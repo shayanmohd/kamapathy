@@ -399,7 +399,7 @@ export const COMMANDS = [
   command(
     "run",
     "Scripts",
-    "run [--timeout <ms>] <file.mjs>",
+    "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",
     "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself",
     {
       arguments: [
@@ -416,9 +416,44 @@ export const COMMANDS = [
           description:
             "Stop the script after this long, 1000 to 3600000, default 300000 or KAMAPATHY_RUN_TIMEOUT_MS.",
         },
+        {
+          name: "--ts",
+          description: "Read the code of run - or run -e as TypeScript.",
+          since: 2,
+        },
+        {
+          name: "--env-file",
+          value: "<path>",
+          description:
+            "Load more variables after the workspace's .env; repeat for several files.",
+          since: 2,
+        },
       ],
       stdin: "The script, with run -.",
     },
+  ),
+  command(
+    "repl",
+    "Scripts",
+    "repl [--env-file <path>]...",
+    "Start a scripting session in a terminal, with the same globals as run",
+    {
+      flags: [
+        {
+          name: "--env-file",
+          value: "<path>",
+          description: "Load more variables after the workspace's .env.",
+        },
+      ],
+      since: 2,
+    },
+  ),
+  command(
+    "workspace",
+    "Scripts",
+    "workspace [--json]",
+    "Print the workspace folder, creating it with mode 0700 when missing",
+    { since: 2 },
   ),
   command("help", "Help", "help", "Show the commands"),
 ];

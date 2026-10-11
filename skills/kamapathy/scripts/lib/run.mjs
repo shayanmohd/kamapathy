@@ -1,18 +1,20 @@
 // kamapathy run: a script with a lazy client as its globals. Its output is
 // held until it ends, a deadline and signals bound it, and the person's
 // decisions stop it for good.
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { rmSync, writeSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "../api.mjs";
 import { guidance, hardStopCause, KamapathyError } from "./errors.mjs";
 import { line, printable } from "./format.mjs";
 import { readInput, required } from "./input.mjs";
 import { Session, takeNotices } from "./request.mjs";
 import { exists } from "./transport.mjs";
+import { prepareWorkspace } from "./workspace.mjs";
 
 const HELD_BYTES = 4 * 1024 * 1024;
 const STALLED_MS = 5000;
@@ -46,17 +48,23 @@ function deadline(value, name) {
 }
 
 // Options come before the source and are checked before stdin is read or
-// Kamapathy is reached.
-export function parseRunOptions(args, env = process.env) {
+// Kamapathy is reached. KAMAPATHY_RUN_TIMEOUT_MS is read later, since a .env
+// may set it.
+export function parseRunOptions(args) {
   let timeoutMs;
+  let typed = false;
+  const envFiles = [];
   let index = 0;
-  for (; index < args.length && args[index].startsWith("--"); index++) {
-    if (args[index] !== "--timeout")
+  for (; index < args.length && args[index].startsWith("--"); index++)
+    if (args[index] === "--timeout")
+      timeoutMs = deadline(args[++index], "--timeout");
+    else if (args[index] === "--ts") typed = true;
+    else if (args[index] === "--env-file")
+      envFiles.push(required(args[++index], "--env-file path"));
+    else
       throw new Error(
         `Unknown run option: ${args[index]}. Run help for usage.`,
       );
-    timeoutMs = deadline(args[++index], "--timeout");
-  }
   const [first, second] = args.slice(index);
   const source =
     first === "-e"
@@ -64,11 +72,55 @@ export function parseRunOptions(args, env = process.env) {
       : first === "-"
         ? { kind: "stdin" }
         : { kind: "file", value: required(first, "script file") };
-  timeoutMs ??=
-    env.KAMAPATHY_RUN_TIMEOUT_MS === undefined
-      ? 300000
-      : deadline(env.KAMAPATHY_RUN_TIMEOUT_MS, "KAMAPATHY_RUN_TIMEOUT_MS");
-  return { timeoutMs, source, ts: false, envFiles: [] };
+  if (typed && source.kind === "file")
+    throw new Error(
+      "--ts applies to run - and run -e. Name a TypeScript file .ts, .mts or .cts.",
+    );
+  const ts =
+    source.kind === "file" ? /\.(?:ts|mts|cts)$/.test(source.value) : typed;
+  return { timeoutMs, source, ts, envFiles };
+}
+
+// Node without type stripping runs the CLI once more with Node's flag. The
+// child gets a path, never code; this process only waits for it and passes
+// on signals.
+async function rerun(file, { timeoutMs, source, envFiles }, env, options) {
+  const temporary = source.kind !== "file";
+  const child = (options.spawn ?? spawn)(
+    options.execPath ?? process.execPath,
+    [
+      "--experimental-strip-types",
+      "--disable-warning=ExperimentalWarning",
+      fileURLToPath(new URL("../kamapathy.mjs", import.meta.url)),
+      "run",
+      ...(timeoutMs === undefined ? [] : ["--timeout", String(timeoutMs)]),
+      ...envFiles.flatMap((path) => ["--env-file", path]),
+      file,
+    ],
+    {
+      stdio: "inherit",
+      env: {
+        ...env,
+        ...(temporary
+          ? { KAMAPATHY_RUN_SOURCE: source.kind === "stdin" ? "stdin" : "-e" }
+          : {}),
+      },
+    },
+  );
+  const forwarded = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => {
+    const pass = () => child.kill(signal);
+    process.on(signal, pass);
+    return [signal, pass];
+  });
+  try {
+    const [code, signal] = await new Promise((done) =>
+      child.once("exit", (...outcome) => done(outcome)),
+    );
+    return code ?? 128 + (SIGNALS[signal] ?? 0);
+  } finally {
+    for (const [signal, pass] of forwarded) process.off(signal, pass);
+    if (temporary) await rm(file, { force: true });
+  }
 }
 
 // The script's globals, each forwarding to the client method of its name.
@@ -176,7 +228,8 @@ function writeAll(writes) {
 
 export async function runScript(args, options = {}) {
   const env = options.env || process.env;
-  const { timeoutMs, source } = parseRunOptions(args, env);
+  const parsed = parseRunOptions(args);
+  const { source, ts } = parsed;
   let file;
   let code;
   if (source.kind === "eval") code = source.value;
@@ -191,6 +244,36 @@ export async function runScript(args, options = {}) {
         "Script file not found. Use run <file.mjs>, run - or run -e <code>.",
       );
   }
+  const temporaryPath = () =>
+    join(
+      tmpdir(),
+      `kamapathy-run-${randomBytes(8).toString("hex")}.${ts ? "mts" : "mjs"}`,
+    );
+  if (ts && !(options.features ?? process.features).typescript) {
+    if (
+      (options.execArgv ?? process.execArgv).includes(
+        "--experimental-strip-types",
+      )
+    )
+      throw new Error(
+        "This Node.js cannot run TypeScript. Use Node.js 22.18 or later, or write the script in JavaScript.",
+      );
+    if (code !== undefined) {
+      file = temporaryPath();
+      await writeFile(file, code, { mode: 0o600, flag: "wx" });
+    }
+    return rerun(file, parsed, env, options);
+  }
+  // A re-run's parent named the source and removes its file itself.
+  delete env.KAMAPATHY_RUN_SOURCE;
+  await prepareWorkspace(env, parsed.envFiles, {
+    stderr: options.stderr || process.stderr,
+  });
+  const timeoutMs =
+    parsed.timeoutMs ??
+    (env.KAMAPATHY_RUN_TIMEOUT_MS === undefined
+      ? 300000
+      : deadline(env.KAMAPATHY_RUN_TIMEOUT_MS, "KAMAPATHY_RUN_TIMEOUT_MS"));
   // Tests run scripts in their own process and read the output from sinks.
   const inProcess =
     options.flushOnSettle ?? !!(options.stdout || options.stderr);
@@ -301,10 +384,7 @@ export async function runScript(args, options = {}) {
   const work = (async () => {
     try {
       if (code !== undefined) {
-        temporary = join(
-          tmpdir(),
-          `kamapathy-run-${randomBytes(8).toString("hex")}.mjs`,
-        );
+        temporary = temporaryPath();
         await writeFile(temporary, code, { mode: 0o600, flag: "wx" });
         file = temporary;
       }

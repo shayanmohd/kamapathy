@@ -20,7 +20,14 @@ import {
   Session,
   takeNotices,
 } from "./lib/request.mjs";
+import { connect } from "./api.mjs";
+import { startRepl } from "./lib/repl.mjs";
 import { runScript } from "./lib/run.mjs";
+import {
+  ensureWorkspace,
+  prepareWorkspace,
+  workspacePath,
+} from "./lib/workspace.mjs";
 import {
   checkBody,
   findCommand,
@@ -45,7 +52,7 @@ const HELP = `Kamapathy browser client
 Kamapathy connects automatically. Each command finds Kamapathy on this
 computer and starts it when agent access was left on. The switch in Settings,
 under Agents, turns access off. Set KAMAPATHY_USER_DATA to use another profile.
-Requires Node.js 22.12 or later.
+Requires Node.js 22.13 or later.
 
 Usage: node kamapathy.mjs <command> [arguments] [--json]
 
@@ -92,13 +99,17 @@ Usage: node kamapathy.mjs <command> [arguments] [--json]
   resume <space-id>                   Take control back when the person says to continue
   wait-for-control <space-id> [--timeout <ms>]
                                       Wait until the agent has control again
-  run [--timeout <ms>] <file.mjs>      Run a script with the client as the
+  run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>
+                                      Run a script with the client as the
                                       globals kamapathy, createSpace,
                                       openSpace, space, spaces and
                                       requestSpace; run - reads it from stdin
                                       and run -e <code> runs the code itself.
                                       It stops after --timeout, 300000 by
-                                      default
+                                      default. TypeScript runs from .ts, .mts
+                                      and .cts files, or with --ts
+  repl [--env-file <path>]...         Start a scripting session in a terminal
+  workspace [--json]                  Print the workspace folder, creating it
 
 A <tab-id> may also be <space-id>:<label>, such as s1:p2.
 Default output is concise text. --json returns compact JSON for programs.
@@ -420,6 +431,44 @@ export const PARSERS = {
     return { path: `/tabs/${tab(args[0])}/screenshot`, output };
   },
   run: (args, options) => runScript(args, options),
+  repl: async (args, options) => {
+    const input = options.stdin || process.stdin;
+    const output = options.stdout || process.stdout;
+    if (!(options.terminal ?? (input.isTTY && output.isTTY)))
+      throw new Error("repl needs a terminal. Pipe a script to run - instead.");
+    const envFiles = [];
+    for (let index = 0; index < args.length; index++)
+      if (args[index] === "--env-file")
+        envFiles.push(required(args[++index], "--env-file path"));
+      else
+        throw new Error(
+          `Unknown repl option: ${args[index]}. Run help for usage.`,
+        );
+    await prepareWorkspace(options.env, envFiles, {
+      stderr: options.stderr || process.stderr,
+    });
+    const session = new Session({
+      env: options.env,
+      fetch: options.fetch,
+      connect: options.connect,
+      health: options.health,
+      lazy: true,
+    });
+    return startRepl({
+      input,
+      output,
+      session,
+      client: await connect({ session, lazy: true }),
+      terminal: true,
+    });
+  },
+  workspace: async (_args, { env, json, stdout }) => {
+    const workspace = await ensureWorkspace(workspacePath(env));
+    (stdout || process.stdout).write(
+      `${json ? JSON.stringify({ workspace }) : workspace}\n`,
+    );
+    return 0;
+  },
 };
 
 export async function runCli(argv, options = {}) {
@@ -448,6 +497,7 @@ export async function runCli(argv, options = {}) {
   const parsed = await parse(name === command ? rest : rest.slice(1), {
     ...options,
     env,
+    json,
   });
   if (typeof parsed === "number") return parsed;
   const { path, method = "GET", body, output, limit } = parsed;

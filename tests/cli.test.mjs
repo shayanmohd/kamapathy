@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -21,10 +22,15 @@ import {
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { KamapathyError, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
-import { httpTimeout } from "../skills/kamapathy/scripts/lib/request.mjs";
+import { httpTimeout, queueNotice } from "../skills/kamapathy/scripts/lib/request.mjs";
+import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
-const env = { KAMAPATHY_NO_LAUNCH: "1" };
+// A workspace that does not exist, so runs load no .env from the real profile.
+const env = {
+  KAMAPATHY_NO_LAUNCH: "1",
+  KAMAPATHY_WORKSPACE: join(tmpdir(), `kamapathy-no-workspace-${randomBytes(8).toString("hex")}`),
+};
 const posix = process.platform !== "win32";
 const directories = [];
 const servers = [];
@@ -1939,6 +1945,181 @@ describe("scripted sessions", () => {
     }
     expect(await main(["health"], { env, fetch, stdout: sink(), stderr: sink(), nodeVersion: "22.13.0" })).toBe(0);
   });
+
+  // Runs the CLI as its own process with this profile.
+  const spawnCli = async (args, extraEnv, input) => {
+    const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", ...args], {
+      env: { ...process.env, ...extraEnv },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.stdin.end(input);
+    const status = await new Promise((done) => child.once("close", done));
+    return { status, stdout, stderr };
+  };
+
+  it("TypeScript runs from .mts, .ts and --ts sources, refuses --ts with a .mjs file, and re-runs once with the flags when stripping is missing", async () => {
+    const { env: profileEnv } = await profile();
+    const typed = "const count: number = 2; console.log(`typed ${count}`);";
+    expect(await spawnCli(["run", await scriptFile("task.mts", typed)], profileEnv)).toEqual({
+      status: 0,
+      stdout: "typed 2\n",
+      stderr: "",
+    });
+    expect((await spawnCli(["run", await scriptFile("task.ts", typed)], profileEnv)).stdout).toBe("typed 2\n");
+    expect((await spawnCli(["run", "--ts", "-e", typed], profileEnv)).stdout).toBe("typed 2\n");
+    expect((await spawnCli(["run", "--ts", "-"], profileEnv, typed)).stdout).toBe("typed 2\n");
+    await expect(
+      runCli(["run", "--ts", await scriptFile("task.mjs", "1")], { env, stdout: sink(), stderr: sink() }),
+    ).rejects.toThrow("--ts applies to run - and run -e. Name a TypeScript file .ts, .mts or .cts.");
+    // Without type stripping, run starts itself once more with Node's flag.
+    const calls = [];
+    const fakeSpawn = (command, args, options) => {
+      calls.push({ command, args, options, file: args.at(-1), existed: existsSync(args.at(-1)) });
+      const child = new EventEmitter();
+      child.kill = vi.fn();
+      setTimeout(() => child.emit("exit", 4, null), 10);
+      return child;
+    };
+    const stripping = { features: { typescript: false }, execArgv: [], spawn: fakeSpawn, execPath: "/bin/node" };
+    const file = await scriptFile("task.mts", typed);
+    const envFile = await scratchFile();
+    expect(
+      await runCli(["run", "--timeout", "5000", "--env-file", envFile, file], { env, stdout: sink(), stderr: sink(), ...stripping }),
+    ).toBe(4);
+    expect(calls[0]).toMatchObject({
+      command: "/bin/node",
+      args: [
+        "--experimental-strip-types",
+        "--disable-warning=ExperimentalWarning",
+        join(process.cwd(), "skills/kamapathy/scripts/kamapathy.mjs"),
+        "run",
+        "--timeout",
+        "5000",
+        "--env-file",
+        envFile,
+        file,
+      ],
+      options: { stdio: "inherit" },
+    });
+    expect(await runCli(["run", "--ts", "-e", typed], { env, stdout: sink(), stderr: sink(), ...stripping })).toBe(4);
+    expect(calls[1].file).toMatch(/kamapathy-run-[a-f0-9]{16}\.mts$/);
+    expect(calls[1].existed).toBe(true);
+    expect(calls[1].options.env.KAMAPATHY_RUN_SOURCE).toBe("-e");
+    expect(existsSync(calls[1].file)).toBe(false);
+    await expect(
+      runCli(["run", file], { env, stdout: sink(), stderr: sink(), ...stripping, execArgv: ["--experimental-strip-types"] }),
+    ).rejects.toThrow("This Node.js cannot run TypeScript. Use Node.js 22.18 or later, or write the script in JavaScript.");
+    expect(calls).toHaveLength(2);
+  }, 30000);
+
+  it("the workspace follows the profile or KAMAPATHY_WORKSPACE; env files fill only unset variables, later files win, profile and workspace names are skipped, unsafe files are refused without printing values", async () => {
+    const { userData } = await profile();
+    expect(workspacePath({ KAMAPATHY_USER_DATA: userData })).toBe(join(userData, "workspace"));
+    expect(workspacePath({ KAMAPATHY_USER_DATA: userData, KAMAPATHY_WORKSPACE: "tasks" }, "/home/me")).toBe(
+      join("/home/me", "tasks"),
+    );
+    const workspace = join(userData, "workspace");
+    await mkdir(workspace, { mode: 0o700 });
+    const dotEnv = join(workspace, ".env");
+    await writeFile(dotEnv, "FROM_ENV=first\nLATER=workspace\nSTART=changed\nKAMAPATHY_USER_DATA=/elsewhere\n", { mode: 0o600 });
+    const extra = join(userData, "extra.env");
+    await writeFile(extra, "LATER=extra-file\nADDED=3\n", { mode: 0o600 });
+    const runEnv = { KAMAPATHY_USER_DATA: userData, KAMAPATHY_NO_LAUNCH: "1", START: "kept" };
+    const stderr = sink();
+    expect(
+      await runCli(["run", "--env-file", extra, "-e", "1"], { env: runEnv, fetch: vi.fn(), stdout: sink(), stderr }),
+    ).toBe(0);
+    expect(runEnv).toMatchObject({
+      FROM_ENV: "first",
+      LATER: "extra-file",
+      ADDED: "3",
+      START: "kept",
+      KAMAPATHY_USER_DATA: userData,
+      KAMAPATHY_WORKSPACE: workspace,
+    });
+    expect(stderr.text()).toBe(
+      `Kamapathy: ${dotEnv} cannot set KAMAPATHY_USER_DATA. Set it in the environment instead.\n`,
+    );
+    if (posix) {
+      await chmod(extra, 0o666);
+      const refused = runCli(["run", "--env-file", extra, "-e", "1"], {
+        env: { ...runEnv },
+        fetch: vi.fn(),
+        stdout: sink(),
+        stderr: sink(),
+      });
+      await expect(refused).rejects.toThrow(
+        `Kamapathy will not load ${extra}: it must be a regular file of at most 64 KiB that your account owns and others cannot change.`,
+      );
+      await expect(refused).rejects.not.toThrow("extra-file");
+      const link = join(userData, "link.env");
+      await symlink(dotEnv, link);
+      await expect(
+        runCli(["run", "--env-file", link, "-e", "1"], { env: { ...runEnv }, fetch: vi.fn(), stdout: sink(), stderr: sink() }),
+      ).rejects.toThrow(`Kamapathy will not load ${link}`);
+      await chmod(workspace, 0o777);
+      await expect(
+        runCli(["run", "-e", "1"], { env: { ...runEnv }, fetch: vi.fn(), stdout: sink(), stderr: sink() }),
+      ).rejects.toThrow(`Kamapathy's workspace ${workspace} must be a folder your account owns that others cannot change.`);
+      await chmod(workspace, 0o700);
+    }
+  });
+
+  it("workspace prints and creates the folder with mode 0700, and --json prints {\"workspace\": path}", async () => {
+    const { userData } = await profile();
+    const fetch = vi.fn();
+    const stdout = sink();
+    expect(await runCli(["workspace"], { env: { KAMAPATHY_USER_DATA: userData }, fetch, stdout })).toBe(0);
+    const workspace = join(userData, "workspace");
+    expect(stdout.text()).toBe(`${workspace}\n`);
+    if (posix) expect((await stat(workspace)).mode & 0o777).toBe(0o700);
+    const json = sink();
+    expect(await runCli(["workspace", "--json"], { env: { KAMAPATHY_USER_DATA: userData }, fetch, stdout: json })).toBe(0);
+    expect(JSON.parse(json.text())).toEqual({ workspace });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("repl runs top-level await with the globals, prints queued notices once before the next prompt, aborts in-flight calls on SIGINT and needs a terminal", async () => {
+    await expect(
+      runCli(["repl"], { env, fetch: vi.fn(), stdin: new PassThrough(), stdout: sink() }),
+    ).rejects.toThrow("repl needs a terminal. Pipe a script to run - instead.");
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /spaces": (_body, options) =>
+        new Promise((_done, reject) =>
+          options.signal.addEventListener("abort", () => reject(options.signal.reason)),
+        ),
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let text = "";
+    output.on("data", (chunk) => (text += chunk));
+    const ended = runCli(["repl"], { env, fetch: api.fetch, health: level2, stdin: input, stdout: output, terminal: true });
+    const entry = async (code, expected) => {
+      input.write(`${code}\n`);
+      await expect.poll(() => text).toContain(expected);
+    };
+    await expect.poll(() => text).toContain("Kamapathy scripting session. Type help() for the API and .exit to leave.");
+    await entry('const replSpace = await space("space-1")', "kamapathy> ");
+    await entry("replSpace.name", "'Research'");
+    queueNotice("repl-test", "A notice for this session.");
+    await entry("1 + 1", "2");
+    await entry("2 + 2", "4");
+    expect(text.split("notice: A notice for this session.").length).toBe(2);
+    expect(text.indexOf("notice: A notice for this session.")).toBeGreaterThan(text.indexOf("\n2"));
+    input.write("await spaces()\n");
+    await expect.poll(() => api.requests.some((request) => request.path === "/spaces")).toBe(true);
+    input.write("\u0003");
+    await expect.poll(() => text).toContain(
+      "error: interrupted: The entry was stopped by Ctrl+C. A call in progress may still have taken effect, so inspect the page before retrying.",
+    );
+    await entry("typeof openSpace", "'function'");
+    input.write(".exit\n");
+    expect(await ended).toBe(0);
+  }, 20000);
 
   it("creates isolated spaces from the command line and says how each space signs in", async () => {
     for (const [args, body] of [
