@@ -11,7 +11,7 @@ import {
   type AutomationController,
   type AutomationServer,
 } from "../electron/agent/server";
-import { initialState, newTab } from "../shared/state";
+import { HOME_URL, initialState, newTab } from "../shared/state";
 import type { BrowserAction, BrowserState, Space } from "../shared/types";
 
 class FakeContents extends EventEmitter {
@@ -83,7 +83,10 @@ class FakeContents extends EventEmitter {
 }
 class FakeController implements AutomationController {
   state: BrowserState = initialState("linux");
-  contents = new FakeContents();
+  // One page per web tab, made when the tab first shows a web page.
+  pages = new Map<string, FakeContents>();
+  private newest?: string;
+  private spare = new FakeContents();
   calls: BrowserAction[] = [];
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
@@ -99,6 +102,25 @@ class FakeController implements AutomationController {
       createdAt: Date.now(),
     });
     this.state.tabs.push(newTab("manual-agent", "https://private.example/"));
+  }
+  // The page made last, which tests with one page drive.
+  get contents(): FakeContents {
+    return this.newest === undefined
+      ? this.spare
+      : this.pages.get(this.newest)!;
+  }
+  set contents(contents: FakeContents) {
+    if (this.newest === undefined) this.spare = contents;
+    else this.pages.set(this.newest, contents);
+  }
+  private page(id: string) {
+    let page = this.pages.get(id);
+    if (!page) {
+      page = new FakeContents();
+      this.pages.set(id, page);
+      this.newest = id;
+    }
+    return page;
   }
   isolatedRequests: boolean[] = [];
   createAgentSpace(name: string, options?: { isolated?: boolean }): Space {
@@ -118,7 +140,10 @@ class FakeController implements AutomationController {
   }
   getWebContents(id: string) {
     this.accessedTabs.push(id);
-    return this.contents as unknown as WebContents;
+    const tab = this.state.tabs.find((item) => item.id === id);
+    // As in BrowserController, a tab on the new tab page has no web page.
+    if (!tab || tab.url === HOME_URL) return undefined;
+    return this.page(id) as unknown as WebContents;
   }
   canCapturePage() {
     return this.captureAvailable;
@@ -131,13 +156,15 @@ class FakeController implements AutomationController {
     if (action.type === "tab:create") {
       const tab = newTab(action.spaceId!, action.url);
       this.state.tabs.push(tab);
+      if (tab.url !== HOME_URL) this.page(tab.id);
       if (!action.background) {
         this.state.activeSpaceId = tab.spaceId;
         this.state.activeTabId = tab.id;
       }
-    } else if (action.type === "tab:navigate")
+    } else if (action.type === "tab:navigate") {
       this.state.tabs.find((tab) => tab.id === action.id)!.url = action.url;
-    else if (action.type === "space:ownership")
+      this.page(action.id);
+    } else if (action.type === "space:ownership")
       this.state.spaces.find((space) => space.id === action.id)!.owner =
         action.owner;
     else if (action.type === "space:delete") {
@@ -1658,5 +1685,148 @@ describe("local automation socket", () => {
     const response = await pending;
     expect(response.status).toBe(409);
     expect((await response.json()).error.code).toBe("human_control");
+  });
+
+  // How a request ended: its status and error code, or "closed" if its
+  // connection dropped first.
+  const settled = (response: Promise<Response>) =>
+    response.then(
+      async (item) => ({
+        status: item.status,
+        code: (await item.json()).error?.code,
+      }),
+      () => "closed",
+    );
+  // What a request settled to within the time given, else "pending".
+  const within = <T>(result: Promise<T>, milliseconds: number) =>
+    Promise.race([
+      result,
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), milliseconds),
+      ),
+    ]);
+  // A snapshot whose page read waits until it is released.
+  const heldSnapshot = async (tabId: string) => {
+    let release: (() => void) | undefined;
+    controller.pages.get(tabId)!.result = () =>
+      new Promise((resolve) => {
+        release = () => resolve({ text: "" });
+      });
+    const result = settled(request(`/tabs/${tabId}/snapshot`));
+    await expect.poll(() => release).toBeDefined();
+    return { result, release: () => release!() };
+  };
+
+  it("returns 404 for a tab outside the managed spaces before reading its body", async () => {
+    const personal = controller.state.tabs[0];
+    const manual = controller.state.tabs.find(
+      (tab) => tab.spaceId === "manual-agent",
+    )!;
+    // The declared body never arrives, so only a refusal made before reading
+    // it can answer.
+    for (const tab of [personal, manual])
+      expect(await declaredSize(`/tabs/${tab.id}/click`, 20)).toBe(404);
+    expect(controller.accessedTabs).toEqual([]);
+  });
+
+  it("admits a request for a tab without a page in a managed space to its space lane", async () => {
+    const one = await createPage();
+    const two = await createPage();
+    // Every agent space opens with a tab on the new tab page.
+    const blank = controller.state.tabs.find(
+      (tab) => tab.spaceId === one.space.id && tab.id !== one.tab.id,
+    )!;
+    const otherSpace = await heldSnapshot(two.tab.id);
+    expect(
+      await within(settled(request(`/tabs/${blank.id}/snapshot`)), 1000),
+    ).toEqual({ status: 409, code: "no_web_page" });
+    const sameSpace = await heldSnapshot(one.tab.id);
+    const queued = settled(request(`/tabs/${blank.id}/snapshot`));
+    expect(await within(queued, 100)).toBe("pending");
+    sameSpace.release();
+    expect(await sameSpace.result).toEqual({ status: 200 });
+    expect(await queued).toEqual({ status: 409, code: "no_web_page" });
+    otherSpace.release();
+    expect(await otherSpace.result).toEqual({ status: 200 });
+  });
+
+  it("answers GET /spaces/:id/tabs while a snapshot runs in that space", async () => {
+    const { space, tab } = await createPage();
+    const snapshot = await heldSnapshot(tab.id);
+    expect(
+      await within(settled(request(`/spaces/${space.id}/tabs`)), 1000),
+    ).toEqual({ status: 200 });
+    snapshot.release();
+    expect(await snapshot.result).toEqual({ status: 200 });
+  });
+
+  it("runs snapshots in different spaces at the same time", async () => {
+    const one = await createPage();
+    const two = await createPage();
+    // The second page is read while the first read still runs.
+    const first = await heldSnapshot(one.tab.id);
+    const second = await heldSnapshot(two.tab.id);
+    first.release();
+    second.release();
+    expect(await first.result).toEqual({ status: 200 });
+    expect(await second.result).toEqual({ status: 200 });
+  });
+
+  it("runs a wait and a click in one space together", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    let clicked = false;
+    page.result = (code: string) =>
+      code.includes(')("check",')
+        ? { ok: true, matched: clicked }
+        : code.includes(')("input",')
+          ? {
+              ok: true,
+              mouse: page.inputs.filter(
+                (input) => input.parameters.type === "mousePressed",
+              ).length,
+              key: 0,
+            }
+          : { ok: true, x: 25, y: 45 };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mouseReleased")
+        clicked = true;
+    };
+    const wait = settled(
+      request(`/tabs/${tab.id}/wait`, "POST", {
+        text: "Delayed content ready",
+        timeoutMs: 2000,
+      }),
+    );
+    // The click arrives while the wait is checking the page.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const click = settled(
+      request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+    );
+    expect(await click).toEqual({ status: 200 });
+    expect(await wait).toEqual({ status: 200 });
+  });
+
+  it("refuses a 17th pending request in a space with busy scope space and retryable", async () => {
+    const { tab } = await createPage();
+    const running = await heldSnapshot(tab.id);
+    controller.contents.result = { text: "" };
+    const queued = Array.from({ length: 15 }, () =>
+      settled(request(`/tabs/${tab.id}/snapshot`)),
+    );
+    // Let the queued requests reach the server.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const refused = await request(`/tabs/${tab.id}/snapshot`);
+    expect(refused.status).toBe(429);
+    expect((await refused.json()).error).toEqual({
+      code: "busy",
+      message: "This space has 16 requests waiting. Wait for them to finish.",
+      scope: "space",
+      retryable: true,
+    });
+    running.release();
+    expect(await running.result).toEqual({ status: 200 });
+    for (const result of await Promise.all(queued))
+      expect(result).toEqual({ status: 200 });
   });
 });

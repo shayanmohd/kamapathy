@@ -8,6 +8,14 @@ import type { AutomationController } from "./server";
 export const BODY_LIMIT = 65536;
 export const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
 
+// Gives up the request's lane and slot while the wait runs, then takes them
+// back and checks the request is still allowed.
+export type Park = <T>(wait: () => Promise<T>) => Promise<T>;
+export interface Run {
+  readonly deadline: number;
+  readonly signal: AbortSignal;
+  park: Park;
+}
 export interface RouteCall {
   request: IncomingMessage;
   response: ServerResponse;
@@ -15,10 +23,20 @@ export interface RouteCall {
   space?: Space;
   tab?: Tab;
   resumeFromHuman: boolean;
+  run: Run;
+  prepared?: unknown;
 }
+// Path segments; ":id" matches any one segment.
 export interface Route {
   method: "GET" | "POST" | "DELETE";
   path: string[];
+  lane: "space" | "server" | "none";
+  budgetMs: number;
+  bodyLimit: number;
+  // Runs after admission, before the body is read.
+  beforeBody?(
+    call: Pick<RouteCall, "request" | "response" | "space" | "tab">,
+  ): { prepared?: unknown; release?(): void };
   handler(call: RouteCall): Promise<unknown>;
 }
 export interface RouteDeps {

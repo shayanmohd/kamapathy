@@ -1,31 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync } from "node:fs";
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from "node:http";
+import { createServer } from "node:http";
 import type { WebContents } from "electron";
-import type {
-  BrowserAction,
-  BrowserState,
-  Space,
-  Tab,
-} from "../../shared/types";
+import type { BrowserAction, BrowserState, Space } from "../../shared/types";
 import { createActions } from "./actions";
 import { createAuthority } from "./authority";
-import { ApiError, fail } from "./errors";
-import {
-  BODY_LIMIT,
-  findRoute,
-  readBody,
-  send,
-  UPLOAD_BODY_LIMIT,
-  type RouteDeps,
-} from "./http";
+import { errorBody, fail } from "./errors";
+import { findRoute, readBody, send } from "./http";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
-import { uploadFields } from "./validate";
+import { Scheduler, type Lane } from "./scheduler";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -57,55 +41,13 @@ export async function startAutomation(
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
   const authority = createAuthority(controller);
-  const { authorizeSpace, authorizeTab } = authority;
-  let pending = 0;
-  let uploading = false;
-  let queue: Promise<unknown> = Promise.resolve();
+  const scheduler = new Scheduler();
   const referenceSession = randomBytes(12).toString("hex");
   const actions = createActions({ controller, authority, referenceSession });
-  const { trackContents, evaluatePage } = actions;
-  const deps: RouteDeps = { controller, authority, actions };
-  const routes = [...spaceRoutes(deps), ...tabRoutes(deps)];
-
-  const route = async (
-    request: IncomingMessage,
-    response: ServerResponse,
-    body?: Record<string, unknown>,
-    resumeFromHuman = false,
-  ) => {
-    if (authority.stopped)
-      return fail(503, "automation_stopped", "Automation is disabled.");
-    const rawPath = request.url || "/";
-    if (!/^\/[a-zA-Z0-9/_-]*$/.test(rawPath))
-      return fail(
-        400,
-        "invalid_path",
-        "Use a route without query parameters or encoded path segments.",
-      );
-    const parts = rawPath.split("/").filter(Boolean);
-    const method = request.method;
-    let space: Space | undefined;
-    let tab: Tab | undefined;
-    if (parts[0] === "spaces" && parts.length >= 2) {
-      const resuming =
-        parts.length === 3 && parts[2] === "resume" && method === "POST";
-      space = authorizeSpace(parts[1], resuming && resumeFromHuman);
-    }
-    if (parts[0] === "tabs" && parts.length >= 2) {
-      tab = authorizeTab(parts[1]);
-    }
-    const match = findRoute(routes, method, parts);
-    if (!match)
-      return fail(404, "route_not_found", "Automation route was not found.");
-    return match.handler({
-      request,
-      response,
-      body,
-      space,
-      tab,
-      resumeFromHuman,
-    });
-  };
+  const routes = [
+    ...spaceRoutes({ controller, authority, actions }),
+    ...tabRoutes({ controller, authority, actions }),
+  ];
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Kamapathy-Instance", instance);
@@ -129,69 +71,94 @@ export async function startAutomation(
           version: controller.state.version,
         });
       }
-      if (pending >= 16)
-        return fail(429, "busy", "Too many pending requests. Try again later.");
-      pending++;
-      let ownsUpload = false;
+      if (authority.stopped)
+        return fail(503, "automation_stopped", "Automation is disabled.");
+      const rawPath = request.url || "/";
+      if (!/^\/[a-zA-Z0-9/_-]*$/.test(rawPath))
+        return fail(
+          400,
+          "invalid_path",
+          "Use a route without query parameters or encoded path segments.",
+        );
+      const parts = rawPath.split("/").filter(Boolean);
+      const method = request.method;
+      // A resume passes human control only if the person had control when
+      // it arrived, so a queued one cannot undo a takeover the agent never saw.
+      const resumeFromHuman =
+        method === "POST" &&
+        parts.length === 3 &&
+        parts[0] === "spaces" &&
+        parts[2] === "resume" &&
+        controller.state.spaces.find((space) => space.id === parts[1])
+          ?.owner === "human";
+      // Runs on arrival, again once the request leaves its queue, and after
+      // every wait it parks.
+      const authorize = () => ({
+        space:
+          parts[0] === "spaces" && parts.length >= 2
+            ? authority.authorizeSpace(parts[1], resumeFromHuman)
+            : undefined,
+        tab:
+          parts[0] === "tabs" && parts.length >= 2
+            ? authority.authorizeTab(parts[1])
+            : undefined,
+      });
+      const scope = authorize();
+      const route = findRoute(routes, method, parts);
+      if (!route)
+        return fail(404, "route_not_found", "Automation route was not found.");
+      const spaceId = scope.space?.id ?? scope.tab?.spaceId;
+      const ticket = scheduler.admit({
+        spaceId: route.lane === "space" ? spaceId : undefined,
+        budgetMs: route.budgetMs,
+      });
+      const abort = new AbortController();
+      response.once("close", () => {
+        if (response.writableFinished) return;
+        ticket.drop();
+        abort.abort();
+      });
+      let before: { prepared?: unknown; release?(): void } | undefined;
       try {
-        // Only this fixed route accepts a larger body. Reserve one transfer
-        // before reading bytes, so concurrent uploads cannot multiply memory.
-        const upload = request.method === "POST"
-          ? /^\/tabs\/([a-zA-Z0-9_-]{1,128})\/upload$/.exec(request.url || "")
-          : null;
-        let uploadContents: WebContents | undefined;
-        let uploadEpoch: number | undefined;
-        if (upload) {
-          authorizeTab(upload[1]);
-          if (uploading)
-            return fail(429, "upload_busy", "Another file transfer is in progress.");
-          uploading = ownsUpload = true;
-          uploadContents = controller.getWebContents(upload[1]);
-          if (!uploadContents || uploadContents.isDestroyed())
-            return fail(409, "no_web_page", "Open a web page before uploading files.");
-          uploadEpoch = trackContents(uploadContents).epoch;
-        }
-        // A resume passes human control only if the person had control when
-        // it arrived, so a queued one cannot undo a takeover the agent never saw.
-        const resumeRoute = request.method === "POST"
-          ? /^\/spaces\/([a-zA-Z0-9_-]{1,128})\/resume$/.exec(request.url || "")
-          : null;
-        const resumeFromHuman = resumeRoute !== null &&
-          controller.state.spaces.find((space) => space.id === resumeRoute[1])?.owner === "human";
+        before = route.beforeBody?.({ request, response, ...scope });
         const body =
-          request.method === "POST" ? await readBody(request, upload ? UPLOAD_BODY_LIMIT : BODY_LIMIT) : undefined;
-        const operation = queue.then(() => {
-          if (response.destroyed || response.writableEnded) return;
-          if (upload) return (async () => {
-            authorizeTab(upload[1]);
-            if (uploadContents!.isDestroyed() ||
-                controller.getWebContents(upload[1]) !== uploadContents ||
-                trackContents(uploadContents!).epoch !== uploadEpoch)
-              return fail(409, "page_changed", "The page changed during the transfer. Take a fresh snapshot.");
-            const payload = uploadFields(body!);
-            const result = await evaluatePage(upload[1], uploadContents!, "upload", payload, Date.now() + 30000);
-            const tab = authorizeTab(upload[1]);
-            controller.addActivity(tab.spaceId, `Agent selected ${payload.files.length} file(s) for upload`, "info");
-            return send(response, 200, result);
-          })();
-          return route(request, response, body, resumeFromHuman);
+          method === "POST"
+            ? await readBody(request, route.bodyLimit)
+            : undefined;
+        const lane: Lane =
+          route.lane === "space"
+            ? { kind: "space", spaceId: spaceId! }
+            : { kind: route.lane };
+        const deadline = await ticket.start(lane);
+        await route.handler({
+          request,
+          response,
+          body,
+          ...authorize(),
+          resumeFromHuman,
+          run: {
+            deadline,
+            signal: abort.signal,
+            park: async (wait) => {
+              try {
+                return await ticket.park(wait);
+              } finally {
+                authorize();
+              }
+            },
+          },
+          prepared: before?.prepared,
         });
-        queue = operation.catch(() => {});
-        await operation;
       } finally {
-        if (ownsUpload) uploading = false;
-        pending--;
+        ticket.finish();
+        before?.release?.();
       }
     } catch (error) {
-      const known = error instanceof ApiError;
-      send(response, known ? error.status : 500, {
-        error: {
-          code: known ? error.code : "operation_failed",
-          message: known
-            ? error.message
-            : "The browser could not complete this operation. Retry after the page finishes loading.",
-        },
-      });
+      const failure = errorBody(
+        error,
+        "The browser could not complete this operation. Retry after the page finishes loading.",
+      );
+      send(response, failure.status, { error: failure.error });
     }
   });
   server.requestTimeout = 10000;
@@ -219,6 +186,7 @@ export async function startAutomation(
     close() {
       if (!closing) {
         authority.stop();
+        scheduler.close();
         actions.dispose();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());

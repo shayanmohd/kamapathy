@@ -2,6 +2,7 @@ import type { WebContents } from "electron";
 import { pageOperation, type PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
+import type { Park, Run } from "./http";
 import { allocateRefs } from "./refs";
 import type { AutomationController } from "./server";
 import { PRESS_KEYS, type ToolAction } from "./validate";
@@ -30,6 +31,7 @@ export async function bounded<T>(operation: Promise<T>, timeout = 15000): Promis
                 504,
                 "page_timeout",
                 "The page did not respond in time.",
+                { awaited: "page" },
               ),
             ),
           timeout,
@@ -58,6 +60,7 @@ export interface Actions {
     id: string,
     timeout?: number,
     allowLoading?: boolean,
+    park?: Park,
   ): Promise<WebContents>;
   evaluatePage(
     id: string,
@@ -69,7 +72,7 @@ export interface Actions {
   executeToolAction(
     id: string,
     action: ToolAction,
-    deadline?: number,
+    run: Run,
   ): Promise<Record<string, unknown>>;
   dispose(): void;
 }
@@ -111,6 +114,7 @@ export function createActions(deps: {
     id: string,
     timeout = 15000,
     allowLoading = false,
+    park?: Park,
   ) => {
     authorizeTab(id);
     const contents = controller.getWebContents(id);
@@ -122,7 +126,7 @@ export function createActions(deps: {
       );
     trackContents(contents);
     if (!allowLoading && contents.isLoadingMainFrame()) {
-      await new Promise<void>((resolve, reject) => {
+      const loading = () => new Promise<void>((resolve, reject) => {
         const cleanup = () => {
           clearTimeout(timer);
           contents.removeListener("did-stop-loading", loaded);
@@ -143,12 +147,14 @@ export function createActions(deps: {
               504,
               "page_timeout",
               "The page is still loading. Try again.",
+              { awaited: "load" },
             ),
           );
         }, timeout);
         contents.once("did-stop-loading", loaded);
         contents.once("destroyed", destroyed);
       });
+      await (park ? park(loading) : loading());
     }
     authorizeTab(id);
     if (contents.isDestroyed())
@@ -450,8 +456,9 @@ export function createActions(deps: {
   const executeToolAction = async (
     id: string,
     action: ToolAction,
-    deadline = Date.now() + 30000,
+    run: Run,
   ): Promise<Record<string, unknown>> => {
+    const { deadline, park } = run;
     const tab = authorizeTab(id);
     const waitDeadline =
       action.type === "wait"
@@ -461,6 +468,7 @@ export function createActions(deps: {
       id,
       remaining(deadline),
       action.type === "wait",
+      park,
     );
     const epoch = trackContents(contents).epoch;
     const payload = action.payload;
@@ -547,8 +555,8 @@ export function createActions(deps: {
       }
       // Let synchronous submit/navigation handlers start, then wait for their load.
       // No input operation is retried, including when navigation times out.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await readyContents(id, remaining(deadline));
+      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, park);
       result = {
         ok: true,
         url: contents.getURL(),
@@ -575,8 +583,8 @@ export function createActions(deps: {
         deadline,
         epoch,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await readyContents(id, remaining(deadline));
+      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, park);
       result = {
         ok: true,
         url: contents.getURL(),
@@ -628,8 +636,8 @@ export function createActions(deps: {
         deadline,
         epoch,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await readyContents(id, remaining(deadline));
+      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, park);
       result = { ok: true, url: contents.getURL(), ...reboundOf(focused) };
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, contents, "scroll", payload, deadline);
@@ -671,10 +679,13 @@ export function createActions(deps: {
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
           );
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(100, waitDeadline - Date.now())),
+        await park(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(resolve, Math.min(100, waitDeadline - Date.now())),
+            ),
         );
-        await readyContents(id, remaining(deadline), true);
+        await readyContents(id, remaining(deadline), true, park);
       }
     }
     authorizeTab(id);

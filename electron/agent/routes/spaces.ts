@@ -1,26 +1,30 @@
 import { fail } from "../errors";
-import { send, type Route, type RouteDeps } from "../http";
+import { BODY_LIMIT, send, type Route, type RouteDeps } from "../http";
 import { stringField, urlField } from "../validate";
 
-export function spaceRoutes(deps: RouteDeps): Route[] {
-  const { controller } = deps;
-  const { managedSpaces, authorizeSpace } = deps.authority;
+export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
+  const { managedSpaces, authorizeSpace } = authority;
   return [
     {
       method: "GET",
       path: ["spaces"],
-      async handler({ response }) {
-        return send(response, 200, {
+      lane: "none",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response }) =>
+        send(response, 200, {
           spaces: controller.state.spaces.filter(
             (space) => managedSpaces.has(space.id) && space.kind === "agent",
           ),
-        });
-      },
+        }),
     },
     {
       method: "POST",
       path: ["spaces"],
-      async handler({ response, body }) {
+      lane: "server",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, body }) => {
         const name = stringField(body!, "name", 48).trim();
         for (const id of managedSpaces)
           if (!controller.state.spaces.some((space) => space.id === id))
@@ -47,17 +51,18 @@ export function spaceRoutes(deps: RouteDeps): Route[] {
     {
       method: "POST",
       path: ["spaces", ":id", "resume"],
-      async handler(call) {
-        const { response } = call;
-        const space = call.space!;
-        if (space.owner !== "agent") {
+      lane: "space",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, space }) => {
+        if (space!.owner !== "agent") {
           await controller.dispatch({
             type: "space:ownership",
-            id: space.id,
+            id: space!.id,
             owner: "agent",
           });
           controller.addActivity(
-            space.id,
+            space!.id,
             "Agent took back control of this space",
             "info",
           );
@@ -68,27 +73,29 @@ export function spaceRoutes(deps: RouteDeps): Route[] {
     {
       method: "DELETE",
       path: ["spaces", ":id"],
-      async handler(call) {
-        const { response } = call;
-        const space = call.space!;
-        await controller.dispatch({ type: "space:delete", id: space.id });
-        managedSpaces.delete(space.id);
+      lane: "space",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, space }) => {
+        await controller.dispatch({ type: "space:delete", id: space!.id });
+        managedSpaces.delete(space!.id);
         return send(response, 200, { ok: true });
       },
     },
     {
       method: "POST",
       path: ["spaces", ":id", "handoff"],
-      async handler(call) {
-        const { response } = call;
-        const space = call.space!;
+      lane: "space",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, space }) => {
         await controller.dispatch({
           type: "space:ownership",
-          id: space.id,
+          id: space!.id,
           owner: "human",
         });
         controller.addActivity(
-          space.id,
+          space!.id,
           "Agent handed this space to you",
           "success",
         );
@@ -98,24 +105,27 @@ export function spaceRoutes(deps: RouteDeps): Route[] {
     {
       method: "GET",
       path: ["spaces", ":id", "tabs"],
-      async handler(call) {
-        const { response } = call;
-        const space = call.space!;
-        return send(response, 200, {
-          tabs: controller.state.tabs.filter((tab) => tab.spaceId === space.id),
-        });
-      },
+      lane: "none",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, space }) =>
+        send(response, 200, {
+          tabs: controller.state.tabs.filter(
+            (tab) => tab.spaceId === space!.id,
+          ),
+        }),
     },
     {
       method: "POST",
       path: ["spaces", ":id", "tabs"],
-      async handler(call) {
-        const { response, body } = call;
-        const space = call.space!;
+      lane: "space",
+      budgetMs: 10000,
+      bodyLimit: BODY_LIMIT,
+      handler: async ({ response, body, space }) => {
         const url = urlField(body!);
         const before = new Set(controller.state.tabs.map((tab) => tab.id));
         if (
-          controller.state.tabs.filter((tab) => tab.spaceId === space.id)
+          controller.state.tabs.filter((tab) => tab.spaceId === space!.id)
             .length >= 20
         )
           return fail(
@@ -125,13 +135,13 @@ export function spaceRoutes(deps: RouteDeps): Route[] {
           );
         await controller.dispatch({
           type: "tab:create",
-          spaceId: space.id,
+          spaceId: space!.id,
           url,
           background: true,
         });
-        authorizeSpace(space.id);
+        authorizeSpace(space!.id);
         const tab = controller.state.tabs.find(
-          (item) => item.spaceId === space.id && !before.has(item.id),
+          (item) => item.spaceId === space!.id && !before.has(item.id),
         );
         if (!tab)
           return fail(
@@ -140,7 +150,7 @@ export function spaceRoutes(deps: RouteDeps): Route[] {
             "Could not create an agent tab.",
           );
         controller.addActivity(
-          space.id,
+          space!.id,
           `Agent opened ${new URL(url).hostname}`,
           "info",
         );
