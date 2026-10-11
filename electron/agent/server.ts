@@ -3,16 +3,24 @@ import { chmodSync } from "node:fs";
 import { createServer } from "node:http";
 import type { WebContents } from "electron";
 import type { BrowserAction, BrowserState, Space } from "../../shared/types";
+import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
 import { createAuthority } from "./authority";
-import { errorBody, fail } from "./errors";
-import { findRoute, readBody, send, type RouteDeps } from "./http";
+import { envelope, fail } from "./errors";
+import {
+  buildRoutes,
+  findRoute,
+  readBody,
+  send,
+  type RouteDeps,
+} from "./http";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
+import { routeNotFound, validateBody } from "./validate";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -109,17 +117,26 @@ export async function startAutomation(
     referenceSession,
   });
   const deps: RouteDeps = { controller, authority, actions, sessions };
-  const routes = [...spaceRoutes(deps), ...tabRoutes(deps)];
+  const routes = buildRoutes({ ...spaceRoutes(deps), ...tabRoutes(deps) });
+  const versions = Object.fromEntries(
+    Object.entries({
+      electron: process.versions.electron,
+      chromium: process.versions.chrome,
+      node: process.versions.node,
+      v8: process.versions.v8,
+    }).filter(([, value]) => value !== undefined),
+  );
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Kamapathy-Instance", instance);
+    const dispatch = { dispatched: false };
+    let key: string | undefined;
     try {
       if (
         request.headers.origin !== undefined ||
         request.headers["sec-fetch-site"] !== undefined
       )
         return fail(
-          403,
           "local_clients_only",
           "Only direct local clients may use this API.",
         );
@@ -127,18 +144,19 @@ export async function startAutomation(
       // never waits behind another agent's page actions.
       if (request.method === "GET" && request.url === "/health") {
         if (authority.stopped)
-          return fail(503, "automation_stopped", "Automation is disabled.");
+          return fail("automation_stopped", "Automation is disabled.");
         return send(response, 200, {
           status: "ok",
           version: controller.state.version,
+          apiLevel: API_LEVEL,
+          versions,
         });
       }
       if (authority.stopped)
-        return fail(503, "automation_stopped", "Automation is disabled.");
+        return fail("automation_stopped", "Automation is disabled.");
       const rawPath = request.url || "/";
       if (!/^\/[a-zA-Z0-9/_-]*$/.test(rawPath))
         return fail(
-          400,
           "invalid_path",
           "Use a route without query parameters or encoded path segments.",
         );
@@ -168,7 +186,12 @@ export async function startAutomation(
       const scope = authorize();
       const route = findRoute(routes, method, parts);
       if (!route)
-        return fail(404, "route_not_found", "Automation route was not found.");
+        throw routeNotFound(
+          method || "GET",
+          rawPath,
+          controller.state.version,
+        );
+      key = route.key;
       const spaceId = scope.space?.id ?? scope.tab?.spaceId;
       const ticket = scheduler.admit({
         spaceId: route.lane === "space" ? spaceId : undefined,
@@ -187,6 +210,8 @@ export async function startAutomation(
           method === "POST"
             ? await readBody(request, route.bodyLimit)
             : undefined;
+        // A malformed body never waits behind page work.
+        validateBody(route, body);
         const lane: Lane =
           route.lane === "space"
             ? { kind: "space", spaceId: spaceId! }
@@ -201,6 +226,7 @@ export async function startAutomation(
           run: {
             deadline,
             signal: abort.signal,
+            dispatch,
             park: async (wait) => {
               try {
                 return await ticket.park(wait);
@@ -216,10 +242,7 @@ export async function startAutomation(
         before?.release?.();
       }
     } catch (error) {
-      const failure = errorBody(
-        error,
-        "The browser could not complete this operation. Retry after the page finishes loading.",
-      );
+      const failure = envelope(error, dispatch.dispatched, { route: key });
       send(response, failure.status, { error: failure.error });
     }
   });

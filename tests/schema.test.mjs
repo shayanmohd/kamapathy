@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ApiError, envelope } from "../electron/agent/errors.ts";
+import { buildRoutes } from "../electron/agent/http.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
+import { parseToolAction } from "../electron/agent/validate.ts";
 import {
   Client,
   Page,
@@ -138,10 +141,28 @@ describe("API schema", () => {
       },
       sessions: { get() {} },
     };
-    const routed = [...spaceRoutes(deps), ...tabRoutes(deps)].map(
-      (item) => `${item.method} /${item.path.join("/")}`,
+    const impls = { ...spaceRoutes(deps), ...tabRoutes(deps) };
+    expect(keys.sort()).toEqual([...Object.keys(impls), "GET /health"].sort());
+    // The router's lane, budget and body limit come from each entry.
+    const built = buildRoutes(impls);
+    expect(built.map((item) => item.key).sort()).toEqual(
+      ROUTES.filter((item) => item.lane !== "preadmission")
+        .map(routeKey)
+        .sort(),
     );
-    expect(keys.sort()).toEqual([...routed, "GET /health"].sort());
+    for (const item of built) {
+      expect(item.schema, item.key).toBe(route(item.key));
+      expect(item.lane, item.key).toBe(item.schema.lane);
+      expect(item.budgetMs, item.key).toBe(item.schema.budget);
+      expect(item.bodyLimit, item.key).toBe(item.schema.limit);
+      expect(`${item.method} /${item.path.join("/")}`, item.key).toBe(item.key);
+    }
+    expect(() =>
+      buildRoutes({
+        ...impls,
+        "POST /tabs/:id/goto": impls["POST /tabs/:id/click"],
+      }),
+    ).toThrow("POST /tabs/:id/goto is not declared in the schema.");
     for (const item of ROUTES) {
       expect(item.limit, routeKey(item)).toBeGreaterThan(0);
       expect(item.budget, routeKey(item)).toBeDefined();
@@ -152,10 +173,14 @@ describe("API schema", () => {
       expect(typeof item.label).toBe("boolean");
       expect(Number.isInteger(item.since)).toBe(true);
     }
-    // Batch step types: the ones the server parses.
+    // Batch step types: the ones the server parses, which it lists when a
+    // step has another.
     const union = read("electron/agent/validate.ts").match(/type: ([^;]+);/)[1];
     expect(ACTIONS.map((item) => item.type).sort()).toEqual(
       [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort(),
+    );
+    expect(() => parseToolAction("hover", {})).toThrow(
+      "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -263,6 +288,54 @@ describe("API schema", () => {
     ])
       expect(isTransient(code), code).toBe(false);
     expect(isTransient("no_such_code")).toBe(false);
+    // Nothing is retryable once anything reached the page.
+    const covered = new ApiError(
+      "element_obscured",
+      "Another element covers the target.",
+    );
+    expect(envelope(covered, false).error).toMatchObject({ retryable: true });
+    expect(envelope(covered, true).error).toEqual({
+      code: "element_obscured",
+      message: "Another element covers the target.",
+      dispatched: true,
+    });
+    expect(envelope(new ApiError("stale_ref", "Stale."), false).error).toEqual({
+      code: "stale_ref",
+      message: "Stale.",
+    });
+    // A route's own fields never set the flags.
+    expect(
+      envelope(
+        new ApiError("busy", "Busy.", { scope: "space", retryable: false }),
+        false,
+      ).error,
+    ).toEqual({
+      code: "busy",
+      message: "Busy.",
+      scope: "space",
+      retryable: true,
+    });
+    expect(
+      envelope(new ApiError("wait_timeout", "Late."), false, { action: "wait" })
+        .status,
+    ).toBe(408);
+    expect(envelope(new ApiError("wait_timeout", "Late."), false).status).toBe(
+      504,
+    );
+    expect(
+      envelope(new Error("internal"), true, { fallback: "Try again." }),
+    ).toEqual({
+      status: 500,
+      error: {
+        code: "operation_failed",
+        message: "Try again.",
+        dispatched: true,
+      },
+    });
+    const noisy = `Moved \u202Eon\u0007.${"x".repeat(400)}`;
+    expect(
+      envelope(new ApiError("page_changed", noisy), false).error.message,
+    ).toBe(`Moved on.${"x".repeat(291)}`);
   });
 
   it("checks options and bodies with today's wording", () => {

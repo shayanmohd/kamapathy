@@ -1,16 +1,14 @@
 import { fail } from "../errors";
-import { BODY_LIMIT, send, type Route, type RouteDeps } from "../http";
+import { send, type RouteDeps, type RouteImpl } from "../http";
 import { stringField, urlField } from "../validate";
 
-export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
+export function spaceRoutes({
+  controller,
+  authority,
+}: RouteDeps): Record<string, RouteImpl> {
   const { managedSpaces, authorizeSpace } = authority;
-  return [
-    {
-      method: "GET",
-      path: ["spaces"],
-      lane: "none",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+  return {
+    "GET /spaces": {
       handler: async ({ response }) =>
         send(response, 200, {
           spaces: controller.state.spaces.filter(
@@ -18,12 +16,7 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
           ),
         }),
     },
-    {
-      method: "POST",
-      path: ["spaces"],
-      lane: "server",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+    "POST /spaces": {
       handler: async ({ response, body }) => {
         const name = stringField(body!, "name", 48).trim();
         for (const id of managedSpaces)
@@ -31,13 +24,12 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
             managedSpaces.delete(id);
         if (managedSpaces.size >= 12)
           return fail(
-            409,
             "space_limit",
             "Close an agent space before creating another. The limit is 12.",
           );
         const isolated = body!.isolated === undefined ? false : body!.isolated;
         if (typeof isolated !== "boolean")
-          return fail(400, "invalid_field", "isolated must be true or false.");
+          return fail("invalid_field", "isolated must be true or false.");
         const space = controller.createAgentSpace(name, { isolated });
         managedSpaces.add(space.id);
         controller.addActivity(
@@ -48,12 +40,7 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
         return send(response, 201, { space });
       },
     },
-    {
-      method: "POST",
-      path: ["spaces", ":id", "resume"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+    "POST /spaces/:id/resume": {
       handler: async ({ response, space }) => {
         if (space!.owner !== "agent") {
           await controller.dispatch({
@@ -70,24 +57,14 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
         return send(response, 200, { ok: true, owner: "agent" });
       },
     },
-    {
-      method: "DELETE",
-      path: ["spaces", ":id"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+    "DELETE /spaces/:id": {
       handler: async ({ response, space }) => {
         await controller.dispatch({ type: "space:delete", id: space!.id });
         managedSpaces.delete(space!.id);
         return send(response, 200, { ok: true });
       },
     },
-    {
-      method: "POST",
-      path: ["spaces", ":id", "handoff"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+    "POST /spaces/:id/handoff": {
       handler: async ({ response, space }) => {
         await controller.dispatch({
           type: "space:ownership",
@@ -102,12 +79,7 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
         return send(response, 200, { ok: true, owner: "human" });
       },
     },
-    {
-      method: "GET",
-      path: ["spaces", ":id", "tabs"],
-      lane: "none",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
+    "GET /spaces/:id/tabs": {
       handler: async ({ response, space }) =>
         send(response, 200, {
           tabs: controller.state.tabs.filter(
@@ -115,13 +87,8 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
           ),
         }),
     },
-    {
-      method: "POST",
-      path: ["spaces", ":id", "tabs"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
-      handler: async ({ response, body, space }) => {
+    "POST /spaces/:id/tabs": {
+      handler: async ({ response, body, space, run }) => {
         const url = urlField(body!);
         const before = new Set(controller.state.tabs.map((tab) => tab.id));
         if (
@@ -129,10 +96,10 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
             .length >= 20
         )
           return fail(
-            409,
             "tab_limit",
             "Close a tab before creating another. The limit is 20 per agent space.",
           );
+        run.dispatch.dispatched = true;
         await controller.dispatch({
           type: "tab:create",
           spaceId: space!.id,
@@ -145,7 +112,6 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
         );
         if (!tab)
           return fail(
-            500,
             "tab_creation_failed",
             "Could not create an agent tab.",
           );
@@ -157,5 +123,5 @@ export function spaceRoutes({ controller, authority }: RouteDeps): Route[] {
         return send(response, 201, { tab });
       },
     },
-  ];
+  };
 }

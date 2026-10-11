@@ -178,7 +178,7 @@ describe("agent request scheduler", () => {
     expect(scheduler.stats()).toEqual(IDLE);
   });
 
-  it("refuses past 16 pending in a space with busy scope space and past 32 overall with busy scope server, both retryable", () => {
+  it("refuses past 16 pending in a space with busy scope space and past 32 overall with busy scope server", () => {
     const { scheduler, arrive, refusal } = setup();
     const admitted = Array.from({ length: 16 }, (_, index) =>
       arrive(`a${index}`, space("a")),
@@ -189,7 +189,7 @@ describe("agent request scheduler", () => {
       status: 429,
       code: "busy",
       message: "This space has 16 requests waiting. Wait for them to finish.",
-      fields: { scope: "space", retryable: true },
+      fields: { scope: "space" },
     });
     for (let index = 0; index < 16; index++)
       admitted.push(arrive(`b${index}`, space("b")));
@@ -199,7 +199,7 @@ describe("agent request scheduler", () => {
         status: 429,
         code: "busy",
         message: "Kamapathy has too many requests waiting. Try again shortly.",
-        fields: { scope: "server", retryable: true },
+        fields: { scope: "server" },
       });
     expect(scheduler.stats()).toEqual({
       running: 0,
@@ -279,7 +279,7 @@ describe("agent request scheduler", () => {
     expect(scheduler.stats()).toEqual(IDLE);
   });
 
-  it("returns 504 action_timeout with awaited queue, timeoutMs and retryable to a request still queued at its run deadline, without running it", async () => {
+  it("returns 504 action_timeout with awaited queue and timeoutMs to a request still queued at its run deadline, without running it", async () => {
     const { scheduler, log, send } = setup();
     const running = send("running", space("a"), 30000);
     const queued = send("queued", space("a"), 1000);
@@ -293,7 +293,7 @@ describe("agent request scheduler", () => {
       code: "action_timeout",
       message:
         "This request waited behind earlier requests in its space and did not start. It is safe to send again.",
-      fields: { awaited: "queue", timeoutMs: 1000, retryable: true },
+      fields: { awaited: "queue", timeoutMs: 1000 },
     });
     running.end();
     await running.outcome;

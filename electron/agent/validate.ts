@@ -1,6 +1,12 @@
 import { isWebUrl } from "../../shared/url";
+import {
+  ACTIONS,
+  API_LEVEL,
+  checkBody,
+} from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { SnapshotOptions } from "../automation-dom";
-import { fail } from "./errors";
+import { ApiError, fail } from "./errors";
+import type { Route } from "./http";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -42,7 +48,6 @@ export function integerField(
     value > maximum
   )
     return fail(
-      400,
       "invalid_field",
       `${name} must be an integer from ${minimum} to ${maximum}.`,
     );
@@ -57,7 +62,6 @@ export function targetFields(
   if (!hasRef && !hasSelector && optional) return {};
   if (hasRef === hasSelector)
     return fail(
-      400,
       "invalid_target",
       "Provide exactly one of ref or selector.",
     );
@@ -65,7 +69,6 @@ export function targetFields(
     const ref = stringField(body, "ref", 32);
     if (!/^@e[1-9]\d*$/.test(ref))
       return fail(
-        400,
         "invalid_ref",
         "Use an element reference from a snapshot, such as @e1.",
       );
@@ -80,7 +83,7 @@ export function parseToolAction(
   if (type === "snapshot") {
     const mode = body.mode ?? "compact";
     if (mode !== "compact" && mode !== "full")
-      return fail(400, "invalid_field", "mode must be compact or full.");
+      return fail("invalid_field", "mode must be compact or full.");
     const options: Omit<SnapshotOptions, "firstRef"> = {
       mode,
       maxChars: integerField(
@@ -117,7 +120,6 @@ export function parseToolAction(
     const key = stringField(body, "key", 20);
     if (!Object.hasOwn(PRESS_KEYS, key))
       return fail(
-        400,
         "invalid_key",
         `Supported keys: ${Object.keys(PRESS_KEYS).join(", ")}.`,
       );
@@ -127,7 +129,6 @@ export function parseToolAction(
     const direction = stringField(body, "direction", 5);
     if (!["up", "down", "left", "right"].includes(direction))
       return fail(
-        400,
         "invalid_field",
         "direction must be up, down, left, or right.",
       );
@@ -145,7 +146,6 @@ export function parseToolAction(
       const value = body[name];
       if (!value || typeof value !== "object" || Array.isArray(value))
         return fail(
-          400,
           "invalid_target",
           `${name} must be an object with a ref or selector.`,
         );
@@ -169,10 +169,43 @@ export function parseToolAction(
           : {}),
       },
     };
+  const types = ACTIONS.map((action) => action.type);
   return fail(
-    400,
     "invalid_action",
-    "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
+    `Batch actions support ${types.slice(0, -1).join(", ")}, and ${types.at(-1)}.`,
+  );
+}
+
+// Rejects a body with a field its route does not declare, or a declared
+// field of the wrong kind, before the request waits for its lane.
+export function validateBody(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): void {
+  const problem = checkBody(route.schema, body);
+  if (problem)
+    throw new ApiError(
+      problem.code,
+      problem.message,
+      problem.code === "unknown_field"
+        ? { ...problem.fields, route: route.key, apiLevel: API_LEVEL }
+        : problem.fields,
+    );
+}
+
+// The segment after /spaces or /tabs is shown as :id.
+export function routeNotFound(
+  method: string,
+  path: string,
+  version: string,
+): ApiError {
+  const route = path
+    .replace(/^\/(spaces|tabs)\/[^/]+/, "/$1/:id")
+    .slice(0, 200);
+  return new ApiError(
+    "route_not_found",
+    `Kamapathy ${version} (API level ${API_LEVEL}) has no route ${method} ${route}. A newer client may need a newer Kamapathy.`,
+    { method, route, apiLevel: API_LEVEL, version },
   );
 }
 
@@ -189,7 +222,6 @@ export function stringField(
     value.length > max
   )
     return fail(
-      400,
       "invalid_field",
       `${key} must be ${empty ? "a" : "a nonempty"} string of at most ${max} characters.`,
     );
@@ -199,7 +231,6 @@ export function urlField(body: Record<string, unknown>): string {
   const value = stringField(body, "url", 8192);
   if (!isWebUrl(value))
     return fail(
-      400,
       "invalid_url",
       "Use a complete HTTP or HTTPS URL without embedded credentials.",
     );
@@ -208,29 +239,29 @@ export function urlField(body: Record<string, unknown>): string {
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);
   if (!target.ref)
-    return fail(400, "invalid_target", "Uploads require a current file input ref from a snapshot.");
+    return fail("invalid_target", "Uploads require a current file input ref from a snapshot.");
   if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > 8)
-    return fail(400, "invalid_files", "Provide between 1 and 8 files.");
+    return fail("invalid_files", "Provide between 1 and 8 files.");
   let total = 0;
   const files = body.files.map((entry: unknown) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))
-      return fail(400, "invalid_files", "Each file needs a name, MIME type, and base64 content.");
+      return fail("invalid_files", "Each file needs a name, MIME type, and base64 content.");
     const file = entry as Record<string, unknown>;
     const name = stringField(file, "name", 255);
     if (/[\\/\u0000-\u001f\u007f]/.test(name) || name === "." || name === "..")
-      return fail(400, "invalid_files", "File names must be basenames without control characters.");
+      return fail("invalid_files", "File names must be basenames without control characters.");
     const type = stringField(file, "type", 128, true);
     if (type && !/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(type))
-      return fail(400, "invalid_files", "Use a valid MIME type or an empty string.");
+      return fail("invalid_files", "Use a valid MIME type or an empty string.");
     const data = stringField(file, "data", Math.ceil(UPLOAD_FILE_LIMIT / 3) * 4, true);
     if (data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(data) || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))
-      return fail(400, "invalid_files", "File content must be canonical base64.");
+      return fail("invalid_files", "File content must be canonical base64.");
     const decoded = Buffer.from(data, "base64");
     if (decoded.toString("base64") !== data)
-      return fail(400, "invalid_files", "File content must be canonical base64.");
+      return fail("invalid_files", "File content must be canonical base64.");
     total += decoded.length;
     if (total > UPLOAD_FILE_LIMIT)
-      return fail(413, "files_too_large", "Files must total at most 16 MiB per upload.");
+      return fail("files_too_large", "Files must total at most 16 MiB per upload.");
     return { name, type, data };
   });
   return { ...target, files };

@@ -592,9 +592,10 @@ export class TabSession {
         }
         fail(signal.reason);
       };
+      const timeoutMs = Math.max(0, step.deadline - Date.now());
       const expiry = setTimeout(
-        () => fail(new CdpTimeoutError("load")),
-        step.deadline - Date.now(),
+        () => fail(new CdpTimeoutError("load", timeoutMs)),
+        timeoutMs,
       );
       if (signal.aborted) return aborted();
       signal.addEventListener("abort", aborted);
@@ -1017,7 +1018,7 @@ export class TabSession {
       this.pending.add(entry);
       if (timeoutMs !== undefined)
         timer = setTimeout(
-          () => entry.fail(new CdpTimeoutError("page")),
+          () => entry.fail(new CdpTimeoutError("page", timeoutMs)),
           timeoutMs,
         );
       reply.then((value) => {
@@ -1066,10 +1067,11 @@ export class TabSession {
         if (this.current === "ready" && !this.releasing) resolve();
         else reject(this.lostError());
       };
+      const timeoutMs = Math.max(0, limit - Date.now());
       const timer = setTimeout(() => {
         this.waiters.delete(check);
-        reject(new CdpTimeoutError("page"));
-      }, limit - Date.now());
+        reject(new CdpTimeoutError("page", timeoutMs));
+      }, timeoutMs);
       this.waiters.add(check);
     });
   }

@@ -1,4 +1,5 @@
 import type { WebContents } from "electron";
+import { ERRORS } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
@@ -38,10 +39,9 @@ export async function bounded<T>(
           () =>
             reject(
               new ApiError(
-                504,
                 "page_timeout",
                 "The page did not respond in time.",
-                { awaited: "page" },
+                { awaited: "page", timeoutMs: timeout },
               ),
             ),
           timeout,
@@ -57,7 +57,6 @@ export function remaining(deadline: number): number {
   const milliseconds = deadline - Date.now();
   if (milliseconds <= 0)
     return fail(
-      504,
       "action_timeout",
       "The action time budget expired. Inspect the page before retrying a side effect.",
     );
@@ -100,7 +99,6 @@ export function createActions(deps: {
     const session = sessions.get(id);
     if (session?.contents === contents) return session;
     return fail(
-      409,
       "debugger_busy",
       "Kamapathy lost its connection to this tab. Try again shortly.",
       { reason: "unavailable" },
@@ -122,7 +120,6 @@ export function createActions(deps: {
     const contents = controller.getWebContents(id);
     if (!contents || contents.isDestroyed())
       return fail(
-        409,
         "no_web_page",
         "Navigate this tab to an HTTP or HTTPS page first.",
       );
@@ -142,7 +139,7 @@ export function createActions(deps: {
           };
           const destroyed = () => {
             cleanup();
-            reject(new ApiError(409, "tab_closed", "The tab was closed."));
+            reject(new ApiError("tab_closed", "The tab was closed."));
           };
           // A dialog that opens while the page loads ends the wait.
           const stopDialog = loading.on("dialog", ({ params }) => {
@@ -154,10 +151,9 @@ export function createActions(deps: {
             cleanup();
             reject(
               new ApiError(
-                504,
                 "page_timeout",
                 "The page is still loading. Try again.",
-                { awaited: "load" },
+                { awaited: "load", timeoutMs: timeout },
               ),
             );
           }, timeout);
@@ -168,7 +164,7 @@ export function createActions(deps: {
     }
     authorizeTab(id);
     if (contents.isDestroyed())
-      return fail(409, "tab_closed", "The tab was closed.");
+      return fail("tab_closed", "The tab was closed.");
     const session = withoutDialog(sessionOf(id, contents));
     if (session.state === "crashed") throw new PageCrashedError();
     return { contents, session };
@@ -203,16 +199,16 @@ export function createActions(deps: {
       session.epoch !== epoch
     )
       return fail(
-        409,
         "page_changed",
         "The page navigated during this operation. Inspect the new page before continuing.",
       );
-    // A control inside a frame from another origin is a conflict with the
-    // page, not a bad request, like a control the person is using.
+    // The page's code keeps its registered status; a code the registry
+    // does not know is reported as element_action_failed.
     if (result?.ok === false)
       return fail(
-        result.code === "cross_origin_frame" ? 409 : 422,
-        typeof result.code === "string" ? result.code : "element_action_failed",
+        typeof result.code === "string" && Object.hasOwn(ERRORS, result.code)
+          ? result.code
+          : "element_action_failed",
         typeof result.error === "string"
           ? result.error
           : "Could not interact with the element.",
@@ -238,7 +234,6 @@ export function createActions(deps: {
         session.epoch !== epoch
       )
         return fail(
-          409,
           "page_changed",
           "The page navigated before input completed. Inspect the new page before continuing.",
         );
@@ -277,7 +272,6 @@ export function createActions(deps: {
       authorizeTab(id);
       if (!final && session.epoch !== epoch)
         return fail(
-          409,
           "page_changed",
           "The page navigated before input completed. Inspect the new page before continuing.",
         );
@@ -309,7 +303,6 @@ export function createActions(deps: {
         );
       } catch {
         return fail(
-          409,
           "drag_unavailable",
           "Kamapathy could not take over drags in this tab.",
         );
@@ -356,7 +349,6 @@ export function createActions(deps: {
         if (data === undefined) {
           await mouse("mouseReleased", start, 0, true);
           return fail(
-            409,
             "drag_not_delivered",
             "The page started a drag that Kamapathy could not move. Inspect the page before retrying.",
           );
@@ -436,7 +428,6 @@ export function createActions(deps: {
         return delivered;
       if (attempt >= 2)
         return fail(
-          409,
           "input_not_delivered",
           "The page did not accept native input. Inspect the page before retrying.",
         );
@@ -457,12 +448,12 @@ export function createActions(deps: {
   ): Promise<Record<string, unknown>> => {
     const tab = authorizeTab(id);
     const deadline = run.deadline;
-    // One dispatch record per request, and per batch step.
+    // The request's dispatch record, or its batch step's.
     const step: Step = {
       deadline,
       signal: run.signal,
       guard: () => authorizeTab(id),
-      dispatch: { dispatched: false },
+      dispatch: run.dispatch,
     };
     // A gesture runs to its end even if the client goes away.
     const gesture: Step = {
@@ -513,7 +504,6 @@ export function createActions(deps: {
       if (empty) {
         if (session.epoch !== epoch)
           return fail(
-            409,
             "page_changed",
             "The page navigated during this operation. Inspect the new page before continuing.",
           );
@@ -522,7 +512,6 @@ export function createActions(deps: {
       else {
         if (!finitePoint(point))
           return fail(
-            422,
             "invalid_target",
             "The page did not provide a valid click target.",
           );
@@ -592,7 +581,6 @@ export function createActions(deps: {
         to = points.to as Point;
       if (!finitePoint(from) || !finitePoint(to))
         return fail(
-          422,
           "invalid_target",
           "The page did not provide valid drag points.",
         );
@@ -692,9 +680,9 @@ export function createActions(deps: {
               ["page_timeout", "action_timeout"].includes(error.code));
           if (!timedOut || Date.now() < waitDeadline) throw error;
           return fail(
-            408,
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
+            { awaited: "condition", timeoutMs: payload.timeoutMs },
           );
         }
         if (observation.matched) {
@@ -703,9 +691,9 @@ export function createActions(deps: {
         }
         if (Date.now() >= waitDeadline)
           return fail(
-            408,
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
+            { awaited: "condition", timeoutMs: payload.timeoutMs },
           );
         await run.park(
           () =>

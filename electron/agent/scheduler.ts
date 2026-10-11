@@ -50,7 +50,7 @@ interface LaneQueue {
 }
 
 const stopped = () =>
-  new ApiError(503, "automation_stopped", "Automation is disabled.");
+  new ApiError("automation_stopped", "Automation is disabled.");
 
 export class Scheduler {
   private readonly entries = new Set<Entry>();
@@ -69,17 +69,15 @@ export class Scheduler {
       (this.perSpace.get(spaceId) ?? 0) >= this.limits.perSpace
     )
       throw new ApiError(
-        429,
         "busy",
         `This space has ${this.limits.perSpace} requests waiting. Wait for them to finish.`,
-        { scope: "space", retryable: true },
+        { scope: "space" },
       );
     if (this.entries.size >= this.limits.total)
       throw new ApiError(
-        429,
         "busy",
         "Kamapathy has too many requests waiting. Try again shortly.",
-        { scope: "server", retryable: true },
+        { scope: "server" },
       );
     const arrival = Date.now();
     const entry: Entry = {
@@ -146,10 +144,9 @@ export class Scheduler {
           this.reject(
             entry,
             new ApiError(
-              504,
               "action_timeout",
               "This request waited behind earlier requests in its space and did not start. It is safe to send again.",
-              { awaited: "queue", timeoutMs: entry.budgetMs, retryable: true },
+              { awaited: "queue", timeoutMs: entry.budgetMs },
             ),
           ),
         entry.runDeadline - Date.now(),

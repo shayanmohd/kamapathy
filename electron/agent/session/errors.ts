@@ -38,7 +38,10 @@ export class PageCrashedError extends Error {
   }
 }
 export class CdpTimeoutError extends Error {
-  constructor(readonly awaited: "page" | "load") {
+  constructor(
+    readonly awaited: "page" | "load",
+    readonly timeoutMs?: number,
+  ) {
     super("The page did not respond in time.");
   }
 }

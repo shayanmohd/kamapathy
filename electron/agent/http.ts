@@ -1,5 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Space, Tab } from "../../shared/types";
+import {
+  ROUTES,
+  routeKey,
+  type SchemaRoute,
+} from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
@@ -7,7 +12,6 @@ import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
 
 export const BODY_LIMIT = 65536;
-export const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
 
 // Gives up the request's lane and slot while the wait runs, then takes them
 // back and checks the request is still allowed.
@@ -15,6 +19,8 @@ export type Park = <T>(wait: () => Promise<T>) => Promise<T>;
 export interface Run {
   readonly deadline: number;
   readonly signal: AbortSignal;
+  // Set once anything that can change the page has been sent.
+  readonly dispatch: { dispatched: boolean };
   park: Park;
 }
 export interface RouteCall {
@@ -27,18 +33,59 @@ export interface RouteCall {
   run: Run;
   prepared?: unknown;
 }
-// Path segments; ":id" matches any one segment.
-export interface Route {
-  method: "GET" | "POST" | "DELETE";
-  path: string[];
-  lane: "space" | "server" | "none";
-  budgetMs: number;
-  bodyLimit: number;
+// What a route does. Its lane, budget and body limit come from the schema.
+export interface RouteImpl {
   // Runs after admission, before the body is read.
   beforeBody?(
     call: Pick<RouteCall, "request" | "response" | "space" | "tab">,
   ): { prepared?: unknown; release?(): void };
   handler(call: RouteCall): Promise<unknown>;
+}
+// Path segments; ":id" matches any one segment.
+export interface Route extends RouteImpl {
+  key: string;
+  method: "GET" | "POST" | "DELETE";
+  path: string[];
+  lane: "space" | "server" | "none";
+  budgetMs: number;
+  bodyLimit: number;
+  schema: SchemaRoute;
+}
+
+// One route object for each route the schema declares, except /health,
+// which the server answers before admission.
+export function buildRoutes(impls: Record<string, RouteImpl>): Route[] {
+  const declared = ROUTES.filter((route) => route.lane !== "preadmission");
+  for (const key of Object.keys(impls))
+    if (!declared.some((route) => routeKey(route) === key))
+      throw new Error(`${key} is not declared in the schema.`);
+  return declared.map((schema) => {
+    const key = routeKey(schema);
+    const impl = impls[key];
+    if (!impl) throw new Error(`${key} has no handler.`);
+    if (schema.lane === "body" || schema.lane === "preadmission")
+      throw new Error(`${key} uses a lane this router does not run.`);
+    const { budget } = schema;
+    let budgetMs: number;
+    if (typeof budget === "number") budgetMs = budget;
+    else if ("field" in budget) {
+      // A wait's own field bounds it; admission counts its largest value.
+      const max = schema.body?.[budget.field]?.max;
+      if (max === undefined)
+        throw new Error(`${key} budgets on a field without a maximum.`);
+      budgetMs = max + (budget.plusMs ?? 0);
+    } else throw new Error(`${key} has a computed budget this router lacks.`);
+    return {
+      ...impl,
+      key,
+      method: schema.method,
+      path: schema.path.split("/").filter(Boolean),
+      lane: schema.lane,
+      budgetMs,
+      bodyLimit: schema.limit,
+      schema,
+    };
+  });
 }
 export interface RouteDeps {
   controller: AutomationController;
@@ -64,10 +111,10 @@ export async function readBody(
   if (
     !/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] || "")
   )
-    return fail(415, "content_type", "Use Content-Type: application/json.");
+    return fail("content_type", "Use Content-Type: application/json.");
   const sizeError = `Request body exceeds ${limit / 1024} KiB.`;
   if (Number(request.headers["content-length"] || 0) > limit)
-    return fail(413, "body_too_large", sizeError);
+    return fail("body_too_large", sizeError);
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -90,13 +137,13 @@ export async function readBody(
         resolve(body as Record<string, unknown>);
       } catch {
         reject(
-          new ApiError(400, "invalid_json", "Body must be a JSON object."),
+          new ApiError("invalid_json", "Body must be a JSON object."),
         );
       }
     };
     const timer = setTimeout(
       () =>
-        finish(new ApiError(408, "body_timeout", "Request body timed out.")),
+        finish(new ApiError("body_timeout", "Request body timed out.")),
       5000,
     );
     request.on("data", (chunk: Buffer) => {
@@ -104,16 +151,16 @@ export async function readBody(
       size += chunk.length;
       if (size > limit)
         finish(
-          new ApiError(413, "body_too_large", sizeError),
+          new ApiError("body_too_large", sizeError),
         );
       else chunks.push(chunk);
     });
     request.once("end", () => finish());
     request.once("error", () =>
-      finish(new ApiError(400, "invalid_body", "Could not read request body.")),
+      finish(new ApiError("invalid_body", "Could not read request body.")),
     );
     request.once("aborted", () =>
-      finish(new ApiError(400, "invalid_body", "Request was interrupted.")),
+      finish(new ApiError("invalid_body", "Request was interrupted.")),
     );
   });
 }

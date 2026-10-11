@@ -19,21 +19,20 @@ export function createAuthority(controller: AutomationController): Authority {
   const authorizeSpace = (id: string, resuming = false): Space => {
     const space = controller.state.spaces.find((item) => item.id === id);
     if (!space || !managedSpaces.has(id) || space.kind !== "agent")
-      return fail(404, "space_not_found", "Agent space was not found.");
+      return fail("space_not_found", "Agent space was not found.");
     if (space.owner !== "agent" && !resuming)
       return fail(
-        409,
         "human_control",
         `The person is using this space. Wait for them. If they tell you they are done or ask you to continue, take control back with resume ${space.id}.`,
       );
     if (stopped)
-      return fail(503, "automation_stopped", "Automation is disabled.");
+      return fail("automation_stopped", "Automation is disabled.");
     return space;
   };
   const authorizeTab = (id: string) => {
     const tab = controller.state.tabs.find((item) => item.id === id);
     if (!tab || !managedSpaces.has(tab.spaceId))
-      return fail(404, "tab_not_found", "Agent tab was not found.");
+      return fail("tab_not_found", "Agent tab was not found.");
     authorizeSpace(tab.spaceId);
     return tab;
   };

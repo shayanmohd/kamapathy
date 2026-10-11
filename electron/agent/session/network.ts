@@ -121,9 +121,10 @@ export class NetworkTracker {
         }
         fail(step.signal?.reason);
       };
+      const timeoutMs = Math.max(0, step.deadline - Date.now());
       const expiry = setTimeout(
-        () => fail(new CdpTimeoutError("load")),
-        step.deadline - Date.now(),
+        () => fail(new CdpTimeoutError("load", timeoutMs)),
+        timeoutMs,
       );
       if (step.signal?.aborted) return aborted();
       step.signal?.addEventListener("abort", aborted);

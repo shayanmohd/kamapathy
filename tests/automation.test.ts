@@ -11,6 +11,11 @@ import {
   type AutomationServer,
   type TestProbe,
 } from "../electron/agent/server";
+import {
+  API_LEVEL,
+  ROUTES,
+  routeKey,
+} from "../skills/kamapathy/scripts/schema/index.mjs";
 import { HOME_URL, initialState, newTab } from "../shared/state";
 import type { BrowserAction, BrowserState, Space, Tab } from "../shared/types";
 import { FakeHost } from "./fake-cdp";
@@ -521,6 +526,7 @@ describe("local automation socket", () => {
       error: {
         code: "screenshot_failed",
         message: "The page could not render a screenshot. Read a snapshot or try again after the page finishes rendering.",
+        retryable: true,
       },
     });
   });
@@ -933,7 +939,7 @@ describe("local automation socket", () => {
       ref: "@e1",
       value: "test",
     });
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(409);
     expect((await response.json()).error.code).toBe("stale_ref");
     expect(controller.contents.scripts).toHaveLength(1);
     expect(controller.contents.scripts[0].code).toContain(
@@ -1030,7 +1036,7 @@ describe("local automation socket", () => {
         { type: "fill", ref: "@e3", value: "must not run" },
       ],
     });
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(409);
     const result = await response.json();
     expect(result).toMatchObject({
       ok: false,
@@ -1745,7 +1751,7 @@ describe("local automation socket", () => {
     const { tab } = await createPage();
     controller.contents.result = { ok: false, code: "stale_ref", error: "Observe the current file input." };
     const response = await request(`/tabs/${tab.id}/upload`, "POST", uploadBody());
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(409);
     expect((await response.json()).error.code).toBe("stale_ref");
     expect(controller.contents.scripts).toHaveLength(1);
     expect(controller.contents.inputs).toEqual([]);
@@ -1790,7 +1796,7 @@ describe("local automation socket", () => {
       expect((await simultaneous.json()).error.code).toBe("upload_busy");
       controller.contents.result = { ok: false, code: "stale_ref", error: "Observe again." };
       transfer.finish();
-      expect((await transfer.result).status).toBe(422);
+      expect((await transfer.result).status).toBe(409);
       controller.contents.result = { ok: true, selected: 1 };
       expect((await request(`/tabs/${tab.id}/upload`, "POST", uploadBody())).status).toBe(200);
     } finally {
@@ -1870,6 +1876,159 @@ describe("local automation socket", () => {
     await expect.poll(() => release).toBeDefined();
     return { result, release: () => release!() };
   };
+
+  it("reports API level and engine versions from health before the queue", async () => {
+    const { tab } = await createPage();
+    controller.contents.result = new Promise(() => {});
+    const running = request(`/tabs/${tab.id}/snapshot`);
+    const response = await request("/health");
+    expect(response.status).toBe(200);
+    // Electron's and Chromium's versions are present only in the app.
+    expect(await response.json()).toEqual({
+      status: "ok",
+      version: controller.state.version,
+      apiLevel: API_LEVEL,
+      versions: { node: process.versions.node, v8: process.versions.v8 },
+    });
+    void running.catch(() => {});
+  });
+
+  it("rejects unknown fields on every route and batch action before any page step", async () => {
+    const { space, tab } = await createPage();
+    // A minimal valid body for each route that reads one.
+    const SAMPLES: Record<string, Record<string, unknown>> = {
+      "POST /spaces": { name: "Research" },
+      "POST /spaces/:id/handoff": {},
+      "POST /spaces/:id/resume": {},
+      "POST /spaces/:id/tabs": { url: "https://example.com/" },
+      "POST /tabs/:id/navigate": { url: "https://example.com/" },
+      "POST /tabs/:id/snapshot": {},
+      "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
+      "POST /tabs/:id/click": { ref: "@e1" },
+      "POST /tabs/:id/fill": { ref: "@e1", value: "x" },
+      "POST /tabs/:id/press": { key: "Enter" },
+      "POST /tabs/:id/scroll": { direction: "down" },
+      "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
+      "POST /tabs/:id/wait": { text: "Done" },
+      "POST /tabs/:id/upload": uploadBody(),
+    };
+    const tabs = controller.state.tabs.length;
+    for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
+      const key = routeKey(route);
+      expect(SAMPLES, key).toHaveProperty(key);
+      const path = route.path.replace(
+        ":id",
+        route.path.startsWith("/spaces/") ? space.id : tab.id,
+      );
+      const response = await request(path, "POST", { ...SAMPLES[key], extra: true });
+      expect(response.status, key).toBe(400);
+      expect((await response.json()).error, key).toEqual({
+        code: "unknown_field",
+        message: `${key} has no field "extra". Allowed: ${Object.keys(route.body!).join(", ") || "none"}.`,
+        field: "extra",
+        allowed: Object.keys(route.body!),
+        route: key,
+        apiLevel: API_LEVEL,
+      });
+    }
+    const response = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "snapshot" }, { type: "click", ref: "@e1", button: "right" }],
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatchObject({
+      code: "unknown_field",
+      field: "button",
+      index: 1,
+      action: "click",
+      allowed: ["type", "ref", "selector"],
+      route: "POST /tabs/:id/actions",
+    });
+    expect(controller.contents.scripts).toEqual([]);
+    expect(controller.contents.inputs).toEqual([]);
+    expect(controller.state.tabs).toHaveLength(tabs);
+    expect(controller.state.spaces.find((item) => item.id === space.id)?.owner).toBe("agent");
+  });
+
+  it("names unknown routes with the id replaced", async () => {
+    const { tab } = await createPage();
+    const response = await request(`/tabs/${tab.id}/goto`, "POST", {
+      url: "https://example.com/",
+    });
+    expect(response.status).toBe(404);
+    expect((await response.json()).error).toEqual({
+      code: "route_not_found",
+      message: `Kamapathy ${controller.state.version} (API level ${API_LEVEL}) has no route POST /tabs/:id/goto. A newer client may need a newer Kamapathy.`,
+      method: "POST",
+      route: "/tabs/:id/goto",
+      apiLevel: API_LEVEL,
+      version: controller.state.version,
+    });
+    expect((await (await request("/nothing/here")).json()).error).toMatchObject({
+      method: "GET",
+      route: "/nothing/here",
+    });
+  });
+
+  it("marks transient failures retryable only before anything reached the page", async () => {
+    const { tab } = await createPage();
+    const click = async () => {
+      const response = await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+      return { status: response.status, error: (await response.json()).error };
+    };
+    // A covered target is reported before any input.
+    controller.contents.result = {
+      ok: false,
+      code: "element_obscured",
+      error: "Another element covers the target.",
+    };
+    expect(await click()).toEqual({
+      status: 409,
+      error: {
+        code: "element_obscured",
+        message: "Another element covers the target.",
+        retryable: true,
+      },
+    });
+    controller.contents.result = { ok: false, code: "stale_ref", error: "Take a fresh snapshot." };
+    expect(await click()).toEqual({
+      status: 409,
+      error: { code: "stale_ref", message: "Take a fresh snapshot." },
+    });
+    // Input the page never received was still sent.
+    controller.contents.result = (code: string) =>
+      code.includes(')("input",') ? { ok: true, mouse: 0, key: 0 } : { ok: true, x: 25, y: 45 };
+    expect(await click()).toMatchObject({
+      status: 409,
+      error: { code: "input_not_delivered", dispatched: true },
+    });
+    expect((await click()).error.retryable).toBeUndefined();
+  });
+
+  it("keeps 408 wait_timeout on the legacy wait route and in a batch wait step", async () => {
+    const { tab } = await createPage();
+    controller.contents.result = { ok: true, matched: false };
+    const response = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Never",
+      timeoutMs: 0,
+    });
+    expect(response.status).toBe(408);
+    expect((await response.json()).error).toEqual({
+      code: "wait_timeout",
+      message: "The requested page condition was not observed before the timeout.",
+      awaited: "condition",
+      timeoutMs: 0,
+      retryable: true,
+    });
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "snapshot" }, { type: "wait", text: "Never", timeoutMs: 0 }],
+    });
+    expect(batch.status).toBe(408);
+    expect(await batch.json()).toMatchObject({
+      ok: false,
+      failedIndex: 1,
+      error: { code: "wait_timeout", awaited: "condition", timeoutMs: 0, retryable: true },
+    });
+  });
 
   it("returns 404 for a tab outside the managed spaces before reading its body", async () => {
     const personal = controller.state.tabs[0];

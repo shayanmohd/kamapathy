@@ -1,13 +1,11 @@
 import type { WebContents } from "electron";
 import { bounded, remaining } from "../actions";
-import { ApiError, errorBody, fail } from "../errors";
+import { ApiError, envelope, fail } from "../errors";
 import {
-  BODY_LIMIT,
   send,
-  UPLOAD_BODY_LIMIT,
-  type Route,
   type RouteCall,
   type RouteDeps,
+  type RouteImpl,
 } from "../http";
 import type { TabSession } from "../session/tab-session";
 import {
@@ -22,7 +20,7 @@ export function tabRoutes({
   authority,
   actions: { readyContents, evaluatePage, executeToolAction },
   sessions,
-}: RouteDeps): Route[] {
+}: RouteDeps): Record<string, RouteImpl> {
   const { authorizeTab } = authority;
   let uploading = false;
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
@@ -35,12 +33,7 @@ export function tabRoutes({
         run,
       ),
     );
-  const tool = (type: string): Route => ({
-    method: "POST",
-    path: ["tabs", ":id", type],
-    lane: "space",
-    budgetMs: 30000,
-    bodyLimit: BODY_LIMIT,
+  const tool = (type: string): RouteImpl => ({
     handler: async ({ response, body, tab, run }) =>
       send(
         response,
@@ -48,27 +41,19 @@ export function tabRoutes({
         await executeToolAction(tab!.id, parseToolAction(type, body!), run),
       ),
   });
-  return [
-    {
-      method: "DELETE",
-      path: ["tabs", ":id"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
-      handler: async ({ response, tab }) => {
+  return {
+    "DELETE /tabs/:id": {
+      handler: async ({ response, tab, run }) => {
+        run.dispatch.dispatched = true;
         await controller.dispatch({ type: "tab:close", id: tab!.id });
         controller.addActivity(tab!.spaceId, "Agent closed a tab", "info");
         return send(response, 200, { ok: true });
       },
     },
-    {
-      method: "POST",
-      path: ["tabs", ":id", "navigate"],
-      lane: "space",
-      budgetMs: 10000,
-      bodyLimit: BODY_LIMIT,
-      handler: async ({ response, body, tab }) => {
+    "POST /tabs/:id/navigate": {
+      handler: async ({ response, body, tab, run }) => {
         const url = urlField(body!);
+        run.dispatch.dispatched = true;
         await controller.dispatch({ type: "tab:navigate", id: tab!.id, url });
         const updated = authorizeTab(tab!.id);
         controller.addActivity(
@@ -79,28 +64,13 @@ export function tabRoutes({
         return send(response, 200, { tab: updated });
       },
     },
-    {
-      method: "GET",
-      path: ["tabs", ":id", "snapshot"],
-      lane: "space",
-      budgetMs: 30000,
-      bodyLimit: BODY_LIMIT,
+    "GET /tabs/:id/snapshot": {
       handler: snapshot,
     },
-    {
-      method: "POST",
-      path: ["tabs", ":id", "snapshot"],
-      lane: "space",
-      budgetMs: 30000,
-      bodyLimit: BODY_LIMIT,
+    "POST /tabs/:id/snapshot": {
       handler: snapshot,
     },
-    {
-      method: "POST",
-      path: ["tabs", ":id", "actions"],
-      lane: "space",
-      budgetMs: 60000,
-      bodyLimit: BODY_LIMIT,
+    "POST /tabs/:id/actions": {
       handler: async ({ response, body, tab, run }) => {
         if (
           !Array.isArray(body!.actions) ||
@@ -108,7 +78,6 @@ export function tabRoutes({
           body!.actions.length > 20
         )
           return fail(
-            400,
             "invalid_actions",
             "actions must contain between 1 and 20 fixed browser actions.",
           );
@@ -116,7 +85,6 @@ export function tabRoutes({
         const actions = body!.actions.map((value: unknown) => {
           if (!value || typeof value !== "object" || Array.isArray(value))
             return fail(
-              400,
               "invalid_action",
               "Each action must be an object with a type.",
             );
@@ -129,18 +97,27 @@ export function tabRoutes({
           result: Record<string, unknown>;
         }[] = [];
         for (const [index, action] of actions.entries()) {
+          // Each step has its own dispatch record, so a failed step's flags
+          // describe that step only.
+          const step = { ...run, dispatch: { dispatched: false } };
           try {
             if (response.destroyed) return;
             authorizeTab(tab!.id);
             results.push({
               index,
               type: action.type,
-              result: await executeToolAction(tab!.id, action, run),
+              result: await executeToolAction(tab!.id, action, step),
             });
           } catch (error) {
-            const { status, error: failure } = errorBody(
+            const { status, error: failure } = envelope(
               error,
-              "The browser could not complete this step. Inspect the page before retrying any side effect.",
+              step.dispatch.dispatched,
+              {
+                route: "POST /tabs/:id/actions",
+                action: action.type,
+                fallback:
+                  "The browser could not complete this step. Inspect the page before retrying any side effect.",
+              },
             );
             const withheld = [
               "human_control",
@@ -165,17 +142,11 @@ export function tabRoutes({
         return send(response, 200, { ok: true, results });
       },
     },
-    {
-      method: "GET",
-      path: ["tabs", ":id", "screenshot"],
-      lane: "space",
-      budgetMs: 30000,
-      bodyLimit: BODY_LIMIT,
+    "GET /tabs/:id/screenshot": {
       handler: async ({ response, tab, run }) => {
         const requireCaptureWindow = () => {
           if (!controller.canCapturePage())
             return fail(
-              409,
               "screenshot_unavailable",
               "Restore or show the Kamapathy window to capture a screenshot. Snapshots and page actions remain available while it is minimized or hidden.",
             );
@@ -191,7 +162,6 @@ export function tabRoutes({
           requireCaptureWindow();
           if (error instanceof ApiError) throw error;
           return fail(
-            503,
             "screenshot_failed",
             "The page could not render a screenshot. Read a snapshot or try again after the page finishes rendering.",
           );
@@ -199,7 +169,6 @@ export function tabRoutes({
         authorizeTab(tab!.id);
         if (screenshot.isEmpty())
           return fail(
-            409,
             "empty_screenshot",
             "The page has not rendered yet. Try again.",
           );
@@ -216,19 +185,18 @@ export function tabRoutes({
         return response.end(screenshot.toPNG());
       },
     },
-    ...["click", "fill", "press", "scroll", "drag", "wait"].map(tool),
-    {
-      method: "POST",
-      path: ["tabs", ":id", "upload"],
-      lane: "space",
-      budgetMs: 30000,
-      bodyLimit: UPLOAD_BODY_LIMIT,
+    ...Object.fromEntries(
+      ["click", "fill", "press", "scroll", "drag", "wait"].map((type) => [
+        `POST /tabs/:id/${type}`,
+        tool(type),
+      ]),
+    ),
+    "POST /tabs/:id/upload": {
       // Only this fixed route accepts a larger body. Reserve one transfer
       // before reading bytes, so concurrent uploads cannot multiply memory.
       beforeBody: ({ tab }) => {
         if (uploading)
           return fail(
-            429,
             "upload_busy",
             "Another file transfer is in progress.",
           );
@@ -240,14 +208,12 @@ export function tabRoutes({
           const contents = controller.getWebContents(tab!.id);
           if (!contents || contents.isDestroyed())
             return fail(
-              409,
               "no_web_page",
               "Open a web page before uploading files.",
             );
           const session = sessions.get(tab!.id);
           if (!session || session.contents !== contents)
             return fail(
-              409,
               "debugger_busy",
               "Kamapathy lost its connection to this tab. Try again shortly.",
               { reason: "unavailable" },
@@ -274,7 +240,6 @@ export function tabRoutes({
           session.epoch !== epoch
         )
           return fail(
-            409,
             "page_changed",
             "The page changed during the transfer. Take a fresh snapshot.",
           );
@@ -295,5 +260,5 @@ export function tabRoutes({
         return send(response, 200, result);
       },
     },
-  ];
+  };
 }
