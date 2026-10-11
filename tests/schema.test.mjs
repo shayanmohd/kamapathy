@@ -153,7 +153,13 @@ describe("API schema", () => {
     for (const item of built) {
       expect(item.schema, item.key).toBe(route(item.key));
       expect(item.lane, item.key).toBe(item.schema.lane);
-      expect(item.budgetMs, item.key).toBe(item.schema.budget);
+      // A field budget admits the field's longest value.
+      const { budget } = item.schema;
+      expect(item.budgetMs, item.key).toBe(
+        typeof budget === "number"
+          ? budget
+          : item.schema.body[budget.field].max + (budget.plusMs ?? 0),
+      );
       expect(item.bodyLimit, item.key).toBe(item.schema.limit);
       expect(`${item.method} /${item.path.join("/")}`, item.key).toBe(item.key);
     }

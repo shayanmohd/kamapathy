@@ -414,6 +414,49 @@ describe("native browser lifecycle", () => {
     expect(browser.state.downloads).toHaveLength(0);
   });
 
+  it("Take over records manual, a handoff records handoff, and taking over during a hold makes it manual", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const ownership = (owner: "human" | "agent", reason?: "handoff") =>
+      browser.dispatch({
+        type: "space:ownership",
+        id: space.id,
+        owner,
+        ...(reason ? { reason } : {}),
+      });
+    await ownership("human");
+    expect(space.owner).toBe("human");
+    expect(space.control).toEqual({ reason: "manual", since: expect.any(Number) });
+    await ownership("agent");
+    expect(space.owner).toBe("agent");
+    expect(space).not.toHaveProperty("control");
+    await ownership("human", "handoff");
+    expect(space.control).toEqual({ reason: "handoff", since: expect.any(Number) });
+    await ownership("agent");
+    const hold = browser.holdForPerson(space.id, "permission", "camera");
+    expect(space).toMatchObject({
+      owner: "human",
+      control: { reason: "permission", prompt: "camera", hold },
+    });
+    await ownership("human");
+    expect(space.control).toEqual({ reason: "manual", since: expect.any(Number) });
+    browser.releaseHold(hold);
+    expect(space.owner).toBe("human");
+    await ownership("agent");
+    browser.releaseHold(browser.holdForPerson(space.id, "device", "usb"));
+    expect(space.owner).toBe("agent");
+    expect(space).not.toHaveProperty("control");
+    await expect(
+      browser.dispatch({
+        type: "space:ownership",
+        id: space.id,
+        owner: "human",
+        reason: "failed",
+      } as never),
+    ).rejects.toThrow();
+    expect(space.owner).toBe("agent");
+  });
+
   it("keeps unwatched agent pages painting after every navigation, but not personal pages", async () => {
     const browser = controller();
     await browser.dispatch({ type: "tab:navigate", id: browser.state.activeTabId, url: "https://example.com/" });

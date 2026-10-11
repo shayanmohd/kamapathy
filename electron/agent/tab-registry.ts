@@ -2,6 +2,7 @@ import { agentRules } from "../../shared/state";
 import type {
   BrowserState,
   ClosedBy,
+  ControlReason,
   OpenedBy,
   Tab,
 } from "../../shared/types";
@@ -15,6 +16,13 @@ export interface ClosedLabel {
   label: string;
   closedBy: ClosedBy;
   at: number;
+}
+// What changed while the person had control: tabs opened and labels
+// retired since control left the agent, and the tab the space shows.
+export interface Boundary {
+  active: Tab | null;
+  opened: Tab[];
+  closed: string[];
 }
 export type RegistryEvent =
   | {
@@ -37,11 +45,15 @@ const CLOSED_LABELS = 100;
 
 // What the registry keeps for a space during this app run. `retired` counts
 // the labels the space has retired, and each closed entry keeps its count,
-// so a caller can tell which labels closed after a given point.
+// so a caller can tell which labels closed after a given point. `mark` holds
+// the tabs and count from when control left the agent, and `last` what
+// changed until it came back.
 interface SpaceRecord {
   nextLabel: number;
   retired: number;
   closed: (ClosedLabel & { sequence: number })[];
+  mark?: { tabs: Set<string>; retired: number };
+  last?: { opened: string[]; closed: string[] };
 }
 
 // Origins, managed flags and labels of tabs. Labels count per space in the
@@ -129,6 +141,67 @@ export class TabRegistry {
     ).length;
   }
 
+  // Gives the person control. When the agent had it, this is where the next
+  // boundary starts; otherwise only the reason changes.
+  handOver(
+    spaceId: string,
+    control: { reason: ControlReason; prompt?: string; hold?: string },
+  ): void {
+    const space = this.space(spaceId);
+    if (space.owner === "agent") {
+      const record = this.record(spaceId);
+      record.mark = {
+        tabs: new Set(
+          this.state()
+            .tabs.filter((tab) => tab.spaceId === spaceId)
+            .map((tab) => tab.id),
+        ),
+        retired: record.retired,
+      };
+      delete record.last;
+    }
+    space.owner = "human";
+    space.control = {
+      reason: control.reason,
+      ...(control.prompt === undefined ? {} : { prompt: control.prompt }),
+      since: this.now(),
+      ...(control.hold === undefined ? {} : { hold: control.hold }),
+    };
+  }
+
+  // Gives the agent control and returns what changed meanwhile. Taking back
+  // control the agent already has changes nothing.
+  takeBack(spaceId: string, active: Tab | null): Boundary {
+    const space = this.space(spaceId);
+    if (space.owner === "agent") return this.lastBoundary(spaceId, active);
+    const record = this.record(spaceId);
+    const mark = record.mark ?? { tabs: new Set<string>(), retired: 0 };
+    record.last = {
+      opened: this.state()
+        .tabs.filter((tab) => tab.spaceId === spaceId && !mark.tabs.has(tab.id))
+        .map((tab) => tab.id),
+      closed: record.closed
+        .filter((item) => item.sequence > mark.retired)
+        .map((item) => item.label),
+    };
+    delete record.mark;
+    space.owner = "agent";
+    delete space.control;
+    return this.lastBoundary(spaceId, active);
+  }
+
+  // The boundary of the last time control came back, listing only tabs
+  // still open, until control leaves again.
+  lastBoundary(spaceId: string, active: Tab | null): Boundary {
+    const last = this.spaces.get(spaceId)?.last;
+    const opened = new Set(last?.opened);
+    return {
+      active,
+      opened: this.state().tabs.filter((tab) => opened.has(tab.id)),
+      closed: [...(last?.closed ?? [])],
+    };
+  }
+
   on(listener: (event: RegistryEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -146,6 +219,12 @@ export class TabRegistry {
       this.spaces.set(spaceId, record);
     }
     return record;
+  }
+
+  private space(spaceId: string) {
+    const space = this.state().spaces.find((item) => item.id === spaceId);
+    if (!space) throw new Error("Space was not found.");
+    return space;
   }
 
   private nextLabel(spaceId: string): string {

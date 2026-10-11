@@ -6,6 +6,7 @@ import type {
   BrowserAction,
   BrowserState,
   ClosedBy,
+  HoldReason,
   Space,
   Tab,
 } from "../../shared/types";
@@ -62,6 +63,10 @@ export interface AutomationController {
   setPageBudget(spaceId: string, pageBudget: number): void;
   /** Clears a popup's unseen flag once the agent has addressed it. */
   markSeen(tabId: string): void;
+  /** Gives the person control until they answer; returns the hold's id. */
+  holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
+  /** Returns control to the agent unless the person took over since. */
+  releaseHold(holdId: string): void;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */

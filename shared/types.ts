@@ -12,6 +12,9 @@ export type ControlReason =
   | "device"
   | "http_auth"
   | "client_certificate";
+// Why the person has control when only they can answer something.
+export type HoldReason =
+  "approval" | "permission" | "device" | "http_auth" | "client_certificate";
 export interface SpaceControl {
   reason: ControlReason;
   prompt?: string;
@@ -171,7 +174,12 @@ export type BrowserAction =
   | { type: "space:rename"; id: string; name: string }
   | { type: "space:color"; id: string; color: SpaceColor }
   | { type: "space:delete"; id: string }
-  | { type: "space:ownership"; id: string; owner: "human" | "agent" }
+  | {
+      type: "space:ownership";
+      id: string;
+      owner: "human" | "agent";
+      reason?: "handoff";
+    }
   | { type: "bookmark:add"; url: string; title: string }
   | { type: "bookmark:remove"; id: string }
   | { type: "bookmark:update"; id: string; url: string; title: string }

@@ -213,9 +213,25 @@ export const ROUTES = [
   route(
     "POST",
     "/spaces/:id/resume",
-    "Takes control of the space back.",
-    '{ ok: true, owner: "agent" }',
+    "Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile.",
+    '{ ok: true, owner: "agent", active: TabView | null, opened: TabView[], closed: label[] }',
     {},
+  ),
+  route(
+    "POST",
+    "/spaces/:id/wait-for-control",
+    "Waits until the agent has control of the space, answering at once when it already has, and lists what changed while the person had control.",
+    '{ ok: true, owner: "agent", active: TabView | null, opened: TabView[], closed: label[] }',
+    {
+      timeoutMs: {
+        kind: "ms",
+        min: 0,
+        max: 600000,
+        default: 600000,
+        description: "How long to wait.",
+      },
+    },
+    { lane: "none", budget: { field: "timeoutMs" }, since: 2 },
   ),
   route(
     "GET",

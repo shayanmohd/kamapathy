@@ -84,7 +84,12 @@ export const ERRORS = {
     ["tabId"],
   ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
-  human_control: code(409, false, "The person controls this space."),
+  human_control: code(409, false, "The person controls this space.", [
+    "spaceId",
+    "reason",
+    "prompt",
+    "since",
+  ]),
   tab_unmanaged: code(
     409,
     false,
@@ -189,7 +194,10 @@ export const ERRORS = {
     false,
     "The selector is not valid CSS, or matches no single visible element.",
   ),
-  busy: code(429, true, "Too many requests are waiting.", ["scope"]),
+  busy: code(429, true, "Too many requests are waiting.", [
+    "scope",
+    "retryAfterMs",
+  ]),
   upload_busy: code(429, true, "Another file transfer is in progress."),
   operation_failed: code(
     500,
@@ -210,6 +218,13 @@ export const ERRORS = {
     "detail",
     "interceptor",
   ]),
+  control_timeout: code(
+    504,
+    true,
+    "Control did not return to the agent before the timeout.",
+    ["awaited", "timeoutMs", "reason"],
+    2,
+  ),
   wait_timeout: {
     ...code(504, true, "The condition was not met before the timeout.", [
       "awaited",

@@ -1,6 +1,28 @@
-import type { Space, Tab } from "../../shared/types";
+import type { ControlReason, Space, Tab } from "../../shared/types";
 import { fail } from "./errors";
 import type { AutomationController } from "./server";
+
+// Only the reasons the agent itself can end; holds and approvals end when
+// the person answers.
+const RESUMABLE: readonly ControlReason[] = ["manual", "handoff", "failed"];
+
+export function humanControlMessage(
+  reason: ControlReason,
+  prompt?: string,
+): string {
+  switch (reason) {
+    case "manual":
+      return "The person took over this space. Stop, and resume only when they ask you to.";
+    case "handoff":
+      return "You handed this space to the person. Resume when they say they are done.";
+    case "failed":
+      return "You reported that this task could not be finished. Resume only when the person asks you to.";
+    case "approval":
+      return `Kamapathy is asking the person to approve ${prompt}. Wait for control.`;
+    default:
+      return `The site asked for ${prompt}, and only the person can answer. Wait for control.`;
+  }
+}
 
 export interface Authority {
   readonly managedSpaces: Set<string>;
@@ -16,7 +38,8 @@ export function createAuthority(controller: AutomationController): Authority {
   const managedSpaces = new Set<string>();
   let stopped = false;
   // While the person has control, only routes that read the space ("allow")
-  // and taking control back ("resume") get through.
+  // and taking control back ("resume") get through, and a resume only when
+  // the agent may end the person's control.
   const authorizeSpace = (
     id: string,
     options: { human?: "allow" | "resume" } = {},
@@ -25,12 +48,15 @@ export function createAuthority(controller: AutomationController): Authority {
     const space = controller.state.spaces.find((item) => item.id === id);
     if (!space || !managedSpaces.has(id) || space.kind !== "agent")
       return fail("space_not_found", "Agent space was not found.");
-    if (space.owner !== "agent" && !options.human)
-      return fail(
-        "human_control",
-        `The person is using this space. Wait for them. If they tell you they are done or ask you to continue, take control back with resume ${space.id}.`,
-      );
-    return space;
+    if (space.owner === "agent" || options.human === "allow") return space;
+    const { reason = "manual", prompt, since } = space.control ?? {};
+    if (options.human === "resume" && RESUMABLE.includes(reason)) return space;
+    return fail("human_control", humanControlMessage(reason, prompt), {
+      spaceId: space.id,
+      reason,
+      ...(prompt === undefined ? {} : { prompt }),
+      ...(since === undefined ? {} : { since }),
+    });
   };
   // Page routes need a tab the agent manages; adopt and release are the
   // two routes that reach the others.

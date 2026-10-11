@@ -213,4 +213,62 @@ describe("tab registry", () => {
     open("one");
     expect(events).toHaveLength(5);
   });
+
+  it("a boundary lists tabs opened and labels retired since control left, and the last one is kept until control leaves again", () => {
+    const { state, clock, registry, open, close } = setup();
+    const space = state.spaces.find((item) => item.id === "one")!;
+    const first = open("one");
+    close(open("one"));
+    expect(registry.lastBoundary("one", first)).toEqual({
+      active: first,
+      opened: [],
+      closed: [],
+    });
+    clock.now = 2000;
+    registry.handOver("one", { reason: "handoff" });
+    expect(space.owner).toBe("human");
+    expect(space.control).toEqual({ reason: "handoff", since: 2000 });
+    const third = open("one", person);
+    const fourth = open("one", person);
+    close(first, "person");
+    close(fourth, "person");
+    open("two", person);
+    // Taking over while the person has control changes the reason only.
+    clock.now = 3000;
+    registry.handOver("one", { reason: "manual" });
+    expect(space.control).toEqual({ reason: "manual", since: 3000 });
+    const fifth = open("one", person);
+    expect(registry.takeBack("one", third)).toEqual({
+      active: third,
+      opened: [third, fifth],
+      closed: ["p1", "p4"],
+    });
+    expect(space.owner).toBe("agent");
+    expect(space).not.toHaveProperty("control");
+    // The last boundary keeps its labels and lists only tabs still open,
+    // with the space's active tab now.
+    close(fifth);
+    expect(registry.lastBoundary("one", null)).toEqual({
+      active: null,
+      opened: [third],
+      closed: ["p1", "p4"],
+    });
+    // Taking back control the agent already has changes nothing.
+    expect(registry.takeBack("one", third)).toEqual({
+      active: third,
+      opened: [third],
+      closed: ["p1", "p4"],
+    });
+    registry.handOver("one", { reason: "manual" });
+    expect(registry.lastBoundary("one", third)).toEqual({
+      active: third,
+      opened: [],
+      closed: [],
+    });
+    expect(registry.takeBack("one", third)).toEqual({
+      active: third,
+      opened: [],
+      closed: [],
+    });
+  });
 });

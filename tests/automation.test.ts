@@ -349,11 +349,17 @@ describe("local automation socket", () => {
     expect(refused.status).toBe(409);
     const { error } = await refused.json();
     expect(error.code).toBe("human_control");
-    expect(error.message).toContain("The person is using this space");
-    expect(error.message).toContain(`resume ${space.id}`);
+    expect(error.message).toBe(
+      "The person took over this space. Stop, and resume only when they ask you to.",
+    );
     const resumed = await request(`/spaces/${space.id}/resume`, "POST", {});
     expect(resumed.status).toBe(200);
-    expect(await resumed.json()).toEqual({ ok: true, owner: "agent" });
+    expect(await resumed.json()).toMatchObject({
+      ok: true,
+      owner: "agent",
+      opened: [],
+      closed: [],
+    });
     expect(controller.calls.at(-1)).toEqual({
       type: "space:ownership",
       id: space.id,
@@ -391,12 +397,22 @@ describe("local automation socket", () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await request(`/spaces/${space.id}/resume`, "POST", {});
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true, owner: "agent" });
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        owner: "agent",
+        opened: [],
+        closed: [],
+      });
     }
     const ownership = (item: BrowserAction) =>
       item.type === "space:ownership";
     expect(controller.calls.filter(ownership)).toEqual([
-      { type: "space:ownership", id: space.id, owner: "human" },
+      {
+        type: "space:ownership",
+        id: space.id,
+        owner: "human",
+        reason: "handoff",
+      },
       { type: "space:ownership", id: space.id, owner: "agent" },
     ]);
     expect(
@@ -1674,6 +1690,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/release": {},
       "POST /spaces/:id/handoff": {},
       "POST /spaces/:id/resume": {},
+      "POST /spaces/:id/wait-for-control": { timeoutMs: 1000 },
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
       "POST /tabs/:id/snapshot": {},

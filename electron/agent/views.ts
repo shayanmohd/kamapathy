@@ -7,6 +7,7 @@ import type {
   SpaceColor,
   Tab,
 } from "../../shared/types";
+import type { Boundary } from "./tab-registry";
 
 export interface TabView {
   id: string;
@@ -62,6 +63,25 @@ export function tabView(tab: Tab, shown: Tab | undefined): TabView {
     managed: tab.managed === true,
     active: tab.id === shown?.id,
     ...(tab.unseen ? { unseen: true as const } : {}),
+  };
+}
+
+export interface BoundaryView {
+  active: TabView | null;
+  opened: TabView[];
+  closed: string[];
+}
+
+// What resume and wait-for-control return about the person's time in
+// control.
+export function boundaryView(
+  boundary: Boundary,
+  shown: Tab | undefined,
+): BoundaryView {
+  return {
+    active: boundary.active ? tabView(boundary.active, shown) : null,
+    opened: boundary.opened.map((tab) => tabView(tab, shown)),
+    closed: boundary.closed,
   };
 }
 

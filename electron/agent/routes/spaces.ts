@@ -4,7 +4,9 @@ import { fail } from "../errors";
 import { send, type RouteDeps, type RouteImpl } from "../http";
 import type { AutomationController } from "../server";
 import { stringField, urlField } from "../validate";
-import { pagesOf, spaceView, tabView } from "../views";
+import { boundaryView, pagesOf, spaceView, tabView } from "../views";
+
+const CONTROL_WAITS = 8;
 
 // Pages the agent manages count toward its space's budget. Opening and
 // adopting stop here before anything changes; popups count but never stop.
@@ -40,6 +42,15 @@ export function spaceRoutes({
     controller.state.spaces.filter(
       (space) => managedSpaces.has(space.id) && space.kind === "agent",
     );
+  // What changed the last time control came back to the agent.
+  const boundaryOf = (spaceId: string) => {
+    const shown = controller.shownTab(spaceId);
+    return boundaryView(
+      controller.registry.lastBoundary(spaceId, shown ?? null),
+      shown,
+    );
+  };
+  let controlWaits = 0;
   return {
     "GET /spaces": {
       handler: async ({ response }) =>
@@ -128,7 +139,78 @@ export function spaceRoutes({
             "info",
           );
         }
-        return send(response, 200, { ok: true, owner: "agent" });
+        return send(response, 200, {
+          ok: true,
+          owner: "agent",
+          ...boundaryOf(space!.id),
+        });
+      },
+    },
+    // Answers once the agent has control, at once if it already has. It
+    // runs beside the space's queue and never takes control itself.
+    "POST /spaces/:id/wait-for-control": {
+      access: { human: "allow" },
+      beforeBody: () => {
+        if (controlWaits >= CONTROL_WAITS)
+          return fail(
+            "busy",
+            `Kamapathy has ${CONTROL_WAITS} waits for control running. Try again shortly.`,
+            { scope: "server" },
+          );
+        controlWaits += 1;
+        return { release: () => void (controlWaits -= 1) };
+      },
+      handler: async ({ response, body, space, run }) => {
+        const id = space!.id;
+        const timeoutMs =
+          typeof body!.timeoutMs === "number" ? body!.timeoutMs : 600000;
+        const outcome = await new Promise<"agent" | "timeout" | "closed">(
+          (resolve, reject) => {
+            if (run.signal.aborted) return resolve("closed");
+            const stop = () => {
+              clearTimeout(timer);
+              unsubscribe();
+              run.signal.removeEventListener("abort", closed);
+            };
+            const settle = (outcome: "agent" | "timeout" | "closed") => {
+              stop();
+              resolve(outcome);
+            };
+            const closed = () => settle("closed");
+            // The space can stop being the agent's while it waits.
+            const check = () => {
+              try {
+                if (authorizeSpace(id, { human: "allow" }).owner === "agent")
+                  settle("agent");
+              } catch (error) {
+                stop();
+                reject(error);
+              }
+            };
+            const timer = setTimeout(() => settle("timeout"), timeoutMs);
+            const unsubscribe = controller.subscribe(check);
+            run.signal.addEventListener("abort", closed);
+            check();
+          },
+        );
+        if (outcome === "closed") return;
+        if (outcome === "timeout")
+          return fail(
+            "control_timeout",
+            `Control did not return within ${timeoutMs} ms.`,
+            {
+              awaited: "control",
+              timeoutMs,
+              reason:
+                controller.state.spaces.find((item) => item.id === id)
+                  ?.control?.reason ?? "manual",
+            },
+          );
+        return send(response, 200, {
+          ok: true,
+          owner: "agent",
+          ...boundaryOf(id),
+        });
       },
     },
     "DELETE /spaces/:id": {
@@ -160,6 +242,7 @@ export function spaceRoutes({
           type: "space:ownership",
           id: space!.id,
           owner: "human",
+          reason: "handoff",
         });
         controller.addActivity(
           space!.id,

@@ -809,4 +809,290 @@ describe("agent spaces", () => {
       false,
     );
   });
+
+  it("human_control carries each reason and message; resume passes manual, handoff and failed but not prompt holds or approvals; an answered hold or approval returns control unless the person took over", async () => {
+    const { space } = await createSpace();
+    const current = () =>
+      controller.state.spaces.find((item) => item.id === space.id)!;
+    const refusal = async () =>
+      (await request(`/spaces/${space.id}/tabs`)).body.error;
+    const resume = () => request(`/spaces/${space.id}/resume`, "POST", {});
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(await refusal()).toEqual({
+      code: "human_control",
+      message:
+        "The person took over this space. Stop, and resume only when they ask you to.",
+      spaceId: space.id,
+      reason: "manual",
+      since: current().control!.since,
+    });
+    expect((await resume()).status).toBe(200);
+    expect((await request(`/spaces/${space.id}/handoff`, "POST", {})).status).toBe(
+      200,
+    );
+    expect(await refusal()).toMatchObject({
+      reason: "handoff",
+      message:
+        "You handed this space to the person. Resume when they say they are done.",
+    });
+    expect((await resume()).status).toBe(200);
+    // Nothing reports a failure yet, so the test records one directly.
+    controller.registry.handOver(space.id, { reason: "failed" });
+    expect(await refusal()).toMatchObject({
+      reason: "failed",
+      message:
+        "You reported that this task could not be finished. Resume only when the person asks you to.",
+    });
+    expect((await resume()).status).toBe(200);
+    for (const [reason, prompt, message] of [
+      [
+        "approval",
+        "clearing site data for example.com",
+        "Kamapathy is asking the person to approve clearing site data for example.com. Wait for control.",
+      ],
+      [
+        "permission",
+        "notifications",
+        "The site asked for notifications, and only the person can answer. Wait for control.",
+      ],
+      [
+        "device",
+        "usb",
+        "The site asked for usb, and only the person can answer. Wait for control.",
+      ],
+      [
+        "http_auth",
+        "a sign-in to example.com",
+        "The site asked for a sign-in to example.com, and only the person can answer. Wait for control.",
+      ],
+      [
+        "client_certificate",
+        "a client certificate",
+        "The site asked for a client certificate, and only the person can answer. Wait for control.",
+      ],
+    ] as const) {
+      const hold = controller.holdForPerson(space.id, reason, prompt);
+      const error = {
+        code: "human_control",
+        message,
+        spaceId: space.id,
+        reason,
+        prompt,
+        since: current().control!.since,
+      };
+      expect(await refusal(), reason).toEqual(error);
+      expect(await resume(), reason).toEqual({ status: 409, body: { error } });
+      expect(current().owner).toBe("human");
+      controller.releaseHold(hold);
+      expect(current().owner, reason).toBe("agent");
+      expect(current()).not.toHaveProperty("control");
+    }
+    // Taking over during a hold makes it manual, and answering the hold
+    // then leaves control with the person.
+    const held = controller.holdForPerson(space.id, "permission", "camera");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(await refusal()).toMatchObject({ reason: "manual" });
+    controller.releaseHold(held);
+    expect(current().owner).toBe("human");
+    expect(() =>
+      controller.holdForPerson(space.id, "permission", "camera"),
+    ).toThrow("The agent does not have control of this space.");
+    expect((await resume()).status).toBe(200);
+    controller.holdForPerson(space.id, "permission", "x".repeat(200));
+    expect(current().control!.prompt).toBe("x".repeat(120));
+  });
+
+  it("resume returns the tabs the person opened and closed and their active tab", async () => {
+    const { space } = await createSpace();
+    const second = await openPage(space.id, "https://example.com/two");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const person = controller.openPersonTab(
+      space.id,
+      "https://example.com/person",
+    );
+    await controller.dispatch({ type: "tab:close", id: second.id });
+    controller.state.activeSpaceId = space.id;
+    controller.state.activeTabId = person.id;
+    const view = expect.objectContaining({
+      id: person.id,
+      label: "p3",
+      openedBy: "person",
+      managed: false,
+      active: true,
+    });
+    const resumed = await request(`/spaces/${space.id}/resume`, "POST", {});
+    expect(resumed).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        owner: "agent",
+        active: view,
+        opened: [view],
+        closed: ["p2"],
+      },
+    });
+    // Until control leaves again, resume and wait-for-control return the
+    // same boundary.
+    expect(await request(`/spaces/${space.id}/resume`, "POST", {})).toEqual(
+      resumed,
+    );
+    expect(
+      await request(`/spaces/${space.id}/wait-for-control`, "POST", {}),
+    ).toEqual(resumed);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect((await request(`/spaces/${space.id}/resume`, "POST", {})).body).toEqual(
+      { ok: true, owner: "agent", active: view, opened: [], closed: [] },
+    );
+  });
+
+  it("wait-for-control returns without blocking the queue, answers at once when the agent has control, and times out with control_timeout", async () => {
+    const { space } = await createSpace();
+    const wait = (body: Record<string, unknown> = {}) =>
+      request(`/spaces/${space.id}/wait-for-control`, "POST", body);
+    const shown = controller.shownTab(space.id)!;
+    expect(await wait()).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        owner: "agent",
+        active: expect.objectContaining({ id: shown.id, active: true }),
+        opened: [],
+        closed: [],
+      },
+    });
+    expect((await request(`/spaces/${space.id}/handoff`, "POST", {})).status).toBe(
+      200,
+    );
+    let answered = false;
+    const waiting = wait().then((result) => {
+      answered = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(answered).toBe(false);
+    // Requests in the space's queue still answer while the wait runs.
+    expect((await request(`/spaces/${space.id}/tabs`)).status).toBe(409);
+    expect((await request(`/spaces/${space.id}`)).status).toBe(200);
+    const person = controller.openPersonTab(
+      space.id,
+      "https://example.com/person",
+    );
+    expect(answered).toBe(false);
+    expect((await request(`/spaces/${space.id}/resume`, "POST", {})).status).toBe(
+      200,
+    );
+    expect(await waiting).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        owner: "agent",
+        active: expect.objectContaining({
+          id: controller.shownTab(space.id)!.id,
+          active: true,
+        }),
+        opened: [expect.objectContaining({ id: person.id, managed: false })],
+        closed: [],
+      },
+    });
+    expect((await request(`/spaces/${space.id}/handoff`, "POST", {})).status).toBe(
+      200,
+    );
+    expect(await wait({ timeoutMs: 50 })).toEqual({
+      status: 504,
+      body: {
+        error: {
+          code: "control_timeout",
+          message: "Control did not return within 50 ms.",
+          awaited: "control",
+          timeoutMs: 50,
+          reason: "handoff",
+          retryable: true,
+        },
+      },
+    });
+    // A wait on a space that goes away answers space_not_found.
+    const gone = wait();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await controller.dispatch({ type: "space:delete", id: space.id });
+    expect(await gone).toMatchObject({
+      status: 404,
+      body: { error: { code: "space_not_found" } },
+    });
+  });
+
+  it("at most 8 waits for control run at once", async () => {
+    const { space } = await createSpace();
+    expect((await request(`/spaces/${space.id}/handoff`, "POST", {})).status).toBe(
+      200,
+    );
+    const answers: { status: number; body: unknown }[] = [];
+    const waits = Array.from({ length: 9 }, () =>
+      request(`/spaces/${space.id}/wait-for-control`, "POST", {}).then(
+        (answer) => {
+          answers.push(answer);
+          return answer;
+        },
+      ),
+    );
+    await expect.poll(() => answers.length).toBe(1);
+    expect(answers[0]).toEqual({
+      status: 429,
+      body: {
+        error: {
+          code: "busy",
+          message: "Kamapathy has 8 waits for control running. Try again shortly.",
+          scope: "server",
+          retryable: true,
+        },
+      },
+    });
+    expect((await request(`/spaces/${space.id}/resume`, "POST", {})).status).toBe(
+      200,
+    );
+    expect((await Promise.all(waits)).map((answer) => answer.status).sort()).toEqual(
+      [...Array(8).fill(200), 429],
+    );
+    // Answered waits give their places back.
+    await request(`/spaces/${space.id}/handoff`, "POST", {});
+    const again = Array.from({ length: 8 }, () =>
+      request(`/spaces/${space.id}/wait-for-control`, "POST", { timeoutMs: 100 }),
+    );
+    expect((await Promise.all(again)).map((answer) => answer.status)).toEqual(
+      Array(8).fill(504),
+    );
+  });
+
+  it("listings show reason, prompt and since while the person has control and no recentTabTitles", async () => {
+    const { space } = await createSpace();
+    controller.holdForPerson(space.id, "permission", "notifications");
+    const { since } = controller.state.spaces.find(
+      (item) => item.id === space.id,
+    )!.control!;
+    const listed = (await request("/spaces")).body.spaces[0];
+    expect(listed).toMatchObject({
+      id: space.id,
+      owner: "human",
+      reason: "permission",
+      prompt: "notifications",
+      since,
+    });
+    expect(listed).not.toHaveProperty("recentTabTitles");
+    expect((await request(`/spaces/${space.id}`)).body.space).toEqual(listed);
+  });
 });

@@ -26,6 +26,7 @@ import type {
   ClosedBy,
   ContentBounds,
   FrozenFrame,
+  HoldReason,
   ImportedBookmark,
   ImportedVisit,
   SignIns,
@@ -1089,6 +1090,31 @@ export class BrowserController {
     this.emit();
   }
 
+  // Gives the person control until they answer a site's prompt or an
+  // approval the agent asked for. Returns the id that releaseHold takes.
+  holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string {
+    if (this.getSpace(spaceId).owner !== "agent")
+      throw new Error("The agent does not have control of this space.");
+    const hold = randomUUID();
+    this.registry.handOver(spaceId, {
+      reason,
+      prompt: prompt.slice(0, 120),
+      hold,
+    });
+    this.emit();
+    return hold;
+  }
+
+  // An answered hold gives control back, unless the person took over since.
+  releaseHold(holdId: string): void {
+    const space = this.state.spaces.find(
+      (item) => item.control?.hold === holdId,
+    );
+    if (!space) return;
+    this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
+    this.emit();
+  }
+
   // Closes one tab for whoever asked: its label retires, its space keeps at
   // least one tab, and a shown tab passes the selection to a neighbor.
   private removeTab(
@@ -1369,10 +1395,16 @@ export class BrowserController {
         const space = this.getSpace(action.id);
         if (
           space.kind !== "agent" ||
-          !["human", "agent"].includes(action.owner)
+          !["human", "agent"].includes(action.owner) ||
+          ![undefined, "handoff"].includes(action.reason)
         )
           throw new Error("Only agent spaces can change ownership.");
-        space.owner = action.owner;
+        if (action.owner === "human")
+          this.registry.handOver(space.id, {
+            reason: action.reason ?? "manual",
+          });
+        else
+          this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
         this.addActivity(
           space.id,
           action.owner === "human"

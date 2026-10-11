@@ -18,6 +18,7 @@ import type {
   BrowserAction,
   BrowserState,
   ClosedBy,
+  HoldReason,
   Space,
   Tab,
 } from "../shared/types";
@@ -233,6 +234,27 @@ export class FakeController implements AutomationController {
     delete tab.unseen;
     this.emit();
   }
+  holdForPerson(spaceId: string, reason: HoldReason, prompt: string) {
+    const space = this.state.spaces.find((item) => item.id === spaceId);
+    if (space?.owner !== "agent")
+      throw new Error("The agent does not have control of this space.");
+    const hold = crypto.randomUUID();
+    this.registry.handOver(spaceId, {
+      reason,
+      prompt: prompt.slice(0, 120),
+      hold,
+    });
+    this.emit();
+    return hold;
+  }
+  releaseHold(holdId: string) {
+    const space = this.state.spaces.find(
+      (item) => item.control?.hold === holdId,
+    );
+    if (!space) return;
+    this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
+    this.emit();
+  }
   // A popup the page at openerId opens, as BrowserController adopts one.
   openPopup(openerId: string, url: string): Tab {
     const opener = this.getTab(openerId);
@@ -307,10 +329,14 @@ export class FakeController implements AutomationController {
       const tab = this.state.tabs.find((item) => item.id === action.id)!;
       tab.url = action.url;
       if (isWebUrl(tab.url)) this.ensureView(tab);
-    } else if (action.type === "space:ownership")
-      this.state.spaces.find((space) => space.id === action.id)!.owner =
-        action.owner;
-    else if (action.type === "space:delete") {
+    } else if (action.type === "space:ownership") {
+      if (action.owner === "human")
+        this.registry.handOver(action.id, {
+          reason: action.reason ?? "manual",
+        });
+      else
+        this.registry.takeBack(action.id, this.shownTab(action.id) ?? null);
+    } else if (action.type === "space:delete") {
       this.state.spaces = this.state.spaces.filter(
         (space) => space.id !== action.id,
       );
