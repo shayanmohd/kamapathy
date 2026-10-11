@@ -11,10 +11,14 @@ const command = (name, group, usage, summary, extra = {}) => ({
   ...(extra.route ? { route: extra.route } : {}),
   ...(extra.script ? { script: extra.script } : {}),
   examples: extra.examples ?? [],
-  since: 1,
+  since: extra.since ?? 1,
 });
 const SPACE_ID = { name: "space-id", description: "A space ID from spaces." };
-const TAB_ID = { name: "tab-id", description: "A tab ID from tabs or open." };
+const TAB_ID = {
+  name: "tab-id",
+  description:
+    "A tab ID from tabs or open, or <space-id>:<label> such as s1:p2.",
+};
 const TARGET = {
   name: "ref-or-selector",
   description: "A ref such as @e3 from a current snapshot, or a CSS selector.",
@@ -45,6 +49,95 @@ export const COMMANDS = [
       ],
       route: "POST /spaces",
       script: "createSpace",
+    },
+  ),
+  command(
+    "space open",
+    "Spaces",
+    "space open <name-or-id> [--isolated] [--page-budget <n>]",
+    "Reuse the listed space with this ID or name, or create it",
+    {
+      arguments: [{ name: "name-or-id", description: "A space ID or name." }],
+      flags: [
+        {
+          name: "--isolated",
+          description: "Give a new space its own sign-ins.",
+        },
+        {
+          name: "--page-budget",
+          value: "<n>",
+          description: "Pages the agent may manage at once, 1 to 20.",
+        },
+      ],
+      route: "POST /spaces",
+      script: "openSpace",
+      since: 2,
+    },
+  ),
+  command(
+    "space finish",
+    "Spaces",
+    "space finish <space-id> --keep all|none|<tab-id>[,<tab-id>]",
+    "Close the pages the agent does not keep and end its access",
+    {
+      arguments: [SPACE_ID],
+      flags: [
+        {
+          name: "--keep",
+          value: "all|none|<tab-id>[,<tab-id>]",
+          description: "The pages to leave open; labels such as p2 work too.",
+        },
+      ],
+      route: "POST /spaces/:id/finish",
+      script: "space.finish",
+      since: 2,
+    },
+  ),
+  command(
+    "space request",
+    "Spaces",
+    "space request --reason <text> [--name <name>] [--timeout <ms>]",
+    "Ask the person to let an agent use one of their spaces",
+    {
+      flags: [
+        {
+          name: "--reason",
+          value: "<text>",
+          description: "Why, in 1 to 120 characters.",
+        },
+        {
+          name: "--name",
+          value: "<name>",
+          description: "The space to suggest.",
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description: "5000 to 600000, default 600000.",
+        },
+      ],
+      route: "POST /space-requests",
+      script: "requestSpace",
+      since: 2,
+    },
+  ),
+  command(
+    "wait-for-control",
+    "Spaces",
+    "wait-for-control <space-id> [--timeout <ms>]",
+    "Wait until the agent has control again",
+    {
+      arguments: [SPACE_ID],
+      flags: [
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description: "0 to 600000, default 600000.",
+        },
+      ],
+      route: "POST /spaces/:id/wait-for-control",
+      script: "space.waitForControl",
+      since: 2,
     },
   ),
   command(
@@ -93,6 +186,42 @@ export const COMMANDS = [
     route: "POST /spaces/:id/tabs",
     script: "space.open",
   }),
+  command(
+    "new-page",
+    "Pages",
+    "new-page <space-id>",
+    "Open a blank background page",
+    {
+      arguments: [SPACE_ID],
+      route: "POST /spaces/:id/tabs",
+      script: "space.newPage",
+      since: 2,
+    },
+  ),
+  command(
+    "adopt",
+    "Pages",
+    "adopt <tab-id>",
+    "Make a page the agent did not open its own",
+    {
+      arguments: [TAB_ID],
+      route: "POST /tabs/:id/adopt",
+      script: "space.adopt",
+      since: 2,
+    },
+  ),
+  command(
+    "release",
+    "Pages",
+    "release <tab-id>",
+    "Give a page back to the person, leaving it open",
+    {
+      arguments: [TAB_ID],
+      route: "POST /tabs/:id/release",
+      script: "space.release",
+      since: 2,
+    },
+  ),
   command("navigate", "Pages", "navigate <tab-id> <url>", "Navigate a tab", {
     arguments: [
       TAB_ID,

@@ -536,7 +536,7 @@ describe("API schema", () => {
     expect(
       checkCall(entry("createSpace"), ["Research", { isolate: true }])?.message,
     ).toBe(
-      'createSpace got unknown option "isolate". Expected createSpace(name, { isolated? }). Did you mean "isolated"?',
+      'createSpace got unknown option "isolate". Expected createSpace(name, { isolated?, pageBudget? }). Did you mean "isolated"?',
     );
 
     const goto = {

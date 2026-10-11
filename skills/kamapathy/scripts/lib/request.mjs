@@ -259,3 +259,41 @@ export class Session {
     this.#controller = new AbortController();
   }
 }
+
+const CLOSER = { agent: "the agent", page: "the page", person: "the person" };
+
+export const isLabel = (value) =>
+  typeof value === "string" && /^p[1-9][0-9]*$/.test(value);
+
+// The tabs with these labels, found with one tabs request. A label the space
+// retired says who closed it.
+export async function resolveLabels(session, spaceId, labels) {
+  const { tabs, closed = [] } = await session.request(
+    `/spaces/${spaceId}/tabs`,
+  );
+  return labels.map((label) => {
+    const tab = tabs.find((item) => item.label === label);
+    if (tab) return tab;
+    const retired = closed.findLast((item) => item.label === label);
+    throw new KamapathyError(
+      "page_not_found",
+      retired
+        ? `Page ${label} was closed by ${CLOSER[retired.closedBy] ?? "someone"}. Open another with space.newPage().`
+        : `No page in this space is labeled ${label}. space.pages() lists them.`,
+      { label, ...(retired ? { closedBy: retired.closedBy } : {}) },
+    );
+  });
+}
+
+// KAMAPATHY_PAGE_BUDGET as a page budget, read when a space is opened.
+export function pageBudgetFrom(env) {
+  const value = env.KAMAPATHY_PAGE_BUDGET;
+  if (value === undefined || value === "") return undefined;
+  if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 20)
+    throw new KamapathyError(
+      "invalid_option",
+      "KAMAPATHY_PAGE_BUDGET must be an integer from 1 to 20.",
+      { option: "KAMAPATHY_PAGE_BUDGET" },
+    );
+  return Number(value);
+}

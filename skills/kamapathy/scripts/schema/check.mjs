@@ -257,8 +257,13 @@ function argumentFits(value, arg) {
       return typeof value === "string";
     case "url":
     case "target":
-    case "label":
       return typeof value === "string" && value.trim() !== "";
+    case "label":
+      return typeof value === "string" && /^p[1-9][0-9]*$/.test(value);
+    case "keep":
+      return (
+        plain(value) && (value.keep === "all" || Array.isArray(value.keep))
+      );
     case "enum":
       return arg.values.includes(value);
     case "integer":
@@ -267,12 +272,13 @@ function argumentFits(value, arg) {
       return (
         Array.isArray(value) && value.every((item) => typeof item === "string")
       );
+    // A Page, a tab id or a label.
     case "page":
-      return (
-        value !== null &&
-        typeof value === "object" &&
-        typeof value.id === "string"
-      );
+      return typeof value === "string"
+        ? value.trim() !== ""
+        : value !== null &&
+            typeof value === "object" &&
+            (typeof value.id === "string" || typeof value.label === "string");
     default:
       return true;
   }

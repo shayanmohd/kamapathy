@@ -16,7 +16,14 @@ import {
   target,
   uploadRef,
 } from "./lib/input.mjs";
-import { encode, Session, takeNotices } from "./lib/request.mjs";
+import {
+  encode,
+  isLabel,
+  pageBudgetFrom,
+  resolveLabels,
+  Session,
+  takeNotices,
+} from "./lib/request.mjs";
 import { exists } from "./lib/transport.mjs";
 import {
   checkBody,
@@ -50,9 +57,21 @@ Usage: node kamapathy.mjs <command> [arguments] [--json]
   spaces                              List accessible spaces
   space create <name> [--isolated]    Create a background agent space, with
                                       its own sign-ins when --isolated is given
+  space open <name-or-id> [--isolated] [--page-budget <n>]
+                                      Reuse the listed space with this ID or
+                                      name, or create it
+  space finish <space-id> --keep all|none|<tab-id>[,<tab-id>]
+                                      Close the pages the agent does not keep
+                                      and end its access
+  space request --reason <text> [--name <name>] [--timeout <ms>]
+                                      Ask the person to let an agent use one
+                                      of their spaces
   space close <space-id>               Close a space and its tabs
   tabs <space-id>                      List tabs in an agent space
   open <space-id> <url>                Open a background tab
+  new-page <space-id>                  Open a blank background page
+  adopt <tab-id>                       Make a page the agent did not open its own
+  release <tab-id>                     Give a page back to the person
   navigate <tab-id> <url>              Navigate a tab
   snapshot <tab-id> [options]          Read bounded page text and control refs
     --full                            Request the larger snapshot mode
@@ -75,11 +94,14 @@ Usage: node kamapathy.mjs <command> [arguments] [--json]
   close <tab-id>                      Close a tab
   handoff <space-id>                  Pause automation for human control
   resume <space-id>                   Take control back when the person says to continue
+  wait-for-control <space-id> [--timeout <ms>]
+                                      Wait until the agent has control again
   run <file.mjs>                      Run a script with the connected client as
                                       the globals kamapathy, createSpace, space
                                       and spaces; run - reads it from stdin and
                                       run -e <code> runs the code itself
 
+A <tab-id> may also be <space-id>:<label>, such as s1:p2.
 Default output is concise text. --json returns compact JSON for programs.
 Batch stops at the first failed action. Submitted actions are never retried.
 Take a snapshot again after navigation before reusing element refs. A ref
@@ -106,11 +128,14 @@ async function runScript(args, options) {
   let source;
   let file;
   if (args[0] === "-e") source = required(args[1], "script code");
-  else if (args[0] === "-") source = await readInput(options.stdin || process.stdin);
+  else if (args[0] === "-")
+    source = await readInput(options.stdin || process.stdin);
   else {
     file = resolve(required(args[0], "script file"));
     if (!(await exists(file)))
-      throw new Error("Script file not found. Use run <file.mjs>, run - or run -e <code>.");
+      throw new Error(
+        "Script file not found. Use run <file.mjs>, run - or run -e <code>.",
+      );
   }
   const client = await connect({
     env: options.env,
@@ -144,7 +169,9 @@ async function runScript(args, options) {
   const stalled = () => {
     failed = true;
     process.exitCode = 1;
-    stderr.write("error: The script stopped with work still pending. Await every call.\n");
+    stderr.write(
+      "error: The script stopped with work still pending. Await every call.\n",
+    );
     exited();
   };
   process.on("unhandledRejection", rejected);
@@ -153,7 +180,10 @@ async function runScript(args, options) {
   let outcome = 0;
   try {
     if (source !== undefined) {
-      temporary = join(tmpdir(), `kamapathy-run-${randomBytes(8).toString("hex")}.mjs`);
+      temporary = join(
+        tmpdir(),
+        `kamapathy-run-${randomBytes(8).toString("hex")}.mjs`,
+      );
       await writeFile(temporary, source, { mode: 0o600, flag: "wx" });
       file = temporary;
     }
@@ -170,6 +200,44 @@ async function runScript(args, options) {
 }
 
 const UPLOAD_LIMIT = 24 * 1024 * 1024;
+const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
+
+// A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
+function tab(value) {
+  const text = required(value, "ID");
+  return LABELED.test(text) ? text : identifier(text);
+}
+// An integer flag value within its bounds.
+function bounded(value, flag, minimum, maximum) {
+  if (
+    !/^\d+$/.test(required(value, flag)) ||
+    Number(value) < minimum ||
+    Number(value) > maximum
+  )
+    throw new Error(
+      `${flag} must be an integer from ${minimum} to ${maximum}.`,
+    );
+  return Number(value);
+}
+// The values of the named flags, each followed by its value.
+function flags(args, names) {
+  const values = {};
+  for (let index = 0; index < args.length; index++) {
+    if (!names.includes(args[index]))
+      throw new Error(`Unknown option: ${args[index]}. Run help for usage.`);
+    values[args[index]] = required(args[index + 1], args[index]);
+    index++;
+  }
+  return values;
+}
+// --page-budget, or else KAMAPATHY_PAGE_BUDGET when it is set.
+function budget(value, env) {
+  const pageBudget =
+    value === undefined
+      ? pageBudgetFrom(env)
+      : bounded(value, "--page-budget", 1, 20);
+  return pageBudget === undefined ? {} : { pageBudget };
+}
 
 // One parser per command, keyed by the schema's command names. Each checks
 // its arguments before anything connects and returns the request, or runs
@@ -181,7 +249,7 @@ export const PARSERS = {
   },
   health: () => ({ path: "/health" }),
   spaces: () => ({ path: "/spaces" }),
-  "space create": (args) => {
+  "space create": (args, { env }) => {
     const isolated = args.includes("--isolated");
     return {
       path: "/spaces",
@@ -192,6 +260,67 @@ export const PARSERS = {
           "space name",
         ),
         ...(isolated ? { isolated: true } : {}),
+        ...budget(undefined, env),
+      },
+    };
+  },
+  "space open": (args, { env }) => {
+    const isolated = args.includes("--isolated");
+    const [name, ...rest] = args.filter(
+      (argument) => argument !== "--isolated",
+    );
+    const { "--page-budget": pageBudget } = flags(rest, ["--page-budget"]);
+    return {
+      path: "/spaces",
+      method: "POST",
+      body: {
+        name: required(name, "space name or ID"),
+        reuse: true,
+        ...(isolated ? { isolated: true } : {}),
+        ...budget(pageBudget, env),
+      },
+    };
+  },
+  // Kept pages are tab IDs or labels in this space, resolved once found.
+  "space finish": (args) => {
+    const [spaceId, flag, value] = args;
+    if (flag !== "--keep" || !value || args.length > 3)
+      throw new Error(
+        "Use space finish <space-id> --keep all|none|<tab-id>[,<tab-id>].",
+      );
+    return {
+      path: `/spaces/${identifier(spaceId)}/finish`,
+      method: "POST",
+      body: {
+        keep:
+          value === "all"
+            ? "all"
+            : value === "none"
+              ? []
+              : value
+                  .split(",")
+                  .map((item) => (isLabel(item) ? item : tab(item))),
+      },
+    };
+  },
+  "space request": (args) => {
+    const values = flags(args, ["--reason", "--name", "--timeout"]);
+    return {
+      path: "/space-requests",
+      method: "POST",
+      body: {
+        reason: required(values["--reason"], "--reason"),
+        ...(values["--name"] === undefined ? {} : { name: values["--name"] }),
+        ...(values["--timeout"] === undefined
+          ? {}
+          : {
+              timeoutMs: bounded(
+                values["--timeout"],
+                "--timeout",
+                5000,
+                600000,
+              ),
+            }),
       },
     };
   },
@@ -210,17 +339,43 @@ export const PARSERS = {
     body: {},
   }),
   tabs: (args) => ({ path: `/spaces/${identifier(args[0])}/tabs` }),
+  "new-page": (args) => ({
+    path: `/spaces/${identifier(args[0])}/tabs`,
+    method: "POST",
+    body: {},
+  }),
+  adopt: (args) => ({
+    path: `/tabs/${tab(args[0])}/adopt`,
+    method: "POST",
+    body: {},
+  }),
+  release: (args) => ({
+    path: `/tabs/${tab(args[0])}/release`,
+    method: "POST",
+    body: {},
+  }),
+  "wait-for-control": (args) => {
+    const { "--timeout": timeout } = flags(args.slice(1), ["--timeout"]);
+    return {
+      path: `/spaces/${identifier(args[0])}/wait-for-control`,
+      method: "POST",
+      body:
+        timeout === undefined
+          ? {}
+          : { timeoutMs: bounded(timeout, "--timeout", 0, 600000) },
+    };
+  },
   open: (args) => ({
     path: `/spaces/${identifier(args[0])}/tabs`,
     method: "POST",
     body: { url: required(args[1], "URL") },
   }),
   navigate: (args) => ({
-    path: `/tabs/${identifier(args[0])}/navigate`,
+    path: `/tabs/${tab(args[0])}/navigate`,
     method: "POST",
     body: { url: required(args[1], "URL") },
   }),
-  close: (args) => ({ path: `/tabs/${identifier(args[0])}`, method: "DELETE" }),
+  close: (args) => ({ path: `/tabs/${tab(args[0])}`, method: "DELETE" }),
   snapshot: (args) => {
     const body = { mode: "compact" };
     for (let index = 1; index < args.length; index++) {
@@ -234,13 +389,13 @@ export const PARSERS = {
       else throw new Error(`Unknown snapshot option: ${args[index]}`);
     }
     return {
-      path: `/tabs/${identifier(args[0])}/snapshot`,
+      path: `/tabs/${tab(args[0])}/snapshot`,
       method: "POST",
       body,
     };
   },
   click: (args) => ({
-    path: `/tabs/${identifier(args[0])}/click`,
+    path: `/tabs/${tab(args[0])}/click`,
     method: "POST",
     body: target(args[1]),
   }),
@@ -250,13 +405,13 @@ export const PARSERS = {
         "Use fill <tab-id> <ref-or-selector> --stdin and pipe the field value.",
       );
     return {
-      path: `/tabs/${identifier(args[0])}/fill`,
+      path: `/tabs/${tab(args[0])}/fill`,
       method: "POST",
       body: { ...target(args[1]), value: await readInput(stdin) },
     };
   },
   upload: async (args) => ({
-    path: `/tabs/${identifier(args[0])}/upload`,
+    path: `/tabs/${tab(args[0])}/upload`,
     method: "POST",
     body: {
       ref: uploadRef(args[1]),
@@ -265,7 +420,7 @@ export const PARSERS = {
     limit: UPLOAD_LIMIT,
   }),
   press: (args) => ({
-    path: `/tabs/${identifier(args[0])}/press`,
+    path: `/tabs/${tab(args[0])}/press`,
     method: "POST",
     body: {
       key: required(args[1], "key"),
@@ -273,9 +428,10 @@ export const PARSERS = {
     },
   }),
   drag: (args) => {
-    if (args.length > 3) throw new Error("Use drag <tab-id> <source> <target>.");
+    if (args.length > 3)
+      throw new Error("Use drag <tab-id> <source> <target>.");
     return {
-      path: `/tabs/${identifier(args[0])}/drag`,
+      path: `/tabs/${tab(args[0])}/drag`,
       method: "POST",
       body: {
         source: target(required(args[1], "drag source")),
@@ -290,9 +446,11 @@ export const PARSERS = {
     const pixels = /^[-+]?\.?\d/.test(args[2] || "");
     const scrolled = pixels ? args[3] : args[2];
     if (args.length > (pixels ? 4 : 3))
-      throw new Error("Use scroll <tab-id> <direction> [pixels] [ref-or-selector].");
+      throw new Error(
+        "Use scroll <tab-id> <direction> [pixels] [ref-or-selector].",
+      );
     return {
-      path: `/tabs/${identifier(args[0])}/scroll`,
+      path: `/tabs/${tab(args[0])}/scroll`,
       method: "POST",
       body: {
         direction: required(args[1], "direction"),
@@ -304,14 +462,14 @@ export const PARSERS = {
   wait: async (args, { stdin }) => {
     if (args[1] !== "--stdin")
       throw new Error("Use wait <tab-id> --stdin and pipe JSON wait options.");
-    const path = `/tabs/${identifier(args[0])}/wait`;
+    const path = `/tabs/${tab(args[0])}/wait`;
     const body = await readJson(stdin);
     if (!body || typeof body !== "object" || Array.isArray(body))
       throw new Error("Wait options must be a JSON object.");
     return { path, method: "POST", body };
   },
   batch: async (args, { stdin }) => {
-    const path = `/tabs/${identifier(args[0])}/actions`;
+    const path = `/tabs/${tab(args[0])}/actions`;
     const input = await readJson(stdin);
     const body = Array.isArray(input) ? { actions: input } : input;
     if (
@@ -320,14 +478,16 @@ export const PARSERS = {
       !body.actions.length ||
       body.actions.length > 20
     )
-      throw new Error("Batch input requires an actions array with 1 to 20 actions.");
+      throw new Error(
+        "Batch input requires an actions array with 1 to 20 actions.",
+      );
     return { path, method: "POST", body };
   },
   screenshot: (args) => {
     const output = resolve(required(args[1], "output PNG path"));
     if (!output.toLowerCase().endsWith(".png"))
       throw new Error("Screenshot output must have a .png extension.");
-    return { path: `/tabs/${identifier(args[0])}/screenshot`, output };
+    return { path: `/tabs/${tab(args[0])}/screenshot`, output };
   },
   run: (args, options) => runScript(args, options),
 };
@@ -348,11 +508,15 @@ export async function runCli(argv, options = {}) {
   const parse = Object.hasOwn(PARSERS, name) ? PARSERS[name] : undefined;
   if (!parse) {
     if (command === "space")
-      throw new Error("Use space create <name> or space close <space-id>.");
+      throw new Error(
+        "Use space create, space open, space finish, space request or space close.",
+      );
     throw new Error(`Unknown command: ${command}. Run help for usage.`);
   }
+  const env = options.env || process.env;
   const parsed = await parse(name === command ? rest : rest.slice(1), {
     ...options,
+    env,
     stdin,
     stdout,
   });
@@ -366,7 +530,7 @@ export async function runCli(argv, options = {}) {
   }
   encode(body, limit);
   const session = new Session({
-    env: options.env || process.env,
+    env,
     fetch: options.fetch,
     connect: options.connect,
     health: options.health,
@@ -377,7 +541,28 @@ export async function runCli(argv, options = {}) {
     const problem = outdated(name, since, session.app);
     throw new KamapathyError(problem.code, problem.message, problem.fields);
   }
-  const response = await session.send(path, { method, body, limit });
+  // <space-id>:<label> tabs and finish's labels resolve with one tabs request.
+  let target = path;
+  const labeled = /^\/tabs\/([^/]+)(\/.*)?$/.exec(path);
+  const tabLabel = labeled && LABELED.exec(labeled[1]);
+  if (tabLabel) {
+    const [found] = await resolveLabels(session, tabLabel[1], [tabLabel[2]]);
+    target = `/tabs/${found.id}${labeled[2] ?? ""}`;
+  }
+  let sent = body;
+  if (name === "space finish" && Array.isArray(body.keep)) {
+    const label = (item) => (isLabel(item) ? item : LABELED.exec(item)?.[2]);
+    const labels = body.keep.map(label).filter(Boolean);
+    const found = labels.length
+      ? await resolveLabels(session, path.split("/")[2], labels)
+      : [];
+    sent = {
+      keep: body.keep.map((item) =>
+        label(item) ? found.find((tab) => tab.label === label(item)).id : item,
+      ),
+    };
+  }
+  const response = await session.send(target, { method, body: sent, limit });
   if (output && response.ok) {
     if (!response.headers.get("content-type")?.startsWith("image/png"))
       throw new Error("The API did not return a PNG screenshot.");
@@ -391,7 +576,7 @@ export async function runCli(argv, options = {}) {
   }
   const data = await response.json().catch(() => null);
   if (Array.isArray(data?.results)) {
-    stdout.write(`${json ? JSON.stringify(data) : formatResult(data)}\n`);
+    stdout.write(`${json ? JSON.stringify(data) : formatResult(data, name)}\n`);
     return data.ok === false || !response.ok ? 1 : 0;
   }
   if (!response.ok) {
@@ -403,7 +588,7 @@ export async function runCli(argv, options = {}) {
     );
   }
   if (data === null) throw new Error("The API did not return valid JSON.");
-  stdout.write(`${json ? JSON.stringify(data) : formatResult(data)}\n`);
+  stdout.write(`${json ? JSON.stringify(data) : formatResult(data, name)}\n`);
   return data?.ok === false ? 1 : 0;
 }
 

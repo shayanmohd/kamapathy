@@ -105,11 +105,57 @@ const signIns = (space) =>
       ? " shared"
       : "";
 
-export function formatResult(data) {
+// One tab per line: its label, ID, origin and flags, or, from a Kamapathy
+// without labels, its ID, title and URL. An opener in tabs is named by its
+// label.
+function tabLine(tab, tabs = []) {
+  if (tab.label === undefined)
+    return `${tab.id} ${line(tab.title)} ${line(tab.url)}`;
+  const opener =
+    tab.openerId &&
+    (tabs.find((item) => item.id === tab.openerId)?.label ?? tab.openerId);
+  return [
+    line(tab.label),
+    tab.id,
+    line(tab.openedBy),
+    ...(opener ? [`from ${line(opener)}`] : []),
+    ...(tab.managed === false ? ["unmanaged"] : []),
+    ...(tab.active ? ["active"] : []),
+    ...(tab.unseen ? ["new"] : []),
+    line(tab.url),
+    JSON.stringify(line(tab.title)),
+  ].join(" ");
+}
+
+const activeLine = (tab) =>
+  `active ${line(tab.label)} ${tab.id} ${line(tab.url)}`;
+
+// What changed while the person had control.
+const boundaryLines = (data) => [
+  ...(data.active ? [activeLine(data.active)] : []),
+  ...(data.opened ?? []).map((tab) => `opened ${tabLine(tab, data.opened)}`),
+  ...(data.closed ?? []).map((label) => `closed ${line(label)}`),
+];
+
+// command names the CLI command, where the same answer reads differently.
+export function formatResult(data, command) {
   if (data && "interactables" in data && "url" in data)
     return formatSnapshot(data);
+  if (command === "space finish")
+    return [
+      `ok: space ${line(data.spaceId)} finished${data.closedSpace ? " and closed" : ""}`,
+      ...["closed", "kept", "protected"]
+        .filter((key) => data[key]?.length)
+        .map((key) => `${key} ${data[key].map(line).join(" ")}`),
+    ].join("\n");
   if (data?.space)
-    return `space ${data.space.id} ${JSON.stringify(line(data.space.name))} ${line(data.space.owner)}${signIns(data.space)}`;
+    return [
+      `space ${data.space.id} ${JSON.stringify(line(data.space.name))} ${line(data.space.owner)}${signIns(data.space)}`,
+      ...(Array.isArray(data.tabs)
+        ? data.tabs.map((tab) => tabLine(tab, data.tabs))
+        : []),
+      ...(data.active ? [activeLine(data.active)] : []),
+    ].join("\n");
   if (data?.tab) return `tab ${data.tab.id} ${line(data.tab.url)}`;
   if (data?.spaces)
     return data.spaces.length
@@ -122,9 +168,7 @@ export function formatResult(data) {
       : "No agent spaces.";
   if (data?.tabs)
     return data.tabs.length
-      ? data.tabs
-          .map((tab) => `${tab.id} ${line(tab.title)} ${line(tab.url)}`)
-          .join("\n")
+      ? data.tabs.map((tab) => tabLine(tab, data.tabs)).join("\n")
       : "No tabs.";
   if (Array.isArray(data?.results)) {
     const output = data.results.map((result, index) => {
@@ -150,7 +194,12 @@ export function formatResult(data) {
     return data.owner === "human"
       ? "ok: human control, automation paused"
       : data.owner === "agent"
-        ? "ok: agent control resumed"
+        ? [
+            command === "wait-for-control"
+              ? "ok: agent has control"
+              : "ok: agent control resumed",
+            ...boundaryLines(data),
+          ].join("\n")
         : actionSummary(data);
   return JSON.stringify(data);
 }

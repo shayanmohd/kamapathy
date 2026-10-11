@@ -7,7 +7,12 @@ import { resolve } from "node:path";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatSnapshot } from "./lib/format.mjs";
 import { readUploadFiles, target, uploadRef } from "./lib/input.mjs";
-import { Session } from "./lib/request.mjs";
+import {
+  isLabel,
+  pageBudgetFrom,
+  resolveLabels,
+  Session,
+} from "./lib/request.mjs";
 import { checkCall, findEntry } from "./schema/index.mjs";
 
 export { KamapathyError } from "./lib/errors.mjs";
@@ -82,6 +87,26 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
  * @property {{ index: number, type: string, result: object }[]} results
  */
 
+// Refreshes a page from a response that carries its tab.
+const REFRESH = Symbol("refresh");
+const PAGE_FIELDS = [
+  "id",
+  "label",
+  "spaceId",
+  "openedBy",
+  "openerId",
+  "managed",
+  "url",
+  "title",
+];
+
+// A synchronous method's check, against the app's level when it is known.
+function checkNow(session, name, args) {
+  const problem = checkCall(findEntry(name), args, session.app ?? undefined);
+  if (problem)
+    throw new KamapathyError(problem.code, problem.message, problem.fields);
+}
+
 // Runs one public method. Its arguments are checked before anything is sent,
 // and against the app's level once Kamapathy is found; errors leaving it name
 // the call.
@@ -112,17 +137,39 @@ export class Page {
    */
   constructor(session, tab) {
     this.#session = session;
-    /** @type {string} */
+    /** @type {string} Undefined until a page from space.page(label) is used. */
     this.id = tab.id;
+    /** @type {string | undefined} Its label in the space, such as p2. */
+    this.label = tab.label;
     /** @type {string | undefined} */
     this.spaceId = tab.spaceId;
+    /** @type {"agent" | "page" | "person" | undefined} */
+    this.openedBy = tab.openedBy;
+    /** @type {string | undefined} The page that opened this popup. */
+    this.openerId = tab.openerId;
+    /** @type {boolean | undefined} Whether the agent may use the page. */
+    this.managed = tab.managed;
     /** @type {string} Last known URL; navigate and snapshot refresh it. */
     this.url = tab.url;
     /** @type {string} Last known title; navigate and snapshot refresh it. */
     this.title = tab.title;
   }
+  [REFRESH](tab) {
+    for (const key of PAGE_FIELDS)
+      if (tab[key] !== undefined) this[key] = tab[key];
+    return this;
+  }
   #call(name, args, send) {
-    return call(this.#session, `Page.${name}`, args, send);
+    return call(this.#session, `Page.${name}`, args, async () => {
+      // A page from space.page(label) finds its tab on first use, once.
+      if (this.id === undefined) {
+        const [tab] = await resolveLabels(this.#session, this.spaceId, [
+          this.label,
+        ]);
+        this[REFRESH](tab);
+      }
+      return send();
+    });
   }
   #post(route, body, options) {
     return this.#session.request(`/tabs/${this.id}/${route}`, {
@@ -139,9 +186,7 @@ export class Page {
   navigate(url) {
     return this.#call("navigate", [url], async () => {
       const { tab } = await this.#post("navigate", { url });
-      this.url = tab.url;
-      this.title = tab.title;
-      return this;
+      return this[REFRESH](tab);
     });
   }
   /**
@@ -278,6 +323,20 @@ export class Page {
       return output;
     });
   }
+  /**
+   * The open page that opened this popup.
+   * @returns {Promise<Page | null>}
+   */
+  opener() {
+    return this.#call("opener", [], async () => {
+      if (!this.openerId) return null;
+      const { tabs } = await this.#session.request(
+        `/spaces/${this.spaceId}/tabs`,
+      );
+      const opener = tabs.find((tab) => tab.id === this.openerId);
+      return opener ? new Page(this.#session, opener) : null;
+    });
+  }
   /** @returns {Promise<{ ok: true }>} */
   close() {
     return this.#call("close", [], () =>
@@ -289,12 +348,15 @@ export class Page {
 /** An agent space the API can reach. */
 export class Space {
   #session;
+  #user;
   /**
    * @param {Session} session
    * @param {{ id: string, name: string, owner: "agent" | "human", signIns?: "shared" | "separate" }} info
+   * @param {Page | null} [user] The page the person left, as userPage().
    */
-  constructor(session, info) {
+  constructor(session, info, user = null) {
     this.#session = session;
+    this.#user = user;
     /** @type {string} */
     this.id = info.id;
     /** @type {string} */
@@ -303,9 +365,155 @@ export class Space {
     this.owner = info.owner;
     /** @type {"shared" | "separate" | undefined} Whether the space uses the person's sign-ins. */
     this.signIns = info.signIns;
+    /** @type {"agent" | "personal" | undefined} */
+    this.kind = info.kind;
+    /** @type {"agent" | "person" | undefined} */
+    this.createdBy = info.createdBy;
+    /** @type {number | undefined} Pages the agent may manage at once. */
+    this.pageBudget = info.pageBudget;
+    /** @type {string | undefined} Why the person has control, while they have it. */
+    this.reason = info.reason;
+    /** @type {string | undefined} What the person is asked to answer. */
+    this.prompt = info.prompt;
+    /** @type {number | undefined} When the person got control. */
+    this.since = info.since;
   }
   #call(name, args, send) {
     return call(this.#session, `Space.${name}`, args, send);
+  }
+  // Tab ids for pages given as Pages, ids or labels. Labels resolve with one
+  // tabs request for the whole call.
+  async #ids(pages) {
+    const labelOf = (page) =>
+      isLabel(page)
+        ? page
+        : typeof page === "object" && page.id === undefined
+          ? page.label
+          : undefined;
+    const labels = pages.map(labelOf).filter(Boolean);
+    const tabs = labels.length
+      ? await resolveLabels(this.#session, this.id, labels)
+      : [];
+    return pages.map((page) => {
+      const label = labelOf(page);
+      if (label === undefined) return typeof page === "string" ? page : page.id;
+      const tab = tabs.find((item) => item.label === label);
+      if (page instanceof Page) page[REFRESH](tab);
+      return tab.id;
+    });
+  }
+  // Pages for a boundary's tabs. Older apps answer without one.
+  #boundary(result) {
+    if (!("active" in result)) return result;
+    this.#user = result.active ? new Page(this.#session, result.active) : null;
+    return {
+      ...result,
+      active: this.#user,
+      opened: (result.opened ?? []).map((tab) => new Page(this.#session, tab)),
+    };
+  }
+  /**
+   * The page with this label, such as p2. It finds its tab when first used
+   * and keeps it.
+   * @param {string} label
+   * @returns {Page}
+   */
+  page(label) {
+    checkNow(this.#session, "Space.page", [label]);
+    return new Page(this.#session, { label, spaceId: this.id });
+  }
+  /** @returns {Promise<Page[]>} The pages the agent manages, in tab order. */
+  pages() {
+    return this.#call("pages", [], async () => {
+      const { tabs } = await this.#session.request(`/spaces/${this.id}/tabs`);
+      return tabs
+        .filter((tab) => tab.managed)
+        .map((tab) => new Page(this.#session, tab));
+    });
+  }
+  /**
+   * Opens a blank background page.
+   * @returns {Promise<Page>}
+   */
+  newPage() {
+    return this.#call("newPage", [], async () => {
+      const { tab } = await this.#session.request(`/spaces/${this.id}/tabs`, {
+        method: "POST",
+        body: {},
+      });
+      return new Page(this.#session, tab);
+    });
+  }
+  /**
+   * Makes a page the agent did not open its own, within the page budget.
+   * @param {Page | string} page A Page, a tab ID or a label.
+   * @returns {Promise<Page>}
+   */
+  adopt(page) {
+    return this.#call("adopt", [page], () => this.#managed(page, "adopt"));
+  }
+  /**
+   * Gives a page the agent did not open back to the person. It stays open.
+   * @param {Page | string} page A Page, a tab ID or a label.
+   * @returns {Promise<Page>}
+   */
+  release(page) {
+    return this.#call("release", [page], () => this.#managed(page, "release"));
+  }
+  async #managed(page, route) {
+    const [id] = await this.#ids([page]);
+    const { tab } = await this.#session.request(`/tabs/${id}/${route}`, {
+      method: "POST",
+      body: {},
+    });
+    return page instanceof Page
+      ? page[REFRESH](tab)
+      : new Page(this.#session, tab);
+  }
+  /**
+   * Ends the agent's task: closes the pages it does not keep and ends its
+   * access. The person's tabs and pages the agent never adopted stay.
+   * @param {{ keep: "all" | (Page | string)[] }} options
+   * @returns {Promise<{ ok: true, spaceId: string, closedSpace: boolean, closed: string[], kept: string[], protected: string[] }>}
+   */
+  finish(options) {
+    return this.#call("finish", [options], async () =>
+      this.#session.request(`/spaces/${this.id}/finish`, {
+        method: "POST",
+        body: {
+          keep:
+            options.keep === "all" ? "all" : await this.#ids(options.keep),
+        },
+      }),
+    );
+  }
+  /**
+   * Waits until the agent has control, at once when it has, and reports
+   * what changed meanwhile.
+   * @param {{ timeout?: number }} [options] Up to 600000 ms, the default.
+   * @returns {Promise<{ ok: true, owner: "agent", active: Page | null, opened: Page[], closed: string[] }>}
+   */
+  waitForControl(options = {}) {
+    return this.#call("waitForControl", [options], async () => {
+      const result = await this.#session.request(
+        `/spaces/${this.id}/wait-for-control`,
+        {
+          method: "POST",
+          body:
+            options.timeout === undefined ? {} : { timeoutMs: options.timeout },
+        },
+      );
+      this.owner = result.owner;
+      return this.#boundary(result);
+    });
+  }
+  /**
+   * The page the space showed when control last came back to this object.
+   * @returns {Page | null}
+   */
+  userPage() {
+    checkNow(this.#session, "Space.userPage", []);
+    return this.#user;
   }
   /**
    * Opens a background tab.
@@ -353,7 +561,7 @@ export class Space {
         body: {},
       });
       this.owner = result.owner;
-      return result;
+      return this.#boundary(result);
     });
   }
   /** Closes the space and its tabs. @returns {Promise<{ ok: true }>} */
@@ -381,20 +589,82 @@ export class Client {
   #call(name, args, send) {
     return call(this.#session, `Client.${name}`, args, send);
   }
+  // An explicit page budget, or KAMAPATHY_PAGE_BUDGET when it is set.
+  #budget(choices) {
+    const pageBudget =
+      choices.pageBudget ?? pageBudgetFrom(this.#session.env);
+    return pageBudget === undefined ? {} : { pageBudget };
+  }
   /**
    * Creates a background agent space.
    * @param {string} name
-   * @param {{ isolated?: boolean }} [choices] `isolated` gives the space a
-   * session of its own instead of the person's sign-ins.
+   * @param {{ isolated?: boolean, pageBudget?: number }} [choices]
+   * `isolated` gives the space a session of its own instead of the person's
+   * sign-ins.
    * @returns {Promise<Space>}
    */
   createSpace(name, choices = {}) {
     return this.#call("createSpace", [name, choices], async () => {
       const { space } = await this.#session.request("/spaces", {
         method: "POST",
-        body: { name, ...(choices.isolated ? { isolated: true } : {}) },
+        body: {
+          name,
+          ...(choices.isolated ? { isolated: true } : {}),
+          ...this.#budget(choices),
+        },
       });
       return new Space(this.#session, space);
+    });
+  }
+  /**
+   * The listed space with this ID, or else the first with this name;
+   * creates one when none matches.
+   * @param {string} nameOrId
+   * @param {{ isolated?: boolean, pageBudget?: number }} [choices]
+   * @returns {Promise<Space>}
+   */
+  openSpace(nameOrId, choices = {}) {
+    return this.#call("openSpace", [nameOrId, choices], async () => {
+      const { space } = await this.#session.request("/spaces", {
+        method: "POST",
+        body: {
+          name: nameOrId,
+          reuse: true,
+          ...(typeof choices.isolated === "boolean"
+            ? { isolated: choices.isolated }
+            : {}),
+          ...this.#budget(choices),
+        },
+      });
+      return new Space(this.#session, space);
+    });
+  }
+  /**
+   * Asks the person to let an agent use one of their spaces and waits for
+   * their answer.
+   * @param {{ reason: string, name?: string, timeout?: number }} options
+   * @returns {Promise<Space>} The granted space; userPage() is the page it shows.
+   */
+  requestSpace(options) {
+    return this.#call("requestSpace", [options], async () => {
+      const { space, active } = await this.#session.request(
+        "/space-requests",
+        {
+          method: "POST",
+          body: {
+            reason: options.reason,
+            ...(options.name === undefined ? {} : { name: options.name }),
+            ...(options.timeout === undefined
+              ? {}
+              : { timeoutMs: options.timeout }),
+          },
+        },
+      );
+      return new Space(
+        this.#session,
+        space,
+        active ? new Page(this.#session, active) : null,
+      );
     });
   }
   /** @returns {Promise<Space[]>} The agent spaces this API session can reach. */
@@ -411,6 +681,13 @@ export class Client {
    */
   space(id) {
     return this.#call("space", [id], async () => {
+      if (
+        (await this.#session.appLevel()) >= 2 &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(id)
+      ) {
+        const { space } = await this.#session.request(`/spaces/${id}`);
+        return new Space(this.#session, space);
+      }
       const { spaces } = await this.#session.request("/spaces");
       const found = spaces.find((space) => space.id === id);
       if (!found)

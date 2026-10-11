@@ -6,6 +6,14 @@ const CREATE_OPTIONS = {
     description:
       "Give the space a session of its own instead of the person's sign-ins.",
   },
+  pageBudget: {
+    kind: "integer",
+    min: 1,
+    max: 20,
+    since: 2,
+    description:
+      "How many pages the agent may manage in the space at once, 20 by default or KAMAPATHY_PAGE_BUDGET.",
+  },
 };
 const CREATE_ERRORS = ["invalid_field", "space_limit", "automation_stopped"];
 
@@ -84,4 +92,57 @@ export const CLIENT = [
   ),
   find("Client.space", "kamapathy.space(id)", "method"),
   list("Client.spaces", "kamapathy.spaces()", "method"),
+  {
+    name: "Client.openSpace",
+    kind: "method",
+    signature: "kamapathy.openSpace(nameOrId, options?)",
+    summary:
+      "Returns the listed space with this ID, or else the first with this name, and creates one when none matches.",
+    args: [
+      { name: "nameOrId", kind: "string" },
+      { name: "options", kind: "options", optional: true },
+    ],
+    options: CREATE_OPTIONS,
+    returns: "Promise<Space>",
+    route: "POST /spaces",
+    errors: [...CREATE_ERRORS, "sign_ins_mismatch"],
+    since: 2,
+  },
+  {
+    name: "Client.requestSpace",
+    kind: "method",
+    signature: "kamapathy.requestSpace(options)",
+    summary:
+      "Asks the person to let an agent use one of their spaces and waits for their answer.",
+    args: [{ name: "options", kind: "options" }],
+    options: {
+      reason: {
+        kind: "string",
+        max: 120,
+        required: true,
+        description: "Why the agent needs a space, shown to the person.",
+      },
+      name: {
+        kind: "string",
+        max: 48,
+        description: "The name of the space to suggest.",
+      },
+      timeout: {
+        kind: "ms",
+        min: 5000,
+        max: 600000,
+        description: "How long to wait for the answer, 600000 by default.",
+      },
+    },
+    returns: "Promise<Space>",
+    route: "POST /space-requests",
+    errors: [
+      "request_declined",
+      "request_timeout",
+      "busy",
+      "invalid_field",
+      "automation_stopped",
+    ],
+    since: 2,
+  },
 ];

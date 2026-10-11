@@ -40,6 +40,10 @@ const property = (name, signature, summary) => ({
   errors: [],
   since: 1,
 });
+const field = (name, signature, summary, returns) => ({
+  ...property(name, signature, summary),
+  returns,
+});
 const method = (
   name,
   signature,
@@ -59,7 +63,7 @@ const method = (
   returns,
   route,
   errors: [...errors, ...PAGE],
-  since: 1,
+  since: extra.since ?? 1,
 });
 
 export const PAGE_ENTRIES = [
@@ -78,6 +82,30 @@ export const PAGE_ENTRIES = [
     "Page.title",
     "page.title",
     "The last known title. navigate and snapshot refresh it.",
+  ),
+  field(
+    "Page.label",
+    "page.label",
+    "The page's label in its space, such as p2. Labels are never reused.",
+    "string | undefined",
+  ),
+  field(
+    "Page.openedBy",
+    "page.openedBy",
+    "Who opened the page: the agent, a page (a popup) or the person.",
+    '"agent" | "page" | "person" | undefined',
+  ),
+  field(
+    "Page.openerId",
+    "page.openerId",
+    "The ID of the page that opened this popup.",
+    "string | undefined",
+  ),
+  field(
+    "Page.managed",
+    "page.managed",
+    "Whether the agent may use the page. Adopt a page to manage it.",
+    "boolean | undefined",
   ),
   method(
     "Page.navigate",
@@ -248,6 +276,16 @@ export const PAGE_ENTRIES = [
       "empty_screenshot",
       "invalid_response",
     ],
+  ),
+  method(
+    "Page.opener",
+    "page.opener()",
+    "The open page that opened this popup, or null.",
+    [],
+    "Promise<Page | null>",
+    "GET /spaces/:id/tabs",
+    [],
+    { since: 2 },
   ),
   method(
     "Page.close",

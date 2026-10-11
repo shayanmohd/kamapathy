@@ -999,6 +999,289 @@ describe("scripted sessions", () => {
     expect(current.app).toEqual({ version: "0.2.0", apiLevel: 2, electron: "44.2.0" });
   });
 
+  // Section 2's shapes: labeled tabs, the closed list and a boundary.
+  const level2 = { status: "ok", version: "0.2.0", apiLevel: 2 };
+  const labeled = [
+    { ...tab, label: "p1", openedBy: "agent", managed: true, active: true },
+    {
+      id: "tab-2",
+      spaceId: "space-1",
+      title: "Slots",
+      url: "https://example.test/slots",
+      label: "p2",
+      openedBy: "page",
+      openerId: "tab-1",
+      managed: false,
+      active: false,
+      unseen: true,
+    },
+  ];
+  const listing = {
+    tabs: labeled,
+    closed: [{ label: "p4", closedBy: "page", at: 1 }],
+    budget: { used: 1, limit: 20 },
+  };
+  const boundary = {
+    ok: true,
+    owner: "agent",
+    active: labeled[0],
+    opened: [labeled[1]],
+    closed: ["p3"],
+  };
+  const sectionTwo = {
+    ...routes,
+    "GET /spaces/space-1": { space },
+    "GET /spaces/space-1/tabs": listing,
+    "POST /spaces/space-1/resume": boundary,
+    "POST /spaces/space-1/wait-for-control": boundary,
+    "POST /tabs/tab-1/adopt": { tab: labeled[0] },
+    "POST /tabs/tab-2/adopt": { tab: { ...labeled[1], managed: true } },
+    "POST /tabs/tab-2/release": { tab: labeled[1] },
+    "POST /tabs/tab-404/adopt": () =>
+      Response.json(
+        { error: { code: "tab_not_found", message: "Agent tab was not found.", tabId: "tab-404" } },
+        { status: 404 },
+      ),
+    "POST /spaces/space-1/finish": {
+      ok: true,
+      spaceId: "space-1",
+      closedSpace: false,
+      closed: ["p1", "p3"],
+      kept: ["p2"],
+      protected: ["p5"],
+    },
+    "POST /space-requests": {
+      space: { id: "work", name: "Work", kind: "personal", owner: "agent", signIns: "shared" },
+      tabs: [{ id: "tab-w", spaceId: "work", title: "Mail", url: "https://mail.test/", label: "p1", openedBy: "person", managed: false, active: true }],
+      active: { id: "tab-w", spaceId: "work", title: "Mail", url: "https://mail.test/", label: "p1", openedBy: "person", managed: false, active: true },
+    },
+  };
+  const paths = (api) => api.requests.map((item) => `${item.method} ${item.path}`);
+
+  it("<space-id>:<label> resolves with one tabs request", async () => {
+    const api = fakeApi(sectionTwo);
+    expect(await runCli(["click", "space-1:p1", "@e2"], { env, fetch: api.fetch, stdout: sink() })).toBe(0);
+    expect(paths(api)).toEqual(["GET /spaces/space-1/tabs", "POST /tabs/tab-1/click"]);
+    await expect(
+      runCli(["click", "space-1:p4", "@e2"], { env, fetch: api.fetch, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "page_not_found", label: "p4", closedBy: "page" });
+    expect(paths(api).slice(2)).toEqual(["GET /spaces/space-1/tabs"]);
+    await expect(
+      runCli(["click", "space-1:x1", "@e2"], { env, fetch: api.fetch, stdout: sink() }),
+    ).rejects.toThrow("Invalid space or tab ID.");
+  });
+
+  it("finish() without keep throws invalid_argument before any request, and space finish requires --keep", async () => {
+    const api = fakeApi(sectionTwo);
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const research = await client.space("space-1");
+    expect(paths(api)).toEqual(["GET /spaces/space-1"]);
+    for (const options of [undefined, {}, { keep: "some" }, { keep: 3 }])
+      await expect(research.finish(options), JSON.stringify(options)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "space.finish",
+        expected: '{ keep: "all" | page[] }',
+      });
+    await expect(
+      runCli(["space", "finish", "space-1"], { env, fetch: api.fetch, health: level2, stdout: sink() }),
+    ).rejects.toThrow("Use space finish <space-id> --keep all|none|<tab-id>[,<tab-id>].");
+    expect(paths(api)).toEqual(["GET /spaces/space-1"]);
+    // Pages, labels and ids all become ids, with one tabs request for the labels.
+    const page = research.page("p1");
+    expect(await research.finish({ keep: [page, "p2", "tab-3"] })).toEqual(sectionTwo["POST /spaces/space-1/finish"]);
+    expect(api.requests.slice(1)).toEqual([
+      { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
+      { method: "POST", path: "/spaces/space-1/finish", body: { keep: ["tab-1", "tab-2", "tab-3"] } },
+    ]);
+    expect(await research.finish({ keep: "all" })).toMatchObject({ ok: true });
+    expect(api.requests.at(-1).body).toEqual({ keep: "all" });
+    const stdout = sink();
+    expect(
+      await runCli(["space", "finish", "space-1", "--keep", "none"], { env, fetch: api.fetch, health: level2, stdout }),
+    ).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ keep: [] });
+    expect(stdout.text()).toBe("ok: space space-1 finished\nclosed p1 p3\nkept p2\nprotected p5\n");
+    await runCli(["space", "finish", "space-1", "--keep", "p2,tab-3"], { env, fetch: api.fetch, health: level2, stdout: sink() });
+    expect(api.requests.slice(-2)).toEqual([
+      { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
+      { method: "POST", path: "/spaces/space-1/finish", body: { keep: ["tab-2", "tab-3"] } },
+    ]);
+  });
+
+  it("page(label) resolves lazily and reports closed labels", async () => {
+    const api = fakeApi(sectionTwo);
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const research = await client.space("space-1");
+    const page = research.page("p1");
+    expect(page).toMatchObject({ label: "p1", spaceId: "space-1" });
+    expect(page.id).toBeUndefined();
+    expect(paths(api)).toEqual(["GET /spaces/space-1"]);
+    await page.click("@e2");
+    await page.click("@e2");
+    expect(page).toMatchObject({ id: "tab-1", openedBy: "agent", managed: true });
+    expect(paths(api).slice(1)).toEqual(["GET /spaces/space-1/tabs", "POST /tabs/tab-1/click", "POST /tabs/tab-1/click"]);
+    await expect(research.page("p4").click("@e1")).rejects.toMatchObject({
+      code: "page_not_found",
+      label: "p4",
+      closedBy: "page",
+      message: "Page p4 was closed by the page. Open another with space.newPage().",
+      entry: "page.click",
+    });
+    expect(() => research.page("tab-1")).toThrow(KamapathyError);
+    // A popup's opener is the open page that opened it.
+    const [, popup] = await research.tabs();
+    expect(popup).toMatchObject({ label: "p2", openedBy: "page", openerId: "tab-1", managed: false });
+    expect(await popup.opener()).toMatchObject({ id: "tab-1", label: "p1" });
+    expect(await (await research.tabs())[0].opener()).toBeNull();
+  });
+
+  it("long waits use their timeout plus 5000 ms", async () => {
+    const api = fakeApi(sectionTwo);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const client = await connect({ env, fetch: api.fetch, health: level2 });
+      const research = await client.space("space-1");
+      await research.waitForControl({ timeout: 1000 });
+      expect(api.requests.at(-1).body).toEqual({ timeoutMs: 1000 });
+      expect(timeouts).toHaveBeenLastCalledWith(6000);
+      await research.waitForControl();
+      expect(api.requests.at(-1).body).toEqual({});
+      expect(timeouts).toHaveBeenLastCalledWith(605000);
+      await client.requestSpace({ reason: "Book a table", timeout: 10000 });
+      expect(timeouts).toHaveBeenLastCalledWith(15000);
+      await runCli(["wait-for-control", "space-1", "--timeout", "2000"], { env, fetch: api.fetch, health: level2, stdout: sink() });
+      expect(timeouts).toHaveBeenLastCalledWith(7000);
+      await research.tabs();
+      expect(timeouts).toHaveBeenLastCalledWith(45000);
+    } finally {
+      timeouts.mockRestore();
+    }
+  });
+
+  it("a label parameter resolves on each call; an unknown label throws page_not_found, with closedBy for a retired one, and an unknown tab id keeps tab_not_found", async () => {
+    const api = fakeApi(sectionTwo);
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const research = await client.space("space-1");
+    const adopted = await research.adopt("p2");
+    expect(adopted).toMatchObject({ id: "tab-2", label: "p2", managed: true });
+    await research.release("p2");
+    expect(paths(api).slice(1)).toEqual([
+      "GET /spaces/space-1/tabs",
+      "POST /tabs/tab-2/adopt",
+      "GET /spaces/space-1/tabs",
+      "POST /tabs/tab-2/release",
+    ]);
+    await expect(research.adopt("p9")).rejects.toMatchObject({
+      code: "page_not_found",
+      label: "p9",
+      message: "No page in this space is labeled p9. space.pages() lists them.",
+    });
+    await expect(research.adopt("p4")).rejects.toMatchObject({ code: "page_not_found", closedBy: "page" });
+    await expect(research.adopt("tab-404")).rejects.toMatchObject({ code: "tab_not_found", tabId: "tab-404" });
+    // A page handle sends its own id.
+    const page = (await research.pages())[0];
+    await research.adopt(page);
+    expect(api.requests.at(-1).path).toBe("/tabs/tab-1/adopt");
+  });
+
+  it("openSpace reuses or creates, createSpace sends KAMAPATHY_PAGE_BUDGET, and requestSpace returns the granted space with its user page", async () => {
+    const api = fakeApi(sectionTwo);
+    const budgeted = { ...env, KAMAPATHY_PAGE_BUDGET: "5" };
+    const client = await connect({ env: budgeted, fetch: api.fetch, health: level2 });
+    await client.openSpace("Research");
+    await client.openSpace("space-1", { isolated: false, pageBudget: 3 });
+    await client.createSpace("Other");
+    await client.createSpace("Own", { isolated: true, pageBudget: 2 });
+    expect(api.requests.map((item) => item.body)).toEqual([
+      { name: "Research", reuse: true, pageBudget: 5 },
+      { name: "space-1", reuse: true, isolated: false, pageBudget: 3 },
+      { name: "Other", pageBudget: 5 },
+      { name: "Own", isolated: true, pageBudget: 2 },
+    ]);
+    const wrong = await connect({ env: { ...env, KAMAPATHY_PAGE_BUDGET: "21" }, fetch: api.fetch, health: level2 });
+    await expect(wrong.createSpace("Other")).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "KAMAPATHY_PAGE_BUDGET",
+    });
+    expect(api.requests).toHaveLength(4);
+    const work = await client.requestSpace({ reason: "Book a table", name: "Work" });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/space-requests",
+      body: { reason: "Book a table", name: "Work" },
+    });
+    expect(work).toMatchObject({ id: "work", kind: "personal", owner: "agent" });
+    expect(work.userPage()).toMatchObject({ id: "tab-w", label: "p1", openedBy: "person" });
+    // Taking control back reports the boundary and the page the person left.
+    const research = await client.space("space-1");
+    expect(research.userPage()).toBeNull();
+    const resumed = await research.resume();
+    expect(resumed).toMatchObject({ ok: true, owner: "agent", closed: ["p3"] });
+    expect(resumed.active).toMatchObject({ id: "tab-1", label: "p1" });
+    expect(resumed.opened.map((item) => item.label)).toEqual(["p2"]);
+    expect(research.userPage()).toBe(resumed.active);
+  });
+
+  it("tabs prints labels, origins and flags, and resume, wait-for-control, space request and space finish print what they return", async () => {
+    const api = fakeApi(sectionTwo);
+    const run = async (args) => {
+      const stdout = sink();
+      expect(await runCli(args, { env, fetch: api.fetch, health: level2, stdout }), args.join(" ")).toBe(0);
+      return stdout.text();
+    };
+    expect(await run(["tabs", "space-1"])).toBe(
+      'p1 tab-1 agent active https://example.test/reserve "Reserve"\np2 tab-2 page from p1 unmanaged new https://example.test/slots "Slots"\n',
+    );
+    const lines = 'active p1 tab-1 https://example.test/reserve\nopened p2 tab-2 page from tab-1 unmanaged new https://example.test/slots "Slots"\nclosed p3\n';
+    expect(await run(["resume", "space-1"])).toBe(`ok: agent control resumed\n${lines}`);
+    expect(await run(["wait-for-control", "space-1"])).toBe(`ok: agent has control\n${lines}`);
+    expect(await run(["space", "request", "--reason", "Book a table", "--name", "Work", "--timeout", "60000"])).toBe(
+      'space work "Work" agent shared\np1 tab-w person unmanaged active https://mail.test/ "Mail"\nactive p1 tab-w https://mail.test/\n',
+    );
+    expect(api.requests.at(-1).body).toEqual({ reason: "Book a table", name: "Work", timeoutMs: 60000 });
+    expect(await run(["space", "open", "Research", "--page-budget", "4"])).toBe('space space-1 "Research" agent shared\n');
+    expect(api.requests.at(-1).body).toEqual({ name: "Research", reuse: true, pageBudget: 4 });
+    expect(await run(["new-page", "space-1"])).toBe("tab tab-1 https://example.test/reserve\n");
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/spaces/space-1/tabs", body: {} });
+    expect(await run(["adopt", "space-1:p2"])).toBe("tab tab-2 https://example.test/slots\n");
+    expect(await run(["release", "tab-2"])).toBe("tab tab-2 https://example.test/slots\n");
+    await expect(
+      runCli(["space", "open", "Research", "--page-budget", "21"], { env, fetch: api.fetch, stdout: sink() }),
+    ).rejects.toThrow("--page-budget must be an integer from 1 to 20.");
+    await expect(runCli(["space", "nope"], { env, fetch: api.fetch, stdout: sink() })).rejects.toThrow(
+      "Use space create, space open, space finish, space request or space close.",
+    );
+  });
+
+  it("refuses calls the app is too old for (methods and commands)", async () => {
+    const api = fakeApi(sectionTwo);
+    const old = { status: "ok", version: "0.1.9", apiLevel: 1 };
+    const client = await connect({ env, fetch: api.fetch, health: old });
+    const research = await client.space("space-1");
+    expect(paths(api)).toEqual(["GET /spaces"]);
+    await expect(research.newPage()).rejects.toMatchObject({
+      code: "app_outdated",
+      entry: "space.newPage",
+      required: 2,
+      available: 1,
+      appVersion: "0.1.9",
+      message:
+        "space.newPage needs Kamapathy API level 2, and Kamapathy 0.1.9 has level 1. Ask the person to update Kamapathy, then read the skill again.",
+    });
+    await expect(client.createSpace("Research", { pageBudget: 3 })).rejects.toMatchObject({
+      code: "app_outdated",
+      option: "pageBudget",
+    });
+    await expect(
+      runCli(["new-page", "space-1"], { env, fetch: api.fetch, health: old, stdout: sink() }),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      message:
+        "new-page needs Kamapathy API level 2, and Kamapathy 0.1.9 has level 1. Ask the person to update Kamapathy, then read the skill again.",
+    });
+    expect(paths(api)).toEqual(["GET /spaces"]);
+  });
+
   it("asks for an isolated space only when told to", async () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });

@@ -279,6 +279,13 @@ export const ERRORS = {
     false,
     "The request failed without an error code.",
   ),
+  page_not_found: code(
+    null,
+    false,
+    "No open page in the space has the label; a retired label says who closed it.",
+    ["label", "closedBy"],
+    2,
+  ),
   invalid_option: code(
     null,
     false,
