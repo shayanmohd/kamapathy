@@ -126,7 +126,8 @@ export async function startAutomation(
   const sessions = new TabSessions({
     controller,
     agentDriven: (spaceId) => authority.agentDriven(spaceId),
-    managedTab: () => true,
+    managedTab: (tabId) =>
+      controller.state.tabs.find((tab) => tab.id === tabId)?.managed === true,
     waitForSpaceIdle: (spaceId, timeoutMs) =>
       scheduler.whenIdle(spaceId, timeoutMs),
     buffers: new EventBufferPool(),
@@ -194,19 +195,30 @@ export async function startAutomation(
         controller.state.spaces.find((space) => space.id === parts[1])
           ?.owner === "human";
       // Runs on arrival, again once the request leaves its queue, and after
-      // every wait it parks.
-      const authorize = () => ({
-        space:
-          parts[0] === "spaces" && parts.length >= 2
-            ? authority.authorizeSpace(parts[1], resumeFromHuman)
-            : undefined,
-        tab:
-          parts[0] === "tabs" && parts.length >= 2
-            ? authority.authorizeTab(parts[1])
-            : undefined,
-      });
-      const scope = authorize();
+      // every wait it parks. The route's access decides whether it answers
+      // while the person has control and whether it reaches unadopted tabs.
+      const authorize = () => {
+        const access = route?.access;
+        return {
+          space:
+            parts[0] === "spaces" && parts.length >= 2
+              ? authority.authorizeSpace(parts[1], {
+                  human:
+                    access?.human === "resume" && !resumeFromHuman
+                      ? undefined
+                      : access?.human,
+                })
+              : undefined,
+          tab:
+            parts[0] === "tabs" && parts.length >= 2
+              ? authority.authorizeTab(parts[1], {
+                  unmanaged: access?.unmanaged,
+                })
+              : undefined,
+        };
+      };
       const route = findRoute(routes, method, parts);
+      const scope = authorize();
       if (!route)
         throw routeNotFound(
           method || "GET",
@@ -214,6 +226,8 @@ export async function startAutomation(
           controller.state.version,
         );
       key = route.key;
+      // A route that addresses a popup reports it to the agent.
+      if (scope.tab?.unseen) controller.markSeen(scope.tab.id);
       const spaceId = scope.space?.id ?? scope.tab?.spaceId;
       const ticket = scheduler.admit({
         spaceId: route.lane === "space" ? spaceId : undefined,

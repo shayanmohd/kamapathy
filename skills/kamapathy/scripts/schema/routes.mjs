@@ -127,7 +127,7 @@ const route = (method, path, summary, response, body, options = {}) => ({
   lane: options.lane ?? "space",
   follow: options.follow ?? false,
   label: false,
-  since: 1,
+  since: options.since ?? 1,
 });
 const action = (type, summary, response) =>
   route("POST", `/tabs/:id/${type}`, summary, response, FIELDS[type], {
@@ -148,15 +148,15 @@ export const ROUTES = [
     "GET",
     "/spaces",
     "Lists the spaces this API session can reach.",
-    "{ spaces }",
+    "{ spaces: SpaceView[] }",
     null,
     { lane: "none" },
   ),
   route(
     "POST",
     "/spaces",
-    "Creates a background agent space.",
-    "201 { space }",
+    "Creates an agent space whose first page is p1, or with reuse returns the listed space whose ID or name matches.",
+    "201 { space: SpaceView, tab: TabView, created: true }; reused 200 { space: SpaceView, created: false }",
     {
       name: {
         kind: "string",
@@ -169,13 +169,37 @@ export const ROUTES = [
         default: false,
         description: "Give the space its own sign-ins instead of the person's.",
       },
+      pageBudget: {
+        kind: "integer",
+        min: 1,
+        max: 20,
+        default: 20,
+        since: 2,
+        description:
+          "Most pages the agent may manage in the space at once. A reused space takes the new value.",
+      },
+      reuse: {
+        kind: "boolean",
+        default: false,
+        since: 2,
+        description:
+          "Return the listed space whose ID, or else first whose name, equals name instead of creating one.",
+      },
     },
     { lane: "server" },
   ),
   route(
+    "GET",
+    "/spaces/:id",
+    "Reads one space the agent can reach, also while the person has control.",
+    "{ space: SpaceView }",
+    null,
+    { lane: "none", since: 2 },
+  ),
+  route(
     "DELETE",
     "/spaces/:id",
-    "Closes a space and its tabs.",
+    "Closes an agent space and its tabs. A space holding tabs the person opened is refused.",
     "{ ok: true }",
     null,
   ),
@@ -196,25 +220,53 @@ export const ROUTES = [
   route(
     "GET",
     "/spaces/:id/tabs",
-    "Lists the space's tabs.",
-    "{ tabs }",
+    "Lists every tab of a space with its label and origin, the last 100 closed labels and the page budget.",
+    "{ tabs: TabView[], closed: [{ label, closedBy, at }], budget: { used, limit } }",
     null,
     { lane: "none" },
   ),
   route(
     "POST",
     "/spaces/:id/tabs",
-    "Opens a background tab.",
-    "201 { tab }",
-    { url },
+    "Opens a page in the background, or a blank page without url. Stops at the page budget.",
+    "201 { tab: TabView }",
+    {
+      url: {
+        kind: "url",
+        description:
+          "The page to open. From API level 2 it may be left out for a blank page.",
+      },
+    },
     { follow: true },
   ),
-  route("DELETE", "/tabs/:id", "Closes a tab.", "{ ok: true }", null),
+  route(
+    "DELETE",
+    "/tabs/:id",
+    "Closes a page the agent manages. Its label is retired, and a blank page with the next label replaces a space's last page.",
+    "{ ok: true, closed?: label, replacement?: TabView }",
+    null,
+  ),
+  route(
+    "POST",
+    "/tabs/:id/adopt",
+    "Makes a page the agent did not open its own, within the page budget. The page keeps its label.",
+    "{ tab: TabView }",
+    {},
+    { since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/release",
+    "Gives a page the agent did not open back to the person. The page stays open.",
+    "{ tab: TabView }",
+    {},
+    { since: 2 },
+  ),
   route(
     "POST",
     "/tabs/:id/navigate",
     "Loads a URL in the tab.",
-    "{ tab }",
+    "{ tab: TabView }",
     { url },
     { follow: true },
   ),

@@ -129,7 +129,24 @@ describe("local automation socket", () => {
   it("creates agent spaces with the person's sign-ins unless isolation is requested", async () => {
     const shared = await request("/spaces", "POST", { name: "Research" });
     expect(shared.status).toBe(201);
-    expect((await shared.json()).space.signIns).toBe("shared");
+    const created = await shared.json();
+    expect(created).toEqual({
+      space: expect.objectContaining({
+        name: "Research",
+        kind: "agent",
+        owner: "agent",
+        signIns: "shared",
+        createdBy: "agent",
+        pageBudget: 20,
+      }),
+      tab: expect.objectContaining({
+        spaceId: created.space.id,
+        label: "p1",
+        openedBy: "agent",
+        managed: true,
+      }),
+      created: true,
+    });
     const isolated = await request("/spaces", "POST", {
       name: "Clean",
       isolated: true,
@@ -1652,7 +1669,9 @@ describe("local automation socket", () => {
     const { space, tab } = await createPage();
     // A minimal valid body for each route that reads one.
     const SAMPLES: Record<string, Record<string, unknown>> = {
-      "POST /spaces": { name: "Research" },
+      "POST /spaces": { name: "Research", isolated: false, pageBudget: 5, reuse: true },
+      "POST /tabs/:id/adopt": {},
+      "POST /tabs/:id/release": {},
       "POST /spaces/:id/handoff": {},
       "POST /spaces/:id/resume": {},
       "POST /spaces/:id/tabs": { url: "https://example.com/" },

@@ -35,6 +35,10 @@ export interface RouteCall {
 }
 // What a route does. Its lane, budget and body limit come from the schema.
 export interface RouteImpl {
+  // human "allow" answers while the person has control, and "resume" lets a
+  // resume take control back (server.ts decides when). unmanaged lets the
+  // route reach tabs the agent has not adopted.
+  access?: { human?: "allow" | "resume"; unmanaged?: true };
   // Runs after admission, before the body is read.
   beforeBody?(
     call: Pick<RouteCall, "request" | "response" | "space" | "tab">,

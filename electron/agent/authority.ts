@@ -5,8 +5,8 @@ import type { AutomationController } from "./server";
 export interface Authority {
   readonly managedSpaces: Set<string>;
   readonly stopped: boolean;
-  authorizeSpace(id: string, resuming?: boolean): Space;
-  authorizeTab(id: string): Tab;
+  authorizeSpace(id: string, options?: { human?: "allow" | "resume" }): Space;
+  authorizeTab(id: string, options?: { unmanaged?: true }): Tab;
   grantSpace(id: string): void;
   stop(): void;
   agentDriven(spaceId: string): boolean;
@@ -15,25 +15,40 @@ export interface Authority {
 export function createAuthority(controller: AutomationController): Authority {
   const managedSpaces = new Set<string>();
   let stopped = false;
-  // Taking control back is the one request allowed while the person has it.
-  const authorizeSpace = (id: string, resuming = false): Space => {
+  // While the person has control, only routes that read the space ("allow")
+  // and taking control back ("resume") get through.
+  const authorizeSpace = (
+    id: string,
+    options: { human?: "allow" | "resume" } = {},
+  ): Space => {
+    if (stopped) return fail("automation_stopped", "Automation is disabled.");
     const space = controller.state.spaces.find((item) => item.id === id);
     if (!space || !managedSpaces.has(id) || space.kind !== "agent")
       return fail("space_not_found", "Agent space was not found.");
-    if (space.owner !== "agent" && !resuming)
+    if (space.owner !== "agent" && !options.human)
       return fail(
         "human_control",
         `The person is using this space. Wait for them. If they tell you they are done or ask you to continue, take control back with resume ${space.id}.`,
       );
-    if (stopped)
-      return fail("automation_stopped", "Automation is disabled.");
     return space;
   };
-  const authorizeTab = (id: string) => {
+  // Page routes need a tab the agent manages; adopt and release are the
+  // two routes that reach the others.
+  const authorizeTab = (
+    id: string,
+    options: { unmanaged?: true } = {},
+  ): Tab => {
+    if (stopped) return fail("automation_stopped", "Automation is disabled.");
     const tab = controller.state.tabs.find((item) => item.id === id);
     if (!tab || !managedSpaces.has(tab.spaceId))
-      return fail("tab_not_found", "Agent tab was not found.");
+      return fail("tab_not_found", "Agent tab was not found.", { tabId: id });
     authorizeSpace(tab.spaceId);
+    if (!tab.managed && !options.unmanaged)
+      return fail(
+        "tab_unmanaged",
+        "Kamapathy has not given this page to the agent. Adopt it first with adopt <tab> or space.adopt(page).",
+        { tabId: tab.id, label: tab.label, openedBy: tab.openedBy },
+      );
     return tab;
   };
   return {

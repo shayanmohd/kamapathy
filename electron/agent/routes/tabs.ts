@@ -14,6 +14,8 @@ import {
   uploadFields,
   urlField,
 } from "../validate";
+import { tabView } from "../views";
+import { checkPageBudget } from "./spaces";
 
 export function tabRoutes({
   controller,
@@ -21,7 +23,7 @@ export function tabRoutes({
   actions: { readyContents, evaluatePage, executeToolAction },
   sessions,
 }: RouteDeps): Record<string, RouteImpl> {
-  const { authorizeTab } = authority;
+  const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
     send(
@@ -45,9 +47,51 @@ export function tabRoutes({
     "DELETE /tabs/:id": {
       handler: async ({ response, tab, run }) => {
         run.dispatch.dispatched = true;
-        await controller.dispatch({ type: "tab:close", id: tab!.id });
+        const { closed, replacement } = controller.closeTab(tab!.id, "agent");
         controller.addActivity(tab!.spaceId, "Agent closed a tab", "info");
-        return send(response, 200, { ok: true });
+        return send(response, 200, {
+          ok: true,
+          ...(closed === undefined ? {} : { closed }),
+          ...(replacement
+            ? {
+                replacement: tabView(
+                  replacement,
+                  controller.shownTab(tab!.spaceId),
+                ),
+              }
+            : {}),
+        });
+      },
+    },
+    "POST /tabs/:id/adopt": {
+      access: { unmanaged: true },
+      handler: async ({ response, tab }) => {
+        const space = authorizeSpace(tab!.spaceId);
+        let adopted = tab!;
+        if (!adopted.managed) {
+          checkPageBudget(controller, space);
+          adopted = controller.setManaged(adopted.id, true);
+          controller.addActivity(space.id, "Agent adopted a page", "info");
+        }
+        return send(response, 200, {
+          tab: tabView(adopted, controller.shownTab(space.id)),
+        });
+      },
+    },
+    "POST /tabs/:id/release": {
+      access: { unmanaged: true },
+      handler: async ({ response, tab }) => {
+        if (tab!.openedBy === "agent")
+          return fail(
+            "release_refused",
+            "The agent opened this page. Close it instead of releasing it.",
+            { tabId: tab!.id, label: tab!.label },
+          );
+        const released = controller.setManaged(tab!.id, false);
+        controller.addActivity(tab!.spaceId, "Agent released a page", "info");
+        return send(response, 200, {
+          tab: tabView(released, controller.shownTab(tab!.spaceId)),
+        });
       },
     },
     "POST /tabs/:id/navigate": {
@@ -61,7 +105,9 @@ export function tabRoutes({
           `Agent navigated to ${new URL(url).hostname}`,
           "info",
         );
-        return send(response, 200, { tab: updated });
+        return send(response, 200, {
+          tab: tabView(updated, controller.shownTab(updated.spaceId)),
+        });
       },
     },
     "GET /tabs/:id/snapshot": {

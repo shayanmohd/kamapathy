@@ -254,6 +254,16 @@ export class FakeController implements AutomationController {
     this.emit();
     return tab;
   }
+  // A tab the person opened in a space, registered the way the
+  // controller's tab:create registers it.
+  openPersonTab(spaceId: string, url = HOME_URL): Tab {
+    const tab = newTab(spaceId, url);
+    this.registry.register(tab, { openedBy: "person", managed: false });
+    this.state.tabs.push(tab);
+    if (isWebUrl(tab.url)) this.ensureView(tab);
+    this.emit();
+    return tab;
+  }
   private getTab(id: string): Tab {
     const tab = this.state.tabs.find((item) => item.id === id);
     if (!tab) throw new Error("Tab was not found.");
