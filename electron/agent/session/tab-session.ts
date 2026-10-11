@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { PageOperation } from "../../automation-dom";
 import {
   CdpTimeoutError,
@@ -61,6 +62,21 @@ type FrameChange = {
 };
 
 const REFUSED = /^(Target|Browser)\./;
+// The connection each running setup hook belongs to, kept across the hook's
+// awaits, so every command it sends goes out while its session sets up.
+const hookSetup = new AsyncLocalStorage<{
+  session: TabSession;
+  generation: number;
+}>();
+// The execution context a command names, if any.
+const contextOf = (params: object): number | undefined => {
+  const { executionContextId, contextId } = params as {
+    executionContextId?: unknown;
+    contextId?: unknown;
+  };
+  const id = executionContextId ?? contextId;
+  return typeof id === "number" ? id : undefined;
+};
 const DISPATCHES =
   /^(Input\.|Page\.(navigate|reload|navigateToHistoryEntry)$|DOM\.setFileInputFiles$)/;
 // An open JavaScript dialog holds these until it closes.
@@ -150,7 +166,6 @@ export class TabSession {
   private generation = 0;
   private navigations = 0;
   private attaches = 0;
-  private setupDepth = 0;
   private awaitingCommit = false;
   private setupTimer?: ReturnType<typeof setTimeout>;
   private retries: ReturnType<typeof setTimeout>[] = [];
@@ -199,10 +214,7 @@ export class TabSession {
   // The worlds handed out, by session and context id. Context ids restart in
   // each renderer process, so a call naming a world whose document ended
   // fails instead of running in whatever context has the id now.
-  private handles = new Map<
-    string,
-    { frameId: string; world: World; epoch: number }
-  >();
+  private handles = new Map<string, { frameId: string; world: World }>();
 
   constructor(
     readonly contents: SessionHost,
@@ -292,20 +304,30 @@ export class TabSession {
     step?: SendStep,
   ): Promise<T> {
     const sessionId = step?.sessionId || undefined;
+    const agent = sessionId !== undefined && this.agents.has(sessionId);
+    const context = contextOf(params);
     // A world handed out on this session or on one that has since ended.
-    const handle = this.handleFor(sessionId, params);
+    const handle =
+      context === undefined
+        ? undefined
+        : this.handles.get(`${sessionId ?? ""}|${context}`);
     if (
       REFUSED.test(method) ||
       (!handle &&
         sessionId !== undefined &&
         !this.children.has(sessionId) &&
-        !this.agents.has(sessionId))
+        !agent)
     )
       throw new TargetRefusedError(method);
     step?.guard?.();
+    // Context ids restart in each renderer process, so on Kamapathy's own
+    // sessions a command may name only a world handed out for its frame's
+    // current document.
     if (
-      handle &&
-      this.registry.worldFor(handle.frameId, this.epoch) !== handle.world
+      context !== undefined &&
+      !agent &&
+      (!handle ||
+        this.registry.worldFor(handle.frameId, this.epoch) !== handle.world)
     )
       throw new ContextLostError(false);
     if (this.releasing || this.current === "released") {
@@ -316,7 +338,7 @@ export class TabSession {
         throw this.lostError();
     } else if (
       this.current !== "ready" &&
-      !(this.setupDepth > 0 && this.current === "attaching")
+      !(this.current === "attaching" && this.inSetupHook())
     ) {
       try {
         await this.usable(step?.deadline ?? Date.now() + 15000);
@@ -368,15 +390,9 @@ export class TabSession {
 
   onSessionSetup(hook: SetupHook): () => void {
     this.hooks.add(hook);
-    if (this.connected && !this.releasing && this.current !== "crashed") {
-      this.setupDepth += 1;
-      try {
-        for (const sessionId of [undefined, ...this.children.keys()])
-          hook(sessionId).catch(() => {});
-      } finally {
-        this.setupDepth -= 1;
-      }
-    }
+    if (this.connected && !this.releasing && this.current !== "crashed")
+      for (const sessionId of [undefined, ...this.children.keys()])
+        this.runHook(hook, sessionId).catch(() => {});
     return () => {
       this.hooks.delete(hook);
     };
@@ -635,11 +651,7 @@ export class TabSession {
     // The frame moved on to its next document while the world was made.
     if (this.registry.worldFor(frameId, this.epoch) !== world)
       throw new ContextLostError(false);
-    this.handles.set(`${sessionId ?? ""}|${contextId}`, {
-      frameId,
-      world,
-      epoch,
-    });
+    this.handles.set(`${sessionId ?? ""}|${contextId}`, { frameId, world });
     return sessionId === undefined ? { contextId } : { sessionId, contextId };
   }
 
@@ -717,19 +729,6 @@ export class TabSession {
         throw error;
       return undefined;
     }
-  }
-
-  // The world handle a command names through its context id, if it is one of
-  // Kamapathy's.
-  private handleFor(sessionId: string | undefined, params: object) {
-    const { executionContextId, contextId } = params as {
-      executionContextId?: unknown;
-      contextId?: unknown;
-    };
-    const id = executionContextId ?? contextId;
-    return typeof id === "number"
-      ? this.handles.get(`${sessionId ?? ""}|${id}`)
-      : undefined;
   }
 
   dialog(): DialogInfo | undefined {
@@ -926,61 +925,68 @@ export class TabSession {
     return true;
   }
 
+  // Runs a setup hook for the current connection.
+  private runHook(hook: SetupHook, sessionId?: string): Promise<void> {
+    return hookSetup.run({ session: this, generation: this.generation }, () =>
+      hook(sessionId),
+    );
+  }
+
+  private inSetupHook(): boolean {
+    const setup = hookSetup.getStore();
+    return setup?.session === this && setup.generation === this.generation;
+  }
+
   // Sends a session's setup in order and awaits no reply. A new view answers
   // only once its first navigation starts, and that waits for attach().
   private setup(sessionId: string | undefined, waiting = false) {
     const generation = this.generation;
-    this.setupDepth += 1;
-    try {
-      const replies: Promise<unknown>[] = [
-        this.command("Page.enable", {}, sessionId),
-        this.command(
-          "Page.setLifecycleEventsEnabled",
-          { enabled: true },
-          sessionId,
-        ),
-        this.command(
-          "Network.enable",
-          { maxTotalBufferSize: 10000000, maxResourceBufferSize: 5000000 },
-          sessionId,
-        ),
-        // Pausing new frames until their setup ended stalled their loads, so
-        // they start at once, and an init script added at attach can miss a
-        // frame's first scripts.
-        this.command(
-          "Target.setAutoAttach",
-          {
-            autoAttach: true,
-            waitForDebuggerOnStart: false,
-            flatten: true,
-            filter: [{ type: "iframe", exclude: false }, { exclude: true }],
-          },
-          sessionId,
-        ),
-        ...[...this.hooks].map((hook) => hook(sessionId)),
-        ...[...this.scripts.values()].map((script) =>
-          this.addScript(script, sessionId),
-        ),
-      ];
-      if (waiting)
-        replies.push(
-          this.command("Runtime.runIfWaitingForDebugger", {}, sessionId),
-        );
+    const replies: Promise<unknown>[] = [
+      this.command("Page.enable", {}, sessionId),
+      this.command(
+        "Page.setLifecycleEventsEnabled",
+        { enabled: true },
+        sessionId,
+      ),
+      this.command(
+        "Network.enable",
+        { maxTotalBufferSize: 10000000, maxResourceBufferSize: 5000000 },
+        sessionId,
+      ),
+      // Pausing new frames until their setup ended stalled their loads, so
+      // they start at once, and an init script added at attach can miss a
+      // frame's first scripts.
+      this.command(
+        "Target.setAutoAttach",
+        {
+          autoAttach: true,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+          filter: [{ type: "iframe", exclude: false }, { exclude: true }],
+        },
+        sessionId,
+      ),
+      ...[...this.hooks].map((hook) => this.runHook(hook, sessionId)),
+      ...[...this.scripts.values()].map((script) =>
+        this.addScript(script, sessionId),
+      ),
+    ];
+    if (waiting)
       replies.push(
-        this.command<FrameTree>("Page.getFrameTree", {}, sessionId).then(
-          (reply) => {
-            if (
-              generation === this.generation &&
-              (sessionId === undefined || this.children.has(sessionId))
-            )
-              this.registry.seed(reply.frameTree, sessionId);
-          },
-        ),
+        this.command("Runtime.runIfWaitingForDebugger", {}, sessionId),
       );
-      return replies;
-    } finally {
-      this.setupDepth -= 1;
-    }
+    replies.push(
+      this.command<FrameTree>("Page.getFrameTree", {}, sessionId).then(
+        (reply) => {
+          if (
+            generation === this.generation &&
+            (sessionId === undefined || this.children.has(sessionId))
+          )
+            this.registry.seed(reply.frameTree, sessionId);
+        },
+      ),
+    );
+    return replies;
   }
 
   // The private sender behind send and setup, and the only one that sends
@@ -1445,9 +1451,9 @@ export class TabSession {
   }) => {
     if (!details.isMainFrame || details.isSameDocument) return;
     this.navigations += 1;
-    // No request holds a world across two main-frame documents.
-    for (const [key, handle] of this.handles)
-      if (handle.epoch < this.navigations - 1) this.handles.delete(key);
+    // Every world ends with the main frame's document, and an id it had is
+    // refused from now on like any other id Kamapathy did not hand out.
+    this.handles.clear();
   };
 
   private readonly onNavigate = () => {

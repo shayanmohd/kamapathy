@@ -204,6 +204,32 @@ describe("TabSession", () => {
     expect(await session.mainFrameId(soon())).toBe("main");
   });
 
+  it("sends a setup hook's later commands, after its awaits, while the session sets up, and again after a re-attach", async () => {
+    const { session, cdp } = open();
+    // A hook may await each command it sends.
+    session.onSessionSetup(async (sessionId) => {
+      const step = { sessionId, deadline: Date.now() + 5000 };
+      await session.send("Runtime.addBinding", { name: "report" }, step);
+      await session.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: true },
+        step,
+      );
+    });
+    const intercepts = () =>
+      cdp
+        .methods()
+        .filter((method) => method === "Page.setInterceptFileChooserDialog");
+    session.attach();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(intercepts()).toHaveLength(1);
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(intercepts()).toHaveLength(2);
+  });
+
   it("marks the session unavailable when setup takes more than 5000 ms after the first commit", async () => {
     const { session, cdp, host } = open({ url: "" });
     cdp.holdReplies = true;
@@ -2167,6 +2193,38 @@ describe("frames", () => {
     expect(session.state).toBe("ready");
     await expect(resolve(main)).rejects.toBeInstanceOf(ContextLostError);
     expect(await session.world("main", soon())).toEqual({ contextId: 6 });
+  });
+
+  it("refuses a world's context id after any number of main-frame navigations, and any context id it did not hand out, except on agent sessions", async () => {
+    const { host, session } = await worldSession();
+    const world = await session.world("main", soon());
+    const evaluate = (contextId: number, sessionId?: string) =>
+      session.send(
+        "Runtime.evaluate",
+        { expression: "1", contextId },
+        soon(sessionId),
+      );
+    for (const url of ["https://example.com/next", "https://example.com/last"])
+      host.emit("did-start-navigation", {
+        url,
+        isMainFrame: true,
+        isSameDocument: false,
+      });
+    const sent = host.debugger.sent.length;
+    const ended = await rejection(evaluate(world.contextId));
+    expect(ended).toBeInstanceOf(ContextLostError);
+    expect(ended).toMatchObject({ started: false });
+    // Context ids restart in each renderer process, so an id Kamapathy did
+    // not hand out may name any context.
+    expect(await rejection(evaluate(world.contextId + 10))).toBeInstanceOf(
+      ContextLostError,
+    );
+    expect(host.debugger.sent).toHaveLength(sent);
+    // An agent session's contexts are the agent's own.
+    const agent = await session.openAgentSession();
+    await expect(evaluate(3, agent)).resolves.toMatchObject({
+      result: { value: { ok: true, contextId: 3 } },
+    });
   });
 
   it("computes frame paths through DOM.getFrameOwner, DOM.resolveNode and frameIndex, releases the object group and omits unresolvable frames", async () => {
