@@ -87,7 +87,7 @@ describe("agent status", () => {
   });
   it("matches the message the automation server records on handoff", () => {
     const source = readFileSync(
-      new URL("../electron/automation.ts", import.meta.url),
+      new URL("../electron/agent/routes/spaces.ts", import.meta.url),
       "utf8",
     );
     expect(source).toContain(`"${HANDOFF_MESSAGE}"`);

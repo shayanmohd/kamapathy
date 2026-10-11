@@ -1,7 +1,7 @@
 import type { Activity, BrowserState, Space, SpaceColor } from "../../shared/types";
 
 export const RECENT_ACTION_MS = 5000;
-// electron/automation.ts records this when an agent hands a space over.
+// electron/agent/routes/spaces.ts records this when an agent hands a space over.
 export const HANDOFF_MESSAGE = "Agent handed this space to you";
 
 export type AgentStatus =

@@ -10,7 +10,7 @@ import {
   startAutomation,
   type AutomationController,
   type AutomationServer,
-} from "../electron/automation";
+} from "../electron/agent/server";
 import { initialState, newTab } from "../shared/state";
 import type { BrowserAction, BrowserState, Space } from "../shared/types";
 

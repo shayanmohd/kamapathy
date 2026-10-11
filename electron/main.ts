@@ -7,7 +7,7 @@ import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
-import { startAutomation } from "./automation";
+import { startAutomation } from "./agent/server";
 import {
   agentPaths,
   chooseSocketPath,
