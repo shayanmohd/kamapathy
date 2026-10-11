@@ -18,7 +18,12 @@ import {
   openingTab,
   PAGE_BUDGET,
 } from "../shared/state";
-import { googleSignInFallback, isWebUrl, normalizeUrl } from "../shared/url";
+import {
+  googleSignInFallback,
+  isPopupUrl,
+  isWebUrl,
+  normalizeUrl,
+} from "../shared/url";
 import type {
   Activity,
   BrowserAction,
@@ -47,6 +52,25 @@ const cleanText = (value: unknown, maximum = 300): string => {
     throw new Error("Invalid text value.");
   return value.trim();
 };
+// What a modifier click asks Kamapathy to load, or nothing when its body
+// cannot be sent as it came.
+function popupLoadOptions({
+  referrer,
+  postBody,
+}: Electron.HandlerDetails): Electron.LoadURLOptions | undefined {
+  const options: Electron.LoadURLOptions = { httpReferrer: referrer };
+  if (!postBody) return options;
+  if (
+    !["application/x-www-form-urlencoded", "multipart/form-data"].includes(
+      postBody.contentType,
+    ) ||
+    /[\r\n]/.test(postBody.boundary || "")
+  )
+    return undefined;
+  options.postData = postBody.data;
+  options.extraHeaders = `Content-Type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ""}`;
+  return options;
+}
 const signInsOf = (value: unknown): SignIns => {
   if (value === undefined || value === "shared") return "shared";
   if (value === "separate") return "separate";
@@ -664,33 +688,99 @@ export class BrowserController {
     return openingTab(this.state, spaceId, this.lastActive.get(spaceId));
   }
 
+  // Tabs and the popups their pages open share these. A popup's session is
+  // its opener's, so the session is given apart from them.
+  private pageWebPreferences(space: Space): Electron.WebPreferences {
+    return {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      navigateOnDragDrop: false,
+      focusOnNavigation: false,
+      spellcheck: true,
+      backgroundThrottling: !agentRules(space),
+    };
+  }
+
   private ensureView(
     tab: Tab,
     loadOptions?: Electron.LoadURLOptions,
   ): WebContentsView {
     const existing = this.views.get(tab.id);
     if (existing) return existing;
+    const view = this.createView(tab);
+    this.load(tab, view.webContents, loadOptions);
+    return view;
+  }
+
+  // A hidden view for the tab, wired before anything loads in it. A popup
+  // brings the contents Chromium made for it.
+  private createView(tab: Tab, webContents?: WebContents): WebContentsView {
     const space = this.getSpace(tab.spaceId);
-    const view = new WebContentsView({
-      webPreferences: {
-        session: this.sessionFor(this.partitionFor(space)),
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        webSecurity: true,
-        allowRunningInsecureContent: false,
-        navigateOnDragDrop: false,
-        focusOnNavigation: false,
-        spellcheck: true,
-        backgroundThrottling: !agentRules(space),
-      },
-    });
+    const view = webContents
+      ? new WebContentsView({ webContents })
+      : new WebContentsView({
+          webPreferences: {
+            session: this.sessionFor(this.partitionFor(space)),
+            ...this.pageWebPreferences(space),
+          },
+        });
     this.views.set(tab.id, view);
     this.window.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 1200, height: 800 });
     view.setVisible(false);
     view.setBorderRadius(10);
+    this.wireView(tab, view);
+    return view;
+  }
+
+  // A page opened a popup. Chromium makes its contents, except for modifier
+  // clicks, which Kamapathy loads itself. Either way it joins the opener's
+  // space as a tab.
+  private adoptPopup(
+    opener: Tab,
+    details: Electron.HandlerDetails,
+    guest: WebContents | undefined,
+  ): WebContents {
+    const space = this.getSpace(opener.spaceId);
+    const opened = newTab(space.id, details.url);
+    this.registry.register(opened, {
+      openedBy: "page",
+      openerId: opener.id,
+      managed:
+        !!opener.managed &&
+        space.owner === "agent" &&
+        agentRules(space) &&
+        space.access !== "ended",
+    });
+    this.state.tabs.push(opened);
+    if (!agentRules(space)) this.activate(opened);
+    const view = this.createView(opened, guest);
+    if (!guest) {
+      const options = isWebUrl(details.url)
+        ? popupLoadOptions(details)
+        : undefined;
+      if (options) this.load(opened, view.webContents, options);
+      // Loaded by Kamapathy, other URLs would run outside their opener.
+      else
+        setTimeout(() => {
+          if (this.views.get(opened.id) !== view) return;
+          this.removeTab(opened, "page");
+          this.emit();
+        });
+    }
+    this.emit();
+    return view.webContents;
+  }
+
+  private wireView(tab: Tab, view: WebContentsView): void {
+    const space = this.getSpace(tab.spaceId);
     const contents = view.webContents;
+    // Popups may also show about:blank and web-origin blob: documents.
+    const allowed = (url: string) =>
+      tab.openedBy === "page" ? isPopupUrl(url) : isWebUrl(url);
     // Chromium paints nothing for a page that was never shown, so an agent
     // page nobody is watching would run no animations, accept no native
     // input and have nothing to capture. Each new document starts hidden,
@@ -726,43 +816,56 @@ export class BrowserController {
       if (input.type === "mouseDown" && space.owner === "human")
         activateFocusedPane();
     });
-    contents.setWindowOpenHandler(({ url, referrer, postBody }) => {
-      if (isCurrentView() && isWebUrl(url) && this.state.tabs.length < 200) {
-        const options: Electron.LoadURLOptions = { httpReferrer: referrer };
-        if (postBody) {
-          if (
-            ![
-              "application/x-www-form-urlencoded",
-              "multipart/form-data",
-            ].includes(postBody.contentType) ||
-            /[\r\n]/.test(postBody.boundary || "")
-          )
-            return { action: "deny" };
-          options.postData = postBody.data;
-          options.extraHeaders = `Content-Type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ""}`;
-        }
-        const opened = newTab(space.id, url);
-        this.registry.register(opened, {
-          openedBy: "page",
-          openerId: tab.id,
-          managed: !!tab.managed && space.owner === "agent",
-        });
-        this.state.tabs.push(opened);
-        if (!agentRules(space)) this.activate(opened);
-        this.ensureView(opened, options);
-        this.emit();
+    contents.setWindowOpenHandler((details) => {
+      if (
+        !isCurrentView() ||
+        !isPopupUrl(details.url) ||
+        this.state.tabs.length >= 200
+      )
+        return { action: "deny" };
+      if (
+        agentRules(space) &&
+        this.state.tabs.filter((item) => item.spaceId === space.id).length >= 20
+      ) {
+        this.addActivity(
+          space.id,
+          "A popup was blocked. This space has 20 tabs.",
+          "warning",
+        );
+        return { action: "deny" };
       }
-      return { action: "deny" };
+      return {
+        action: "allow",
+        outlivesOpener: true,
+        overrideBrowserWindowOptions: {
+          show: false,
+          webPreferences: this.pageWebPreferences(space),
+        },
+        createWindow: (options) =>
+          this.adoptPopup(
+            tab,
+            details,
+            (options as { webContents?: WebContents }).webContents,
+          ),
+      };
     });
     contents.on("will-navigate", (event, url) => {
-      if (!isWebUrl(url)) event.preventDefault();
+      if (allowed(url)) return;
+      event.preventDefault();
+      // A popup refused its first document would stay an empty tab.
+      if (tab.openedBy === "page" && contents.getURL() === "")
+        setTimeout(() => {
+          if (!isCurrentView() || contents.getURL() !== "") return;
+          this.removeTab(tab, "page");
+          this.emit();
+        });
     });
     contents.on("will-redirect", (event, url) => {
       if (!isWebUrl(url)) event.preventDefault();
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.on("did-start-navigation", (details) => {
-      if (!isCurrentView() || !details.isMainFrame || !isWebUrl(details.url))
+      if (!isCurrentView() || !details.isMainFrame || !allowed(details.url))
         return;
       tab.url = details.url;
       delete tab.error;
@@ -781,7 +884,7 @@ export class BrowserController {
     const updateNavigation = () => {
       if (!isCurrentView()) return;
       const url = contents.getURL();
-      if (isWebUrl(url) && !tab.error) tab.url = url;
+      if (allowed(url) && !tab.error) tab.url = url;
       tab.canGoBack = contents.navigationHistory.canGoBack();
       tab.canGoForward = contents.navigationHistory.canGoForward();
       this.emit();
@@ -896,6 +999,23 @@ export class BrowserController {
         })
         .catch(() => undefined);
     });
+    // A page that closes itself leaves its view in the window without
+    // contents, so the view goes and so does its tab. Kamapathy's own
+    // closes take the view out of the map first.
+    contents.once("destroyed", () => {
+      if (
+        this.destroyed ||
+        this.views.get(tab.id) !== view ||
+        !this.state.tabs.includes(tab)
+      )
+        return;
+      this.views.delete(tab.id);
+      this.pendingLoads.delete(tab.id);
+      if (!this.window.isDestroyed())
+        this.window.contentView.removeChildView(view);
+      this.removeTab(tab, "page");
+      this.emit();
+    });
     // Listeners see each new page before its first load. Commands sent to
     // the page here are answered only once that load starts.
     for (const listener of this.viewListeners) {
@@ -908,8 +1028,6 @@ export class BrowserController {
         );
       }
     }
-    this.load(tab, contents, loadOptions);
-    return view;
   }
 
   private load(
@@ -985,8 +1103,10 @@ export class BrowserController {
     this.pendingLoads.delete(id);
     if (!this.window.isDestroyed())
       this.window.contentView.removeChildView(view);
-    if (!view.webContents.isDestroyed())
-      view.webContents.close({ waitForBeforeUnload: false });
+    // A page that closed itself leaves its view without contents.
+    const contents = view.webContents as WebContents | undefined;
+    if (contents && !contents.isDestroyed())
+      contents.close({ waitForBeforeUnload: false });
   }
 
   createAgentSpace(

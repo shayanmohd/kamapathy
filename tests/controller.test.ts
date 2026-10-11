@@ -16,8 +16,8 @@ import {
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
-  WebContentsView: vi.fn(function () {
-    return new FakeView();
+  WebContentsView: vi.fn(function (options?: { webContents?: FakeContents }) {
+    return new FakeView(options?.webContents);
   }),
   nativeTheme: { themeSource: "system" },
   session: {
@@ -95,7 +95,7 @@ class FakeContents extends EventEmitter {
   }
 }
 class FakeView {
-  webContents = new FakeContents();
+  constructor(public webContents = new FakeContents()) {}
   visible = false;
   bounds = { x: 0, y: 0, width: 0, height: 0 };
   setVisible(value: boolean) {
@@ -157,6 +157,53 @@ function viewFor(contents: FakeContents) {
     .mocked(WebContentsView)
     .mock.results.map((result) => result.value as FakeView)
     .find((view) => view.webContents === contents)!;
+}
+function preferencesOf(page: FakeContents) {
+  const { calls, results } = vi.mocked(WebContentsView).mock;
+  const index = results.findIndex(
+    (result) => (result.value as FakeView).webContents === page,
+  );
+  return calls[index][0]!.webPreferences!;
+}
+function windowOf(browser: BrowserController) {
+  return (
+    browser as unknown as {
+      window: { contentView: { removeChildView: ReturnType<typeof vi.fn> } };
+    }
+  ).window;
+}
+type OpenDecision =
+  | { action: "deny" }
+  | {
+      action: "allow";
+      outlivesOpener: boolean;
+      overrideBrowserWindowOptions: {
+        show: boolean;
+        webPreferences: Electron.WebPreferences;
+      };
+      createWindow(options: { webContents?: FakeContents }): FakeContents;
+    };
+// Opens a popup from page as Chromium does: the open handler decides, then
+// createWindow adopts the guest Chromium made, or gets none for a modifier
+// click.
+function popup(
+  page: FakeContents,
+  details: Record<string, unknown> & { url: string },
+  guest: FakeContents | null = new FakeContents(),
+) {
+  const handler = page.setWindowOpenHandler.mock.calls[0][0];
+  const decision: OpenDecision = handler({
+    frameName: "",
+    features: "",
+    disposition: "foreground-tab",
+    referrer: { url: page.url, policy: "default" },
+    ...details,
+  });
+  const returned =
+    decision.action === "allow"
+      ? decision.createWindow(guest ? { webContents: guest } : {})
+      : undefined;
+  return { decision, returned };
 }
 beforeEach(() => {
   sessions.clear();
@@ -232,7 +279,6 @@ describe("native browser lifecycle", () => {
       url: "https://example.com/form",
     });
     const source = contents(browser, sourceId);
-    const open = source.setWindowOpenHandler.mock.calls[0][0];
     const referrer = {
       url: "https://example.com/form",
       policy: "strict-origin-when-cross-origin",
@@ -241,11 +287,16 @@ describe("native browser lifecycle", () => {
       contentType: "application/x-www-form-urlencoded",
       data: [{ type: "rawData", bytes: Buffer.from("name=Probe") }],
     };
-    expect(
-      open({ url: "https://example.com/receipt", referrer, postBody }),
-    ).toEqual({ action: "deny" });
+    // A modifier click gives createWindow no contents, so Kamapathy loads
+    // the page itself.
+    const { returned } = popup(
+      source,
+      { url: "https://example.com/receipt", referrer, postBody },
+      null,
+    );
     expect(browser.state.activeTabId).not.toBe(sourceId);
     const destination = contents(browser, browser.state.activeTabId);
+    expect(returned).toBe(destination);
     expect(destination.loadURL).toHaveBeenCalledWith(
       "https://example.com/receipt",
       {
@@ -1286,25 +1337,22 @@ describe("view hooks", () => {
     const page = contents(browser, tab.id);
     expect(created).toEqual([{ tabId: tab.id, page, loads: 0, menus: 1 }]);
     expect(page.loadURL).toHaveBeenCalledExactlyOnceWith("https://example.com/");
-    const open = page.setWindowOpenHandler.mock.calls[0][0];
-    const referrer = { url: "https://example.com/", policy: "default" };
-    expect(open({ url: "https://example.com/popup", referrer })).toEqual({
-      action: "deny",
-    });
-    const popup = browser.state.tabs.at(-1)!;
-    expect(popup).toMatchObject({
+    const guest = new FakeContents();
+    expect(popup(page, { url: "https://example.com/popup" }, guest).returned).toBe(
+      guest,
+    );
+    const opened = browser.state.tabs.at(-1)!;
+    expect(opened).toMatchObject({
       spaceId: space.id,
       url: "https://example.com/popup",
     });
-    const popupPage = contents(browser, popup.id);
+    expect(contents(browser, opened.id)).toBe(guest);
     expect(created).toEqual([
       { tabId: tab.id, page, loads: 0, menus: 1 },
-      { tabId: popup.id, page: popupPage, loads: 0, menus: 1 },
+      { tabId: opened.id, page: guest, loads: 0, menus: 1 },
     ]);
-    expect(popupPage.loadURL).toHaveBeenCalledExactlyOnceWith(
-      "https://example.com/popup",
-      { httpReferrer: referrer },
-    );
+    // Chromium loads the popup itself.
+    expect(guest.loadURL).not.toHaveBeenCalled();
     // Navigating a page that has a view reuses it, so listeners do not run again.
     await browser.dispatch({
       type: "tab:navigate",
@@ -1380,14 +1428,6 @@ describe("tab origins and agent rules", () => {
     createdAt: expect.any(Number),
   };
   // The web preferences the view of a page was created with.
-  function preferencesOf(page: FakeContents) {
-    const { calls, results } = vi.mocked(WebContentsView).mock;
-    const index = results.findIndex(
-      (result) => (result.value as FakeView).webContents === page,
-    );
-    return calls[index][0]!.webPreferences!;
-  }
-
   it("interface tabs are stamped person", async () => {
     const browser = controller();
     for (const tab of browser.state.tabs) {
@@ -1614,8 +1654,6 @@ describe("tab origins and agent rules", () => {
     const shared = sessions.get("persist:space-personal")!;
     const request = shared.setPermissionRequestHandler.mock.calls[0][0];
     const check = shared.setPermissionCheckHandler.mock.calls[0][0];
-    const open = page.setWindowOpenHandler.mock.calls[0][0];
-    const referrer = { url: "https://example.com/", policy: "default" };
     const item = {
       setSaveDialogOptions: vi.fn(),
       getFilename: () => "report.pdf",
@@ -1630,7 +1668,12 @@ describe("tab origins and agent rules", () => {
     expect(browser.state.history).toMatchObject([
       { url: "https://example.com/", title: "Before" },
     ]);
-    open({ url: "https://example.com/popup", referrer });
+    const backgroundPage = new FakeContents();
+    const granted = popup(
+      page,
+      { url: "https://example.com/popup" },
+      backgroundPage,
+    );
     const background = browser.state.tabs.at(-1)!;
     expect(background).toMatchObject({
       url: "https://example.com/popup",
@@ -1641,9 +1684,12 @@ describe("tab origins and agent rules", () => {
       unseen: true,
     });
     expect(browser.state.activeTabId).toBe(id);
-    expect(
-      preferencesOf(contents(browser, background.id)).backgroundThrottling,
-    ).toBe(false);
+    expect(granted.decision).toMatchObject({
+      overrideBrowserWindowOptions: {
+        webPreferences: { backgroundThrottling: false },
+      },
+    });
+    expect(backgroundPage.setBackgroundThrottling).toHaveBeenCalledWith(false);
     const refused = vi.fn();
     request(page, "notifications", refused, {
       requestingUrl: "https://example.com/",
@@ -1672,15 +1718,17 @@ describe("tab origins and agent rules", () => {
     ]);
     page.emit("page-title-updated", {}, "Personal again");
     expect(browser.state.history[0].title).toBe("Personal again");
-    open({ url: "https://example.org/popup", referrer });
+    const personalPopup = popup(page, { url: "https://example.org/popup" });
     const foreground = browser.state.tabs.at(-1)!;
     expect(browser.state.activeTabId).toBe(foreground.id);
     expect(foreground).toMatchObject({ openedBy: "page", openerId: id });
     expect(foreground).not.toHaveProperty("label");
     expect(foreground).not.toHaveProperty("unseen");
-    expect(
-      preferencesOf(contents(browser, foreground.id)).backgroundThrottling,
-    ).toBe(true);
+    expect(personalPopup.decision).toMatchObject({
+      overrideBrowserWindowOptions: {
+        webPreferences: { backgroundThrottling: true },
+      },
+    });
     vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
       response: 0,
       checkboxChecked: false,
@@ -1879,5 +1927,298 @@ describe("agent access", () => {
       signIns: "separate",
     });
     expect(browser.state.spaces[1].signIns).toBe("separate");
+  });
+});
+
+describe("popups", () => {
+  // An agent space with a page at https://example.com/, the opener of the
+  // popups each test makes.
+  async function agentPage(browser: BrowserController) {
+    const space = browser.createAgentSpace("Task");
+    const opener = browser.state.tabs.find((tab) => tab.spaceId === space.id)!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: opener.id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, opener.id);
+    page.commit("https://example.com/");
+    return { space, opener, page };
+  }
+
+  it("a window.open popup becomes a background agent tab with opener, label and managed state, and a foreground personal one", async () => {
+    const browser = controller();
+    const { space, opener, page } = await agentPage(browser);
+    const selection = [browser.state.activeSpaceId, browser.state.activeTabId];
+    const guest = new FakeContents();
+    const { decision, returned } = popup(
+      page,
+      { url: "https://example.com/popup" },
+      guest,
+    );
+    expect(decision).toMatchObject({
+      action: "allow",
+      outlivesOpener: true,
+      overrideBrowserWindowOptions: { show: false },
+    });
+    expect(returned).toBe(guest);
+    const tab = browser.state.tabs.at(-1)!;
+    expect(tab).toMatchObject({
+      spaceId: space.id,
+      url: "https://example.com/popup",
+      openedBy: "page",
+      openerId: opener.id,
+      label: "p2",
+      managed: true,
+      unseen: true,
+    });
+    expect(contents(browser, tab.id)).toBe(guest);
+    expect(viewFor(guest).visible).toBe(false);
+    expect([browser.state.activeSpaceId, browser.state.activeTabId]).toEqual(
+      selection,
+    );
+    // A popup is the agent's only when its opener is and the agent has
+    // control.
+    browser.setManaged(opener.id, false);
+    popup(page, { url: "https://example.com/second" });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      openerId: opener.id,
+      label: "p3",
+      managed: false,
+    });
+    browser.setManaged(opener.id, true);
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    popup(page, { url: "https://example.com/third" });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      label: "p4",
+      managed: false,
+    });
+    // A personal popup opens in front, without a label.
+    const personalId = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: personalId,
+      url: "https://example.org/",
+    });
+    popup(contents(browser, personalId), { url: "https://example.org/popup" });
+    const personal = browser.state.tabs.at(-1)!;
+    expect(personal).toMatchObject({
+      spaceId: "personal",
+      openedBy: "page",
+      openerId: personalId,
+      managed: false,
+    });
+    expect(personal).not.toHaveProperty("label");
+    expect(browser.state.activeTabId).toBe(personal.id);
+  });
+
+  it("popup web preferences match tab views", async () => {
+    const browser = controller();
+    const { page } = await agentPage(browser);
+    const personalId = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: personalId,
+      url: "https://example.org/",
+    });
+    const personalPage = contents(browser, personalId);
+    for (const opener of [page, personalPage]) {
+      const { session: _session, ...expected } = preferencesOf(opener);
+      const { decision } = popup(opener, { url: "https://example.com/popup" });
+      expect(decision).toMatchObject({
+        overrideBrowserWindowOptions: { webPreferences: expected },
+      });
+      expect(
+        decision.action === "allow" &&
+          decision.overrideBrowserWindowOptions.webPreferences,
+      ).toEqual(expected);
+    }
+  });
+
+  it("other schemes, credential URLs, data: URLs and popups past 20 tabs are denied, and the 20-tab denial is logged", async () => {
+    const browser = controller();
+    const { space, page } = await agentPage(browser);
+    const tabs = browser.state.tabs.length;
+    for (const url of [
+      "mailto:someone@example.com",
+      "file:///etc/hosts",
+      "javascript:alert(1)",
+      "https://user:secret@example.com/",
+      "data:text/html,<p>Hello</p>",
+      "about:srcdoc",
+      "blob:null/1234",
+    ])
+      expect(popup(page, { url }).decision, url).toEqual({ action: "deny" });
+    expect(browser.state.tabs).toHaveLength(tabs);
+    for (const url of ["about:blank", "blob:https://example.com/1234"])
+      expect(popup(page, { url }).decision.action, url).toBe("allow");
+    while (
+      browser.state.tabs.filter((tab) => tab.spaceId === space.id).length < 20
+    )
+      browser.openAgentTab(space.id);
+    expect(popup(page, { url: "https://example.com/more" }).decision).toEqual({
+      action: "deny",
+    });
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: space.id,
+      message: "A popup was blocked. This space has 20 tabs.",
+      kind: "warning",
+    });
+  });
+
+  it("an about:blank popup is followed to its web URL, and closing itself closes its tab", async () => {
+    const browser = controller();
+    const { space, page } = await agentPage(browser);
+    const guest = new FakeContents();
+    popup(page, { url: "about:blank" }, guest);
+    const tab = browser.state.tabs.at(-1)!;
+    expect(tab).toMatchObject({ url: "about:blank", label: "p2" });
+    guest.emit("did-start-navigation", {
+      url: "https://example.com/written",
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(tab.url).toBe("https://example.com/written");
+    guest.commit("https://example.com/written");
+    // window.close() destroys the contents and leaves the view behind.
+    const view = viewFor(guest);
+    guest.destroyed = true;
+    guest.emit("destroyed");
+    expect(browser.state.tabs).not.toContain(tab);
+    expect(windowOf(browser).contentView.removeChildView).toHaveBeenCalledWith(
+      view,
+    );
+    expect(browser.registry.closed(space.id)).toMatchObject([
+      { label: "p2", closedBy: "page" },
+    ]);
+  });
+
+  it("popups without an opener load with referrer and form body, and refuse URLs Kamapathy would load outside their opener", async () => {
+    const browser = controller();
+    const { page } = await agentPage(browser);
+    const referrer = { url: "https://example.com/", policy: "default" };
+    const { returned } = popup(
+      page,
+      {
+        url: "https://example.com/next",
+        referrer,
+        disposition: "background-tab",
+      },
+      null,
+    );
+    const opened = browser.state.tabs.at(-1)!;
+    expect(returned).toBe(contents(browser, opened.id));
+    expect(returned!.loadURL).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/next",
+      { httpReferrer: referrer },
+    );
+    // Loaded by Kamapathy, these would run outside their opener, and a body
+    // Kamapathy cannot send as it came is refused too.
+    for (const details of [
+      { url: "about:blank" },
+      { url: "blob:https://example.com/1234" },
+      {
+        url: "https://example.com/form",
+        postBody: {
+          contentType: "text/plain",
+          data: [{ type: "rawData", bytes: Buffer.from("name=Probe") }],
+        },
+      },
+    ]) {
+      const refused = popup(page, details, null).returned!;
+      const tab = browser.state.tabs.at(-1)!;
+      expect(refused.loadURL, details.url).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(browser.state.tabs).not.toContain(tab));
+    }
+  });
+
+  it("throttling is turned off inside createWindow and after every navigation under agent rules", async () => {
+    const browser = controller();
+    const { page } = await agentPage(browser);
+    const guest = new FakeContents();
+    popup(page, { url: "https://example.com/popup" }, guest);
+    expect(guest.setBackgroundThrottling).toHaveBeenCalledExactlyOnceWith(
+      false,
+    );
+    guest.commit("https://example.com/next");
+    expect(guest.setBackgroundThrottling).toHaveBeenCalledTimes(2);
+    expect(guest.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    const personalId = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: personalId,
+      url: "https://example.org/",
+    });
+    const personal = new FakeContents();
+    popup(
+      contents(browser, personalId),
+      { url: "https://example.org/popup" },
+      personal,
+    );
+    personal.commit("https://example.org/next");
+    expect(personal.setBackgroundThrottling).not.toHaveBeenCalled();
+  });
+
+  it("a popup whose first navigation is refused closes its tab", async () => {
+    const browser = controller();
+    const { page } = await agentPage(browser);
+    const empty = new FakeContents();
+    popup(page, { url: "https://example.com/popup" }, empty);
+    const tab = browser.state.tabs.at(-1)!;
+    const refusal = { preventDefault: vi.fn() };
+    empty.emit("will-navigate", refusal, "mailto:someone@example.com");
+    expect(refusal.preventDefault).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(browser.state.tabs).not.toContain(tab));
+    // A popup with a document keeps its tab when a later navigation is refused.
+    const loaded = new FakeContents();
+    popup(page, { url: "https://example.com/popup" }, loaded);
+    const kept = browser.state.tabs.at(-1)!;
+    loaded.commit("https://example.com/popup");
+    const later = { preventDefault: vi.fn() };
+    loaded.emit("will-navigate", later, "mailto:someone@example.com");
+    expect(later.preventDefault).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(browser.state.tabs).toContain(kept);
+    // Popups may go to about:blank and web-origin blob: URLs later on.
+    for (const url of ["about:blank", "blob:https://example.com/1234"]) {
+      const allowed = { preventDefault: vi.fn() };
+      loaded.emit("will-navigate", allowed, url);
+      expect(allowed.preventDefault, url).not.toHaveBeenCalled();
+    }
+  });
+
+  it("any tab whose page closes itself is removed and its view leaves the window", async () => {
+    const browser = controller();
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/",
+    });
+    const tab = browser.state.tabs.find(
+      (item) => item.id === browser.state.activeTabId,
+    )!;
+    expect(tab.id).not.toBe(id);
+    const page = contents(browser, tab.id);
+    const view = viewFor(page);
+    page.destroyed = true;
+    page.emit("destroyed");
+    expect(browser.state.tabs).not.toContain(tab);
+    expect(windowOf(browser).contentView.removeChildView).toHaveBeenCalledWith(
+      view,
+    );
+    expect(browser.state.activeTabId).toBe(id);
+    // Closing a tab from Kamapathy is not mistaken for the page closing it.
+    await browser.dispatch({ type: "tab:create", url: "https://example.org/" });
+    const other = browser.state.activeTabId;
+    const otherPage = contents(browser, other);
+    await browser.dispatch({ type: "tab:close", id: other });
+    const remaining = [...browser.state.tabs];
+    otherPage.emit("destroyed");
+    expect(browser.state.tabs).toEqual(remaining);
+    expect(browser.state.activeTabId).toBe(id);
   });
 });
