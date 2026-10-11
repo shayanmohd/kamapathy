@@ -238,3 +238,107 @@ export function attachedTarget(
     options.parentSessionId,
   );
 }
+// Chromium telling the session that hosts a frame how far its document has
+// loaded. Turning lifecycle events on replays a document's events so far.
+export function lifecycleEvent(
+  debuggerFake: FakeDebugger,
+  options: {
+    frameId: string;
+    loaderId: string;
+    name: string;
+    sessionId?: string;
+  },
+): void {
+  debuggerFake.event(
+    "Page.lifecycleEvent",
+    {
+      frameId: options.frameId,
+      loaderId: options.loaderId,
+      name: options.name,
+      timestamp: 1,
+    },
+    options.sessionId,
+  );
+}
+
+// Chromium telling the session that hosts a frame that it committed a
+// document.
+export function frameNavigated(
+  debuggerFake: FakeDebugger,
+  options: {
+    frameId: string;
+    parentId?: string;
+    loaderId: string;
+    url: string;
+    type?: string;
+    sessionId?: string;
+  },
+): void {
+  debuggerFake.event(
+    "Page.frameNavigated",
+    {
+      frame: {
+        id: options.frameId,
+        ...(options.parentId ? { parentId: options.parentId } : {}),
+        loaderId: options.loaderId,
+        url: options.url,
+        securityOrigin: new URL(options.url).origin,
+        mimeType: "text/html",
+      },
+      type: options.type ?? "Navigation",
+    },
+    options.sessionId,
+  );
+}
+
+// Chromium reporting a request, or a redirect of one, on the session that
+// saw it start. A document's own request has its loaderId for requestId, and
+// a worker's requests carry an empty loaderId.
+export function requestWillBeSent(
+  debuggerFake: FakeDebugger,
+  options: {
+    requestId: string;
+    frameId: string;
+    loaderId: string;
+    url: string;
+    redirect?: true;
+    sessionId?: string;
+  },
+): void {
+  debuggerFake.event(
+    "Network.requestWillBeSent",
+    {
+      requestId: options.requestId,
+      loaderId: options.loaderId,
+      documentURL: options.url,
+      request: { url: options.url, method: "GET", headers: {} },
+      timestamp: 1,
+      wallTime: 1,
+      initiator: { type: "other" },
+      type: options.requestId === options.loaderId ? "Document" : "Other",
+      frameId: options.frameId,
+      ...(options.redirect ? { redirectResponse: { status: 302 } } : {}),
+    },
+    options.sessionId,
+  );
+}
+
+// Chromium reporting that a request finished, or failed, on any session.
+export function loadingEnded(
+  debuggerFake: FakeDebugger,
+  requestId: string,
+  options: { failed?: true; sessionId?: string } = {},
+): void {
+  if (options.failed)
+    debuggerFake.event(
+      "Network.loadingFailed",
+      { requestId, timestamp: 2, type: "Other", errorText: "net::ERR_FAILED" },
+      options.sessionId,
+    );
+  else
+    debuggerFake.event(
+      "Network.loadingFinished",
+      { requestId, timestamp: 2, encodedDataLength: 0 },
+      options.sessionId,
+    );
+}

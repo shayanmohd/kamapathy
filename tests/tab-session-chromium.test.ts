@@ -14,7 +14,7 @@ import {
   vi,
 } from "vitest";
 import { TabSession } from "../electron/agent/session/tab-session";
-import type { FrameInfo } from "../electron/agent/session/types";
+import type { FrameInfo, Step } from "../electron/agent/session/types";
 import {
   chromiumAvailable,
   launchChromium,
@@ -204,5 +204,121 @@ describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
         agent(),
       ),
     ).toMatchObject({ ok: true });
+  }, 20000);
+});
+// Its own server answers /probe/delay 800 ms late and notes when the answer
+// ended.
+describe.skipIf(!chromiumAvailable)("lifecycle and network in Chromium", () => {
+  const WORKER_PAGE = `<!doctype html><meta charset="utf-8"><title>Worker probe</title>
+<p id="worker-result">Worker not started</p>
+<script>
+const source = "postMessage('worker-ready')";
+const worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+worker.onmessage = (event) => { document.getElementById("worker-result").textContent = event.data; };
+</script>`;
+  let site: Server;
+  let origin: string;
+  let browser: ChromiumBrowser;
+  let page: ChromiumPage | undefined;
+  let session: TabSession | undefined;
+  let delayEnded = 0;
+  beforeAll(async () => {
+    site = createServer((request, response) => {
+      const path = new URL(request.url || "/", "http://x").pathname;
+      if (path === "/probe/delay") {
+        setTimeout(() => {
+          response.writeHead(200, { "Content-Type": "text/plain" });
+          response.end("Delayed", () => {
+            delayEnded = Date.now();
+          });
+        }, 800);
+        return;
+      }
+      const html = path === "/probe/worker" ? WORKER_PAGE : framePages[path];
+      response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
+      response.end(html || "");
+    });
+    await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+    origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+    browser = await launchChromium();
+  }, 60000);
+  afterEach(async () => {
+    await session?.release();
+    await page?.close();
+    session = page = undefined;
+  });
+  afterAll(async () => {
+    await browser?.close();
+    site?.close();
+  });
+  const step = (): Step => ({ deadline: Date.now() + 10000 });
+  // A session attached to a fresh page, then the page loaded through it.
+  const open = async (path: string) => {
+    page = await browser.newPage();
+    const opened = new TabSession(page.host, {
+      tabId: "chromium",
+      waitForSpaceIdle: async () => {},
+    });
+    session = opened;
+    opened.attach();
+    const { loaderId } = await opened.send<{ loaderId: string }>(
+      "Page.navigate",
+      { url: origin + path },
+      step(),
+    );
+    await opened.waitForLifecycle("load", { ...step(), loaderId });
+    return opened;
+  };
+
+  it("waits for network idle until a delayed request in the localhost frame finishes", async () => {
+    const opened = await open("/frames/outer");
+    let frame: FrameInfo | undefined;
+    for (const end = Date.now() + 10000; !frame && Date.now() < end; ) {
+      frame = (await opened.frames(step())).find(
+        (item) => item.url.includes("//localhost:") && !!item.sessionId,
+      );
+      if (!frame) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await opened.waitForLifecycle("load", {
+      ...step(),
+      frameId: frame!.frameId,
+    });
+    // Every document request has ended, the localhost frame's included,
+    // though only that frame's own session could have seen its end.
+    await opened.network.waitForIdle(300, step());
+    const sent = Date.now();
+    await opened.send(
+      "Runtime.evaluate",
+      { expression: "fetch('/probe/delay').then((response) => response.text())" },
+      { ...step(), sessionId: frame!.sessionId, mutates: true },
+    );
+    await expect.poll(() => opened.network.inFlight()).toBe(1);
+    await opened.network.waitForIdle(300, step());
+    const idle = Date.now();
+    expect(idle - sent).toBeGreaterThanOrEqual(700);
+    expect(delayEnded).toBeGreaterThan(0);
+    expect(idle).toBeGreaterThanOrEqual(delayEnded);
+    expect(opened.network.inFlight()).toBe(0);
+  }, 20000);
+
+  it("lets a blob worker post worker-ready within 3 seconds", async () => {
+    const opened = await open("/probe/worker");
+    const main = await opened.mainFrameId(step());
+    const end = Date.now() + 3000;
+    let posted = false;
+    while (!posted && Date.now() < end) {
+      const { matched } = await opened.evaluateInFrame(
+        main,
+        "check",
+        { text: "worker-ready" },
+        { ...step(), namespace: "internal" },
+      );
+      posted = matched === true;
+      if (!posted) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(posted).toBe(true);
+    // The worker's script request ends where no session of the tab hears
+    // it, so it never keeps the tab busy.
+    await opened.network.waitForIdle(300, step());
   }, 20000);
 });

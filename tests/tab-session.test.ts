@@ -39,7 +39,11 @@ import type { BrowserState, Space } from "../shared/types";
 import {
   FakeHost,
   attachedTarget,
+  frameNavigated,
   frameTree,
+  lifecycleEvent,
+  loadingEnded,
+  requestWillBeSent,
   type FakeDebugger,
 } from "./fake-cdp";
 
@@ -2340,5 +2344,574 @@ describe("frames", () => {
     expect(createdWorlds(cdp).map((command) => command.params.frameId)).toEqual(
       ["main"],
     );
+  });
+});
+describe("lifecycle and network", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const step = (ms = 10000) => ({ deadline: Date.now() + ms });
+  // A ready session whose sessions each answer Page.getFrameTree with their
+  // own frames. heard collects its lifecycle events.
+  const tracked = async () => {
+    const opened = await ready();
+    const trees: Record<string, Parameters<typeof frameTree>[0]> = {
+      "": [{ id: "main", url: "https://example.com/", loaderId: "loader-1" }],
+    };
+    opened.cdp.reply("Page.getFrameTree", (_params, sessionId) =>
+      frameTree(trees[sessionId ?? ""]),
+    );
+    const heard: unknown[][] = [];
+    opened.session.on("lifecycle", ({ params, sessionId }) => {
+      heard.push([params.frameId, params.loaderId, params.state, sessionId]);
+    });
+    return { ...opened, trees, heard };
+  };
+  // A frame of the page that runs in the page's process.
+  const localFrame = (
+    cdp: FakeDebugger,
+    frameId: string,
+    loaderId: string,
+    parentId = "main",
+  ) => {
+    cdp.event("Page.frameAttached", { frameId, parentFrameId: parentId });
+    frameNavigated(cdp, {
+      frameId,
+      parentId,
+      loaderId,
+      url: `https://example.com/${frameId}`,
+    });
+  };
+  // A frame of another site in a process of its own. Auto-attach gives it a
+  // session, which answers with the frame's own tree.
+  const remoteFrame = async (
+    cdp: FakeDebugger,
+    trees: Record<string, Parameters<typeof frameTree>[0]>,
+    frameId: string,
+    loaderId: string,
+  ) => {
+    const sessionId = `${frameId}-session`;
+    const url = `https://${frameId}.example/`;
+    trees[sessionId] = [{ id: frameId, parentId: "main", url, loaderId }];
+    cdp.event("Page.frameAttached", { frameId, parentFrameId: "main" });
+    attachedTarget(cdp, { sessionId, targetId: frameId, url });
+    await settle();
+    return sessionId;
+  };
+
+  it("follows lifecycle per frame and loader from Page.lifecycleEvent and frameNavigated, counting a back-forward cache restore as load", async () => {
+    const { session, cdp, trees, heard } = await tracked();
+    const main = async () => (await session.frames(step()))[0];
+    // No event has described the document the session attached to.
+    expect(await main()).toMatchObject({
+      frameId: "main",
+      loaderId: "loader-1",
+      lifecycle: "unknown",
+    });
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name: "init" });
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-2",
+      url: "https://example.com/next",
+    });
+    expect(await main()).toMatchObject({
+      loaderId: "loader-2",
+      lifecycle: "commit",
+    });
+    // Other names are ignored, and a document's state never moves back.
+    for (const name of [
+      "DOMContentLoaded",
+      "firstPaint",
+      "networkAlmostIdle",
+      "load",
+      "init",
+      "DOMContentLoaded",
+    ])
+      lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name });
+    expect(await main()).toMatchObject({ lifecycle: "load" });
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-0",
+      url: "https://example.com/",
+      type: "BackForwardCacheRestore",
+    });
+    expect(await main()).toMatchObject({
+      loaderId: "loader-0",
+      lifecycle: "load",
+    });
+    // Each frame and each of its documents is followed on its own.
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-2",
+      name: "DOMContentLoaded",
+    });
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-1",
+      name: "DOMContentLoaded",
+    });
+    lifecycleEvent(cdp, { frameId: "child", loaderId: "child-1", name: "init" });
+    // Turning lifecycle events on in a frame's own session replays its
+    // document, naming its commit "commit".
+    const remote = await remoteFrame(cdp, trees, "remote", "remote-1");
+    for (const name of ["commit", "DOMContentLoaded"])
+      lifecycleEvent(cdp, {
+        frameId: "remote",
+        loaderId: "remote-1",
+        name,
+        sessionId: remote,
+      });
+    // A session the tab did not set up never counts.
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-0",
+      name: "load",
+      sessionId: "agent-session",
+    });
+    expect(heard).toEqual([
+      ["main", "loader-2", "commit", undefined],
+      ["main", "loader-2", "domcontentloaded", undefined],
+      ["main", "loader-2", "load", undefined],
+      ["main", "loader-0", "load", undefined],
+      ["main", "loader-1", "domcontentloaded", undefined],
+      ["child", "child-1", "commit", undefined],
+      ["remote", "remote-1", "commit", remote],
+      ["remote", "remote-1", "domcontentloaded", remote],
+    ]);
+    // A frame keeps its last two documents only, so an event for an older
+    // one starts it over.
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name: "load" });
+    expect(heard.at(-1)).toEqual(["main", "loader-2", "load", undefined]);
+  });
+
+  it("settles an unknown lifecycle with one ready probe", async () => {
+    const { session, cdp, heard } = await tracked();
+    let readyState = "interactive";
+    cdp.reply("Runtime.evaluate", () => ({
+      result: { type: "object", value: { ok: true, readyState } },
+    }));
+    const probes = () =>
+      cdp.sent
+        .filter((command) => command.method === "Runtime.evaluate")
+        .map((command) => command.params.expression);
+    const loaded = track(session.waitForLifecycle("load", step()));
+    const parsed = track(session.waitForLifecycle("domcontentloaded", step()));
+    await settle();
+    expect(probes()).toEqual([operationExpression("ready", {}, "internal")]);
+    expect(parsed).toEqual({ settled: true, value: undefined });
+    expect(loaded.settled).toBe(false);
+    // Lifecycle events take it from there, with no second probe.
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-1", name: "load" });
+    await settle();
+    expect(loaded).toEqual({ settled: true, value: undefined });
+    await session.waitForLifecycle("load", step());
+    expect(probes()).toHaveLength(1);
+    expect((await session.frames(step()))[0].lifecycle).toBe("load");
+    expect(heard).toEqual([
+      ["main", "loader-1", "domcontentloaded", undefined],
+      ["main", "loader-1", "load", undefined],
+    ]);
+    // A lost debugger forgets what it knew, so the document is read again.
+    readyState = "complete";
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    await session.waitForLifecycle("load", step());
+    expect(probes()).toHaveLength(2);
+    // A frame that has not committed a document yet is never probed.
+    cdp.event("Page.frameAttached", { frameId: "child", parentFrameId: "main" });
+    const child = track(
+      session.waitForLifecycle("load", { ...step(), frameId: "child" }),
+    );
+    await settle();
+    lifecycleEvent(cdp, { frameId: "child", loaderId: "child-1", name: "init" });
+    frameNavigated(cdp, {
+      frameId: "child",
+      parentId: "main",
+      loaderId: "child-1",
+      url: "https://example.com/child",
+    });
+    lifecycleEvent(cdp, { frameId: "child", loaderId: "child-1", name: "load" });
+    await settle();
+    expect(child).toEqual({ settled: true, value: undefined });
+    expect(probes()).toHaveLength(2);
+  });
+
+  it("waitForLifecycle resolves at the state and rejects with page_timeout awaited load at the deadline, FrameGoneError when the frame is removed and tab_closed when the tab closes", async () => {
+    const { session, cdp } = await tracked();
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-1", name: "init" });
+    const parsed = track(session.waitForLifecycle("domcontentloaded", step()));
+    await settle();
+    expect(parsed.settled).toBe(false);
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-1",
+      name: "DOMContentLoaded",
+    });
+    await settle();
+    expect(parsed).toEqual({ settled: true, value: undefined });
+    // With a loaderId it waits for that document, before it commits too,
+    // and fails if the frame commits another first.
+    const next = track(
+      session.waitForLifecycle("load", { ...step(), loaderId: "loader-2" }),
+    );
+    await settle();
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name: "init" });
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-2",
+      url: "https://example.com/next",
+    });
+    await settle();
+    expect(next.settled).toBe(false);
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name: "load" });
+    await settle();
+    expect(next).toEqual({ settled: true, value: undefined });
+    const replaced = track(
+      session.waitForLifecycle("load", { ...step(), loaderId: "loader-3" }),
+    );
+    await settle();
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-4", name: "init" });
+    await settle();
+    expect(replaced.error).toBeInstanceOf(ContextLostError);
+    expect(replaced.error).toMatchObject({ started: false });
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-4",
+      url: "https://example.com/last",
+    });
+    const late = track(session.waitForLifecycle("load", step(3000)));
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(late.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(late.error).toBeInstanceOf(CdpTimeoutError);
+    expect(toApiError(late.error)).toMatchObject({
+      status: 504,
+      code: "page_timeout",
+      fields: { awaited: "load" },
+    });
+    localFrame(cdp, "child", "child-1");
+    const child = track(
+      session.waitForLifecycle("load", { ...step(), frameId: "child" }),
+    );
+    await settle();
+    cdp.event("Page.frameDetached", { frameId: "child", reason: "remove" });
+    await settle();
+    expect(child.error).toBeInstanceOf(FrameGoneError);
+    expect(child.error).toMatchObject({ frameId: "child" });
+    await expect(
+      session.waitForLifecycle("load", { ...step(), frameId: "gone" }),
+    ).rejects.toBeInstanceOf(FrameGoneError);
+    // Every wake runs the guard first, and the step's signal ends the wait.
+    const takeover = new Error("The person is using this space.");
+    let owner = "agent";
+    const guarded = track(
+      session.waitForLifecycle("load", {
+        ...step(),
+        guard: () => {
+          if (owner !== "agent") throw takeover;
+        },
+      }),
+    );
+    const controller = new AbortController();
+    const aborted = track(
+      session.waitForLifecycle("load", {
+        ...step(),
+        signal: controller.signal,
+      }),
+    );
+    await settle();
+    owner = "human";
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-4",
+      name: "DOMContentLoaded",
+    });
+    controller.abort(new Error("The client went away."));
+    await settle();
+    expect(guarded.error).toBe(takeover);
+    expect(aborted.error).toMatchObject({ message: "The client went away." });
+    // Release ends a wait as a lost session.
+    const releasing = track(session.waitForLifecycle("load", step()));
+    await settle();
+    expect(releasing.settled).toBe(false);
+    await session.release();
+    expect(releasing.error).toBeInstanceOf(SessionLostError);
+    expect(releasing.error).toMatchObject({ reason: "unavailable" });
+    const other = await tracked();
+    const closing = track(other.session.waitForLifecycle("load", step()));
+    await settle();
+    other.host.destroy();
+    await settle();
+    expect(closing.error).toBeInstanceOf(TabClosedError);
+    expect(toApiError(closing.error)).toMatchObject({
+      status: 409,
+      code: "tab_closed",
+    });
+  });
+
+  it("tracks requests by requestId across sessions until loadingFinished or loadingFailed on any session", async () => {
+    const { session, cdp, trees } = await tracked();
+    const remote = await remoteFrame(cdp, trees, "remote", "remote-1");
+    const start = Date.now();
+    expect(session.network.inFlight()).toBe(0);
+    expect(session.network.lastActivityAt()).toBe(0);
+    requestWillBeSent(cdp, {
+      requestId: "page.1",
+      frameId: "main",
+      loaderId: "loader-1",
+      url: "https://example.com/app.js",
+    });
+    expect(session.network.inFlight()).toBe(1);
+    expect(session.network.lastActivityAt()).toBe(start);
+    // A redirect keeps its request.
+    await vi.advanceTimersByTimeAsync(100);
+    requestWillBeSent(cdp, {
+      requestId: "page.1",
+      frameId: "main",
+      loaderId: "loader-1",
+      url: "https://cdn.example.com/app.js",
+      redirect: true,
+    });
+    requestWillBeSent(cdp, {
+      requestId: "remote.1",
+      frameId: "remote",
+      loaderId: "remote-1",
+      url: "https://remote.example/data.json",
+      sessionId: remote,
+    });
+    expect(session.network.inFlight()).toBe(2);
+    expect(session.network.lastActivityAt()).toBe(start + 100);
+    await vi.advanceTimersByTimeAsync(100);
+    loadingEnded(cdp, "page.1");
+    loadingEnded(cdp, "remote.1", { failed: true, sessionId: remote });
+    expect(session.network.inFlight()).toBe(0);
+    expect(session.network.lastActivityAt()).toBe(start + 200);
+    // A frame's document request starts on its parent's session and ends on
+    // the frame's own.
+    requestWillBeSent(cdp, {
+      requestId: "remote-2",
+      frameId: "remote",
+      loaderId: "remote-2",
+      url: "https://remote.example/next",
+    });
+    expect(session.network.inFlight()).toBe(1);
+    loadingEnded(cdp, "remote-2", { sessionId: remote });
+    expect(session.network.inFlight()).toBe(0);
+    // Its session can miss that end; the parsed document ends it then.
+    requestWillBeSent(cdp, {
+      requestId: "remote-3",
+      frameId: "remote",
+      loaderId: "remote-3",
+      url: "https://remote.example/last",
+    });
+    lifecycleEvent(cdp, {
+      frameId: "remote",
+      loaderId: "remote-3",
+      name: "DOMContentLoaded",
+      sessionId: remote,
+    });
+    expect(session.network.inFlight()).toBe(0);
+    // An end Kamapathy never saw start changes nothing.
+    await vi.advanceTimersByTimeAsync(100);
+    const last = session.network.lastActivityAt();
+    loadingEnded(cdp, "before-attach");
+    expect(session.network.lastActivityAt()).toBe(last);
+  });
+
+  it("ignores /favicon.ico requests and agent sessions", async () => {
+    const { session, cdp } = await tracked();
+    const sent = (
+      requestId: string,
+      url: string,
+      options: { loaderId?: string; sessionId?: string } = {},
+    ) =>
+      requestWillBeSent(cdp, {
+        requestId,
+        frameId: "main",
+        loaderId: "loader-1",
+        url,
+        ...options,
+      });
+    sent("icon.1", "https://example.com/favicon.ico");
+    sent("icon.2", "https://example.com/static/favicon.ico?v=2");
+    // A session the tab did not set up, as an agent's own will be.
+    sent("agent.1", "https://example.com/data.json", {
+      sessionId: "agent-session",
+    });
+    // A worker's requests carry no loaderId and end only on its own target.
+    sent("worker.1", "https://example.com/worker.js", { loaderId: "" });
+    expect(session.network.inFlight()).toBe(0);
+    expect(session.network.lastActivityAt()).toBe(0);
+    // Only the path decides.
+    sent("page.1", "https://example.com/favicon.ico.json");
+    sent("page.2", "https://example.com/search?q=/favicon.ico");
+    expect(session.network.inFlight()).toBe(2);
+  });
+
+  it("drops requests of removed frames, of frames that committed another loader and of ended sessions", async () => {
+    const { session, cdp, trees } = await tracked();
+    const inFlight = () => session.network.inFlight();
+    const sent = (
+      requestId: string,
+      frameId: string,
+      loaderId: string,
+      sessionId?: string,
+    ) =>
+      requestWillBeSent(cdp, {
+        requestId,
+        frameId,
+        loaderId,
+        url: `https://example.com/${requestId}`,
+        sessionId,
+      });
+    // Chromium removes a frame's frames before the frame itself.
+    localFrame(cdp, "outer", "outer-1");
+    localFrame(cdp, "inner", "inner-1", "outer");
+    sent("outer.1", "outer", "outer-1");
+    sent("inner.1", "inner", "inner-1");
+    expect(inFlight()).toBe(2);
+    cdp.event("Page.frameDetached", { frameId: "inner", reason: "remove" });
+    cdp.event("Page.frameDetached", { frameId: "outer", reason: "remove" });
+    expect(inFlight()).toBe(0);
+    // A frame moving to its own process keeps its document request, which
+    // ends on the frame's new session.
+    localFrame(cdp, "moving", "moving-1");
+    sent("moving-2", "moving", "moving-2");
+    cdp.event("Page.frameDetached", { frameId: "moving", reason: "swap" });
+    expect(inFlight()).toBe(1);
+    loadingEnded(cdp, "moving-2");
+    // A frame that commits another document drops its earlier documents'
+    // requests, whether init or Page.frameNavigated says so first.
+    localFrame(cdp, "child", "child-1");
+    sent("child.1", "child", "child-1");
+    sent("child-2", "child", "child-2");
+    lifecycleEvent(cdp, { frameId: "child", loaderId: "child-2", name: "init" });
+    expect(inFlight()).toBe(1);
+    sent("child.2", "child", "child-2");
+    frameNavigated(cdp, {
+      frameId: "child",
+      parentId: "main",
+      loaderId: "child-3",
+      url: "https://example.com/child-3",
+    });
+    expect(inFlight()).toBe(0);
+    // The main frame's next document takes the last one's frames with it,
+    // though Chromium reports no Page.frameDetached for them.
+    sent("child.3", "child", "child-3");
+    sent("main.1", "main", "loader-1");
+    sent("loader-2", "main", "loader-2");
+    lifecycleEvent(cdp, { frameId: "main", loaderId: "loader-2", name: "init" });
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-2",
+      url: "https://example.com/next",
+    });
+    expect(inFlight()).toBe(1);
+    // A session that ends takes the requests it reported, those of frames
+    // inside its own included, and its frame's document request, which
+    // began on the page's session.
+    const remote = await remoteFrame(cdp, trees, "remote", "remote-1");
+    sent("remote-1", "remote", "remote-1");
+    sent("remote.1", "remote", "remote-1", remote);
+    sent("nested.1", "nested", "nested-1", remote);
+    expect(inFlight()).toBe(4);
+    cdp.event("Target.detachedFromTarget", {
+      sessionId: remote,
+      targetId: "remote",
+    });
+    expect(inFlight()).toBe(1);
+    // A lost debugger forgets every request.
+    cdp.lose();
+    expect(inFlight()).toBe(0);
+  });
+
+  it("waitForIdle resolves once nothing has been in flight for idleMs since the last start or finish", async () => {
+    const { session, cdp } = await tracked();
+    const sent = (requestId: string) =>
+      requestWillBeSent(cdp, {
+        requestId,
+        frameId: "main",
+        loaderId: "loader-1",
+        url: `https://example.com/${requestId}`,
+      });
+    // A tab with nothing in flight since attach is idle at once.
+    await expect(
+      session.network.waitForIdle(500, step()),
+    ).resolves.toBeUndefined();
+    sent("a");
+    const idle = track(session.network.waitForIdle(500, step()));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(idle.settled).toBe(false);
+    loadingEnded(cdp, "a");
+    await vi.advanceTimersByTimeAsync(400);
+    // A request that starts and ends meanwhile starts the quiet time again.
+    sent("b");
+    loadingEnded(cdp, "b");
+    await vi.advanceTimersByTimeAsync(499);
+    expect(idle.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(idle).toEqual({ settled: true, value: undefined });
+    sent("c");
+    const busy = track(session.network.waitForIdle(500, step(2000)));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(busy.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(busy.error).toBeInstanceOf(CdpTimeoutError);
+    expect(toApiError(busy.error)).toMatchObject({
+      status: 504,
+      code: "page_timeout",
+      fields: { awaited: "load" },
+    });
+    // Every wake runs the guard first, and the step's signal ends the wait.
+    const takeover = new Error("The person is using this space.");
+    let owner = "agent";
+    const guarded = track(
+      session.network.waitForIdle(500, {
+        ...step(),
+        guard: () => {
+          if (owner !== "agent") throw takeover;
+        },
+      }),
+    );
+    const controller = new AbortController();
+    const aborted = track(
+      session.network.waitForIdle(500, {
+        ...step(),
+        signal: controller.signal,
+      }),
+    );
+    owner = "human";
+    loadingEnded(cdp, "c");
+    controller.abort(new Error("The client went away."));
+    await settle();
+    expect(guarded.error).toBe(takeover);
+    expect(aborted.error).toMatchObject({ message: "The client went away." });
+    // Release ends a wait as a lost session, and a closed tab as tab_closed.
+    sent("d");
+    const releasing = track(session.network.waitForIdle(500, step()));
+    await settle();
+    expect(releasing.settled).toBe(false);
+    await session.release();
+    expect(releasing.error).toBeInstanceOf(SessionLostError);
+    expect(releasing.error).toMatchObject({ reason: "unavailable" });
+    const other = await tracked();
+    requestWillBeSent(other.cdp, {
+      requestId: "e",
+      frameId: "main",
+      loaderId: "loader-1",
+      url: "https://example.com/e",
+    });
+    const closing = track(other.session.network.waitForIdle(500, step()));
+    other.host.destroy();
+    await settle();
+    expect(closing.error).toBeInstanceOf(TabClosedError);
+    expect(toApiError(closing.error)).toMatchObject({
+      status: 409,
+      code: "tab_closed",
+    });
   });
 });

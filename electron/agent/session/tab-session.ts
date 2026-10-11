@@ -10,6 +10,8 @@ import {
   TargetRefusedError,
 } from "./errors";
 import { FrameRegistry, type FrameRecord } from "./frames";
+import { LifecycleTracker, reached } from "./lifecycle";
+import { NetworkTracker } from "./network";
 import {
   OPERATIONS,
   PAGE_SOURCE,
@@ -55,6 +57,28 @@ const releasesInput = (method: string, params: Record<string, unknown>) =>
   (method === "Input.setInterceptDrags" && params.enabled === false);
 const report = (error: unknown) =>
   console.error("A tab session listener failed:", error);
+// The events lifecycle and network tracking follow. Method listeners hear
+// only Kamapathy's own sessions, never an agent's.
+const LOADING_EVENTS = [
+  "Page.lifecycleEvent",
+  "Page.frameNavigated",
+  "Network.requestWillBeSent",
+  "Network.loadingFinished",
+  "Network.loadingFailed",
+];
+type Commit = { frameId: string; loaderId: string };
+// The document an event says a frame committed: a live init, the commit
+// that turning lifecycle events on replays, or Page.frameNavigated.
+const commitOf = ({ method, params }: CdpEvent): Commit | undefined => {
+  if (method === "Page.frameNavigated")
+    return { frameId: params.frame.id, loaderId: params.frame.loaderId };
+  if (
+    method === "Page.lifecycleEvent" &&
+    (params.name === "init" || params.name === "commit")
+  )
+    return { frameId: params.frameId, loaderId: params.loaderId };
+  return undefined;
+};
 // What a failed call into one of Kamapathy's worlds means: a context gone
 // before the call ran, or one destroyed while it ran.
 const lostContext = (error: unknown) => {
@@ -98,6 +122,27 @@ export class TabSession {
   private setupTimer?: ReturnType<typeof setTimeout>;
   private retries: ReturnType<typeof setTimeout>[] = [];
   private readonly registry = new FrameRegistry();
+  private lifecycle = new LifecycleTracker();
+  private requests = new NetworkTracker();
+  // Lifecycle waits, checked again on every change that can settle them.
+  private lifecycleWaits = new Set<(commit?: Commit) => void>();
+  // The documents a ready probe is reading.
+  private probes = new Set<string>();
+  // Ends every wait once release starts or the tab closes.
+  private ending = new AbortController();
+  readonly network: {
+    inFlight(): number;
+    lastActivityAt(): number;
+    waitForIdle(idleMs: number, step: Step): Promise<void>;
+  } = {
+    inFlight: () => this.requests.inFlight(),
+    lastActivityAt: () => this.requests.lastActivityAt(),
+    waitForIdle: (idleMs, step) =>
+      this.requests.waitForIdle(idleMs, {
+        ...step,
+        signal: this.waitSignal(step),
+      }),
+  };
   // Iframe sessions, each with the session that reported it.
   private children = new Map<string, { parent?: string }>();
   private hooks = new Set<SetupHook>();
@@ -127,6 +172,32 @@ export class TabSession {
     contents.on("destroyed", this.onDestroyed);
     this.cdp.on("message", this.onMessage);
     this.cdp.on("detach", this.onDetach);
+    for (const method of LOADING_EVENTS)
+      this.on(method, (event) => this.trackLoading(event));
+    // A session that ends takes its requests with it, and its frame's: the
+    // frame's document request began on its parent's session.
+    this.on("Target.detachedFromTarget", ({ params }) => {
+      this.requests.dropSession(params.sessionId);
+      if (params.targetId) this.requests.dropFrame(params.targetId);
+    });
+    this.on("frame", ({ params }) => {
+      if (params.change !== "detached") return;
+      this.requests.dropFrame(params.frameId);
+      this.lifecycle.forget(params.frameId);
+      this.wakeLifecycle();
+    });
+    this.on("attached", () => this.wakeLifecycle());
+    // The lifecycle events that setup turns on again replay each document.
+    this.on("detached", () => {
+      this.lifecycle.clear();
+      this.requests.clear();
+    });
+    this.on("releasing", () => {
+      this.ending.abort(new SessionLostError("unavailable"));
+    });
+    this.on("closed", () => {
+      this.ending.abort(new TabClosedError());
+    });
   }
 
   get state(): SessionState {
@@ -278,7 +349,7 @@ export class TabSession {
           crossOrigin: this.registry.crossOrigin(frame.frameId),
           path,
           loaderId: frame.loaderId,
-          lifecycle: "unknown",
+          lifecycle: this.lifecycle.state(frame.frameId, frame.loaderId),
           ...(frame.unavailable ? { unavailable: true as const } : {}),
           ...(frame.blocked ? { blocked: true as const } : {}),
         });
@@ -366,6 +437,81 @@ export class TabSession {
         throw error;
       }
     }
+  }
+
+  // Resolves once a frame's document reaches state: the document loaderId
+  // names, else the one the frame shows. The frame defaults to the main
+  // frame.
+  async waitForLifecycle(
+    state: "commit" | "domcontentloaded" | "load",
+    step: Step & { frameId?: string; loaderId?: string },
+  ): Promise<void> {
+    const frameId = step.frameId ?? (await this.mainFrameId(step));
+    const signal = this.waitSignal(step);
+    return new Promise<void>((resolve, reject) => {
+      let probed = false;
+      const stop = () => {
+        clearTimeout(expiry);
+        this.lifecycleWaits.delete(check);
+        signal.removeEventListener("abort", aborted);
+      };
+      const fail = (error: unknown) => {
+        stop();
+        reject(error);
+      };
+      const check = (commit?: Commit) => {
+        try {
+          step.guard?.();
+        } catch (error) {
+          return fail(error);
+        }
+        const frame = this.registry.get(frameId);
+        // A lost debugger empties the registry until setup reads it again.
+        if (!frame) {
+          if (this.state === "ready") fail(new FrameGoneError(frameId));
+          return;
+        }
+        if (
+          step.loaderId &&
+          commit?.frameId === frameId &&
+          commit.loaderId !== step.loaderId
+        )
+          return fail(new ContextLostError(false));
+        const loaderId = step.loaderId ?? frame.loaderId;
+        const current = this.lifecycle.state(frameId, loaderId);
+        if (reached(current, state)) {
+          stop();
+          return resolve();
+        }
+        // Only a document the frame shows now can be read, and a frame that
+        // has not committed one yet has none to read.
+        if (
+          current === "unknown" &&
+          !probed &&
+          loaderId &&
+          loaderId === frame.loaderId
+        ) {
+          probed = true;
+          this.probeReady(frameId, loaderId, step);
+        }
+      };
+      const aborted = () => {
+        try {
+          step.guard?.();
+        } catch (error) {
+          return fail(error);
+        }
+        fail(signal.reason);
+      };
+      const expiry = setTimeout(
+        () => fail(new CdpTimeoutError("load")),
+        step.deadline - Date.now(),
+      );
+      if (signal.aborted) return aborted();
+      signal.addEventListener("abort", aborted);
+      this.lifecycleWaits.add(check);
+      check();
+    });
   }
 
   // The frame's Kamapathy world for its current document, made on first use
@@ -908,6 +1054,69 @@ export class TabSession {
     this.contents.removeListener("destroyed", this.onDestroyed);
     this.cdp.removeListener("message", this.onMessage);
     this.cdp.removeListener("detach", this.onDetach);
+  }
+
+  private trackLoading(event: CdpEvent): void {
+    const commit = commitOf(event);
+    // Requests of the frame's earlier documents can no longer end where
+    // Kamapathy hears them.
+    if (commit) this.requests.dropOtherLoaders(commit.frameId, commit.loaderId);
+    this.requests.apply(event);
+    const change = this.lifecycle.apply(event);
+    if (change) this.emit("lifecycle", change, event.sessionId);
+    if (change || commit) this.wakeLifecycle(commit);
+  }
+
+  private wakeLifecycle(commit?: Commit): void {
+    for (const check of [...this.lifecycleWaits]) check(commit);
+  }
+
+  // Reads readyState once for a document no lifecycle event has described,
+  // such as one still loading when the session attached.
+  private probeReady(frameId: string, loaderId: string, step: Step): void {
+    const key = `${frameId}|${loaderId}`;
+    if (this.probes.has(key)) return;
+    this.probes.add(key);
+    this.evaluateInFrame(
+      frameId,
+      "ready",
+      {},
+      {
+        deadline: step.deadline,
+        signal: step.signal,
+        guard: step.guard,
+        namespace: "internal",
+      },
+    )
+      .then((result) => {
+        const readyState = result?.readyState;
+        const frame = this.registry.get(frameId);
+        // The frame may have moved on while the probe ran.
+        if (
+          frame?.loaderId !== loaderId ||
+          (readyState !== "loading" &&
+            readyState !== "interactive" &&
+            readyState !== "complete")
+        )
+          return;
+        const before = this.lifecycle.state(frameId, loaderId);
+        this.lifecycle.settle(frameId, loaderId, readyState);
+        const state = this.lifecycle.state(frameId, loaderId);
+        if (state !== before)
+          this.emit("lifecycle", { frameId, loaderId, state }, frame.sessionId);
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.probes.delete(key);
+        this.wakeLifecycle();
+      });
+  }
+
+  // A wait also ends when release starts or the tab closes.
+  private waitSignal(step: Step): AbortSignal {
+    return step.signal
+      ? AbortSignal.any([this.ending.signal, step.signal])
+      : this.ending.signal;
   }
 
   private readonly onMessage = (
