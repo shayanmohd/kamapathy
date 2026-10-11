@@ -22,6 +22,13 @@ export interface AutomationController {
     message: string,
     kind: "info" | "success" | "warning",
   ): void;
+  subscribe(listener: (state: BrowserState) => void): () => void;
+  /** The tab's live page, if it has one. Never creates a view. */
+  peekWebContents(tabId: string): WebContents | undefined;
+  /** Called for each new page, popups included, before its first load. */
+  onViewCreated(
+    listener: (tabId: string, contents: WebContents) => void,
+  ): () => void;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */

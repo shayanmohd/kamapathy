@@ -111,6 +111,9 @@ export class BrowserController {
   private grants = new Set<string>();
   private pendingLoads = new Map<string, symbol>();
   private listeners = new Set<(state: BrowserState) => void>();
+  private viewListeners = new Set<
+    (tabId: string, contents: WebContents) => void
+  >();
   private closedTabs: Tab[] = [];
   private lastActive = new Map<string, string>();
   private bounds: ContentBounds = {
@@ -143,6 +146,13 @@ export class BrowserController {
   subscribe(listener: (state: BrowserState) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  onViewCreated(
+    listener: (tabId: string, contents: WebContents) => void,
+  ): () => void {
+    this.viewListeners.add(listener);
+    return () => this.viewListeners.delete(listener);
   }
 
   private emit(): BrowserState {
@@ -560,6 +570,12 @@ export class BrowserController {
     return this.ensureView(tab).webContents;
   }
 
+  // Unlike getWebContents, this never creates a view.
+  peekWebContents(tabId: string): WebContents | undefined {
+    const contents = this.views.get(tabId)?.webContents;
+    return contents && !contents.isDestroyed() ? contents : undefined;
+  }
+
   canCapturePage(): boolean {
     return (
       !this.window.isDestroyed() &&
@@ -861,6 +877,18 @@ export class BrowserController {
         })
         .catch(() => undefined);
     });
+    // Listeners see each new page before its first load. Commands sent to
+    // the page here are answered only once that load starts.
+    for (const listener of this.viewListeners) {
+      try {
+        listener(tab.id, contents);
+      } catch (error) {
+        console.error(
+          "View listener failed:",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+      }
+    }
     this.load(tab, contents, loadOptions);
     return view;
   }
@@ -1521,5 +1549,6 @@ export class BrowserController {
     this.sessionCleanups.clear();
     this.sessions.clear();
     this.listeners.clear();
+    this.viewListeners.clear();
   }
 }

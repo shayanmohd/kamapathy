@@ -12,7 +12,8 @@ import {
   type AutomationServer,
 } from "../electron/agent/server";
 import { HOME_URL, initialState, newTab } from "../shared/state";
-import type { BrowserAction, BrowserState, Space } from "../shared/types";
+import type { BrowserAction, BrowserState, Space, Tab } from "../shared/types";
+import { isWebUrl } from "../shared/url";
 
 class FakeContents extends EventEmitter {
   scripts: { worldId: number; code: string }[] = [];
@@ -83,10 +84,14 @@ class FakeContents extends EventEmitter {
 }
 class FakeController implements AutomationController {
   state: BrowserState = initialState("linux");
-  // One page per web tab, made when the tab first shows a web page.
+  // One page per web tab, made with its view as in BrowserController. Most
+  // tests drive the newest page through `contents`.
   pages = new Map<string, FakeContents>();
-  private newest?: string;
-  private spare = new FakeContents();
+  private fallback = new FakeContents();
+  private stateListeners = new Set<(state: BrowserState) => void>();
+  private viewListeners = new Set<
+    (tabId: string, contents: WebContents) => void
+  >();
   calls: BrowserAction[] = [];
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
@@ -103,24 +108,13 @@ class FakeController implements AutomationController {
     });
     this.state.tabs.push(newTab("manual-agent", "https://private.example/"));
   }
-  // The page made last, which tests with one page drive.
   get contents(): FakeContents {
-    return this.newest === undefined
-      ? this.spare
-      : this.pages.get(this.newest)!;
+    return [...this.pages.values()].at(-1) ?? this.fallback;
   }
-  set contents(contents: FakeContents) {
-    if (this.newest === undefined) this.spare = contents;
-    else this.pages.set(this.newest, contents);
-  }
-  private page(id: string) {
-    let page = this.pages.get(id);
-    if (!page) {
-      page = new FakeContents();
-      this.pages.set(id, page);
-      this.newest = id;
-    }
-    return page;
+  set contents(page: FakeContents) {
+    const newest = [...this.pages.keys()].at(-1);
+    if (newest) this.pages.set(newest, page);
+    else this.fallback = page;
   }
   isolatedRequests: boolean[] = [];
   createAgentSpace(name: string, options?: { isolated?: boolean }): Space {
@@ -141,9 +135,42 @@ class FakeController implements AutomationController {
   getWebContents(id: string) {
     this.accessedTabs.push(id);
     const tab = this.state.tabs.find((item) => item.id === id);
-    // As in BrowserController, a tab on the new tab page has no web page.
     if (!tab || tab.url === HOME_URL) return undefined;
-    return this.page(id) as unknown as WebContents;
+    return this.ensureView(tab) as unknown as WebContents;
+  }
+  peekWebContents(id: string) {
+    const tab = this.state.tabs.find((item) => item.id === id);
+    const page = this.pages.get(id);
+    if (!tab || tab.url === HOME_URL || !page || page.isDestroyed())
+      return undefined;
+    return page as unknown as WebContents;
+  }
+  subscribe(listener: (state: BrowserState) => void) {
+    this.stateListeners.add(listener);
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
+  onViewCreated(listener: (tabId: string, contents: WebContents) => void) {
+    this.viewListeners.add(listener);
+    return () => {
+      this.viewListeners.delete(listener);
+    };
+  }
+  emit() {
+    for (const listener of this.stateListeners) listener(this.state);
+  }
+  // A web tab gets its page once, and view listeners hear of it before it
+  // would load, as in BrowserController.ensureView.
+  private ensureView(tab: Tab) {
+    let page = this.pages.get(tab.id);
+    if (!page) {
+      page = new FakeContents();
+      this.pages.set(tab.id, page);
+      for (const listener of this.viewListeners)
+        listener(tab.id, page as unknown as WebContents);
+    }
+    return page;
   }
   canCapturePage() {
     return this.captureAvailable;
@@ -156,14 +183,15 @@ class FakeController implements AutomationController {
     if (action.type === "tab:create") {
       const tab = newTab(action.spaceId!, action.url);
       this.state.tabs.push(tab);
-      if (tab.url !== HOME_URL) this.page(tab.id);
       if (!action.background) {
         this.state.activeSpaceId = tab.spaceId;
         this.state.activeTabId = tab.id;
       }
+      if (isWebUrl(tab.url)) this.ensureView(tab);
     } else if (action.type === "tab:navigate") {
-      this.state.tabs.find((tab) => tab.id === action.id)!.url = action.url;
-      this.page(action.id);
+      const tab = this.state.tabs.find((item) => item.id === action.id)!;
+      tab.url = action.url;
+      if (isWebUrl(tab.url)) this.ensureView(tab);
     } else if (action.type === "space:ownership")
       this.state.spaces.find((space) => space.id === action.id)!.owner =
         action.owner;
@@ -176,6 +204,7 @@ class FakeController implements AutomationController {
       );
     } else if (action.type === "tab:close")
       this.state.tabs = this.state.tabs.filter((tab) => tab.id !== action.id);
+    this.emit();
     return this.state;
   }
 }

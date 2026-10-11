@@ -1207,3 +1207,118 @@ describe("keyboard shortcuts", () => {
     expect(press(browser, { ...primary, key: "j", code: "KeyJ" })).toBeUndefined();
   });
 });
+
+describe("view hooks", () => {
+  it("runs view-created listeners before the first loadURL", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const created: {
+      tabId: string;
+      page: unknown;
+      loads: number;
+      menus: number;
+    }[] = [];
+    const stop = browser.onViewCreated((tabId, page) => {
+      created.push({
+        tabId,
+        page,
+        loads: vi.mocked(page.loadURL).mock.calls.length,
+        // The context menu handler is the last event ensureView wires.
+        menus: page.listenerCount("context-menu"),
+      });
+    });
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: space.id,
+      url: "https://example.com/",
+      background: true,
+    });
+    const tab = browser.state.tabs.at(-1)!;
+    const page = contents(browser, tab.id);
+    expect(created).toEqual([{ tabId: tab.id, page, loads: 0, menus: 1 }]);
+    expect(page.loadURL).toHaveBeenCalledExactlyOnceWith("https://example.com/");
+    const open = page.setWindowOpenHandler.mock.calls[0][0];
+    const referrer = { url: "https://example.com/", policy: "default" };
+    expect(open({ url: "https://example.com/popup", referrer })).toEqual({
+      action: "deny",
+    });
+    const popup = browser.state.tabs.at(-1)!;
+    expect(popup).toMatchObject({
+      spaceId: space.id,
+      url: "https://example.com/popup",
+    });
+    const popupPage = contents(browser, popup.id);
+    expect(created).toEqual([
+      { tabId: tab.id, page, loads: 0, menus: 1 },
+      { tabId: popup.id, page: popupPage, loads: 0, menus: 1 },
+    ]);
+    expect(popupPage.loadURL).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/popup",
+      { httpReferrer: referrer },
+    );
+    // Navigating a page that has a view reuses it, so listeners do not run again.
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/next",
+    });
+    expect(created).toHaveLength(2);
+    stop();
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: space.id,
+      url: "https://example.org/",
+      background: true,
+    });
+    expect(created).toHaveLength(2);
+  });
+
+  it("peekWebContents never creates a view", () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const blank = browser.state.tabs.find((tab) => tab.spaceId === space.id)!;
+    // A saved web tab has no view until it is shown or used.
+    const saved = newTab(space.id, "https://example.com/");
+    browser.state.tabs.push(saved);
+    for (const id of [blank.id, saved.id, "missing"])
+      expect(browser.peekWebContents(id)).toBeUndefined();
+    expect(WebContentsView).not.toHaveBeenCalled();
+    const page = contents(browser, saved.id);
+    expect(WebContentsView).toHaveBeenCalledOnce();
+    expect(browser.peekWebContents(saved.id)).toBe(page);
+    page.destroyed = true;
+    expect(browser.peekWebContents(saved.id)).toBeUndefined();
+    expect(WebContentsView).toHaveBeenCalledOnce();
+  });
+
+  it("keeps loading a page when a view-created listener throws", async () => {
+    const browser = controller();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const order: string[] = [];
+      browser.onViewCreated(() => {
+        order.push("first");
+        throw new Error("Listener failed");
+      });
+      browser.onViewCreated(() => {
+        order.push("second");
+      });
+      await browser.dispatch({
+        type: "tab:create",
+        url: "https://example.com/",
+        background: true,
+      });
+      const tab = browser.state.tabs.at(-1)!;
+      expect(order).toEqual(["first", "second"]);
+      expect(contents(browser, tab.id).loadURL).toHaveBeenCalledExactlyOnceWith(
+        "https://example.com/",
+      );
+      expect(logged).toHaveBeenCalledExactlyOnceWith(
+        "View listener failed:",
+        "Listener failed",
+      );
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
