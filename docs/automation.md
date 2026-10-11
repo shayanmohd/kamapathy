@@ -145,31 +145,119 @@ Requests are HTTP over the local agent socket. POST requests require `Content-Ty
 
 Screenshots require a shown, unminimized Kamapathy window, including captures of background tabs. If the native window is hidden or minimized, the screenshot route returns HTTP 409 with `screenshot_unavailable`. Restore the window before retrying a capture, or use a snapshot when it provides enough information. This restriction applies to screenshots; it does not disable the space's other authorized actions.
 
-| Method | Route                  | Body or response                                                                                       |
-| ------ | ---------------------- | ------------------------------------------------------------------------------------------------------ |
-| GET    | `/health`              | Status and app version                                                                                 |
-| GET    | `/spaces`              | `{ spaces: [...] }` for this API session                                                               |
-| POST   | `/spaces`              | `{ "name": "Research", "isolated": true }`; `isolated` is optional and gives the space a session without your sign-ins; returns `{ space }` with its `signIns` |
-| DELETE | `/spaces/:id`          | Closes the space and its tabs                                                                          |
-| GET    | `/spaces/:id/tabs`     | `{ tabs: [...] }`                                                                                      |
-| POST   | `/spaces/:id/tabs`     | `{ "url": "https://example.com" }`, returns `{ tab }`                                                  |
-| POST   | `/spaces/:id/handoff`  | `{}`, returns `{ ok: true, owner: "human" }`                                                           |
-| POST   | `/spaces/:id/resume`   | `{}`, returns `{ ok: true, owner: "agent" }`; allowed while the person has control                     |
-| POST   | `/tabs/:id/navigate`   | `{ "url": "https://example.com" }`, returns `{ tab }`                                                  |
-| GET    | `/tabs/:id/snapshot`   | Compact `{ tabId, url, title, text, interactables, omittedControls?, truncated }`                      |
-| POST   | `/tabs/:id/snapshot`   | `{ "mode": "compact", "selector": "#form", "maxChars": 1000, "maxControls": 10 }`; all fields optional |
-| GET    | `/tabs/:id/screenshot` | PNG of the current page viewport                                                                       |
-| POST   | `/tabs/:id/click`      | `{ "ref": "@e2" }` or `{ "selector": "#submit" }`; returns `{ ok, url, fallback?, rebound? }`              |
-| POST   | `/tabs/:id/fill`       | `{ "ref": "@e1", "value": "Kamapathy" }`; selector also supported                                          |
-| POST   | `/tabs/:id/upload`     | `{ "ref": "@e8", "files": [{ "name": "report.pdf", "type": "application/pdf", "data": "<base64 bytes>" }] }`; returns `{ ok: true, selected: 1 }` |
-| POST   | `/tabs/:id/press`      | `{ "key": "Enter" }`; optional ref or selector                                                         |
-| POST   | `/tabs/:id/scroll`     | `{ "direction": "down", "pixels": 600 }`; optional ref or selector; returns `{ ok, scrolled, selector?, x, y, moved }` |
-| POST   | `/tabs/:id/drag`       | `{ "source": { "ref": "@e4" }, "target": { "selector": "#zone" } }`; returns `{ ok, url, drag, rebound? }` |
-| POST   | `/tabs/:id/wait`       | `{ "selector": "#results", "text": "Complete", "timeoutMs": 5000 }`; fields optional                   |
-| POST   | `/tabs/:id/actions`    | `{ "actions": [...] }`; fixed sequential actions with partial progress                                 |
-| DELETE | `/tabs/:id`            | Closes the tab                                                                                         |
+<!-- generated:routes -->
+| Method | Route | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/health` |  | Checks the connection. Returns `{ status: "ok", version, apiLevel, versions }`. |
+| GET | `/spaces` |  | Lists the spaces this API session can reach. Returns `{ spaces: SpaceView[] }`. |
+| POST | `/spaces` | `name`, `isolated?`, `pageBudget?`, `reuse?` | Creates an agent space whose first page is p1, or with reuse returns the listed space whose ID or name matches. Returns `201 { space: SpaceView, tab: TabView, created: true }; reused 200 { space: SpaceView, created: false }`. |
+| GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |
+| DELETE | `/spaces/:id` |  | Closes an agent space and its tabs. A space holding tabs the person opened is refused. Returns `{ ok: true }`. |
+| POST | `/spaces/:id/handoff` | `{}` | Hands the space to the person. Returns `{ ok: true, owner: "human" }`. |
+| POST | `/spaces/:id/resume` | `{}` | Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
+| POST | `/spaces/:id/wait-for-control` | `timeoutMs?` | Waits until the agent has control of the space, answering at once when it already has, and lists what changed while the person had control. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
+| POST | `/spaces/:id/finish` | `keep` | Ends the agent's task in a space: closes the pages it does not keep, keeps the person's tabs and ends its access. Returns `{ ok: true, spaceId, closedSpace, closed: label[], kept: label[], protected: label[] }`. |
+| GET | `/spaces/:id/tabs` |  | Lists every tab of a space with its label and origin, the last 100 closed labels and the page budget. Returns `{ tabs: TabView[], closed: [{ label, closedBy, at }], budget: { used, limit } }`. |
+| POST | `/spaces/:id/tabs` | `url?` | Opens a page in the background, or a blank page without url. Stops at the page budget. Returns `201 { tab: TabView }`. |
+| POST | `/space-requests` | `reason`, `name?`, `timeoutMs?` | Asks the person to let an agent use one of their spaces and waits for their answer. Returns `{ space: SpaceView, tabs: TabView[], active: TabView \| null }`. |
+| DELETE | `/tabs/:id` |  | Closes a page the agent manages. Its label is retired, and a blank page with the next label replaces a space's last page. Returns `{ ok: true, closed?: label, replacement?: TabView }`. |
+| POST | `/tabs/:id/adopt` | `{}` | Makes a page the agent did not open its own, within the page budget. The page keeps its label. Returns `{ tab: TabView }`. |
+| POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
+| POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
+| GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
+| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
+| POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
+| GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
+| POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
+| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound? }`. |
+| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound? }`. |
+| POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved }`. |
+| POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound? }`. |
+| POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
+| POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected }`. |
+<!-- /generated:routes -->
 
 Navigation accepts only complete HTTP or HTTPS URLs without embedded credentials. Paths do not accept query strings or encoded segments. The server limits its managed spaces to 12 and tabs to 20 per space. Requests for one space run one at a time in arrival order, and different spaces run at the same time, up to six at once. A space can have 16 requests pending and the server 32; more return `429 busy`. Requests that only list spaces or tabs count only toward the server's 32. A wait lets other requests in its space run between checks. Waiting beyond 3 seconds comes out of a request's own timeout, and a request that cannot start in time returns `504 action_timeout` with `awaited: "queue"` without touching the page. Page operations wait up to 15 seconds for loading and another 15 seconds for a response. A timeout does not guarantee a page action was cancelled; inspect the page before retrying a consequential action.
+
+## Error codes
+
+<!-- generated:errors -->
+| Code | Status | Retryable | Fields | Meaning |
+| --- | --- | --- | --- | --- |
+| `invalid_path` | 400 | not retryable |  | The path has a query string, an encoded segment or characters no route uses. |
+| `invalid_json` | 400 | not retryable |  | The request body is not valid JSON. |
+| `invalid_body` | 400 | not retryable |  | The request body is not a JSON object. |
+| `invalid_field` | 400 | not retryable | `field`, `expected`, `index` | A field has the wrong kind or is out of range. |
+| `invalid_target` | 400 | not retryable |  | The action needs exactly one of ref or selector, or cannot use the target it got. |
+| `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
+| `invalid_key` | 400 | not retryable |  | The key is not one press supports. |
+| `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
+| `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
+| `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
+| `invalid_files` | 400 | not retryable |  | The upload has no files, too many, or a malformed one. |
+| `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
+| `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
+| `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
+| `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
+| `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
+| `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
+| `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
+| `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
+| `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
+| `release_refused` | 409 | not retryable | `tabId`, `label` | The agent opened this page, so it closes the page instead of releasing it. |
+| `page_budget` | 409 | not retryable | `limit`, `used`, `pages` | The space already holds as many pages as its budget allows. Close or reuse a page. |
+| `space_protected` | 409 | not retryable | `tabs` | The space holds tabs the person opened, so the agent cannot close it. |
+| `sign_ins_mismatch` | 409 | not retryable | `spaceId`, `signIns` | The space a reuse found uses other sign-ins than the request asked for. |
+| `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
+| `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
+| `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
+| `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
+| `empty_screenshot` | 409 | retryable |  | The page has not rendered yet. |
+| `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
+| `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
+| `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
+| `page_crashed` | 409 | not retryable |  | The page process stopped. |
+| `tab_closed` | 409 | not retryable |  | The tab was closed. |
+| `cross_origin_frame` | 409 | not retryable |  | The control is inside a frame from another origin. |
+| `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
+| `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
+| `input_not_delivered` | 409 | retryable |  | The page never received the input. |
+| `stale_ref` | 409 | not retryable |  | The ref belongs to an earlier snapshot or a control the page removed. |
+| `element_obscured` | 409 | retryable |  | Another element covers the target. |
+| `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
+| `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
+| `content_type` | 415 | not retryable |  | The request body is not JSON. |
+| `element_action_failed` | 422 | not retryable |  | The page refused the action. |
+| `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
+| `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
+| `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
+| `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
+| `invalid_selector` | 422 | not retryable |  | The selector is not valid CSS, or matches no single visible element. |
+| `busy` | 429 | retryable | `scope`, `retryAfterMs` | Too many requests are waiting. |
+| `upload_busy` | 429 | retryable |  | Another file transfer is in progress. |
+| `operation_failed` | 500 | not retryable |  | The browser could not complete the operation. |
+| `tab_creation_failed` | 500 | not retryable |  | Kamapathy could not create the tab. |
+| `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
+| `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
+| `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
+| `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
+| `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
+| `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
+| `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |
+| `request_too_large` | client | not retryable |  | The encoded request is larger than its route accepts. |
+| `invalid_response` | client | not retryable |  | Kamapathy's answer was not what the route returns. |
+| `request_failed` | client | not retryable |  | The request failed without an error code. |
+| `run_timeout` | client | not retryable | `timeoutMs` | The run passed its deadline. A call in progress may still have taken effect. |
+| `interrupted` | client | not retryable | `signal` | A signal or Ctrl+C stopped the run. A call in progress may still have taken effect. |
+| `page_not_found` | client | not retryable | `label`, `closedBy` | No open page in the space has the label; a retired label says who closed it. |
+| `invalid_option` | client | not retryable | `entry`, `option`, `expected`, `suggestion` | Options are not a plain object, or have an undeclared key or a bad value. |
+| `invalid_argument` | client | not retryable | `entry`, `expected` | Arguments are missing, extra or of the wrong kind. |
+| `app_outdated` | client | not retryable | `entry`, `option`, `required`, `available`, `appVersion` | The running Kamapathy predates this call. |
+<!-- /generated:errors -->
 
 ## Isolation and limitations
 

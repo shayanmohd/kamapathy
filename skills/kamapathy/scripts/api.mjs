@@ -15,6 +15,7 @@ import {
 } from "./lib/request.mjs";
 import { checkCall, findEntry } from "./schema/index.mjs";
 
+export { help } from "./help.mjs";
 export { KamapathyError } from "./lib/errors.mjs";
 export * as schema from "./schema/index.mjs";
 

@@ -21,6 +21,14 @@ import {
   takeNotices,
 } from "./lib/request.mjs";
 import { connect } from "./api.mjs";
+import {
+  formatCommand,
+  formatGeneralHelp,
+  helpTopic,
+  programName,
+  skillFolder,
+  skillPath,
+} from "./help.mjs";
 import { startRepl } from "./lib/repl.mjs";
 import { runScript } from "./lib/run.mjs";
 import {
@@ -29,7 +37,9 @@ import {
   workspacePath,
 } from "./lib/workspace.mjs";
 import {
+  API_LEVEL,
   checkBody,
+  CLIENT_VERSION,
   findCommand,
   matchRoute,
   outdated,
@@ -46,77 +56,7 @@ export {
   resolveSocket,
   socketFetch,
 } from "./lib/transport.mjs";
-
-const HELP = `Kamapathy browser client
-
-Kamapathy connects automatically. Each command finds Kamapathy on this
-computer and starts it when agent access was left on. The switch in Settings,
-under Agents, turns access off. Set KAMAPATHY_USER_DATA to use another profile.
-Requires Node.js 22.13 or later.
-
-Usage: node kamapathy.mjs <command> [arguments] [--json]
-
-  health                              Check the connection
-  spaces                              List accessible spaces
-  space create <name> [--isolated]    Create a background agent space, with
-                                      its own sign-ins when --isolated is given
-  space open <name-or-id> [--isolated] [--page-budget <n>]
-                                      Reuse the listed space with this ID or
-                                      name, or create it
-  space finish <space-id> --keep all|none|<tab-id>[,<tab-id>]
-                                      Close the pages the agent does not keep
-                                      and end its access
-  space request --reason <text> [--name <name>] [--timeout <ms>]
-                                      Ask the person to let an agent use one
-                                      of their spaces
-  space close <space-id>               Close a space and its tabs
-  tabs <space-id>                      List tabs in an agent space
-  open <space-id> <url>                Open a background tab
-  new-page <space-id>                  Open a blank background page
-  adopt <tab-id>                       Make a page the agent did not open its own
-  release <tab-id>                     Give a page back to the person
-  navigate <tab-id> <url>              Navigate a tab
-  snapshot <tab-id> [options]          Read bounded page text and control refs
-    --full                            Request the larger snapshot mode
-    --selector <css>                   Scope the snapshot to one element
-    --max-chars <n> --max-controls <n>  Override snapshot bounds
-  click <tab-id> <ref-or-selector>     Click a control
-  fill <tab-id> <ref-or-selector> --stdin
-                                      Read the exact field value from stdin
-  upload <tab-id> <ref> <file> [files] Select up to 8 files, 16 MiB total
-  press <tab-id> <key> [ref-or-selector]
-                                      Press a supported key
-  drag <tab-id> <source> <target>     Drag one element onto another (refs or selectors)
-  scroll <tab-id> <direction> [pixels] [ref-or-selector]
-                                      Scroll up, down, left or right: the page,
-                                      the panel holding a control, or the panel
-                                      in the middle when the page cannot scroll
-  wait <tab-id> --stdin               Read wait options as JSON from stdin
-  batch <tab-id>                      Read an actions array or {actions} JSON
-  screenshot <tab-id> <file.png>       Save a viewport PNG without overwriting
-  close <tab-id>                      Close a tab
-  handoff <space-id>                  Pause automation for human control
-  resume <space-id>                   Take control back when the person says to continue
-  wait-for-control <space-id> [--timeout <ms>]
-                                      Wait until the agent has control again
-  run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>
-                                      Run a script with the client as the
-                                      globals kamapathy, createSpace,
-                                      openSpace, space, spaces and
-                                      requestSpace; run - reads it from stdin
-                                      and run -e <code> runs the code itself.
-                                      It stops after --timeout, 300000 by
-                                      default. TypeScript runs from .ts, .mts
-                                      and .cts files, or with --ts
-  repl [--env-file <path>]...         Start a scripting session in a terminal
-  workspace [--json]                  Print the workspace folder, creating it
-
-A <tab-id> may also be <space-id>:<label>, such as s1:p2.
-Default output is concise text. --json returns compact JSON for programs.
-Batch stops at the first failed action. Submitted actions are never retried.
-Take a snapshot again after navigation before reusing element refs. A ref
-follows a control the page draws again only when that control is unmistakable.
-`;
+import { discover } from "./lib/transport.mjs";
 
 function identifier(value) {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(required(value, "ID")))
@@ -175,8 +115,13 @@ function budget(value, env) {
 // its arguments before anything connects and returns the request, or runs
 // the command itself and returns its exit status.
 export const PARSERS = {
-  help: (_args, { stdout }) => {
-    (stdout || process.stdout).write(HELP);
+  help: (args, { env, stdout }) => {
+    const program = programName(env);
+    (stdout || process.stdout).write(
+      args.length
+        ? `${helpTopic(args, program)}\n`
+        : formatGeneralHelp(program, skillPath()),
+    );
     return 0;
   },
   health: () => ({ path: "/health" }),
@@ -473,17 +418,34 @@ export const PARSERS = {
 
 export async function runCli(argv, options = {}) {
   const stdout = options.stdout || process.stdout;
-  const json = argv.includes("--json");
-  const [command = "help", ...rest] = argv.filter(
-    (argument) => argument !== "--json",
+  // Arguments after -- are read literally, never as --help, --version or
+  // --json.
+  const end = argv.indexOf("--");
+  const flagged = end < 0 ? argv : argv.slice(0, end);
+  const json = flagged.includes("--json");
+  const asksHelp = flagged.some((argument) =>
+    ["--help", "-h"].includes(argument),
   );
+  const [command = "help", ...rest] = [
+    ...flagged.filter(
+      (argument) => !["--json", "--help", "-h"].includes(argument),
+    ),
+    ...(end < 0 ? [] : argv.slice(end + 1)),
+  ];
+  const env = options.env || process.env;
+  if (command === "--version" || command === "-v")
+    return versions(env, options, json, stdout);
   const name =
     rest.length && PARSERS[`${command} ${rest[0]}`]
       ? `${command} ${rest[0]}`
-      : ["--help", "-h"].includes(command)
-        ? "help"
-        : command;
+      : command;
   const parse = Object.hasOwn(PARSERS, name) ? PARSERS[name] : undefined;
+  // <command> --help shows that command's help and nothing else runs; on
+  // its own, --help is general help.
+  if (asksHelp && parse && name !== "help") {
+    stdout.write(`${formatCommand(findCommand(name), programName(env))}\n`);
+    return 0;
+  }
   if (!parse) {
     if (command === "space")
       throw new Error(
@@ -491,7 +453,6 @@ export async function runCli(argv, options = {}) {
       );
     throw new Error(`Unknown command: ${command}. Run help for usage.`);
   }
-  const env = options.env || process.env;
   // Parsers get the caller's own streams, so run can tell a test's sinks
   // from the real process.
   const parsed = await parse(name === command ? rest : rest.slice(1), {
@@ -569,6 +530,79 @@ export async function runCli(argv, options = {}) {
   if (data === null) throw new Error("The API did not return valid JSON.");
   stdout.write(`${json ? JSON.stringify(data) : formatResult(data, name)}\n`);
   return data?.ok === false ? 1 : 0;
+}
+
+// kamapathy --version: the client, the skill and the running Kamapathy,
+// found without starting it.
+async function versions(env, options, json, stdout) {
+  const client = {
+    version: CLIENT_VERSION,
+    apiLevel: API_LEVEL,
+    node: process.versions.node,
+    skill: skillFolder(),
+  };
+  let app = null;
+  let appStatus = "running";
+  let problem;
+  try {
+    const { health } = await discover(env, {
+      ...options.connect,
+      allowLaunch: false,
+      healthTimeoutMs: 2000,
+    });
+    app = {
+      version: health.version,
+      apiLevel: Number.isInteger(health.apiLevel) ? health.apiLevel : 1,
+      electron: health.versions?.electron,
+      chromium: health.versions?.chromium,
+      node: health.versions?.node,
+    };
+  } catch (error) {
+    appStatus =
+      error?.reason === "access_off"
+        ? "access_off"
+        : ["not_running", "quit_by_person"].includes(error?.reason)
+          ? "not_running"
+          : "unreachable";
+    problem = error instanceof Error ? error.message : String(error);
+  }
+  if (json) {
+    stdout.write(`${JSON.stringify({ client, app, appStatus })}\n`);
+    return 0;
+  }
+  const named = app?.version ? `Kamapathy ${line(app.version)}` : "Kamapathy";
+  const lines = [
+    `Kamapathy client ${CLIENT_VERSION}, API level ${API_LEVEL}, Node ${process.versions.node}`,
+    `Skill ${client.skill ?? "folder not found"}`,
+  ];
+  if (!app)
+    lines.push(
+      appStatus === "access_off"
+        ? "Agent access is off in Kamapathy."
+        : appStatus === "not_running"
+          ? "Kamapathy is not running."
+          : `Kamapathy did not answer: ${line(problem)}.`,
+    );
+  else {
+    lines.push(
+      [
+        `${named}, API level ${app.apiLevel}`,
+        ...(app.electron ? [`Electron ${line(app.electron)}`] : []),
+        ...(app.chromium ? [`Chromium ${line(app.chromium)}`] : []),
+        ...(app.node ? [`Node ${line(app.node)}`] : []),
+      ].join(", "),
+    );
+    if (app.apiLevel < API_LEVEL)
+      lines.push(
+        `${named} has API level ${app.apiLevel} and this client uses ${API_LEVEL}. Calls added after level ${app.apiLevel} fail until the person updates Kamapathy.`,
+      );
+    else if (app.apiLevel > API_LEVEL)
+      lines.push(
+        `This skill copy (${CLIENT_VERSION}) is older than ${named}. Update this skill copy, then read its SKILL.md again.`,
+      );
+  }
+  stdout.write(`${lines.join("\n")}\n`);
+  return 0;
 }
 
 // Every command but help and version needs this Node.js.

@@ -455,5 +455,52 @@ export const COMMANDS = [
     "Print the workspace folder, creating it with mode 0700 when missing",
     { since: 2 },
   ),
-  command("help", "Help", "help", "Show the commands"),
+  command("help", "Help", "help [topic]", "Show the commands, or help on one", {
+    arguments: [
+      {
+        name: "topic",
+        description:
+          "A command such as space create, api, errors, routes, or a script entry such as page.click.",
+      },
+    ],
+  }),
+];
+
+// Options every command takes.
+export const GLOBAL_FLAGS = [
+  { name: "--json", description: "Print compact JSON for programs." },
+  { name: "--help, -h", description: "Show help for the command." },
+  {
+    name: "--version, -v",
+    description: "Show the client's, the skill's and Kamapathy's versions.",
+  },
+  { name: "--", description: "Read every later argument literally." },
+];
+
+// Variables the client reads.
+export const ENVIRONMENT = [
+  {
+    name: "KAMAPATHY_USER_DATA",
+    description: "The Kamapathy profile folder to use.",
+  },
+  {
+    name: "KAMAPATHY_NO_LAUNCH",
+    description: "Set to 1 to never start Kamapathy.",
+  },
+  {
+    name: "KAMAPATHY_WORKSPACE",
+    description: "The scripting workspace, by default inside the profile.",
+  },
+  {
+    name: "KAMAPATHY_RUN_TIMEOUT_MS",
+    description: "How long run lets a script take, 300000 by default.",
+  },
+  {
+    name: "KAMAPATHY_PAGE_BUDGET",
+    description: "The page budget new and reused spaces get, 1 to 20.",
+  },
+  {
+    name: "KAMAPATHY_PROGRAM",
+    description: "Set by the launchers so help names the program kamapathy.",
+  },
 ];

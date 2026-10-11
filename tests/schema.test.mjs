@@ -15,6 +15,10 @@ import {
 } from "../skills/kamapathy/scripts/api.mjs";
 import { PARSERS } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { installGlobals } from "../skills/kamapathy/scripts/lib/run.mjs";
+import {
+  generateReference,
+  resolveNames,
+} from "../skills/kamapathy/scripts/help.mjs";
 
 const {
   ACTIONS,
@@ -593,5 +597,33 @@ describe("API schema", () => {
     );
     expect(route("POST /tabs/:id/upload").limit).toBe(24 * 1024 * 1024);
     expect(route("GET /health").lane).toBe("preadmission");
+  });
+
+  it("resolves help names in every accepted form", () => {
+    const names = (query) => resolveNames(query).map((entry) => entry.name);
+    expect(names("Page.wait")).toEqual(["Page.wait"]);
+    expect(names("page.wait")).toEqual(["Page.wait"]);
+    expect(names("PAGE.wait()")).toEqual(["Page.wait"]);
+    expect(names("kamapathy.createSpace")).toEqual(["Client.createSpace"]);
+    expect(names("wait")).toEqual(["Page.wait"]);
+    expect(names("close")).toEqual(["Space.close", "Page.close"]);
+    expect(names("createSpace")).toEqual(["createSpace"]);
+    expect(names("clik")).toEqual([]);
+  });
+
+  it("keeps the generated API reference current", () => {
+    const { apiMarkdown, routesBlock, errorsBlock } = generateReference();
+    expect(read("skills/kamapathy/references/api.md")).toBe(apiMarkdown);
+    const docs = read("docs/automation.md");
+    const between = (start, end) =>
+      docs.slice(docs.indexOf(start) + start.length, docs.indexOf(end));
+    expect(
+      between("<!-- generated:routes -->", "<!-- /generated:routes -->"),
+    ).toBe(routesBlock);
+    expect(
+      between("<!-- generated:errors -->", "<!-- /generated:errors -->"),
+    ).toBe(errorsBlock);
+    for (const text of [apiMarkdown, routesBlock, errorsBlock])
+      expect(text).not.toMatch(/[\u2013\u2014]/);
   });
 });

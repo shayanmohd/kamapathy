@@ -140,7 +140,7 @@ export const ROUTES = [
     "GET",
     "/health",
     "Checks the connection.",
-    "{ status, version }",
+    '{ status: "ok", version, apiLevel, versions }',
     null,
     { budget: 0, lane: "preadmission" },
   ),

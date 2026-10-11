@@ -2121,6 +2121,138 @@ describe("scripted sessions", () => {
     expect(await ended).toBe(0);
   }, 20000);
 
+  it("prints help for every command and topic without connecting", async () => {
+    const fetch = vi.fn();
+    const launch = vi.fn();
+    const stdin = new PassThrough();
+    const help = async (args) => {
+      const stdout = sink();
+      expect(await runCli(args, { env, fetch, connect: { launch }, stdin, stdout }), args.join(" ")).toBe(0);
+      return stdout.text();
+    };
+    for (const command of schema.COMMANDS) {
+      const text = await help(["help", ...command.name.split(" ")]);
+      expect(text, command.name).toContain(command.usage);
+      expect(text, command.name).toContain(command.summary);
+      if (command.name !== "help") {
+        expect(await help([...command.name.split(" "), "--help"])).toBe(text);
+        expect(await help([...command.name.split(" "), "-h"])).toBe(text);
+      }
+    }
+    expect(await help(["help", "api"])).toContain("Kamapathy script API");
+    expect(await help(["help", "api", "page.click"])).toContain("page.click(target)");
+    expect(await help(["help", "errors"])).toContain("human_control");
+    expect(await help(["help", "routes"])).toContain("POST /tabs/:id/click");
+    expect(await help(["help", "page.wait"])).toContain("page.wait(options?)");
+    expect(await help(["help", "--json"])).toBe(await help(["help"]));
+    expect(await help(["--help"])).toBe(await help(["help"]));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("ends general help with this client's SKILL.md", async () => {
+    const stdout = sink();
+    await runCli(["help"], { env, stdout });
+    const skill = await realpathOf(join(process.cwd(), "skills/kamapathy/SKILL.md"));
+    expect(stdout.text().endsWith(
+      `Agents: read the Kamapathy skill before using these commands.\n  ${skill}\nIn run scripts, help() lists the API and help("page.click") shows one entry.\n`,
+    )).toBe(true);
+    expect(stdout.text()).toContain("Requires Node.js 22.13 or later.");
+    for (const name of ["KAMAPATHY_USER_DATA", "KAMAPATHY_NO_LAUNCH", "KAMAPATHY_WORKSPACE", "KAMAPATHY_RUN_TIMEOUT_MS", "KAMAPATHY_PAGE_BUDGET", "KAMAPATHY_PROGRAM", "--version"])
+      expect(stdout.text(), name).toContain(name);
+  });
+
+  it("names the program kamapathy only when KAMAPATHY_PROGRAM is set", async () => {
+    const named = sink();
+    await runCli(["help", "click"], { env: { ...env, KAMAPATHY_PROGRAM: "launcher-secret" }, stdout: named });
+    expect(named.text()).toContain("Usage: kamapathy click <tab-id> <ref-or-selector>");
+    expect(named.text()).not.toContain("launcher-secret");
+    const plain = sink();
+    await runCli(["help", "click"], { env, stdout: plain });
+    expect(plain.text()).toContain(
+      `Usage: node ${join(process.cwd(), "skills/kamapathy/scripts/kamapathy.mjs")} click <tab-id> <ref-or-selector>`,
+    );
+  });
+
+  it("reports unknown topics with close matches and status 1", async () => {
+    const stderr = sink();
+    expect(await main(["help", "snapshto"], { env, stdout: sink(), stderr })).toBe(1);
+    expect(stderr.text()).toBe('Kamapathy: No help topic "snapshto". Close matches: snapshot.\n');
+    const none = sink();
+    expect(await main(["help", "zzzzzz"], { env, stdout: sink(), stderr: none })).toBe(1);
+    expect(none.text()).toBe('Kamapathy: No help topic "zzzzzz".\n');
+  });
+
+  it("reads arguments after -- literally", async () => {
+    const fetch = vi.fn(async () => Response.json({ space }));
+    const stdout = sink();
+    expect(await runCli(["space", "create", "--", "--help"], { env, fetch, stdout })).toBe(0);
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ name: "--help" });
+    expect(stdout.text()).toBe('space space-1 "Research" agent shared\n');
+    await runCli(["space", "create", "--", "--json"], { env, fetch, stdout: sink() });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ name: "--json" });
+  });
+
+  it("prints versions without starting Kamapathy", async () => {
+    const launch = vi.fn();
+    const skillFolder = await realpathOf(join(process.cwd(), "skills/kamapathy"));
+    const client = `Kamapathy client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}, Node ${process.versions.node}\nSkill ${skillFolder}\n`;
+    const version = async (argv, profileEnv) => {
+      const stdout = sink();
+      expect(await main(argv, { env: profileEnv, connect: { launch }, stdout, stderr: sink() })).toBe(0);
+      return stdout.text();
+    };
+    const running = await profile();
+    const health = { status: "ok", version: "0.2.0", apiLevel: 2, versions: { electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0", v8: "x" } };
+    await fakeKamapathy(running.paths, {
+      handler: (_request, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify(health));
+      },
+    });
+    const runningEnv = { KAMAPATHY_USER_DATA: running.userData };
+    expect(await version(["--version"], runningEnv)).toBe(
+      `${client}Kamapathy 0.2.0, API level 2, Electron 44.2.0, Chromium 152.0.7977.76, Node 24.20.0\n`,
+    );
+    expect(await version(["-v"], runningEnv)).toBe(await version(["--version"], runningEnv));
+    expect(JSON.parse(await version(["--version", "--json"], runningEnv))).toEqual({
+      client: { version: schema.CLIENT_VERSION, apiLevel: schema.API_LEVEL, node: process.versions.node, skill: skillFolder },
+      app: { version: "0.2.0", apiLevel: 2, electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0" },
+      appStatus: "running",
+    });
+    const idle = await profile();
+    expect(await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData })).toBe(`${client}Kamapathy is not running.\n`);
+    expect(JSON.parse(await version(["--version", "--json"], { KAMAPATHY_USER_DATA: idle.userData }))).toMatchObject({
+      app: null,
+      appStatus: "not_running",
+    });
+    await writeFile(idle.paths.off, "", { mode: 0o600 });
+    expect(await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData })).toBe(`${client}Agent access is off in Kamapathy.\n`);
+    const older = await profile();
+    await fakeKamapathy(older.paths, {
+      handler: (_request, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ status: "ok", version: "0.1.9" }));
+      },
+    });
+    expect(await version(["--version"], { KAMAPATHY_USER_DATA: older.userData })).toBe(
+      `${client}Kamapathy 0.1.9, API level 1\nKamapathy 0.1.9 has API level 1 and this client uses ${schema.API_LEVEL}. Calls added after level 1 fail until the person updates Kamapathy.\n`,
+    );
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("help() in a run prints the index and one entry", async () => {
+    const { env: profileEnv } = await profile();
+    const run = await spawnCli(["run", "-e", 'help(); help("page.click"); help("clik"); help("close");'], profileEnv);
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`);
+    expect(run.stdout).toContain('help("page.click") shows one entry; help("errors") lists error codes.');
+    expect(run.stdout).toContain("page.click(target)\n");
+    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click.');
+    expect(run.stdout).toContain("space.close()\n");
+    expect(run.stdout).toContain("page.close()\n");
+  }, 20000);
+
   it("creates isolated spaces from the command line and says how each space signs in", async () => {
     for (const [args, body] of [
       [["space", "create", "Research"], { name: "Research" }],

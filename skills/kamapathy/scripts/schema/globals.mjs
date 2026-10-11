@@ -115,7 +115,7 @@ export const GLOBALS = [
     kind: "global",
     signature: "kamapathy",
     summary:
-      "The connected client: a Client with createSpace, space and spaces.",
+      "The connected client: a Client with createSpace, openSpace, space, spaces and requestSpace.",
     args: [],
     returns: "Client",
     errors: [],
@@ -126,6 +126,17 @@ export const GLOBALS = [
   list("spaces", "spaces()", "global"),
   open("openSpace", "openSpace(nameOrId, options?)", "global"),
   request("requestSpace", "requestSpace(options)", "global"),
+  {
+    name: "help",
+    kind: "global",
+    signature: "help(...names)",
+    summary:
+      'Prints the API, or one entry such as help("page.click"), or the topics errors and routes.',
+    args: [],
+    returns: "void",
+    errors: [],
+    since: 2,
+  },
 ];
 
 export const CLIENT = [

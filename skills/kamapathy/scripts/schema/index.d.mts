@@ -130,5 +130,8 @@ export function outdated(
   option?: string,
 ): Problem;
 export function suggest(name: string, candidates: readonly string[]): string | undefined;
+export function editDistance(a: string, b: string): number;
+export const GLOBAL_FLAGS: readonly { name: string; description: string }[];
+export const ENVIRONMENT: readonly { name: string; description: string }[];
 export function findEntry(name: string): Entry | undefined;
 export function findCommand(name: string): Command | undefined;

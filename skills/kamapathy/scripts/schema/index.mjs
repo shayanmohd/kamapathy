@@ -6,8 +6,14 @@ import { CLIENT, GLOBALS } from "./globals.mjs";
 import { PAGE_ENTRIES } from "./page.mjs";
 import { SPACE } from "./space.mjs";
 
-export { checkBody, checkCall, outdated, suggest } from "./check.mjs";
-export { COMMANDS } from "./cli.mjs";
+export {
+  checkBody,
+  checkCall,
+  editDistance,
+  outdated,
+  suggest,
+} from "./check.mjs";
+export { COMMANDS, ENVIRONMENT, GLOBAL_FLAGS } from "./cli.mjs";
 export { ERRORS, isTransient } from "./errors.mjs";
 export {
   ACTIONS,

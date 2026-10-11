@@ -411,7 +411,7 @@ export function checkCall(entry, args, app) {
   return first;
 }
 
-function editDistance(a, b) {
+export function editDistance(a, b) {
   let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
   for (let i = 1; i <= a.length; i++) {
     const current = [i];

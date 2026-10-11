@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "../api.mjs";
+import { help } from "../help.mjs";
 import { guidance, hardStopCause, KamapathyError } from "./errors.mjs";
 import { line, printable } from "./format.mjs";
 import { readInput, required } from "./input.mjs";
@@ -123,11 +124,17 @@ async function rerun(file, { timeoutMs, source, envFiles }, env, options) {
   }
 }
 
-// The script's globals, each forwarding to the client method of its name.
+// The script's globals: the client, help, and the rest each forwarding to
+// the client method of its name.
 export function installGlobals(target, client) {
-  for (const name of GLOBALS)
+  for (const name of [...GLOBALS, "help"])
     Object.defineProperty(target, name, {
-      value: name === "kamapathy" ? client : (...args) => client[name](...args),
+      value:
+        name === "kamapathy"
+          ? client
+          : name === "help"
+            ? help
+            : (...args) => client[name](...args),
       writable: true,
       configurable: true,
       enumerable: false,
