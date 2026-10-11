@@ -123,6 +123,12 @@ export function checkCall(
   app?: { apiLevel: number; version?: string },
 ): Problem | null;
 export function checkBody(route: Pick<SchemaRoute, "method" | "path" | "body">, body: unknown): Problem | null;
+export function outdated(
+  name: string,
+  required: number,
+  app: { apiLevel: number; version?: string },
+  option?: string,
+): Problem;
 export function suggest(name: string, candidates: readonly string[]): string | undefined;
 export function findEntry(name: string): Entry | undefined;
 export function findCommand(name: string): Command | undefined;

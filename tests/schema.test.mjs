@@ -13,6 +13,7 @@ import {
   Space,
   schema,
 } from "../skills/kamapathy/scripts/api.mjs";
+import { PARSERS } from "../skills/kamapathy/scripts/kamapathy.mjs";
 
 const {
   ACTIONS,
@@ -117,14 +118,10 @@ describe("API schema", () => {
     ).toEqual(
       [...assigned.matchAll(/^\s*(\w+)[:,]/gm)].map((m) => m[1]).sort(),
     );
-    // The CLI's commands: one case each, and space create and close under
-    // the space case.
+    // The CLI's commands: one parser each, keyed by the command's name.
     const commands = COMMANDS.map((item) => item.name);
     expect(new Set(commands).size).toBe(commands.length);
-    const cases = [...cli.matchAll(/^\s*case "([a-z]+)":/gm)].flatMap((m) =>
-      m[1] === "space" ? ["space create", "space close"] : [m[1]],
-    );
-    expect(commands.sort()).toEqual([...cases, "help"].sort());
+    expect(Object.keys(PARSERS).sort()).toEqual(commands.sort());
     // The router's routes, plus /health, which is answered before them.
     const keys = ROUTES.map(routeKey);
     expect(new Set(keys).size).toBe(keys.length);

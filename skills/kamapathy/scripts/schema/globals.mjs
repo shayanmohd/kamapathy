@@ -65,6 +65,18 @@ export const GLOBALS = [
 ];
 
 export const CLIENT = [
+  {
+    name: "Client.app",
+    kind: "property",
+    signature: "kamapathy.app",
+    summary:
+      "The running Kamapathy's version and API level, or null until the client has found it.",
+    args: [],
+    returns:
+      "{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string } | null",
+    errors: [],
+    since: 1,
+  },
   create(
     "Client.createSpace",
     "kamapathy.createSpace(name, options?)",

@@ -278,7 +278,8 @@ function argumentFits(value, arg) {
   }
 }
 
-function outdated(name, required, app, option) {
+// app_outdated for a call, option or command the app's level is below.
+export function outdated(name, required, app, option) {
   return problem(
     "app_outdated",
     `${option ? `${name} option "${option}"` : name} needs Kamapathy API level ${required}, and ${

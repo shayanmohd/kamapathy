@@ -19,7 +19,8 @@ import {
   runCli,
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
-import { KamapathyError, connect } from "../skills/kamapathy/scripts/api.mjs";
+import { KamapathyError, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
+import { httpTimeout } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
 const env = { KAMAPATHY_NO_LAUNCH: "1" };
@@ -329,6 +330,104 @@ describe("automatic connection", () => {
       PATH: "/bin",
     });
     expect(environment).toEqual({ KAMAPATHY_USER_DATA: "/profile", PATH: "/bin" });
+  });
+
+  it("discovery failures name their reason: not_installed for a missing app or start command and quit_by_person under a fresh quit marker, neither retryable", async () => {
+    const reasonOf = (promise) =>
+      promise.then(
+        () => "found",
+        (error) => [error.code, error.reason, error.retryable === true],
+      );
+    const missing = await profile();
+    for (const options of [
+      { platform: "linux", env: { PATH: "" } },
+      { platform: "win32", env: { USERPROFILE: missing.userData, LOCALAPPDATA: missing.userData } },
+    ])
+      expect(
+        await reasonOf(
+          resolveSocket(
+            { KAMAPATHY_USER_DATA: missing.userData },
+            {
+              launch: (paths) =>
+                launchKamapathy(
+                  paths,
+                  { KAMAPATHY_USER_DATA: missing.userData, ...options.env },
+                  { platform: options.platform },
+                ),
+            },
+          ),
+        ),
+        options.platform,
+      ).toEqual(["not_connected", "not_installed", false]);
+    const quit = await profile();
+    await writeFile(quit.paths.quit, JSON.stringify({ at: Date.now() }), { mode: 0o600 });
+    const launch = vi.fn();
+    expect(
+      await reasonOf(resolveSocket({ KAMAPATHY_USER_DATA: quit.userData }, { launch })),
+    ).toEqual(["not_connected", "quit_by_person", false]);
+    expect(launch).not.toHaveBeenCalled();
+    // An old quit no longer blocks starting Kamapathy.
+    await writeFile(quit.paths.quit, JSON.stringify({ at: Date.now() - 600001 }), { mode: 0o600 });
+    expect(await reasonOf(resolveSocket(quit.env))).toEqual(["not_connected", "not_running", false]);
+    expect(
+      await reasonOf(
+        resolveSocket({ KAMAPATHY_USER_DATA: quit.userData }, { launch, intervalMs: 10, timeoutMs: 50 }),
+      ),
+    ).toEqual(["not_connected", "start_timeout", false]);
+    await writeFile(quit.paths.off, "", { mode: 0o600 });
+    expect(await reasonOf(resolveSocket(quit.env))).toEqual(["not_connected", "access_off", false]);
+    const busy = await profile();
+    await fakeKamapathy(busy.paths, { handler: (request) => request.socket.destroy() });
+    expect(await reasonOf(resolveSocket(busy.env))).toEqual(["not_connected", "busy", true]);
+    if (posix) {
+      const untrusted = await profile();
+      await fakeKamapathy(untrusted.paths);
+      await chmod(untrusted.paths.endpoint, 0o644);
+      expect(await reasonOf(resolveSocket(untrusted.env))).toEqual([
+        "not_connected",
+        "untrusted_files",
+        false,
+      ]);
+      const denied = await profile();
+      const { socket } = await fakeKamapathy(denied.paths);
+      await chmod(socket, 0o000);
+      expect(await reasonOf(resolveSocket(denied.env))).toEqual([
+        "not_connected",
+        "permission_denied",
+        false,
+      ]);
+    }
+  });
+
+  it("after a lost connection the next call finds the restarted app without starting it", async () => {
+    const { paths, userData } = await profile();
+    const answer = (request, response) => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify(
+          request.url === "/health" ? { status: "ok", version: "test" } : { spaces: [] },
+        ),
+      );
+    };
+    const first = await fakeKamapathy(paths, { handler: answer });
+    const launch = vi.fn();
+    const client = await connect({ env: { KAMAPATHY_USER_DATA: userData }, connect: { launch } });
+    expect(await client.spaces()).toEqual([]);
+    // Kamapathy quits: the call in progress loses its connection.
+    const server = servers.pop();
+    await new Promise((done) => server.close(done));
+    await rm(first.socket, { force: true });
+    await expect(client.spaces()).rejects.toMatchObject({
+      code: "not_connected",
+      reason: "lost",
+      entry: "kamapathy.spaces",
+      message: expect.stringContaining("may still have taken effect"),
+    });
+    // It restarts on its own: the next call finds it, and nothing was started.
+    const second = await fakeKamapathy(paths, { handler: answer });
+    expect(await client.spaces()).toEqual([]);
+    expect(second.instance).not.toBe(first.instance);
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it("checks arguments before looking for or starting Kamapathy", async () => {
@@ -795,6 +894,111 @@ describe("scripted sessions", () => {
     }
   });
 
+  it("refuses unknown options before sending: only /health is requested", async () => {
+    const { paths, env: profileEnv } = await profile();
+    const requests = [];
+    await fakeKamapathy(paths, {
+      handler: (request, response) => {
+        requests.push(`${request.method} ${request.url}`);
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ status: "ok", version: "test" }));
+      },
+    });
+    const client = await connect({ env: profileEnv });
+    await expect(client.createSpace("Research", { isolatd: true })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "kamapathy.createSpace",
+      option: "isolatd",
+      suggestion: "isolated",
+    });
+    await expect(client.space(7)).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "kamapathy.space",
+    });
+    expect(requests).toEqual(["GET /health"]);
+  });
+
+  it("queues the stale skill notice once through session.notice: it prints as notice: on stderr only", async () => {
+    const { paths, env: profileEnv } = await profile();
+    await fakeKamapathy(paths, {
+      handler: (_request, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            status: "ok",
+            version: "0.9.0",
+            apiLevel: schema.API_LEVEL + 1,
+            skill: { path: "/opt/kamapathy/skill" },
+          }),
+        );
+      },
+    });
+    const stdout = sink();
+    const stderr = sink();
+    expect(await main(["health", "--json"], { env: profileEnv, stdout, stderr })).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({ status: "ok", version: "0.9.0" });
+    expect(stderr.text()).toBe(
+      `notice: This skill copy (${schema.CLIENT_VERSION}) is older than Kamapathy 0.9.0. Read /opt/kamapathy/skill/SKILL.md for the current API.\n`,
+    );
+    const again = sink();
+    expect(await main(["health"], { env: profileEnv, stdout: sink(), stderr: again })).toBe(0);
+    expect(again.text()).toBe("");
+  });
+
+  it("copies retryable and dispatched as own fields and adds entry", async () => {
+    const api = fakeApi({
+      ...routes,
+      "POST /tabs/tab-1/click": () =>
+        Response.json(
+          {
+            error: {
+              code: "action_timeout",
+              message: "The control never became actionable.",
+              awaited: "actionable",
+              timeoutMs: 5000,
+              retryable: true,
+            },
+          },
+          { status: 504 },
+        ),
+      "POST /tabs/tab-1/fill": () =>
+        Response.json(
+          { error: { code: "element_obscured", message: "Covered.", dispatched: true } },
+          { status: 409 },
+        ),
+    });
+    const client = await connect({ env, fetch: api.fetch });
+    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const timedOut = await page.click("@e2").catch((error) => error);
+    expect(timedOut).toBeInstanceOf(KamapathyError);
+    expect(timedOut).toMatchObject({
+      code: "action_timeout",
+      status: 504,
+      awaited: "actionable",
+      timeoutMs: 5000,
+      retryable: true,
+      entry: "page.click",
+    });
+    expect(Object.hasOwn(timedOut, "retryable")).toBe(true);
+    const reached = await page.fill("@e1", "A").catch((error) => error);
+    expect(reached).toMatchObject({ code: "element_obscured", dispatched: true, entry: "page.fill" });
+    expect(reached).not.toHaveProperty("retryable");
+  });
+
+  it("an injected fetch sends no health request, and space(id) lists spaces for an app without apiLevel", async () => {
+    const api = fakeApi(routes);
+    const client = await connect({ env, fetch: api.fetch });
+    expect(client.app).toEqual({ apiLevel: 1 });
+    expect((await client.space("space-1")).id).toBe("space-1");
+    expect(api.requests).toEqual([{ method: "GET", path: "/spaces", body: undefined }]);
+    const current = await connect({
+      env,
+      fetch: api.fetch,
+      health: { status: "ok", version: "0.2.0", apiLevel: 2, versions: { electron: "44.2.0" } },
+    });
+    expect(current.app).toEqual({ version: "0.2.0", apiLevel: 2, electron: "44.2.0" });
+  });
+
   it("asks for an isolated space only when told to", async () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });
@@ -981,8 +1185,8 @@ describe("scripted sessions", () => {
         );
       },
     });
-    // A real process with Node's own module loader: the runner imports api.mjs,
-    // which imports the CLI module, while the CLI module is the entry point.
+    // A real process with Node's own module loader, started from either entry
+    // point.
     for (const entry of ["skills/kamapathy/scripts/kamapathy.mjs", "scripts/kamapathy.mjs"]) {
       const child = spawn(
         process.execPath,
@@ -1077,5 +1281,38 @@ describe("scripted sessions", () => {
     await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
     expect(help.text()).toContain("--isolated");
     expect(help.text()).toMatch(/\n  run /);
+  });
+});
+
+describe("client errors and timeouts", () => {
+  it("KamapathyError copies structured fields; httpTimeout adds 5000 ms to a declared budget and keeps 45000 ms and 180000 ms otherwise", () => {
+    const error = new KamapathyError("page_timeout", "The page did not load.", {
+      status: 504,
+      awaited: "load",
+      timeoutMs: 100,
+      name: "Other",
+      stack: "replaced",
+      cause: "replaced",
+    });
+    expect(error).toMatchObject({
+      name: "KamapathyError",
+      code: "page_timeout",
+      message: "The page did not load.",
+      status: 504,
+      awaited: "load",
+      timeoutMs: 100,
+    });
+    expect(error.stack).not.toBe("replaced");
+    expect(Object.hasOwn(error, "cause")).toBe(false);
+    // The client's own codes take retryable from the registry.
+    expect(new KamapathyError("not_connected", "Busy.", { reason: "busy" }).retryable).toBe(true);
+    expect(
+      new KamapathyError("not_connected", "Off.", { reason: "access_off" }),
+    ).not.toHaveProperty("retryable");
+    const route = (key) => schema.ROUTES.find((item) => schema.routeKey(item) === key);
+    expect(httpTimeout(600000, route("POST /spaces/:id/wait-for-control"))).toBe(605000);
+    expect(httpTimeout(undefined, route("POST /tabs/:id/click"))).toBe(45000);
+    expect(httpTimeout(undefined, route("POST /tabs/:id/actions"))).toBe(180000);
+    expect(httpTimeout(undefined, undefined)).toBe(45000);
   });
 });
