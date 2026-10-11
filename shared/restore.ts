@@ -65,14 +65,20 @@ export function restoreState(
             spaceIds.add(space.id);
             return true;
           })
-          .map((space) => ({
-            ...space,
-            owner: "human" as const,
-            signIns:
-              space.signIns === "separate"
-                ? ("separate" as const)
-                : ("shared" as const),
-          }))
+          // Only saved fields come back; agent state never outlives a run.
+          .map(
+            (space): Space => ({
+              id: space.id,
+              name: space.name,
+              color: space.color,
+              kind: "personal",
+              owner: "human",
+              signIns: space.signIns === "separate" ? "separate" : "shared",
+              createdAt: Number.isFinite(space.createdAt)
+                ? space.createdAt
+                : Date.now(),
+            }),
+          )
       : [];
     if (spaces.length) state.spaces = spaces.slice(0, 30);
     state.tabs = state.spaces.map((space) => newTab(space.id));

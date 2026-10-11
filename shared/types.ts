@@ -1,6 +1,28 @@
 export type Theme = "system" | "light" | "dark";
 export type SpaceColor = "green" | "blue" | "orange" | "purple";
 export type SignIns = "shared" | "separate";
+export type OpenedBy = "agent" | "page" | "person";
+export type ClosedBy = "agent" | "page" | "person";
+export type ControlReason =
+  | "manual"
+  | "handoff"
+  | "failed"
+  | "approval"
+  | "permission"
+  | "device"
+  | "http_auth"
+  | "client_certificate";
+export interface SpaceControl {
+  reason: ControlReason;
+  prompt?: string;
+  since: number;
+  hold?: string;
+}
+export interface SpaceEnd {
+  by: "agent" | "person";
+  reason: "finished" | "stopped";
+  at: number;
+}
 export interface Space {
   id: string;
   name: string;
@@ -10,6 +32,12 @@ export interface Space {
   // Shared spaces use one session; separate ones keep their own cookies.
   signIns: SignIns;
   createdAt: number;
+  // Agent state for this run only; none of it is saved.
+  createdBy?: "agent" | "person";
+  pageBudget?: number;
+  access?: "granted" | "ended";
+  ended?: SpaceEnd;
+  control?: SpaceControl;
 }
 export interface Tab {
   id: string;
@@ -22,6 +50,13 @@ export interface Tab {
   canGoBack: boolean;
   canGoForward: boolean;
   error?: string;
+  // Agent bookkeeping for this run only; none of it is saved.
+  label?: string;
+  openedBy?: OpenedBy;
+  openerId?: string;
+  managed?: boolean;
+  createdAt?: number;
+  unseen?: true;
 }
 export interface Bookmark {
   id: string;

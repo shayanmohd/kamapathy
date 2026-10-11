@@ -1,7 +1,15 @@
-import type { BrowserState, Tab } from "./types";
+import type { BrowserState, Space, Tab } from "./types";
 import { version } from "../package.json";
 
 export const HOME_URL = "kamapathy://newtab";
+// The most pages an agent manages in one space unless it asks for fewer.
+export const PAGE_BUDGET = 20;
+// Agent spaces follow agent rules, and so does a personal space while the
+// person lets an agent use it: no history, background popups and pages that
+// keep painting.
+export function agentRules(space: Pick<Space, "kind" | "access">): boolean {
+  return space.kind === "agent" || space.access === "granted";
+}
 export const id = () => globalThis.crypto.randomUUID();
 export function newTab(spaceId: string, url = HOME_URL): Tab {
   return {

@@ -19,9 +19,29 @@ export function readState(
 }
 
 export function writeState(path: string, state: BrowserState): void {
-  const spaces = state.spaces.filter((space) => space.kind === "personal");
+  // Labels, origins, budgets, grants and other agent state live for one run,
+  // so only these fields are written.
+  const spaces = state.spaces
+    .filter((space) => space.kind === "personal")
+    .map(({ id, name, color, kind, owner, signIns, createdAt }) => ({
+      id,
+      name,
+      color,
+      kind,
+      owner,
+      signIns,
+      createdAt,
+    }));
   const ids = new Set(spaces.map((space) => space.id));
-  const tabs = state.tabs.filter((tab) => ids.has(tab.spaceId));
+  const tabs = state.tabs
+    .filter((tab) => ids.has(tab.spaceId))
+    .map(({ id, spaceId, title, url, pinned }) => ({
+      id,
+      spaceId,
+      title,
+      url,
+      pinned,
+    }));
   const activeSpaceId = ids.has(state.activeSpaceId)
     ? state.activeSpaceId
     : spaces[0]?.id;

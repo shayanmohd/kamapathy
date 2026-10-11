@@ -11,12 +11,19 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { HOME_URL, newTab, openingTab } from "../shared/state";
+import {
+  agentRules,
+  HOME_URL,
+  newTab,
+  openingTab,
+  PAGE_BUDGET,
+} from "../shared/state";
 import { googleSignInFallback, isWebUrl, normalizeUrl } from "../shared/url";
 import type {
   Activity,
   BrowserAction,
   BrowserState,
+  ClosedBy,
   ContentBounds,
   FrozenFrame,
   ImportedBookmark,
@@ -26,6 +33,7 @@ import type {
   SpaceColor,
   Tab,
 } from "../shared/types";
+import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
 
 const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
@@ -103,6 +111,7 @@ function jpeg(image: NativeImage, width: number): string {
 
 export class BrowserController {
   readonly state: BrowserState;
+  readonly registry = new TabRegistry(() => this.state);
   private views = new Map<string, WebContentsView>();
   // Sessions and their cleanups are keyed by partition, grants by space.
   private sessions = new Map<string, Session>();
@@ -137,6 +146,9 @@ export class BrowserController {
     private statePath: string,
   ) {
     this.state = state;
+    // Restored tabs are the person's.
+    for (const tab of state.tabs)
+      this.registry.register(tab, { openedBy: "person", managed: false });
     nativeTheme.themeSource = state.settings.theme;
     this.bindShortcuts(window.webContents);
     window.on("resize", () => this.layout());
@@ -333,7 +345,7 @@ export class BrowserController {
     browsingSession.setPermissionCheckHandler(
       (contents, permission, origin, details) => {
         const space = this.spaceOf(contents);
-        if (!space || space.kind === "agent" || !isCurrentSession())
+        if (!space || agentRules(space) || !isCurrentSession())
           return false;
         if (
           permission === "media" &&
@@ -361,7 +373,7 @@ export class BrowserController {
         const space = this.spaceOf(contents);
         if (
           !space ||
-          space.kind === "agent" ||
+          agentRules(space) ||
           !isCurrentSession() ||
           !contents ||
           contents.isDestroyed() ||
@@ -475,7 +487,7 @@ export class BrowserController {
       contents: WebContents,
     ) => {
       const space = this.spaceOf(contents);
-      if (!space || space.kind === "agent") {
+      if (!space || agentRules(space)) {
         event.preventDefault();
         if (space)
           this.addActivity(
@@ -618,7 +630,7 @@ export class BrowserController {
     if (this.canCapturePage())
       await Promise.all(
         this.state.spaces
-          .filter((space) => space.kind === "agent")
+          .filter(agentRules)
           .map((space) => this.captureThumbnail(space.id, true)),
       );
     return Object.fromEntries(this.captures);
@@ -644,7 +656,7 @@ export class BrowserController {
     if (image) this.remember(spaceId, image);
   }
 
-  private shownTab(spaceId: string): Tab | undefined {
+  shownTab(spaceId: string): Tab | undefined {
     if (spaceId === this.state.activeSpaceId)
       return this.state.tabs.find((tab) => tab.id === this.state.activeTabId);
     return openingTab(this.state, spaceId, this.lastActive.get(spaceId));
@@ -668,7 +680,7 @@ export class BrowserController {
         navigateOnDragDrop: false,
         focusOnNavigation: false,
         spellcheck: true,
-        backgroundThrottling: space.kind !== "agent",
+        backgroundThrottling: !agentRules(space),
       },
     });
     this.views.set(tab.id, view);
@@ -677,16 +689,16 @@ export class BrowserController {
     view.setVisible(false);
     view.setBorderRadius(10);
     const contents = view.webContents;
-    if (space.kind === "agent") {
-      // Chromium paints nothing for a page that was never shown, so an agent
-      // page nobody is watching would run no animations, accept no native
-      // input and have nothing to capture. Each new document starts hidden.
-      const keepPainting = () => {
-        if (!contents.isDestroyed()) contents.setBackgroundThrottling(false);
-      };
-      keepPainting();
-      contents.on("did-navigate", keepPainting);
-    }
+    // Chromium paints nothing for a page that was never shown, so an agent
+    // page nobody is watching would run no animations, accept no native
+    // input and have nothing to capture. Each new document starts hidden,
+    // and agent rules can start or end while the page is open.
+    const keepPainting = () => {
+      if (agentRules(space) && !contents.isDestroyed())
+        contents.setBackgroundThrottling(false);
+    };
+    keepPainting();
+    contents.on("did-navigate", keepPainting);
     const isCurrentView = () =>
       !this.destroyed &&
       !contents.isDestroyed() &&
@@ -728,8 +740,13 @@ export class BrowserController {
           options.extraHeaders = `Content-Type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ""}`;
         }
         const opened = newTab(space.id, url);
+        this.registry.register(opened, {
+          openedBy: "page",
+          openerId: tab.id,
+          managed: !!tab.managed && space.owner === "agent",
+        });
         this.state.tabs.push(opened);
-        if (space.kind !== "agent") this.activate(opened);
+        if (!agentRules(space)) this.activate(opened);
         this.ensureView(opened, options);
         this.emit();
       }
@@ -795,7 +812,7 @@ export class BrowserController {
       if (!isCurrentView()) return;
       tab.title = title.slice(0, 300) || tab.url;
       const latest = this.state.history.find((entry) => entry.url === tab.url);
-      if (latest && space.kind === "personal") latest.title = tab.title;
+      if (latest && !agentRules(space)) latest.title = tab.title;
       this.emit();
     });
     contents.on("page-favicon-updated", (_event, favicons) => {
@@ -924,8 +941,7 @@ export class BrowserController {
   }
 
   private recordVisit(tab: Tab): void {
-    if (this.getSpace(tab.spaceId).kind === "agent" || !isWebUrl(tab.url))
-      return;
+    if (agentRules(this.getSpace(tab.spaceId)) || !isWebUrl(tab.url)) return;
     const previous = this.state.history.find((entry) => entry.url === tab.url);
     this.state.history = this.state.history.filter(
       (entry) => entry.url !== tab.url,
@@ -973,9 +989,16 @@ export class BrowserController {
 
   createAgentSpace(
     name: string,
-    { color = "purple", isolated = false }: {
+    {
+      color = "purple",
+      isolated = false,
+      pageBudget,
+      createdBy = "agent",
+    }: {
       color?: SpaceColor;
       isolated?: boolean;
+      pageBudget?: number;
+      createdBy?: "agent" | "person";
     } = {},
   ): Space {
     if (this.destroyed) throw new Error("Browser is closing.");
@@ -994,9 +1017,18 @@ export class BrowserController {
           ? "separate"
           : "shared",
       createdAt: Date.now(),
+      createdBy,
+      pageBudget: pageBudget ?? PAGE_BUDGET,
     };
+    // A space an agent creates is granted to it from the start.
+    if (createdBy === "agent") space.access = "granted";
     this.state.spaces.push(space);
-    this.state.tabs.push(newTab(space.id));
+    const tab = newTab(space.id);
+    this.registry.register(tab, {
+      openedBy: createdBy,
+      managed: createdBy === "agent",
+    });
+    this.state.tabs.push(tab);
     this.addActivity(
       space.id,
       space.signIns === "shared"
@@ -1005,6 +1037,103 @@ export class BrowserController {
       "info",
     );
     return space;
+  }
+
+  // A tab the agent manages, opened in the background. Routes check the page
+  // budget and the limit per space; only the overall limit is checked here.
+  openAgentTab(spaceId: string, url?: string): Tab {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    if (this.state.tabs.length >= 200)
+      throw new Error("The maximum of 200 tabs has been reached.");
+    const space = this.getSpace(spaceId);
+    const tab = newTab(
+      space.id,
+      normalizeUrl(
+        url === undefined ? "" : cleanText(url, 8192),
+        this.state.settings.searchEngine,
+      ),
+    );
+    this.registry.register(tab, { openedBy: "agent", managed: true });
+    this.state.tabs.push(tab);
+    if (isWebUrl(tab.url)) this.ensureView(tab);
+    this.emit();
+    return tab;
+  }
+
+  closeTab(
+    tabId: string,
+    by: ClosedBy,
+  ): { closed?: string; replacement?: Tab } {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    const result = this.removeTab(this.getTab(tabId), by);
+    this.emit();
+    return result;
+  }
+
+  setManaged(tabId: string, managed: boolean): Tab {
+    const tab = this.getTab(tabId);
+    this.registry.setManaged(tab, managed);
+    this.emit();
+    return tab;
+  }
+
+  setPageBudget(spaceId: string, pageBudget: number): void {
+    this.getSpace(spaceId).pageBudget = pageBudget;
+    this.emit();
+  }
+
+  markSeen(tabId: string): void {
+    const tab = this.getTab(tabId);
+    if (!tab.unseen) return;
+    delete tab.unseen;
+    this.emit();
+  }
+
+  // Closes one tab for whoever asked: its label retires, its space keeps at
+  // least one tab, and a shown tab passes the selection to a neighbor.
+  private removeTab(
+    tab: Tab,
+    by: ClosedBy,
+  ): { closed?: string; replacement?: Tab } {
+    this.closedTabs.unshift({ ...tab });
+    this.closedTabs = this.closedTabs.slice(0, 20);
+    const index = this.state.tabs.indexOf(tab);
+    const spaceIndex = this.state.tabs
+      .filter((item) => item.spaceId === tab.spaceId)
+      .indexOf(tab);
+    this.registry.retire(tab, by);
+    this.state.tabs.splice(index, 1);
+    this.destroyTab(tab.id);
+    if (this.state.splitTabId === tab.id) this.state.splitTabId = null;
+    let candidates = this.state.tabs.filter(
+      (item) => item.spaceId === tab.spaceId,
+    );
+    let replacement: Tab | undefined;
+    if (!candidates.length) {
+      // The blank tab that replaces a last tab takes the closer's origin.
+      replacement = newTab(tab.spaceId);
+      this.registry.register(
+        replacement,
+        by === "agent"
+          ? { openedBy: "agent", managed: true }
+          : by === "person"
+            ? { openedBy: "person", managed: false }
+            : { openedBy: tab.openedBy ?? "person", managed: !!tab.managed },
+      );
+      this.state.tabs.push(replacement);
+      candidates = [replacement];
+    }
+    if (this.state.activeTabId === tab.id) {
+      const next =
+        candidates.find((item) => item.id === this.state.splitTabId) ??
+        candidates[Math.min(candidates.length - 1, spaceIndex)];
+      this.state.splitTabId = null;
+      this.activate(next);
+    }
+    return {
+      ...(tab.label ? { closed: tab.label } : {}),
+      ...(replacement ? { replacement } : {}),
+    };
   }
 
   async dispatch(action: BrowserAction): Promise<BrowserState> {
@@ -1027,6 +1156,8 @@ export class BrowserController {
             this.state.settings.searchEngine,
           ),
         );
+        // Tabs made through the app are the person's, in any space.
+        this.registry.register(tab, { openedBy: "person", managed: false });
         this.state.tabs.push(tab);
         if (!action.background) this.activate(tab);
         if (isWebUrl(tab.url)) this.ensureView(tab);
@@ -1078,30 +1209,7 @@ export class BrowserController {
           if (!this.window.isDestroyed()) this.window.close();
           break;
         }
-        this.closedTabs.unshift({ ...tab });
-        this.closedTabs = this.closedTabs.slice(0, 20);
-        const index = this.state.tabs.indexOf(tab);
-        const spaceIndex = this.state.tabs
-          .filter((item) => item.spaceId === tab.spaceId)
-          .indexOf(tab);
-        this.state.tabs.splice(index, 1);
-        this.destroyTab(tab.id);
-        if (this.state.splitTabId === tab.id) this.state.splitTabId = null;
-        let candidates = this.state.tabs.filter(
-          (item) => item.spaceId === tab.spaceId,
-        );
-        if (!candidates.length) {
-          const replacement = newTab(tab.spaceId);
-          this.state.tabs.push(replacement);
-          candidates = [replacement];
-        }
-        if (this.state.activeTabId === tab.id) {
-          const next =
-            candidates.find((item) => item.id === this.state.splitTabId) ??
-            candidates[Math.min(candidates.length - 1, spaceIndex)];
-          this.state.splitTabId = null;
-          this.activate(next);
-        }
+        this.removeTab(tab, "person");
         break;
       }
       case "tab:reopen": {
@@ -1117,6 +1225,7 @@ export class BrowserController {
             title: old.title,
             pinned: old.pinned,
           };
+          this.registry.register(tab, { openedBy: "person", managed: false });
           this.state.tabs.push(tab);
           this.activate(tab);
         }
@@ -1196,6 +1305,7 @@ export class BrowserController {
           space = this.createAgentSpace(name, {
             color: action.color,
             isolated: signIns === "separate",
+            createdBy: "person",
           });
           space.owner = "human";
         } else {
@@ -1207,9 +1317,12 @@ export class BrowserController {
             owner: "human",
             signIns,
             createdAt: Date.now(),
+            createdBy: "person",
           };
           this.state.spaces.push(space);
-          this.state.tabs.push(newTab(space.id));
+          const tab = newTab(space.id);
+          this.registry.register(tab, { openedBy: "person", managed: false });
+          this.state.tabs.push(tab);
         }
         this.activate(this.state.tabs.find((tab) => tab.spaceId === space.id)!);
         break;
@@ -1291,6 +1404,7 @@ export class BrowserController {
           (item) => item.spaceId !== space.id,
         );
         this.captures.delete(space.id);
+        this.registry.forget(space.id);
         for (const key of this.grants)
           if (key.startsWith(`${space.id}|`)) this.grants.delete(key);
         this.state.activity = this.state.activity.filter(

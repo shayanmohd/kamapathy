@@ -203,6 +203,107 @@ describe("desktop session persistence", () => {
     expect(restored.automation).toEqual({ running: false });
   });
 
+  it("never saves labels, origins, managed flags, budgets, grants, control or ended state", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    const [personal, work] = original.spaces;
+    // A granted personal space, as a grant leaves it.
+    Object.assign(personal, {
+      owner: "agent",
+      createdBy: "person",
+      pageBudget: 7,
+      access: "granted",
+      control: {
+        reason: "approval",
+        prompt: "clearing site data",
+        since: 1,
+        hold: "hold-1",
+      },
+    });
+    Object.assign(work, {
+      access: "ended",
+      ended: { by: "person", reason: "stopped", at: 2 },
+    });
+    for (const [index, tab] of original.tabs.entries())
+      Object.assign(tab, {
+        url: `https://example.com/${index}`,
+        label: `p${index + 1}`,
+        openedBy: "page",
+        openerId: "opener",
+        managed: true,
+        createdAt: 3,
+        unseen: true,
+      });
+    writeState(path, original);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    for (const space of saved.spaces)
+      expect(Object.keys(space).sort()).toEqual([
+        "color",
+        "createdAt",
+        "id",
+        "kind",
+        "name",
+        "owner",
+        "signIns",
+      ]);
+    for (const tab of saved.tabs)
+      expect(Object.keys(tab).sort()).toEqual([
+        "id",
+        "pinned",
+        "spaceId",
+        "title",
+        "url",
+      ]);
+    // A file that holds them anyway restores none of them.
+    writeFileSync(path, JSON.stringify(original));
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.spaces).toEqual([
+      {
+        id: "personal",
+        name: "Personal",
+        color: "green",
+        kind: "personal",
+        owner: "human",
+        signIns: "shared",
+        createdAt: personal.createdAt,
+      },
+      {
+        id: "work",
+        name: "Work",
+        color: "blue",
+        kind: "personal",
+        owner: "human",
+        signIns: "shared",
+        createdAt: work.createdAt,
+      },
+    ]);
+    expect(restored.tabs.map((tab) => tab.url)).toEqual([
+      "https://example.com/0",
+      "https://example.com/1",
+    ]);
+    const runtime = [
+      "label",
+      "openedBy",
+      "openerId",
+      "managed",
+      "createdAt",
+      "unseen",
+    ];
+    for (const tab of restored.tabs)
+      for (const field of runtime) expect(tab).not.toHaveProperty(field);
+    // An invalid creation time becomes the time of the restore.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...original,
+        spaces: [{ ...personal, createdAt: "soon" }],
+      }),
+    );
+    expect(readState(path, "darwin", "0.2.0").spaces[0].createdAt).toEqual(
+      expect.any(Number),
+    );
+  });
+
   it("starts one blank tab per personal space when session restoration is disabled", () => {
     const path = statePath();
     const original = initialState();

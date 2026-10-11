@@ -53,6 +53,21 @@ export function isWebUrl(url: string): boolean {
   }
 }
 
+// A popup may show about:blank, a web page, or a blob: URL that a web page
+// made. Everything else, data: URLs included, is refused.
+export function isPopupUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "about:")
+      return parsed.pathname === "blank" && !parsed.search;
+    // A blob: URL's path starts with the origin that made it.
+    if (parsed.protocol === "blob:") return isWebUrl(parsed.pathname);
+    return isWebUrl(url);
+  } catch {
+    return false;
+  }
+}
+
 export function isGoogleSignInRejectedUrl(value: string): boolean {
   try {
     const url = new URL(value);

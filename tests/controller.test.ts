@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
 import { dialog, session, shell, WebContentsView } from "electron";
 import { BrowserController } from "../electron/controller";
-import { HOME_URL, initialState, newTab } from "../shared/state";
+import {
+  agentRules,
+  HOME_URL,
+  initialState,
+  newTab,
+  PAGE_BUDGET,
+} from "../shared/state";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
@@ -1320,5 +1326,334 @@ describe("view hooks", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+});
+
+
+describe("tab origins and agent rules", () => {
+  const person = {
+    openedBy: "person",
+    managed: false,
+    createdAt: expect.any(Number),
+  };
+  // The web preferences the view of a page was created with.
+  function preferencesOf(page: FakeContents) {
+    const { calls, results } = vi.mocked(WebContentsView).mock;
+    const index = results.findIndex(
+      (result) => (result.value as FakeView).webContents === page,
+    );
+    return calls[index][0]!.webPreferences!;
+  }
+
+  it("interface tabs are stamped person", async () => {
+    const browser = controller();
+    for (const tab of browser.state.tabs) {
+      expect(tab).toMatchObject(person);
+      expect(tab).not.toHaveProperty("label");
+    }
+    await browser.dispatch({ type: "tab:create", url: "https://example.com/" });
+    const created = browser.state.tabs.at(-1)!;
+    expect(created).toMatchObject(person);
+    await browser.dispatch({ type: "tab:duplicate", id: created.id });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      ...person,
+      url: "https://example.com/",
+    });
+    await browser.dispatch({ type: "tab:close", id: created.id });
+    await browser.dispatch({ type: "tab:reopen" });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      ...person,
+      url: "https://example.com/",
+    });
+    await browser.dispatch({
+      type: "space:create",
+      kind: "personal",
+      color: "blue",
+      name: "Errands",
+    });
+    const errands = browser.state.spaces.at(-1)!;
+    expect(errands).toMatchObject({ kind: "personal", createdBy: "person" });
+    expect(errands).not.toHaveProperty("access");
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      ...person,
+      spaceId: errands.id,
+    });
+    // An agent space the person makes follows agent rules, so its tabs are
+    // labeled, but they stay the person's.
+    await browser.dispatch({
+      type: "space:create",
+      kind: "agent",
+      color: "purple",
+      name: "Manual task",
+    });
+    const manual = browser.state.spaces.at(-1)!;
+    expect(manual).toMatchObject({
+      kind: "agent",
+      owner: "human",
+      createdBy: "person",
+      pageBudget: PAGE_BUDGET,
+    });
+    expect(manual).not.toHaveProperty("access");
+    const first = browser.state.tabs.at(-1)!;
+    expect(first).toMatchObject({ ...person, spaceId: manual.id, label: "p1" });
+    // Links opened from the context menu or another app come in as tab:create.
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: manual.id,
+      url: "https://example.org/",
+      background: true,
+    });
+    const linked = browser.state.tabs.at(-1)!;
+    expect(linked).toMatchObject({ ...person, label: "p2" });
+    // A reopened tab is a new tab with a new label.
+    await browser.dispatch({ type: "tab:close", id: linked.id });
+    await browser.dispatch({ type: "tab:reopen" });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      ...person,
+      url: "https://example.org/",
+      label: "p3",
+    });
+    expect(browser.registry.closed(manual.id)).toEqual([
+      { label: "p2", closedBy: "person", at: expect.any(Number) },
+    ]);
+  });
+
+  it("an API space's first tab is p1, agent-opened and managed, and openAgentTab adds managed agent tabs in the background", () => {
+    const browser = controller();
+    const selection = {
+      space: browser.state.activeSpaceId,
+      tab: browser.state.activeTabId,
+    };
+    const space = browser.createAgentSpace("Task", { pageBudget: 5 });
+    expect(space).toMatchObject({
+      kind: "agent",
+      owner: "agent",
+      createdBy: "agent",
+      pageBudget: 5,
+      access: "granted",
+    });
+    expect(browser.createAgentSpace("Other").pageBudget).toBe(PAGE_BUDGET);
+    const first = browser.state.tabs.find((tab) => tab.spaceId === space.id)!;
+    expect(first).toMatchObject({
+      url: HOME_URL,
+      label: "p1",
+      openedBy: "agent",
+      managed: true,
+      createdAt: expect.any(Number),
+    });
+    expect(first).not.toHaveProperty("unseen");
+    const emitted = vi.fn();
+    browser.subscribe(emitted);
+    const page = browser.openAgentTab(space.id, "example.com/docs");
+    expect(page).toMatchObject({
+      spaceId: space.id,
+      url: "https://example.com/docs",
+      label: "p2",
+      openedBy: "agent",
+      managed: true,
+    });
+    expect(browser.state.tabs.at(-1)).toBe(page);
+    expect(emitted).toHaveBeenCalled();
+    expect(
+      contents(browser, page.id).loadURL,
+    ).toHaveBeenCalledExactlyOnceWith("https://example.com/docs");
+    const blank = browser.openAgentTab(space.id);
+    expect(blank).toMatchObject({
+      url: HOME_URL,
+      label: "p3",
+      openedBy: "agent",
+      managed: true,
+    });
+    expect(browser.peekWebContents(blank.id)).toBeUndefined();
+    expect(WebContentsView).toHaveBeenCalledOnce();
+    expect({
+      space: browser.state.activeSpaceId,
+      tab: browser.state.activeTabId,
+    }).toEqual(selection);
+    expect(browser.registry.used(space.id)).toBe(3);
+    while (browser.state.tabs.length < 200)
+      browser.state.tabs.push(newTab("personal"));
+    expect(() => browser.openAgentTab(space.id)).toThrow("200 tabs");
+  });
+
+  it("closeTab retires the label and gives a last closed tab a blank replacement with the closer's origin", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const first = browser.state.tabs.find((tab) => tab.spaceId === space.id)!;
+    const second = browser.openAgentTab(space.id, "https://example.com/");
+    const page = contents(browser, second.id);
+    const emitted = vi.fn();
+    browser.subscribe(emitted);
+    expect(browser.closeTab(second.id, "agent")).toEqual({ closed: "p2" });
+    expect(emitted).toHaveBeenCalled();
+    expect(page.destroyed).toBe(true);
+    expect(browser.state.tabs).not.toContain(second);
+    const spaceTabs = () =>
+      browser.state.tabs.filter((tab) => tab.spaceId === space.id);
+    // A page that closes the agent's last tab leaves one like it.
+    const byPage = browser.closeTab(first.id, "page");
+    expect(byPage).toEqual({
+      closed: "p1",
+      replacement: expect.objectContaining({
+        url: HOME_URL,
+        label: "p3",
+        openedBy: "agent",
+        managed: true,
+      }),
+    });
+    expect(spaceTabs()).toEqual([byPage.replacement]);
+    const byPerson = browser.closeTab(byPage.replacement!.id, "person");
+    expect(byPerson.replacement).toMatchObject({
+      label: "p4",
+      openedBy: "person",
+      managed: false,
+    });
+    const byAgent = browser.closeTab(byPerson.replacement!.id, "agent");
+    expect(byAgent.replacement).toMatchObject({
+      label: "p5",
+      openedBy: "agent",
+      managed: true,
+    });
+    // The person's own close goes through the same path.
+    await browser.dispatch({ type: "tab:close", id: byAgent.replacement!.id });
+    expect(spaceTabs()).toMatchObject([
+      { label: "p6", openedBy: "person", managed: false },
+    ]);
+    expect(browser.registry.closed(space.id)).toEqual(
+      [
+        ["p2", "agent"],
+        ["p1", "page"],
+        ["p3", "person"],
+        ["p4", "agent"],
+        ["p5", "person"],
+      ].map(([label, closedBy]) => ({
+        label,
+        closedBy,
+        at: expect.any(Number),
+      })),
+    );
+    // Only the person's close of a personal space's last empty tab closes
+    // the window.
+    const work = browser.state.tabs.find((tab) => tab.spaceId === "work")!;
+    expect(browser.closeTab(work.id, "agent")).toEqual({
+      replacement: expect.objectContaining({ spaceId: "work", url: HOME_URL }),
+    });
+    expect(browser.window.close).not.toHaveBeenCalled();
+    expect(() => browser.closeTab("missing", "agent")).toThrow(
+      "Tab was not found.",
+    );
+  });
+
+  it("agent rules follow kind and grants for history, popup activation, permissions, downloads, throttling and thumbnails", async () => {
+    expect(agentRules({ kind: "agent" })).toBe(true);
+    expect(agentRules({ kind: "agent", access: "ended" })).toBe(true);
+    expect(agentRules({ kind: "personal" })).toBe(false);
+    expect(agentRules({ kind: "personal", access: "granted" })).toBe(true);
+    expect(agentRules({ kind: "personal", access: "ended" })).toBe(false);
+    const browser = controller();
+    const work = browser.state.spaces.find((space) => space.id === "work")!;
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, id);
+    page.commit("https://example.com/");
+    page.emit("page-title-updated", {}, "Before");
+    expect(browser.state.history).toMatchObject([
+      { url: "https://example.com/", title: "Before" },
+    ]);
+    // A grant sets access and labels the space's tabs; set them directly.
+    work.access = "granted";
+    browser.registry.labelSpace(work.id);
+    const shared = sessions.get("persist:space-personal")!;
+    const request = shared.setPermissionRequestHandler.mock.calls[0][0];
+    const check = shared.setPermissionCheckHandler.mock.calls[0][0];
+    const open = page.setWindowOpenHandler.mock.calls[0][0];
+    const referrer = { url: "https://example.com/", policy: "default" };
+    const item = {
+      setSaveDialogOptions: vi.fn(),
+      getFilename: () => "report.pdf",
+      getTotalBytes: () => 10,
+      on: vi.fn(),
+      once: vi.fn(),
+    };
+    expect(page.setBackgroundThrottling).not.toHaveBeenCalled();
+    page.emit("page-title-updated", {}, "Granted");
+    page.commit("https://example.com/next");
+    expect(page.setBackgroundThrottling).toHaveBeenCalledExactlyOnceWith(false);
+    expect(browser.state.history).toMatchObject([
+      { url: "https://example.com/", title: "Before" },
+    ]);
+    open({ url: "https://example.com/popup", referrer });
+    const background = browser.state.tabs.at(-1)!;
+    expect(background).toMatchObject({
+      url: "https://example.com/popup",
+      openedBy: "page",
+      openerId: id,
+      managed: false,
+      label: "p2",
+      unseen: true,
+    });
+    expect(browser.state.activeTabId).toBe(id);
+    expect(
+      preferencesOf(contents(browser, background.id)).backgroundThrottling,
+    ).toBe(false);
+    const refused = vi.fn();
+    request(page, "notifications", refused, {
+      requestingUrl: "https://example.com/",
+      isMainFrame: true,
+    });
+    expect(refused).toHaveBeenCalledExactlyOnceWith(false);
+    expect(check(page, "notifications", "https://example.com/", {})).toBe(
+      false,
+    );
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    const blocked = { preventDefault: vi.fn() };
+    shared.emit("will-download", blocked, item, page);
+    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    expect(browser.state.downloads).toEqual([]);
+    expect(await browser.thumbnails()).toEqual({ work: jpegOf(480) });
+    expect(page.capturePage).toHaveBeenCalledExactlyOnceWith(undefined, {
+      stayHidden: true,
+    });
+    // When the grant ends, personal rules apply again.
+    delete work.access;
+    page.commit("https://example.org/");
+    expect(page.setBackgroundThrottling).toHaveBeenCalledOnce();
+    expect(browser.state.history).toMatchObject([
+      { url: "https://example.org/" },
+      { url: "https://example.com/" },
+    ]);
+    page.emit("page-title-updated", {}, "Personal again");
+    expect(browser.state.history[0].title).toBe("Personal again");
+    open({ url: "https://example.org/popup", referrer });
+    const foreground = browser.state.tabs.at(-1)!;
+    expect(browser.state.activeTabId).toBe(foreground.id);
+    expect(foreground).toMatchObject({ openedBy: "page", openerId: id });
+    expect(foreground).not.toHaveProperty("label");
+    expect(foreground).not.toHaveProperty("unseen");
+    expect(
+      preferencesOf(contents(browser, foreground.id)).backgroundThrottling,
+    ).toBe(true);
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+      response: 0,
+      checkboxChecked: false,
+    });
+    const asked = vi.fn();
+    request(page, "notifications", asked, {
+      requestingUrl: "https://example.org/",
+      isMainFrame: true,
+    });
+    await vi.waitFor(() => expect(asked).toHaveBeenCalledWith(false));
+    expect(dialog.showMessageBox).toHaveBeenCalledOnce();
+    const allowed = { preventDefault: vi.fn() };
+    shared.emit("will-download", allowed, item, page);
+    expect(allowed.preventDefault).not.toHaveBeenCalled();
+    expect(browser.state.downloads[0].filename).toBe("report.pdf");
+    await browser.thumbnails();
+    expect(page.capturePage).toHaveBeenCalledOnce();
   });
 });

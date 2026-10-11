@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HOME_URL } from "../shared/state";
-import { googleSignInFallback, hostname, isGoogleSignInRejectedUrl, isWebUrl, normalizeUrl, displayUrl } from "../shared/url";
+import { googleSignInFallback, hostname, isGoogleSignInRejectedUrl, isPopupUrl, isWebUrl, normalizeUrl, displayUrl } from "../shared/url";
 
 describe("Google sign-in fallback", () => {
   it("recognizes the rejection page and discards authentication query parameters", () => {
@@ -117,6 +117,37 @@ describe("remote page URL validation", () => {
     "http://",
   ])("does not treat %s as a permitted remote page", (url) => {
     expect(isWebUrl(url)).toBe(false);
+  });
+});
+
+describe("popup URL validation", () => {
+  it("isPopupUrl allows only about:blank, credential-free web URLs and web-origin blob URLs", () => {
+    for (const url of [
+      "about:blank",
+      "about:blank#results",
+      "https://example.com/login?next=%2F",
+      "http://127.0.0.1:8080/popup",
+      "blob:https://example.com/550e8400-e29b-41d4-a716-446655440000",
+      "blob:http://localhost:5173/7d6e2a1c",
+    ])
+      expect(isPopupUrl(url), url).toBe(true);
+    for (const url of [
+      "data:text/html,<script>opener.postMessage('hi', '*')</script>",
+      "about:srcdoc",
+      "about:blank?query=1",
+      "javascript:alert(1)",
+      "file:///etc/passwd",
+      HOME_URL,
+      "chrome://settings",
+      "https://user:secret@example.com/",
+      "blob:null/550e8400-e29b-41d4-a716-446655440000",
+      "blob:file:///tmp/page",
+      "blob:https://user:secret@example.com/550e8400",
+      "blob:data:text/html,hello",
+      "example.com",
+      "",
+    ])
+      expect(isPopupUrl(url), url).toBe(false);
   });
 });
 

@@ -2,7 +2,13 @@ import { randomBytes } from "node:crypto";
 import { chmodSync } from "node:fs";
 import { createServer } from "node:http";
 import type { WebContents } from "electron";
-import type { BrowserAction, BrowserState, Space } from "../../shared/types";
+import type {
+  BrowserAction,
+  BrowserState,
+  ClosedBy,
+  Space,
+  Tab,
+} from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
 import { createAuthority } from "./authority";
@@ -20,12 +26,18 @@ import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
+import type { TabRegistry } from "./tab-registry";
 import { routeNotFound, validateBody } from "./validate";
 
 export interface AutomationController {
   readonly state: BrowserState;
+  /** Labels, origins and managed flags of tabs, and retired labels. */
+  readonly registry: TabRegistry;
   dispatch(action: BrowserAction): Promise<BrowserState>;
-  createAgentSpace(name: string, options?: { isolated?: boolean }): Space;
+  createAgentSpace(
+    name: string,
+    options?: { isolated?: boolean; pageBudget?: number },
+  ): Space;
   getWebContents(tabId: string): WebContents | undefined;
   canCapturePage(): boolean;
   addActivity(
@@ -40,6 +52,16 @@ export interface AutomationController {
   onViewCreated(
     listener: (tabId: string, contents: WebContents) => void,
   ): () => void;
+  /** The tab the space shows, or would show when the person opens it. */
+  shownTab(spaceId: string): Tab | undefined;
+  /** A managed agent tab in the background; a blank page without url. */
+  openAgentTab(spaceId: string, url?: string): Tab;
+  /** Retires the tab's label; a space left empty gets a blank tab. */
+  closeTab(tabId: string, by: ClosedBy): { closed?: string; replacement?: Tab };
+  setManaged(tabId: string, managed: boolean): Tab;
+  setPageBudget(spaceId: string, pageBudget: number): void;
+  /** Clears a popup's unseen flag once the agent has addressed it. */
+  markSeen(tabId: string): void;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */
