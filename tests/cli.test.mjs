@@ -952,7 +952,7 @@ describe("scripted sessions", () => {
     expect(again.text()).toBe("");
   });
 
-  it("copies retryable and dispatched as own fields and adds entry", async () => {
+  it("copies retryable and dispatched as own fields, adds entry, and prints retry guidance", async () => {
     const api = fakeApi({
       ...routes,
       "POST /tabs/tab-1/click": () =>
@@ -990,6 +990,25 @@ describe("scripted sessions", () => {
     const reached = await page.fill("@e1", "A").catch((error) => error);
     expect(reached).toMatchObject({ code: "element_obscured", dispatched: true, entry: "page.fill" });
     expect(reached).not.toHaveProperty("retryable");
+    // Single commands add the same line after their status line.
+    const retried = sink();
+    expect(await main(["click", "tab-1", "@e2"], { env, fetch: api.fetch, stdout: sink(), stderr: retried })).toBe(1);
+    expect(retried.text()).toBe(
+      "Kamapathy: 504 action_timeout: The control never became actionable.\nKamapathy: Nothing reached the page, so the same command can be retried.\n",
+    );
+    const inspected = sink();
+    expect(
+      await main(["fill", "tab-1", "@e1", "--stdin"], {
+        env,
+        fetch: api.fetch,
+        stdin: Readable.from(["A"]),
+        stdout: sink(),
+        stderr: inspected,
+      }),
+    ).toBe(1);
+    expect(inspected.text()).toBe(
+      "Kamapathy: 409 element_obscured: Covered.\nKamapathy: The action reached the page before it failed. Inspect the page before retrying.\n",
+    );
   });
 
   it("an injected fetch sends no health request, and space(id) lists spaces for an app without apiLevel", async () => {
@@ -1444,10 +1463,10 @@ describe("scripted sessions", () => {
         { env, fetch: api.fetch, stdout: sink(), stderr: stale },
       ),
     ).toBe(1);
-    expect(stale.text()).toBe("error: stale_ref: Observe again.\n");
+    expect(stale.text()).toMatch(/^error: stale_ref: Observe again\.\n  at -e:1:\d+\n$/);
     const plain = sink();
     expect(await runCli(["run", "-e", 'throw new Error("boom")'], { env, fetch: api.fetch, stdout: sink(), stderr: plain })).toBe(1);
-    expect(plain.text()).toBe("error: boom\n");
+    expect(plain.text()).toMatch(/^error: boom\n  at -e:1:\d+\n$/);
     const missing = sink();
     expect(await runCli(["run", "-e", 'await space("space-9")'], { env, fetch: api.fetch, stdout: sink(), stderr: missing })).toBe(1);
     expect(missing.text()).toMatch(/^error: space_not_found: /);
@@ -1594,8 +1613,22 @@ describe("scripted sessions", () => {
       ["manual", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
       ["handoff", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
       [undefined, { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
-      ["permission", { status: 1, stdout: "kept\n", stderr: `error: human_control: ${message}\n${hold}` }],
-      ["failed", { status: 1, stdout: "kept\n", stderr: `error: human_control: ${message}\n` }],
+      [
+        "permission",
+        {
+          status: 1,
+          stdout: "kept\n",
+          stderr: expect.stringMatching(new RegExp(`^error: human_control: ${message}\\n  at -e:1:\\d+\\n${hold}$`)),
+        },
+      ],
+      [
+        "failed",
+        {
+          status: 1,
+          stdout: "kept\n",
+          stderr: expect.stringMatching(new RegExp(`^error: human_control: ${message}\\n  at -e:1:\\d+\\n$`)),
+        },
+      ],
     ])
       expect(
         await runIn(`${firstPage} process.stdout.write("kept\\n"); await page.click("@e2");`, {
@@ -1642,7 +1675,11 @@ describe("scripted sessions", () => {
         ...sectionTwo,
         "POST /tabs/tab-1/click": refusal(409, { ...stopped, endedBy: "agent", reason: "finished", message: "Finished." }),
       }),
-    ).toMatchObject({ status: 1, stdout: "x\n", stderr: "error: space_ended: Finished.\n" });
+    ).toMatchObject({
+      status: 1,
+      stdout: "x\n",
+      stderr: expect.stringMatching(/^error: space_ended: Finished\.\n  at -e:1:\d+\n$/),
+    });
   });
 
   it("automation_stopped and an off marker at the first call are hard stops; a delayed waitForControl answer is not", async () => {
@@ -1693,7 +1730,7 @@ describe("scripted sessions", () => {
     calls.length = 0;
     expect(
       await runIn(`${firstPage} await page.click("@e2"); throw new Error("boom");`, sectionTwo, { options: { endHooks: hooks } }),
-    ).toMatchObject({ status: 1, stderr: "error: boom\n" });
+    ).toMatchObject({ status: 1, stderr: expect.stringMatching(/^error: boom\n  at -e:1:\d+\n$/) });
     expect(calls.map(([name]) => name)).toEqual(["first", "second"]);
     calls.length = 0;
     await runIn(`${firstPage} await page.click("@e2").catch(() => {});`, {
@@ -1838,8 +1875,10 @@ describe("scripted sessions", () => {
       stderr: [
         "two",
         "error: late",
+        "  at -e:1:69",
         "notice: Update this skill copy, then read its SKILL.md again.",
         "error: final",
+        "  at -e:1:246",
         `Kamapathy: ${5 * 1024 * 1024} more bytes of output were dropped after the first 4 MiB. Write large results to a file.`,
         "",
       ].join("\n"),

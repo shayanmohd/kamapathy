@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "../api.mjs";
+import { describeError, describeScriptError } from "../diagnostics.mjs";
 import { help } from "../help.mjs";
 import { guidance, hardStopCause, KamapathyError } from "./errors.mjs";
 import { line, printable } from "./format.mjs";
@@ -200,13 +201,15 @@ function capture() {
   };
 }
 
-// Today's line for an error that ends a run, then, for a hold only the
+// The fixed line for an error that stops the run from outside the script.
+const stopText = (error) =>
+  `error: ${error.code}: ${printable(error.message)}\n`;
+
+// The description of an error that ended the run, then, for a hold only the
 // person can answer, what to do next.
-function errorText(error) {
-  const code = typeof error?.code === "string" ? `${error.code}: ` : "";
-  const message = error instanceof Error ? error.message : String(error);
+function failureText(lines, error) {
   const next = hardStopCause(error) ? "" : guidance(error);
-  return `error: ${code}${printable(message)}\n${next ? `${next}\n` : ""}`;
+  return `${[...lines, ...(next ? [next] : [])].join("\n")}\n`;
 }
 
 // Everything at exit, waiting out a slow reader but giving up on a
@@ -271,7 +274,17 @@ export async function runScript(args, options = {}) {
     }
     return rerun(file, parsed, env, options);
   }
-  // A re-run's parent named the source and removes its file itself.
+  // Errors name the source as typed. A re-run's parent says which source its
+  // temporary file holds, and removes that file itself.
+  const label =
+    source.kind === "eval"
+      ? "-e"
+      : source.kind === "stdin"
+        ? "stdin"
+        : env.KAMAPATHY_RUN_SOURCE &&
+            /kamapathy-run-[a-f0-9]{16}\.mts$/.test(source.value)
+          ? env.KAMAPATHY_RUN_SOURCE
+          : source.value;
   delete env.KAMAPATHY_RUN_SOURCE;
   await prepareWorkspace(env, parsed.envFiles, {
     stderr: options.stderr || process.stderr,
@@ -287,7 +300,13 @@ export async function runScript(args, options = {}) {
   // Errors keep the script's frames through the client's layers.
   Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
   const captured = capture();
-  const state = { final: "", status: 0, settled: false, stepped: false };
+  const state = {
+    final: "",
+    status: 0,
+    settled: false,
+    stepped: false,
+    stopped: false,
+  };
   const session = new Session({
     env,
     fetch: options.fetch,
@@ -297,6 +316,7 @@ export async function runScript(args, options = {}) {
     run: true,
   });
   for (const hook of options.endHooks ?? []) session.onRunEnd(hook);
+  const client = await connect({ session, lazy: true });
   let temporary;
   // The held output, then notices, then the final lines; after a hard stop,
   // only the guidance.
@@ -328,8 +348,9 @@ export async function runScript(args, options = {}) {
   const stopped = new Promise((done) => (finish = done));
   // The deadline and signals abort calls in progress and end the run.
   const stop = (error, status) => {
+    state.stopped = true;
     session.abort(error);
-    state.final = errorText(error);
+    state.final = stopText(error);
     state.status = status;
     if (inProcess) finish();
     else process.exit(status);
@@ -348,7 +369,10 @@ export async function runScript(args, options = {}) {
   );
   timer.unref();
   const rejected = (error) => {
-    captured.hold(2, errorText(error));
+    captured.hold(
+      2,
+      failureText(describeError(error, { label, file, client }), error),
+    );
     state.status = 1;
     if (!inProcess) process.exitCode = 1;
   };
@@ -373,7 +397,10 @@ export async function runScript(args, options = {}) {
         ),
       );
     process.on("uncaughtException", (error) => {
-      captured.hold(2, errorText(error));
+      captured.hold(
+        2,
+        failureText(describeError(error, { label, file, client }), error),
+      );
       process.exit(1);
     });
     process.once("beforeExit", stalled);
@@ -386,7 +413,6 @@ export async function runScript(args, options = {}) {
       if (temporary) rmSync(temporary, { force: true });
     });
   }
-  const client = await connect({ session, lazy: true });
   installGlobals(globalThis, client);
   const work = (async () => {
     try {
@@ -397,8 +423,14 @@ export async function runScript(args, options = {}) {
       }
       await import(pathToFileURL(file).href);
     } catch (error) {
-      state.final = errorText(error);
-      state.status = 1;
+      // After the deadline or a signal, the stop's own line stays.
+      if (!state.stopped) {
+        state.final = failureText(
+          await describeScriptError(error, { label, file, client }),
+          error,
+        );
+        state.status = 1;
+      }
     }
     state.settled = true;
     process.off("beforeExit", stalled);

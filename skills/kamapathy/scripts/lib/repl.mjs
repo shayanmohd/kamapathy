@@ -2,8 +2,9 @@
 // stopping the calls of the entry in progress.
 import repl from "node:repl";
 import { inspect } from "node:util";
+import { describeError } from "../diagnostics.mjs";
 import { KamapathyError } from "./errors.mjs";
-import { line, printable } from "./format.mjs";
+import { line } from "./format.mjs";
 import { takeNotices } from "./request.mjs";
 import { installGlobals } from "./run.mjs";
 
@@ -15,8 +16,7 @@ function writer(value) {
   if (!(value instanceof Error)) return inspect(value);
   if (value.code === "ERR_SCRIPT_EXECUTION_INTERRUPTED")
     return `error: interrupted: ${INTERRUPTED}`;
-  const code = typeof value.code === "string" ? `${value.code}: ` : "";
-  return `error: ${code}${printable(value.message)}`;
+  return describeError(value).join("\n");
 }
 
 // Resolves 0 when the person types .exit or presses Ctrl+D.

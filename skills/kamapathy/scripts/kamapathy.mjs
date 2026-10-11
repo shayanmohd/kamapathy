@@ -21,6 +21,7 @@ import {
   takeNotices,
 } from "./lib/request.mjs";
 import { connect } from "./api.mjs";
+import { formatApiError } from "./diagnostics.mjs";
 import {
   formatCommand,
   formatGeneralHelp,
@@ -642,7 +643,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
       "Request timed out. Inspect the page before retrying an action that may have submitted a form.";
   stderr.write(
     failure instanceof KamapathyError && failure.status !== undefined
-      ? `Kamapathy: ${failure.status} ${line(failure.code)}: ${line(message)}\n`
+      ? `${formatApiError(failure).join("\n")}\n`
       : `Kamapathy: ${printable(message)}\n`,
   );
   return 1;
