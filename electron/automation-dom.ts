@@ -20,7 +20,9 @@ export type PageOperation =
   | "scroll"
   | "drag"
   | "input"
-  | "frame";
+  | "frame"
+  | "ready"
+  | "frameIndex";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge.
@@ -65,7 +67,10 @@ export function pageOperation(
       fingerprints: new Map(),
       secrets: new WeakSet(),
     };
-    world.__kamapathyReferences = registry;
+    // Kamapathy's own reads run under another namespace and leave the agent's
+    // refs in place.
+    if (operation !== "ready" && operation !== "frameIndex")
+      world.__kamapathyReferences = registry;
   }
   const failure = (error: string, code = "element_action_failed") => ({
     ok: false as const,
@@ -1490,6 +1495,20 @@ export function pageOperation(
         requestAnimationFrame(() => resolve({ ok: true })),
       ),
     );
+  if (operation === "ready")
+    return { ok: true, readyState: document.readyState };
+  // The path snapshots print for a frame element, counted from this world's
+  // document.
+  if (operation === "frameIndex") {
+    const element = payload.element;
+    const index = isElement(element)
+      ? framesIn(docOf(element)).indexOf(element)
+      : -1;
+    if (!isElement(element) || index < 0 || !live(element))
+      return failure("The element is not a frame shown in this page.");
+    const around = framePath(element);
+    return { ok: true, path: around ? `${around}/${index}` : `${index}` };
+  }
   if (operation === "scroll") {
     const direction = payload.direction as string;
     const pixels = payload.pixels as number;

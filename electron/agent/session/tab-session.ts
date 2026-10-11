@@ -2,15 +2,23 @@ import type { PageOperation } from "../../automation-dom";
 import {
   CdpTimeoutError,
   ContextLostError,
+  FrameBlockedError,
   FrameGoneError,
   PageCrashedError,
   SessionLostError,
   TabClosedError,
   TargetRefusedError,
 } from "./errors";
-import { OPERATIONS, WORLD_NAME, operationExpression } from "./operations";
+import { FrameRegistry, type FrameRecord } from "./frames";
+import {
+  OPERATIONS,
+  PAGE_SOURCE,
+  WORLD_NAME,
+  operationExpression,
+} from "./operations";
 import type {
   CdpEvent,
+  FrameInfo,
   SendStep,
   SessionHost,
   SessionState,
@@ -28,8 +36,12 @@ export interface TabSessionOptions {
 
 type Listener = (event: CdpEvent) => void | Promise<unknown>;
 type Pending = { guard?: () => void; fail(error: unknown): void };
-type TreeFrame = { id: string; loaderId: string };
-type FrameTree = { frameTree: { frame: TreeFrame } };
+type FrameTree = { frameTree: { frame: { id: string } } };
+type World = Promise<{ contextId: number }>;
+type FrameChange = {
+  frameId: string;
+  change: "attached" | "navigated" | "detached";
+};
 
 const REFUSED = /^(Target|Browser)\./;
 const DISPATCHES =
@@ -43,6 +55,23 @@ const releasesInput = (method: string, params: Record<string, unknown>) =>
   (method === "Input.setInterceptDrags" && params.enabled === false);
 const report = (error: unknown) =>
   console.error("A tab session listener failed:", error);
+// What a failed call into one of Kamapathy's worlds means: a context gone
+// before the call ran, or one destroyed while it ran.
+const lostContext = (error: unknown) => {
+  const message = error instanceof Error ? error.message : "";
+  if (/Cannot find context with specified id/.test(message))
+    return new ContextLostError(false);
+  if (
+    /Execution context was destroyed|Inspected target navigated or closed/.test(
+      message,
+    )
+  )
+    return new ContextLostError(true);
+  return error;
+};
+// Frame paths hold their owner elements in this object group until released.
+const FRAME_GROUP = "kamapathy-frames";
+const FRAME_INDEX = `function(namespace){return (${PAGE_SOURCE})("frameIndex",{element:this},namespace)}`;
 
 // How many main-frame navigations each page has started while a session
 // watched it. A page's next session counts on from there, so refs from
@@ -68,22 +97,20 @@ export class TabSession {
   private awaitingCommit = false;
   private setupTimer?: ReturnType<typeof setTimeout>;
   private retries: ReturnType<typeof setTimeout>[] = [];
-  private main?: { frameId: string; loaderId: string };
+  private readonly registry = new FrameRegistry();
   // Iframe sessions, each with the session that reported it.
   private children = new Map<string, { parent?: string }>();
   private hooks = new Set<SetupHook>();
   private listeners = new Map<string, Set<Listener>>();
   private pending = new Set<Pending>();
   private waiters = new Set<() => void>();
-  // Kamapathy's world in each frame document, keyed
-  // `${sessionId ?? ""}|${frameId}|${loaderId}`. Execution context ids restart
-  // in each renderer process, so a world is never reused for another document.
-  private worlds = new Map<
+  // The worlds handed out, by session and context id. Context ids restart in
+  // each renderer process, so a call naming a world whose document ended
+  // fails instead of running in whatever context has the id now.
+  private handles = new Map<
     string,
-    { epoch: number; contextId: Promise<number> }
+    { frameId: string; world: World; epoch: number }
   >();
-  // Each frame's current document, from Page.frameNavigated.
-  private loaders = new Map<string, string>();
 
   constructor(
     readonly contents: SessionHost,
@@ -100,13 +127,6 @@ export class TabSession {
     contents.on("destroyed", this.onDestroyed);
     this.cdp.on("message", this.onMessage);
     this.cdp.on("detach", this.onDetach);
-    this.on("Page.frameNavigated", ({ params }) => {
-      this.loaders.set(params.frame.id, params.frame.loaderId);
-    });
-    this.on("detached", () => {
-      this.loaders.clear();
-      this.worlds.clear();
-    });
   }
 
   get state(): SessionState {
@@ -140,12 +160,19 @@ export class TabSession {
     step?: SendStep,
   ): Promise<T> {
     const sessionId = step?.sessionId || undefined;
+    // A world handed out on this session or on one that has since ended.
+    const handle = this.handleFor(sessionId, params);
     if (
       REFUSED.test(method) ||
-      (sessionId !== undefined && !this.children.has(sessionId))
+      (!handle && sessionId !== undefined && !this.children.has(sessionId))
     )
       throw new TargetRefusedError(method);
     step?.guard?.();
+    if (
+      handle &&
+      this.registry.worldFor(handle.frameId, this.epoch) !== handle.world
+    )
+      throw new ContextLostError(false);
     if (this.releasing || this.current === "released") {
       if (
         this.closed ||
@@ -171,13 +198,18 @@ export class TabSession {
     if (timeoutMs <= 0) throw new CdpTimeoutError("page");
     if (step?.dispatch && (step.mutates || DISPATCHES.test(method)))
       step.dispatch.dispatched = true;
-    const reply = await this.command<T>(
-      method,
-      params,
-      sessionId,
-      timeoutMs,
-      step?.guard,
-    );
+    let reply: T;
+    try {
+      reply = await this.command<T>(
+        method,
+        params,
+        sessionId,
+        timeoutMs,
+        step?.guard,
+      );
+    } catch (error) {
+      throw handle ? lostContext(error) : error;
+    }
     step?.guard?.();
     return reply;
   }
@@ -208,35 +240,96 @@ export class TabSession {
   }
 
   async mainFrameId(step: Step): Promise<string> {
-    if (this.current === "ready" && !this.releasing && this.main)
-      return this.main.frameId;
+    const known =
+      this.current === "ready" && !this.releasing
+        ? this.registry.mainFrameId
+        : undefined;
+    if (known) return known;
     const reply = await this.send<FrameTree>("Page.getFrameTree", {}, step);
-    this.keepMain(reply.frameTree.frame);
+    this.registry.seed(reply.frameTree);
     return reply.frameTree.frame.id;
   }
 
+  // The tab's frames with the index paths snapshots print. A frame whose
+  // path cannot be worked out is left out.
+  async frames(step: Step): Promise<FrameInfo[]> {
+    const main = await this.mainFrameId(step);
+    const paths = new Map<string, string>();
+    const sessions = new Set<string | undefined>();
+    const frames: FrameInfo[] = [];
+    try {
+      for (const frame of this.registry.list()) {
+        const path =
+          frame.frameId === main
+            ? ""
+            : await this.framePath(frame, paths, sessions, step);
+        if (path === undefined) continue;
+        paths.set(frame.frameId, path);
+        frames.push({
+          frameId: frame.frameId,
+          ...(frame.parentFrameId === undefined
+            ? {}
+            : { parentFrameId: frame.parentFrameId }),
+          url: frame.url,
+          origin: frame.origin,
+          ...(frame.sessionId === undefined
+            ? {}
+            : { sessionId: frame.sessionId }),
+          crossOrigin: this.registry.crossOrigin(frame.frameId),
+          path,
+          loaderId: frame.loaderId,
+          lifecycle: "unknown",
+          ...(frame.unavailable ? { unavailable: true as const } : {}),
+          ...(frame.blocked ? { blocked: true as const } : {}),
+        });
+      }
+    } finally {
+      await Promise.all(
+        [...sessions].map((sessionId) =>
+          this.send(
+            "Runtime.releaseObjectGroup",
+            { objectGroup: FRAME_GROUP },
+            { sessionId, deadline: step.deadline },
+          ).catch(() => {}),
+        ),
+      );
+    }
+    return frames;
+  }
+
+  // Kamapathy's world in a frame, for callers that resolve nodes into it and
+  // call fixed functions there. It lasts until the frame's next document or
+  // a re-attach; a call on it after that fails with ContextLostError.
+  world(
+    frameId: string,
+    step: Step,
+  ): Promise<{ sessionId?: string; contextId: number }> {
+    return this.openWorld(frameId, step, false);
+  }
+
   // Runs one of Kamapathy's fixed page operations in the frame's Kamapathy
-  // world. Only the main frame is served until frames are tracked.
+  // world, on the session that hosts the frame.
   async evaluateInFrame(
     frameId: string,
     op: PageOperation,
     payload: object,
     step: Step & { namespace: string; timeoutMs?: number },
   ): Promise<Record<string, unknown>> {
-    if (frameId !== (await this.mainFrameId(step)))
-      throw new FrameGoneError(frameId);
     const expression = operationExpression(op, payload, step.namespace);
     for (let attempt = 0; ; attempt += 1) {
-      const contextId = await this.worldContext(frameId, step, attempt > 0);
-      let reply: {
-        result?: { value?: unknown };
-        exceptionDetails?: {
-          text?: string;
-          exception?: { description?: string };
-        };
-      };
       try {
-        reply = await this.send(
+        const { sessionId, contextId } = await this.openWorld(
+          frameId,
+          step,
+          attempt > 0,
+        );
+        const reply = await this.send<{
+          result?: { value?: unknown };
+          exceptionDetails?: {
+            text?: string;
+            exception?: { description?: string };
+          };
+        }>(
           "Runtime.evaluate",
           {
             expression,
@@ -246,6 +339,7 @@ export class TabSession {
             silent: true,
           },
           {
+            sessionId,
             deadline: step.deadline,
             signal: step.signal,
             guard: step.guard,
@@ -254,59 +348,169 @@ export class TabSession {
             ...(OPERATIONS[op].mutates ? { mutates: true as const } : {}),
           },
         );
+        if (reply.exceptionDetails)
+          throw new Error(
+            reply.exceptionDetails.exception?.description ??
+              reply.exceptionDetails.text ??
+              "The page operation failed.",
+          );
+        return reply.result?.value as Record<string, unknown>;
       } catch (error) {
-        const message = error instanceof Error ? error.message : "";
         // The world was gone before the call ran: make it again, once.
-        if (/Cannot find context with specified id/.test(message)) {
-          if (attempt === 0) continue;
-          throw new ContextLostError(false);
-        }
         if (
-          /Execution context was destroyed|Inspected target navigated or closed/.test(
-            message,
-          )
+          attempt === 0 &&
+          error instanceof ContextLostError &&
+          !error.started
         )
-          throw new ContextLostError(true);
+          continue;
         throw error;
       }
-      if (reply.exceptionDetails)
-        throw new Error(
-          reply.exceptionDetails.exception?.description ??
-            reply.exceptionDetails.text ??
-            "The page operation failed.",
-        );
-      return reply.result?.value as Record<string, unknown>;
     }
   }
 
-  // The frame's Kamapathy world for its current document, made on first use.
-  // The main frame is on the page session, whose part of the key is empty.
-  private worldContext(
+  // The frame's Kamapathy world for its current document, made on first use
+  // on the session that hosts the frame.
+  private async openWorld(
     frameId: string,
     step: Step,
     fresh: boolean,
-  ): Promise<number> {
-    const frame = `|${frameId}|`;
-    const key = `${frame}${this.loaders.get(frameId) ?? ""}`;
-    const cached = this.worlds.get(key);
-    // epoch counts the main frame's next document as soon as it starts,
-    // before Page.frameNavigated arrives.
-    if (cached && !fresh && cached.epoch === this.epoch)
-      return cached.contextId;
-    for (const other of this.worlds.keys())
-      if (other.startsWith(frame)) this.worlds.delete(other);
-    const contextId = this.send<{ executionContextId: number }>(
-      "Page.createIsolatedWorld",
-      // The protocol spells grantUniveralAccess this way.
-      { frameId, worldName: WORLD_NAME, grantUniveralAccess: false },
-      { deadline: step.deadline, signal: step.signal, guard: step.guard },
-    ).then((reply) => reply.executionContextId);
-    const world = { epoch: this.epoch, contextId };
-    this.worlds.set(key, world);
-    contextId.catch(() => {
-      if (this.worlds.get(key) === world) this.worlds.delete(key);
+  ): Promise<{ sessionId?: string; contextId: number }> {
+    // Waits, as send does, until the session is up and knows its frames.
+    await this.mainFrameId(step);
+    const frame = this.registry.get(frameId);
+    if (!frame) throw new FrameGoneError(frameId);
+    if (frame.blocked) throw new FrameBlockedError(frameId);
+    if (frame.unavailable) throw new SessionLostError("unavailable");
+    const { sessionId } = frame;
+    const epoch = this.epoch;
+    if (fresh) this.registry.dropWorld(frameId);
+    let world = this.registry.worldFor(frameId, epoch);
+    if (!world) {
+      const made: World = this.send<{ executionContextId: number }>(
+        "Page.createIsolatedWorld",
+        // The protocol spells grantUniveralAccess this way.
+        { frameId, worldName: WORLD_NAME, grantUniveralAccess: false },
+        {
+          sessionId,
+          deadline: step.deadline,
+          signal: step.signal,
+          guard: step.guard,
+        },
+      ).then(
+        (reply) => ({ contextId: reply.executionContextId }),
+        (error: unknown) => {
+          throw error instanceof Error &&
+            /No frame for given id found/.test(error.message)
+            ? new FrameGoneError(frameId)
+            : error;
+        },
+      );
+      this.registry.setWorld(frameId, epoch, made);
+      made.catch(() => {
+        if (this.registry.worldFor(frameId, epoch) === made)
+          this.registry.dropWorld(frameId);
+      });
+      world = made;
+    }
+    const { contextId } = await world;
+    // The frame moved on to its next document while the world was made.
+    if (this.registry.worldFor(frameId, this.epoch) !== world)
+      throw new ContextLostError(false);
+    this.handles.set(`${sessionId ?? ""}|${contextId}`, {
+      frameId,
+      world,
+      epoch,
     });
-    return contextId;
+    return sessionId === undefined ? { contextId } : { sessionId, contextId };
+  }
+
+  // A frame's path: its owner element, found on the session hosting its
+  // parent, placed among the parent's frames by frameIndex in the parent's
+  // world.
+  private async framePath(
+    frame: FrameRecord,
+    paths: Map<string, string>,
+    sessions: Set<string | undefined>,
+    step: Step,
+  ): Promise<string | undefined> {
+    const parent =
+      frame.parentFrameId === undefined
+        ? undefined
+        : this.registry.get(frame.parentFrameId);
+    const parentPath = parent && paths.get(parent.frameId);
+    if (
+      !parent ||
+      parentPath === undefined ||
+      parent.blocked ||
+      parent.unavailable
+    )
+      return undefined;
+    try {
+      const { sessionId, contextId } = await this.world(parent.frameId, step);
+      const at = {
+        sessionId,
+        deadline: step.deadline,
+        signal: step.signal,
+        guard: step.guard,
+      };
+      const owner = await this.send<{ backendNodeId: number }>(
+        "DOM.getFrameOwner",
+        { frameId: frame.frameId },
+        at,
+      );
+      sessions.add(sessionId);
+      const node = await this.send<{ object: { objectId?: string } }>(
+        "DOM.resolveNode",
+        {
+          backendNodeId: owner.backendNodeId,
+          executionContextId: contextId,
+          objectGroup: FRAME_GROUP,
+        },
+        at,
+      );
+      const reply = await this.send<{
+        result?: { value?: { ok?: boolean; path?: unknown } };
+      }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: node.object.objectId,
+          functionDeclaration: FRAME_INDEX,
+          arguments: [{ value: "internal" }],
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        at,
+      );
+      const index = reply.result?.value;
+      if (index?.ok !== true || typeof index.path !== "string")
+        return undefined;
+      return parentPath ? `${parentPath}/${index.path}` : index.path;
+    } catch (error) {
+      // A takeover, a lost session or the deadline ends the whole read.
+      // Anything else only leaves this frame out.
+      step.guard?.();
+      if (
+        error instanceof SessionLostError ||
+        error instanceof PageCrashedError ||
+        error instanceof TabClosedError ||
+        error instanceof CdpTimeoutError
+      )
+        throw error;
+      return undefined;
+    }
+  }
+
+  // The world handle a command names through its context id, if it is one of
+  // Kamapathy's.
+  private handleFor(sessionId: string | undefined, params: object) {
+    const { executionContextId, contextId } = params as {
+      executionContextId?: unknown;
+      contextId?: unknown;
+    };
+    const id = executionContextId ?? contextId;
+    return typeof id === "number"
+      ? this.handles.get(`${sessionId ?? ""}|${id}`)
+      : undefined;
   }
 
   private connect(): boolean {
@@ -382,8 +586,11 @@ export class TabSession {
       replies.push(
         this.command<FrameTree>("Page.getFrameTree", {}, sessionId).then(
           (reply) => {
-            if (sessionId === undefined && generation === this.generation)
-              this.keepMain(reply.frameTree.frame);
+            if (
+              generation === this.generation &&
+              (sessionId === undefined || this.children.has(sessionId))
+            )
+              this.registry.seed(reply.frameTree, sessionId);
           },
         ),
       );
@@ -514,14 +721,19 @@ export class TabSession {
     return waits;
   }
 
-  private keepMain(frame: TreeFrame): void {
-    this.main = { frameId: frame.id, loaderId: frame.loaderId };
-  }
-
   private adopt(params: any, parent: string | undefined): void {
     const sessionId: string = params.sessionId;
-    // A releasing session sets up nothing new.
-    if (params.targetInfo?.type !== "iframe" || this.releasing) {
+    const target = params.targetInfo ?? {};
+    // An iframe target's id is its frame id.
+    if (target.type === "iframe")
+      this.registry.attachTarget(target.targetId, sessionId, target.url ?? "");
+    // A releasing session sets up nothing new, and a blocked frame gets
+    // nothing at all.
+    if (
+      target.type !== "iframe" ||
+      this.releasing ||
+      this.registry.get(target.targetId)?.blocked
+    ) {
       const resume = params.waitingForDebugger
         ? this.command("Runtime.runIfWaitingForDebugger", {}, sessionId)
         : Promise.resolve();
@@ -537,20 +749,50 @@ export class TabSession {
     this.children.set(sessionId, { parent });
     const generation = this.generation;
     const replies = this.setup(sessionId, params.waitingForDebugger === true);
+    // Its frames stay listed, unavailable.
     Promise.all(replies).catch(() => {
-      if (generation !== this.generation || !this.children.has(sessionId))
-        return;
-      this.forget(sessionId);
-      this.command("Target.detachFromTarget", { sessionId }, parent).catch(
-        () => {},
-      );
+      if (generation === this.generation && this.children.has(sessionId))
+        this.letGo(sessionId);
     });
   }
 
+  // Detaches a child session on the session that reported it.
+  private letGo(sessionId: string): void {
+    const parent = this.children.get(sessionId)?.parent;
+    this.forget(sessionId);
+    this.command("Target.detachFromTarget", { sessionId }, parent).catch(
+      () => {},
+    );
+  }
+
+  // Forgets a session with the sessions it reported. Their frames stay
+  // listed, unavailable.
   private forget(sessionId: string): void {
+    this.registry.detachSession(sessionId);
     if (!this.children.delete(sessionId)) return;
     for (const [id, child] of this.children)
       if (child.parent === sessionId) this.forget(id);
+  }
+
+  // A frame that commits a blocked URL loses its own session. Frames that
+  // left the registry with another are reported detached too.
+  private framesChanged(
+    change: FrameChange,
+    before: FrameRecord[],
+    source: string | undefined,
+  ): void {
+    const frame = this.registry.get(change.frameId);
+    if (
+      change.change === "navigated" &&
+      frame?.blocked &&
+      frame.ownSession &&
+      frame.sessionId
+    )
+      this.letGo(frame.sessionId);
+    this.emit("frame", change, source);
+    for (const { frameId } of before)
+      if (frameId !== change.frameId && !this.registry.get(frameId))
+        this.emit("frame", { frameId, change: "detached" }, source);
   }
 
   private committed(): void {
@@ -578,7 +820,7 @@ export class TabSession {
     this.awaitingCommit = false;
     clearTimeout(this.setupTimer);
     this.children.clear();
-    this.main = undefined;
+    this.registry.clear();
     this.failPending(() => new SessionLostError("unavailable"));
     this.setState("unavailable");
     this.emit("detached", { reason });
@@ -612,7 +854,8 @@ export class TabSession {
           this.releasing
         )
           return;
-        this.keepMain(reply.frameTree.frame);
+        this.registry.clear();
+        this.registry.seed(reply.frameTree);
         this.setState("ready");
       },
       () => {},
@@ -645,6 +888,7 @@ export class TabSession {
         this.cdp.detach();
       }
       this.children.clear();
+      this.registry.clear();
       this.setState("released");
       this.dispose();
     }
@@ -678,13 +922,18 @@ export class TabSession {
     if (method === "Target.attachedToTarget") this.adopt(params, source);
     else if (method === "Target.detachedFromTarget")
       this.forget(params.sessionId);
-    else if (
-      method === "Page.frameNavigated" &&
-      source === undefined &&
-      !params.frame.parentId
-    )
-      this.keepMain(params.frame);
+    const before =
+      method === "Page.frameNavigated" || method === "Page.frameDetached"
+        ? this.registry.list()
+        : [];
+    const change = this.registry.apply({
+      method,
+      params,
+      sessionId: source,
+      at: Date.now(),
+    });
     this.emit(method, params, source);
+    if (change) this.framesChanged(change, before, source);
   };
 
   // Electron reports the session's own detach() too. Every own detach clears
@@ -700,7 +949,11 @@ export class TabSession {
     isMainFrame: boolean;
     isSameDocument: boolean;
   }) => {
-    if (details.isMainFrame && !details.isSameDocument) this.navigations += 1;
+    if (!details.isMainFrame || details.isSameDocument) return;
+    this.navigations += 1;
+    // No request holds a world across two main-frame documents.
+    for (const [key, handle] of this.handles)
+      if (handle.epoch < this.navigations - 1) this.handles.delete(key);
   };
 
   private readonly onNavigate = () => {
@@ -734,6 +987,7 @@ export class TabSession {
     this.connected = false;
     this.generation += 1;
     this.children.clear();
+    this.registry.clear();
     this.failPending(() => new TabClosedError());
     this.setState("released");
     this.emit("closed", {});

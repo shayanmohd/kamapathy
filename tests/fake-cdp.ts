@@ -20,6 +20,8 @@ export class FakeDebugger extends EventEmitter {
   attachError?: Error;
   holdReplies = false;
   readonly sent: SentCommand[] = [];
+  // Frame targets announced through attachedTarget, by session.
+  readonly targets = new Map<string, { targetId: string; url: string }>();
   private replies: Map<string, Reply>;
   private pending = new Set<Command>();
   private held: Command[] = [];
@@ -29,10 +31,20 @@ export class FakeDebugger extends EventEmitter {
     let context = 0;
     this.replies = new Map(
       Object.entries({
-        "Page.getFrameTree": () =>
-          frameTree([
-            { id: "main", url: "https://example.com/", loaderId: "loader-1" },
-          ]),
+        // A frame target's session reports the frame it was attached for.
+        "Page.getFrameTree": (_params, sessionId) => {
+          const target =
+            sessionId === undefined ? undefined : this.targets.get(sessionId);
+          return frameTree([
+            target
+              ? { id: target.targetId, url: target.url }
+              : {
+                  id: "main",
+                  url: "https://example.com/",
+                  loaderId: "loader-1",
+                },
+          ]);
+        },
         "Page.createIsolatedWorld": () => ({ executionContextId: ++context }),
         ...replies,
       }),
@@ -192,4 +204,37 @@ export function frameTree(
     };
   };
   return { frameTree: node(frames[0]) };
+}
+// Chromium reports a new target on the session that hosts its parent frame.
+// Unless a test replies otherwise, the target's own Page.getFrameTree names
+// that frame at that URL.
+export function attachedTarget(
+  debuggerFake: FakeDebugger,
+  options: {
+    parentSessionId?: string;
+    sessionId: string;
+    targetId: string;
+    type?: string;
+    url: string;
+    waitingForDebugger?: boolean;
+  },
+): void {
+  debuggerFake.targets.set(options.sessionId, {
+    targetId: options.targetId,
+    url: options.url,
+  });
+  debuggerFake.event(
+    "Target.attachedToTarget",
+    {
+      sessionId: options.sessionId,
+      targetInfo: {
+        targetId: options.targetId,
+        type: options.type ?? "iframe",
+        url: options.url,
+        attached: true,
+      },
+      waitingForDebugger: options.waitingForDebugger ?? false,
+    },
+    options.parentSessionId,
+  );
 }

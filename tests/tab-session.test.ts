@@ -17,7 +17,13 @@ import {
   TargetRefusedError,
 } from "../electron/agent/session/errors";
 import {
+  FrameRegistry,
+  PDF_VIEWER_ID,
+  isWebFrame,
+} from "../electron/agent/session/frames";
+import {
   OPERATIONS,
+  PAGE_SOURCE,
   WORLD_NAME,
   operationExpression,
 } from "../electron/agent/session/operations";
@@ -30,7 +36,12 @@ import type {
 } from "../electron/agent/session/types";
 import { initialState, newTab } from "../shared/state";
 import type { BrowserState, Space } from "../shared/types";
-import { FakeHost, frameTree, type FakeDebugger } from "./fake-cdp";
+import {
+  FakeHost,
+  attachedTarget,
+  frameTree,
+  type FakeDebugger,
+} from "./fake-cdp";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -90,20 +101,14 @@ function attachTarget(
   sessionId: string,
   options: { parent?: string; type?: string; waiting?: boolean } = {},
 ) {
-  cdp.event(
-    "Target.attachedToTarget",
-    {
-      sessionId,
-      targetInfo: {
-        targetId: `target-${sessionId}`,
-        type: options.type ?? "iframe",
-        url: "https://frame.example/",
-        attached: true,
-      },
-      waitingForDebugger: options.waiting ?? false,
-    },
-    options.parent,
-  );
+  attachedTarget(cdp, {
+    parentSessionId: options.parent,
+    sessionId,
+    targetId: `target-${sessionId}`,
+    type: options.type,
+    url: "https://frame.example/",
+    waitingForDebugger: options.waiting,
+  });
 }
 // A setup hook like section 5's, which sends before its first await.
 const focusHook = (session: TabSession) => async (sessionId?: string) => {
@@ -1465,5 +1470,875 @@ it("maps session errors to API errors", () => {
   expect(errorBody(new Error("Protocol error"), "Fallback.")).toEqual({
     status: 500,
     error: { code: "operation_failed", message: "Fallback." },
+  });
+});
+type TreeFrames = Parameters<typeof frameTree>[0];
+// A Page.getFrameTree reply's frame tree.
+const treeOf = (frames: TreeFrames) =>
+  (frameTree(frames) as { frameTree: object }).frameTree;
+const frameEvent = (
+  method: string,
+  params: object,
+  sessionId?: string,
+): CdpEvent => ({ method, params, sessionId, at: 0 });
+// Each session's Page.getFrameTree, keyed by session id, "" for the page.
+function frameTrees(cdp: FakeDebugger, trees: Record<string, TreeFrames>) {
+  cdp.reply("Page.getFrameTree", (_params, sessionId) =>
+    frameTree(trees[sessionId ?? ""]),
+  );
+}
+// Answers path lookups for frames at these indexes in their parents'
+// documents. A frame given null is not one frameIndex lists, and a frame
+// left out has no owner element.
+function framePaths(cdp: FakeDebugger, indexes: Record<string, string | null>) {
+  const owners = Object.keys(indexes);
+  cdp.reply("DOM.getFrameOwner", (params) => {
+    if (!owners.includes(params.frameId))
+      throw new Error("Frame with the given id was not found.");
+    return { backendNodeId: owners.indexOf(params.frameId) + 1 };
+  });
+  cdp.reply("DOM.resolveNode", (params) => ({
+    object: {
+      type: "object",
+      subtype: "node",
+      objectId: `owner-${params.backendNodeId}`,
+    },
+  }));
+  cdp.reply("Runtime.callFunctionOn", (params) => {
+    const path = indexes[owners[Number(params.objectId.slice(6)) - 1]];
+    return {
+      result: {
+        type: "object",
+        value:
+          path === null
+            ? {
+                ok: false,
+                code: "element_action_failed",
+                error: "Not a frame.",
+              }
+            : { ok: true, path },
+      },
+    };
+  });
+}
+// A ready session on a page with a same-origin frame, card, and a frame from
+// another site, ads, that Chromium moves to its own process and session as
+// it does: its target is reported before its URL is known.
+async function framedPage() {
+  const opened = open();
+  frameTrees(opened.cdp, {
+    "": [
+      { id: "main", url: "https://example.com/" },
+      { id: "card", parentId: "main", url: "https://example.com/card" },
+    ],
+    "ads-session": [
+      { id: "ads", parentId: "main", url: "https://ads.example/" },
+      { id: "ads-inner", parentId: "ads", url: "https://ads.example/inner" },
+    ],
+  });
+  opened.session.attach();
+  await settle();
+  opened.cdp.event("Page.frameAttached", {
+    frameId: "ads",
+    parentFrameId: "main",
+  });
+  opened.cdp.event("Page.frameStartedNavigating", {
+    frameId: "ads",
+    url: "https://ads.example/",
+    loaderId: "loader-ads",
+    navigationType: "differentDocument",
+  });
+  attachedTarget(opened.cdp, {
+    sessionId: "ads-session",
+    targetId: "ads",
+    url: "",
+  });
+  await settle();
+  return opened;
+}
+const createdWorlds = (cdp: FakeDebugger) =>
+  cdp.sent.filter((command) => command.method === "Page.createIsolatedWorld");
+
+describe("frames", () => {
+  it("keeps the frame registry through attach, navigate, same-document navigation, swap, remove and session loss", async () => {
+    const { cdp, session } = await framedPage();
+    frameTrees(cdp, {
+      "": [
+        { id: "main", url: "https://example.com/" },
+        { id: "card", parentId: "main", url: "https://example.com/card" },
+      ],
+      "ads-session": [
+        { id: "ads", parentId: "main", url: "https://ads.example/" },
+        { id: "ads-inner", parentId: "ads", url: "https://ads.example/inner" },
+      ],
+      "late-session": [
+        { id: "late", parentId: "main", url: "https://late.example/" },
+      ],
+    });
+    framePaths(cdp, {
+      card: "0",
+      ads: "1",
+      "ads-inner": "0",
+      late: "2",
+      "late-inner": "0",
+    });
+    const changes: unknown[] = [];
+    session.on("frame", ({ params }) => {
+      changes.push(params);
+    });
+    const listed = async () =>
+      (await session.frames(soon())).map(
+        ({ frameId, url, path, sessionId, unavailable }) =>
+          [frameId, url, path, sessionId, unavailable] as const,
+      );
+    expect(await listed()).toEqual([
+      ["main", "https://example.com/", "", undefined, undefined],
+      ["card", "https://example.com/card", "0", undefined, undefined],
+      ["ads", "https://ads.example/", "1", "ads-session", undefined],
+      [
+        "ads-inner",
+        "https://ads.example/inner",
+        "1/0",
+        "ads-session",
+        undefined,
+      ],
+    ]);
+    // A new frame shows about:blank until it navigates. A new document has
+    // none of the old one's frames.
+    cdp.event("Page.frameAttached", { frameId: "late", parentFrameId: "main" });
+    cdp.event("Page.frameAttached", {
+      frameId: "late-inner",
+      parentFrameId: "late",
+    });
+    expect((await listed()).slice(4)).toEqual([
+      ["late", "about:blank", "2", undefined, undefined],
+      ["late-inner", "about:blank", "2/0", undefined, undefined],
+    ]);
+    cdp.event("Page.frameNavigated", {
+      frame: {
+        id: "late",
+        parentId: "main",
+        loaderId: "loader-late-2",
+        url: "https://example.com/late",
+        securityOrigin: "https://example.com",
+        mimeType: "text/html",
+      },
+      type: "Navigation",
+    });
+    cdp.event("Page.navigatedWithinDocument", {
+      frameId: "late",
+      url: "https://example.com/late#part",
+    });
+    expect((await listed()).slice(4)).toEqual([
+      ["late", "https://example.com/late#part", "2", undefined, undefined],
+    ]);
+    // The frame moves to its own process. Chromium may report the swap
+    // after the new session attached, and the swap changes nothing then.
+    cdp.event("Page.frameDetached", { frameId: "late", reason: "swap" });
+    attachedTarget(cdp, {
+      sessionId: "late-session",
+      targetId: "late",
+      url: "https://late.example/",
+    });
+    await settle();
+    cdp.event("Page.frameDetached", { frameId: "late", reason: "swap" });
+    expect((await listed()).slice(4)).toEqual([
+      ["late", "https://late.example/", "2", "late-session", undefined],
+    ]);
+    // Removing a frame removes the frames inside it.
+    cdp.event("Page.frameDetached", { frameId: "ads", reason: "remove" });
+    // A frame whose session ends stays listed, unavailable.
+    cdp.event("Target.detachedFromTarget", { sessionId: "late-session" });
+    expect(await listed()).toEqual([
+      ["main", "https://example.com/", "", undefined, undefined],
+      ["card", "https://example.com/card", "0", undefined, undefined],
+      ["late", "https://late.example/", "2", undefined, true],
+    ]);
+    expect(changes).toEqual([
+      { frameId: "late", change: "attached" },
+      { frameId: "late-inner", change: "attached" },
+      { frameId: "late", change: "navigated" },
+      { frameId: "late-inner", change: "detached" },
+      { frameId: "ads", change: "detached" },
+      { frameId: "ads-inner", change: "detached" },
+    ]);
+    // A lost debugger takes every frame with it until setup reads the tree
+    // again.
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(await listed()).toEqual([
+      ["main", "https://example.com/", "", undefined, undefined],
+      ["card", "https://example.com/card", "0", undefined, undefined],
+    ]);
+  });
+
+  it("computes crossOrigin against the parent frame's origin, opaque origins included, and false for the main frame", () => {
+    const registry = new FrameRegistry();
+    registry.seed(
+      treeOf([
+        { id: "main", url: "https://example.com/" },
+        { id: "same", parentId: "main", url: "https://example.com/same" },
+        { id: "site", parentId: "main", url: "https://ads.example/" },
+        { id: "port", parentId: "main", url: "https://example.com:8443/" },
+        { id: "scheme", parentId: "main", url: "http://example.com/" },
+        // Chromium reports the opaque origin of these documents as "://".
+        {
+          id: "data",
+          parentId: "main",
+          url: "data:text/html,<p>Hi</p>",
+          origin: "://",
+        },
+        { id: "blank", parentId: "main", url: "about:blank", origin: "://" },
+        { id: "srcdoc", parentId: "data", url: "about:srcdoc", origin: "://" },
+        {
+          id: "sandbox",
+          parentId: "same",
+          url: "https://example.com/box",
+          origin: "null",
+        },
+      ]),
+    );
+    expect(
+      registry
+        .list()
+        .map(({ frameId }) => [frameId, registry.crossOrigin(frameId)]),
+    ).toEqual([
+      ["main", false],
+      ["same", false],
+      ["sandbox", true],
+      ["site", true],
+      ["port", true],
+      ["scheme", true],
+      ["data", true],
+      ["srcdoc", true],
+      ["blank", true],
+    ]);
+    expect(registry.crossOrigin("unknown")).toBe(false);
+  });
+
+  it("lists extension frames and the PDF viewer as blocked with no world or setup hook, refuses evaluateInFrame and world, and resumes and detaches their targets", async () => {
+    const { cdp, session } = open();
+    frameTrees(cdp, {
+      "": [
+        { id: "main", url: "https://example.com/" },
+        { id: "doc", parentId: "main", url: "https://example.com/doc.pdf" },
+      ],
+    });
+    const hook = vi.fn(async (_sessionId?: string) => {});
+    session.onSessionSetup(hook);
+    session.attach();
+    await settle();
+    // Chromium opens the PDF viewer inside the frame showing the PDF and
+    // reports its target before its URL is known.
+    const viewer = `chrome-extension://${PDF_VIEWER_ID}/index.html`;
+    cdp.event("Page.frameAttached", {
+      frameId: "viewer",
+      parentFrameId: "doc",
+    });
+    cdp.event("Page.frameStartedNavigating", {
+      frameId: "viewer",
+      url: viewer,
+      loaderId: "loader-viewer",
+      navigationType: "differentDocument",
+    });
+    attachedTarget(cdp, {
+      sessionId: "viewer-session",
+      targetId: "viewer",
+      url: "",
+    });
+    // An extension's own page in a frame, whose target waits to start.
+    const panel =
+      "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html";
+    cdp.event("Page.frameAttached", {
+      frameId: "panel",
+      parentFrameId: "main",
+    });
+    attachedTarget(cdp, {
+      sessionId: "panel-session",
+      targetId: "panel",
+      url: panel,
+      waitingForDebugger: true,
+    });
+    await settle();
+    expect(cdp.methods("viewer-session")).toEqual([]);
+    expect(cdp.methods("panel-session")).toEqual([
+      "Runtime.runIfWaitingForDebugger",
+    ]);
+    expect(
+      cdp.sent.filter(
+        (command) => command.method === "Target.detachFromTarget",
+      ),
+    ).toEqual([
+      {
+        method: "Target.detachFromTarget",
+        params: { sessionId: "viewer-session" },
+      },
+      {
+        method: "Target.detachFromTarget",
+        params: { sessionId: "panel-session" },
+      },
+    ]);
+    expect(hook.mock.calls).toEqual([[undefined]]);
+    framePaths(cdp, { doc: "0", viewer: "0", panel: "1" });
+    expect(
+      (await session.frames(soon())).map(
+        ({ frameId, url, path, sessionId, blocked }) => ({
+          frameId,
+          url,
+          path,
+          sessionId,
+          blocked,
+        }),
+      ),
+    ).toEqual([
+      { frameId: "main", url: "https://example.com/", path: "" },
+      { frameId: "doc", url: "https://example.com/doc.pdf", path: "0" },
+      { frameId: "viewer", url: viewer, path: "0/0", blocked: true },
+      { frameId: "panel", url: panel, path: "1", blocked: true },
+    ]);
+    for (const frameId of ["viewer", "panel"]) {
+      await expect(
+        session.evaluateInFrame(frameId, "snapshot", {}, evaluation()),
+      ).rejects.toBeInstanceOf(FrameBlockedError);
+      await expect(session.world(frameId, soon())).rejects.toBeInstanceOf(
+        FrameBlockedError,
+      );
+    }
+    expect(createdWorlds(cdp).map((command) => command.params.frameId)).toEqual(
+      ["main", "doc"],
+    );
+  });
+
+  it("blocks every frame inside a blocked frame", async () => {
+    const registry = new FrameRegistry();
+    registry.seed(
+      treeOf([
+        { id: "main", url: "https://example.com/" },
+        {
+          id: "panel",
+          parentId: "main",
+          url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+          origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+        },
+        { id: "inside", parentId: "panel", url: "https://example.com/inside" },
+        { id: "deeper", parentId: "inside", url: "about:blank", origin: "://" },
+        { id: "card", parentId: "main", url: "https://example.com/card" },
+        {
+          id: "data",
+          parentId: "main",
+          url: "data:text/html,<p>Hi</p>",
+          origin: "://",
+        },
+      ]),
+    );
+    registry.apply(
+      frameEvent("Page.frameAttached", {
+        frameId: "late",
+        parentFrameId: "inside",
+      }),
+    );
+    expect(
+      registry.list().map(({ frameId, blocked }) => [frameId, blocked]),
+    ).toEqual([
+      ["main", false],
+      ["panel", true],
+      ["inside", true],
+      ["deeper", true],
+      ["late", true],
+      ["card", false],
+      ["data", false],
+    ]);
+    // In a tab showing a local file, a web frame inside it gets no session.
+    const { cdp, session } = open({ url: "file:///Users/person/page.html" });
+    frameTrees(cdp, {
+      "": [
+        {
+          id: "main",
+          url: "file:///Users/person/page.html",
+          origin: "file://",
+        },
+        { id: "blank", parentId: "main", url: "about:blank", origin: "://" },
+      ],
+    });
+    const hook = vi.fn(async (_sessionId?: string) => {});
+    session.onSessionSetup(hook);
+    session.attach();
+    await settle();
+    cdp.event("Page.frameAttached", { frameId: "web", parentFrameId: "main" });
+    attachedTarget(cdp, {
+      sessionId: "web-session",
+      targetId: "web",
+      url: "https://example.com/",
+    });
+    await settle();
+    expect(cdp.methods("web-session")).toEqual([]);
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Target.detachFromTarget",
+      params: { sessionId: "web-session" },
+    });
+    expect(hook.mock.calls).toEqual([[undefined]]);
+    for (const frameId of ["main", "blank", "web"])
+      await expect(
+        session.evaluateInFrame(frameId, "check", {}, evaluation()),
+      ).rejects.toBeInstanceOf(FrameBlockedError);
+    expect(createdWorlds(cdp)).toEqual([]);
+    // A frame's path is read in its parent's world, so only the main frame
+    // is listed here.
+    expect(await session.frames(soon())).toEqual([
+      {
+        frameId: "main",
+        url: "file:///Users/person/page.html",
+        origin: "file://",
+        crossOrigin: false,
+        path: "",
+        loaderId: "loader-main",
+        lifecycle: "unknown",
+        blocked: true,
+      },
+    ]);
+  });
+
+  it("drops the world and session of a frame that later commits a blocked URL", async () => {
+    const { cdp, session } = await framedPage();
+    await session.evaluateInFrame("ads", "check", {}, evaluation());
+    await session.evaluateInFrame("card", "check", {}, evaluation());
+    expect(createdWorlds(cdp)).toHaveLength(2);
+    const changes: unknown[] = [];
+    session.on("frame", ({ params }) => {
+      changes.push(params);
+    });
+    // The out-of-process frame loads an extension page: its session is
+    // detached on the page session, with the frames inside it.
+    const page = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/ad.html";
+    cdp.event(
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "ads",
+          parentId: "main",
+          loaderId: "loader-ads-2",
+          url: page,
+          securityOrigin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+          mimeType: "text/html",
+        },
+        type: "Navigation",
+      },
+      "ads-session",
+    );
+    await settle();
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Target.detachFromTarget",
+      params: { sessionId: "ads-session" },
+    });
+    await expect(
+      session.send("Page.getFrameTree", {}, soon("ads-session")),
+    ).rejects.toBeInstanceOf(TargetRefusedError);
+    // A same-process frame showing an error page loses its world.
+    cdp.event("Page.frameNavigated", {
+      frame: {
+        id: "card",
+        parentId: "main",
+        loaderId: "loader-card-2",
+        url: "chrome-error://chromewebdata/",
+        securityOrigin: "://",
+        mimeType: "text/html",
+      },
+      type: "Navigation",
+    });
+    for (const frameId of ["ads", "card"])
+      await expect(
+        session.evaluateInFrame(frameId, "check", {}, evaluation()),
+      ).rejects.toBeInstanceOf(FrameBlockedError);
+    await expect(
+      session.evaluateInFrame("ads-inner", "check", {}, evaluation()),
+    ).rejects.toBeInstanceOf(FrameGoneError);
+    expect(createdWorlds(cdp)).toHaveLength(2);
+    expect(changes).toEqual([
+      { frameId: "ads", change: "navigated" },
+      { frameId: "ads-inner", change: "detached" },
+      { frameId: "card", change: "navigated" },
+    ]);
+    framePaths(cdp, { card: "0", ads: "1" });
+    expect(
+      (await session.frames(soon())).map(
+        ({ frameId, sessionId, blocked, unavailable }) => ({
+          frameId,
+          sessionId,
+          blocked,
+          unavailable,
+        }),
+      ),
+    ).toEqual([
+      { frameId: "main" },
+      { frameId: "card", blocked: true },
+      { frameId: "ads", blocked: true },
+    ]);
+  });
+
+  it("treats a main frame showing chrome-error://chromewebdata/ as a web frame", async () => {
+    expect(isWebFrame("chrome-error://chromewebdata/", "://", true)).toBe(true);
+    expect(isWebFrame("chrome-error://chromewebdata/", "://", false)).toBe(
+      false,
+    );
+    const { cdp, session } = open({ url: "chrome-error://chromewebdata/" });
+    frameTrees(cdp, {
+      "": [{ id: "main", url: "chrome-error://chromewebdata/", origin: "://" }],
+    });
+    cdp.reply("Runtime.evaluate", () => ({
+      result: { type: "object", value: { ok: true, matched: true } },
+    }));
+    session.attach();
+    await settle();
+    expect(
+      await session.evaluateInFrame(
+        "main",
+        "check",
+        { text: "This site can't be reached" },
+        evaluation(),
+      ),
+    ).toEqual({ ok: true, matched: true });
+    expect(createdWorlds(cdp)).toHaveLength(1);
+    expect((await session.frames(soon()))[0]).not.toHaveProperty("blocked");
+  });
+
+  it("evaluates in an out-of-process frame on its own session", async () => {
+    const { cdp, session } = await framedPage();
+    cdp.reply("Runtime.evaluate", (params, sessionId) => ({
+      result: {
+        type: "object",
+        value: {
+          ok: true,
+          sessionId: sessionId ?? null,
+          contextId: params.contextId,
+        },
+      },
+    }));
+    expect(
+      await session.evaluateInFrame(
+        "ads",
+        "check",
+        { text: "Ad" },
+        evaluation(),
+      ),
+    ).toEqual({ ok: true, sessionId: "ads-session", contextId: 1 });
+    expect(
+      await session.evaluateInFrame("ads-inner", "check", {}, evaluation()),
+    ).toEqual({ ok: true, sessionId: "ads-session", contextId: 2 });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, sessionId: null, contextId: 3 });
+    expect(createdWorlds(cdp)).toEqual([
+      {
+        method: "Page.createIsolatedWorld",
+        params: {
+          frameId: "ads",
+          worldName: "kamapathy",
+          grantUniveralAccess: false,
+        },
+        sessionId: "ads-session",
+      },
+      {
+        method: "Page.createIsolatedWorld",
+        params: {
+          frameId: "ads-inner",
+          worldName: "kamapathy",
+          grantUniveralAccess: false,
+        },
+        sessionId: "ads-session",
+      },
+      {
+        method: "Page.createIsolatedWorld",
+        params: {
+          frameId: "main",
+          worldName: "kamapathy",
+          grantUniveralAccess: false,
+        },
+      },
+    ]);
+    expect(
+      cdp.sent.find(
+        (command) =>
+          command.method === "Runtime.evaluate" &&
+          command.sessionId === "ads-session",
+      )?.params,
+    ).toEqual({
+      expression: operationExpression("check", { text: "Ad" }, "test"),
+      contextId: 1,
+      returnByValue: true,
+      awaitPromise: true,
+      silent: true,
+    });
+  });
+
+  it("world returns the session and context evaluateInFrame uses and fails with ContextLostError after the frame's next document", async () => {
+    const { cdp, session } = await framedPage();
+    const handle = await session.world("ads", soon());
+    expect(handle).toEqual({ sessionId: "ads-session", contextId: 1 });
+    await session.evaluateInFrame("ads", "check", {}, evaluation());
+    expect(
+      cdp.sent.filter((command) => command.method === "Runtime.evaluate"),
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ contextId: 1 }),
+        sessionId: "ads-session",
+      }),
+    ]);
+    expect(createdWorlds(cdp)).toHaveLength(1);
+    const resolve = (world: { sessionId?: string; contextId: number }) =>
+      session.send(
+        "DOM.resolveNode",
+        { backendNodeId: 7, executionContextId: world.contextId },
+        soon(world.sessionId),
+      );
+    await expect(resolve(handle)).resolves.toEqual({});
+    // Chromium reports a context that is already gone.
+    cdp.reply("DOM.resolveNode", () => {
+      throw new Error("Cannot find context with specified id");
+    });
+    const missing = await rejection(resolve(handle));
+    expect(missing).toBeInstanceOf(ContextLostError);
+    expect(missing).toMatchObject({ started: false });
+    cdp.reply("DOM.resolveNode", () => ({}));
+    // After the frame's next document the handle is refused before anything
+    // is sent, since a new process may give its id to another context.
+    cdp.event(
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "ads",
+          parentId: "main",
+          loaderId: "loader-ads-2",
+          url: "https://ads.example/next",
+          securityOrigin: "https://ads.example",
+          mimeType: "text/html",
+        },
+        type: "Navigation",
+      },
+      "ads-session",
+    );
+    const sent = cdp.sent.length;
+    const ended = await rejection(resolve(handle));
+    expect(ended).toBeInstanceOf(ContextLostError);
+    expect(ended).toMatchObject({ started: false });
+    expect(cdp.sent).toHaveLength(sent);
+    const next = await session.world("ads", soon());
+    expect(next).toEqual({ sessionId: "ads-session", contextId: 2 });
+    await expect(resolve(next)).resolves.toEqual({});
+    // A world made while its frame moved on is never handed out.
+    cdp.holdReplies = true;
+    const racing = rejection(session.world("card", soon()));
+    await settle();
+    cdp.event("Page.frameNavigated", {
+      frame: {
+        id: "card",
+        parentId: "main",
+        loaderId: "loader-card-2",
+        url: "https://example.com/card/2",
+        securityOrigin: "https://example.com",
+        mimeType: "text/html",
+      },
+      type: "Navigation",
+    });
+    cdp.holdReplies = false;
+    cdp.flush();
+    expect(await racing).toBeInstanceOf(ContextLostError);
+    expect(await session.world("card", soon())).toEqual({ contextId: 4 });
+    // The same holds once the frame's session has ended, and after a
+    // re-attach.
+    const main = await session.world("main", soon());
+    cdp.event("Target.detachedFromTarget", { sessionId: "ads-session" });
+    await expect(resolve(next)).rejects.toBeInstanceOf(ContextLostError);
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    await expect(resolve(main)).rejects.toBeInstanceOf(ContextLostError);
+    expect(await session.world("main", soon())).toEqual({ contextId: 6 });
+  });
+
+  it("computes frame paths through DOM.getFrameOwner, DOM.resolveNode and frameIndex, releases the object group and omits unresolvable frames", async () => {
+    const { cdp, session } = await framedPage();
+    // gone has no owner element, and frameIndex does not list hidden, so
+    // neither has a path, nor has the frame inside hidden.
+    cdp.event("Page.frameAttached", {
+      frameId: "hidden",
+      parentFrameId: "card",
+    });
+    cdp.event("Page.frameAttached", {
+      frameId: "deep",
+      parentFrameId: "hidden",
+    });
+    cdp.event("Page.frameAttached", { frameId: "gone", parentFrameId: "main" });
+    framePaths(cdp, {
+      card: "0",
+      hidden: null,
+      deep: "0",
+      ads: "1",
+      "ads-inner": "0",
+    });
+    expect(
+      (await session.frames(soon())).map(
+        ({ frameId, path, sessionId, crossOrigin }) => ({
+          frameId,
+          path,
+          sessionId,
+          crossOrigin,
+        }),
+      ),
+    ).toEqual([
+      { frameId: "main", path: "", crossOrigin: false },
+      { frameId: "card", path: "0", crossOrigin: false },
+      {
+        frameId: "ads",
+        path: "1",
+        sessionId: "ads-session",
+        crossOrigin: true,
+      },
+      {
+        frameId: "ads-inner",
+        path: "1/0",
+        sessionId: "ads-session",
+        crossOrigin: false,
+      },
+    ]);
+    const lookups = cdp.sent.filter((command) =>
+      /^(DOM|Runtime)\./.test(command.method),
+    );
+    // Each frame's owner is found on the session hosting its parent and
+    // resolved into the parent's world: main's is context 1, card's 2 and
+    // ads's 3.
+    expect(lookups.slice(0, 3)).toEqual([
+      { method: "DOM.getFrameOwner", params: { frameId: "card" } },
+      {
+        method: "DOM.resolveNode",
+        params: {
+          backendNodeId: 1,
+          executionContextId: 1,
+          objectGroup: "kamapathy-frames",
+        },
+      },
+      {
+        method: "Runtime.callFunctionOn",
+        params: {
+          objectId: "owner-1",
+          functionDeclaration: `function(namespace){return (${PAGE_SOURCE})("frameIndex",{element:this},namespace)}`,
+          arguments: [{ value: "internal" }],
+          returnByValue: true,
+          awaitPromise: true,
+        },
+      },
+    ]);
+    expect(
+      lookups
+        .filter((command) => command.method === "DOM.resolveNode")
+        .map(({ params, sessionId }) => [
+          params.backendNodeId,
+          params.executionContextId,
+          sessionId,
+        ]),
+    ).toEqual([
+      [1, 1, undefined],
+      [2, 2, undefined],
+      [4, 1, undefined],
+      [5, 3, "ads-session"],
+    ]);
+    expect(
+      lookups
+        .filter((command) => command.method === "DOM.getFrameOwner")
+        .map(({ params, sessionId }) => [params.frameId, sessionId]),
+    ).toEqual([
+      ["card", undefined],
+      ["hidden", undefined],
+      ["ads", undefined],
+      ["ads-inner", "ads-session"],
+      ["gone", undefined],
+    ]);
+    expect(
+      lookups.filter(
+        (command) => command.method === "Runtime.releaseObjectGroup",
+      ),
+    ).toEqual([
+      {
+        method: "Runtime.releaseObjectGroup",
+        params: { objectGroup: "kamapathy-frames" },
+      },
+      {
+        method: "Runtime.releaseObjectGroup",
+        params: { objectGroup: "kamapathy-frames" },
+        sessionId: "ads-session",
+      },
+    ]);
+    const methods = cdp.sent.map((command) => command.method);
+    expect(methods).not.toContain("DOM.enable");
+    expect(methods).not.toContain("Runtime.enable");
+    // A takeover ends the whole read.
+    const takeover = new Error("The person is using this space.");
+    await expect(
+      session.frames({
+        ...soon(),
+        guard: () => {
+          throw takeover;
+        },
+      }),
+    ).rejects.toBe(takeover);
+  });
+
+  it("marks the frames of a child whose setup failed unavailable", async () => {
+    const { cdp, session } = open();
+    frameTrees(cdp, {
+      "": [{ id: "main", url: "https://example.com/" }],
+      "ads-session": [
+        { id: "ads", parentId: "main", url: "https://ads.example/" },
+        { id: "ads-inner", parentId: "ads", url: "https://ads.example/inner" },
+      ],
+    });
+    // The frame's session ends before Chromium answers Network.enable.
+    cdp.reply("Network.enable", (_params, sessionId) =>
+      sessionId === "ads-session"
+        ? new Promise((_resolve, reject) =>
+            setTimeout(() => reject(new Error("Session closed")), 0),
+          )
+        : {},
+    );
+    session.attach();
+    await settle();
+    cdp.event("Page.frameAttached", { frameId: "ads", parentFrameId: "main" });
+    attachedTarget(cdp, {
+      sessionId: "ads-session",
+      targetId: "ads",
+      url: "https://ads.example/",
+    });
+    await settle();
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Target.detachFromTarget",
+      params: { sessionId: "ads-session" },
+    });
+    framePaths(cdp, { ads: "0", "ads-inner": "0" });
+    expect(
+      (await session.frames(soon())).map(
+        ({ frameId, path, sessionId, unavailable }) => ({
+          frameId,
+          path,
+          sessionId,
+          unavailable,
+        }),
+      ),
+    ).toEqual([
+      { frameId: "main", path: "" },
+      { frameId: "ads", path: "0", unavailable: true },
+    ]);
+    for (const frameId of ["ads", "ads-inner"])
+      for (const lost of [
+        await rejection(session.world(frameId, soon())),
+        await rejection(
+          session.evaluateInFrame(frameId, "check", {}, evaluation()),
+        ),
+      ]) {
+        expect(lost, frameId).toBeInstanceOf(SessionLostError);
+        expect(lost).toMatchObject({ reason: "unavailable" });
+      }
+    expect(createdWorlds(cdp).map((command) => command.params.frameId)).toEqual(
+      ["main"],
+    );
   });
 });

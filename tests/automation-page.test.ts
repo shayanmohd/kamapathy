@@ -43,12 +43,26 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   const operate = (
     operation: PageOperation,
     payload: Record<string, unknown> = {},
+    namespace = "test",
   ): Promise<any> =>
     page.evaluate(
-      ([script, operation, payload]) =>
-        (0, eval)(script)(operation, payload, "test"),
-      [script, operation, payload] as const,
+      ([script, operation, payload, namespace]) =>
+        (0, eval)(script)(operation, payload, namespace),
+      [script, operation, payload, namespace] as const,
     );
+  // frameIndex takes the frame element itself, which cannot travel as JSON.
+  const frameIndex = async (
+    find: () => Element | null | undefined,
+    namespace = "test",
+  ): Promise<any> =>
+    page.evaluate(
+      ([script, element, namespace]) =>
+        (0, eval)(script)("frameIndex", { element }, namespace),
+      [script, await page.evaluateHandle(find), namespace] as const,
+    );
+  // The frame /frames/shadow-frame hosts in a shadow root.
+  const shadowFrame = () =>
+    document.getElementById("widget")!.shadowRoot!.getElementById("embedded");
   const snapshot = () =>
     operate("snapshot", {
       mode: "full",
@@ -176,5 +190,45 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
       "Other",
       "Veiled button",
     ]);
+  }, 20000);
+
+  it("ready returns the document's readyState", async () => {
+    await open("/frames/outer");
+    expect(await operate("ready", {}, "internal")).toEqual({
+      ok: true,
+      readyState: "complete",
+    });
+  }, 20000);
+
+  it("frameIndex returns the index snapshots print for a frame inside a shadow root", async () => {
+    await open("/frames/shadow-frame");
+    const count = byLabel(await snapshot(), "Count clicks");
+    expect(count.frame).toBe("0");
+    expect(await frameIndex(shadowFrame)).toEqual({ ok: true, path: "0" });
+    // A frame inside a frame is counted from this world's document.
+    await page.goto(origin + "/frames/outer");
+    await page.waitForLoadState("networkidle");
+    expect(byLabel(await snapshot(), "Deep button").frame).toBe("0/0");
+    expect(
+      await frameIndex(() =>
+        document
+          .querySelector<HTMLIFrameElement>("#inner")!
+          .contentDocument!.getElementById("nested"),
+      ),
+    ).toEqual({ ok: true, path: "0/0" });
+    expect(await frameIndex(() => document.body)).toMatchObject({ ok: false });
+  }, 20000);
+
+  it("ready and frameIndex leave refs from a snapshot under another namespace valid", async () => {
+    await open("/frames/shadow-frame");
+    const count = byLabel(await snapshot(), "Count clicks");
+    expect(await operate("ready", {}, "internal")).toMatchObject({ ok: true });
+    expect(await frameIndex(shadowFrame, "internal")).toEqual({
+      ok: true,
+      path: "0",
+    });
+    expect(await operate("target", { ref: count.ref })).toMatchObject({
+      ok: true,
+    });
   }, 20000);
 });

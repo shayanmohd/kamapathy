@@ -19,6 +19,8 @@ export const OPERATIONS: Record<PageOperation, { mutates: boolean }> = {
   drag: { mutates: false },
   input: { mutates: false },
   frame: { mutates: false },
+  ready: { mutates: false },
+  frameIndex: { mutates: false },
 };
 
 export function operationExpression(
