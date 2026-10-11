@@ -129,6 +129,13 @@ export interface ImportOutcome {
   history: number;
   warnings: string[];
 }
+// An agent's request for one of the person's spaces, waiting for an answer.
+export interface SpaceRequest {
+  id: string;
+  reason: string;
+  name?: string;
+  at: number;
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
@@ -139,6 +146,7 @@ export interface BrowserState {
   history: HistoryEntry[];
   downloads: Download[];
   activity: Activity[];
+  spaceRequests: SpaceRequest[];
   settings: Settings;
   platform: "darwin" | "win32" | "linux" | "web";
   version: string;
@@ -183,6 +191,12 @@ export type BrowserAction =
   | { type: "space:grant"; id: string }
   | { type: "space:stop"; id: string }
   | { type: "space:keep"; id: string }
+  | {
+      type: "space-request:answer";
+      id: string;
+      allow: boolean;
+      spaceId?: string;
+    }
   | { type: "bookmark:add"; url: string; title: string }
   | { type: "bookmark:remove"; id: string }
   | { type: "bookmark:update"; id: string; url: string; title: string }

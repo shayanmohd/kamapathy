@@ -262,6 +262,13 @@ function registerIpc(): void {
       automation.endSpace(action.id);
       return owner.state;
     }
+    if (action?.type === "space-request:answer" && automation) {
+      automation.answerRequest(action.id, {
+        allow: action.allow === true,
+        spaceId: action.spaceId,
+      });
+      return owner.state;
+    }
     return owner.dispatch(action);
   });
   ipcMain.on("kamapathy:bounds", (event, bounds: ContentBounds) => {

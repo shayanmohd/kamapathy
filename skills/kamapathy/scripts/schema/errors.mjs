@@ -70,6 +70,13 @@ export const ERRORS = {
     "The protocol command reaches beyond this tab's own page and frames.",
     ["method", "reason"],
   ),
+  request_declined: code(
+    403,
+    false,
+    "The person did not let an agent use a space.",
+    [],
+    2,
+  ),
   route_not_found: code(404, false, "This Kamapathy has no such route.", [
     "method",
     "route",
@@ -230,6 +237,13 @@ export const ERRORS = {
     true,
     "Control did not return to the agent before the timeout.",
     ["awaited", "timeoutMs", "reason"],
+    2,
+  ),
+  request_timeout: code(
+    504,
+    false,
+    "The person did not answer a request for a space in time. Asking again interrupts them.",
+    ["awaited", "timeoutMs"],
     2,
   ),
   wait_timeout: {

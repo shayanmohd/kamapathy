@@ -342,6 +342,22 @@ describe("desktop session persistence", () => {
       expect(tab).not.toHaveProperty(field);
   });
 
+  it("never saves requests for a space", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    original.spaceRequests.push({
+      id: "request",
+      reason: "Book a table",
+      name: "Work",
+      at: 5,
+    });
+    writeState(path, original);
+    const raw = readFileSync(path, "utf8");
+    expect(raw).not.toContain("spaceRequests");
+    expect(raw).not.toContain("Book a table");
+    expect(readState(path, "darwin", "0.2.0").spaceRequests).toEqual([]);
+  });
+
   it("starts one blank tab per personal space when session restoration is disabled", () => {
     const path = statePath();
     const original = initialState();

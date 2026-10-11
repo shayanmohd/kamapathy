@@ -270,6 +270,35 @@ export const ROUTES = [
     { follow: true },
   ),
   route(
+    "POST",
+    "/space-requests",
+    "Asks the person to let an agent use one of their spaces and waits for their answer.",
+    "{ space: SpaceView, tabs: TabView[], active: TabView | null }",
+    {
+      reason: {
+        kind: "string",
+        min: 1,
+        max: 120,
+        required: true,
+        description:
+          "Why the agent needs a space, shown to the person as the agent's words.",
+      },
+      name: {
+        kind: "string",
+        max: 48,
+        description: "The name of the space to suggest.",
+      },
+      timeoutMs: {
+        kind: "ms",
+        min: 5000,
+        max: 600000,
+        default: 600000,
+        description: "How long to wait for the person's answer.",
+      },
+    },
+    { lane: "none", budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
     "DELETE",
     "/tabs/:id",
     "Closes a page the agent manages. Its label is retired, and a blank page with the next label replaces a space's last page.",

@@ -32,6 +32,7 @@ import type {
   SignIns,
   Space,
   SpaceColor,
+  SpaceRequest,
   Tab,
 } from "../shared/types";
 import { TabRegistry } from "./agent/tab-registry";
@@ -1140,13 +1141,34 @@ export class BrowserController {
     );
   }
 
-  // Agent access went off: every grant ends.
+  // Agent access went off: every grant ends and no request waits.
   resetAgentAccess(): void {
     const granted = this.state.spaces.filter(
       (space) => space.kind === "personal" && space.access,
     );
     this.registry.reset();
+    this.state.spaceRequests = [];
     for (const space of granted) this.setThrottling(space.id, true);
+    this.emit();
+  }
+
+  // Shown to the person until they answer or the request ends.
+  addSpaceRequest(request: { reason: string; name?: string }): SpaceRequest {
+    const added: SpaceRequest = {
+      id: randomUUID(),
+      reason: request.reason,
+      ...(request.name === undefined ? {} : { name: request.name }),
+      at: Date.now(),
+    };
+    this.state.spaceRequests.push(added);
+    this.emit();
+    return added;
+  }
+
+  removeSpaceRequest(id: string): void {
+    this.state.spaceRequests = this.state.spaceRequests.filter(
+      (request) => request.id !== id,
+    );
     this.emit();
   }
 
@@ -1499,6 +1521,9 @@ export class BrowserController {
       case "space:keep":
         await this.keepAsPersonal(action.id);
         break;
+      case "space-request:answer":
+        // main.ts answers through the agent service while it runs.
+        throw new Error("Turn on agent access first.");
       case "space:delete": {
         const space = this.getSpace(action.id);
         if (

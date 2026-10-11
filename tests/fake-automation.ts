@@ -20,6 +20,7 @@ import type {
   ClosedBy,
   HoldReason,
   Space,
+  SpaceRequest,
   Tab,
 } from "../shared/types";
 import { isWebUrl } from "../shared/url";
@@ -273,6 +274,24 @@ export class FakeController implements AutomationController {
   }
   resetAgentAccess() {
     this.registry.reset();
+    this.state.spaceRequests = [];
+    this.emit();
+  }
+  addSpaceRequest(request: { reason: string; name?: string }) {
+    const added: SpaceRequest = {
+      id: crypto.randomUUID(),
+      reason: request.reason,
+      ...(request.name === undefined ? {} : { name: request.name }),
+      at: Date.now(),
+    };
+    this.state.spaceRequests.push(added);
+    this.emit();
+    return added;
+  }
+  removeSpaceRequest(id: string) {
+    this.state.spaceRequests = this.state.spaceRequests.filter(
+      (request) => request.id !== id,
+    );
     this.emit();
   }
   async keepAsPersonal(spaceId: string) {

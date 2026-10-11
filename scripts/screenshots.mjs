@@ -484,10 +484,10 @@ export const afterSurfaces = {
   "stop-all-confirm": {
     open: async ({ shell, dispatch, ids }) => {
       await dispatch({ type: "tab:activate", id: ids.agentTab });
-      await agentBar(shell).getByRole("button", { name: "Stop all agents" }).click();
       await agentBar(shell)
-        .getByText("Stop every agent and turn off agent access?")
-        .waitFor();
+        .getByRole("button", { name: "Stop", exact: true })
+        .click();
+      await agentBar(shell).getByText("Stop the agent in this space?").waitFor();
     },
     close: ({ shell }) =>
       agentBar(shell).getByRole("button", { name: "Cancel" }).click(),

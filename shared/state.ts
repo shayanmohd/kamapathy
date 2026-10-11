@@ -104,6 +104,7 @@ export function initialState(
     history: [],
     downloads: [],
     activity: [],
+    spaceRequests: [],
     settings: {
       theme: "system",
       searchEngine: "duckduckgo",

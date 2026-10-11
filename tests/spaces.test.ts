@@ -9,7 +9,7 @@ import {
   RECENT_ACTION_MS,
   spaceButtonState,
 } from "../src/lib/spaces";
-import { spacesCopy } from "../src/copy";
+import { agentBarCopy, spacesCopy, statusCopy } from "../src/copy";
 
 const now = 1_000_000;
 const entry = (
@@ -81,6 +81,32 @@ describe("agent status", () => {
     );
     expect(agentStatus(space, state, now, new Set())).toBe("paused");
   });
+  it("a granted personal space gets the agent bar statuses, and a finished or stopped agent space says so", () => {
+    const state = initialState();
+    const work = state.spaces.find((space) => space.id === "work")!;
+    work.access = "granted";
+    work.owner = "agent";
+    expect(agentStatus(work, state, now, new Set())).toBe("idle");
+    work.owner = "human";
+    expect(agentStatus(work, state, now, new Set())).toBe("in-control");
+    work.access = "ended";
+    work.ended = { by: "person", reason: "stopped", at: now };
+    expect(agentStatus(work, state, now, new Set())).toBeUndefined();
+    const { state: agentState, space } = withAgent("human");
+    space.access = "ended";
+    space.ended = { by: "agent", reason: "finished", at: now };
+    expect(agentStatus(space, agentState, now, new Set())).toBe("finished");
+    space.ended = { by: "person", reason: "stopped", at: now };
+    expect(agentStatus(space, agentState, now, new Set())).toBe("stopped");
+    expect([statusCopy.finished, agentBarCopy.status.finished]).toEqual([
+      "Agent finished",
+      "Agent finished",
+    ]);
+    expect([statusCopy.stopped, agentBarCopy.status.stopped]).toEqual([
+      "You stopped the agent",
+      "You stopped the agent",
+    ]);
+  });
   it("has no status for personal spaces", () => {
     const state = initialState();
     expect(agentStatus(state.spaces[0], state, now, new Set())).toBeUndefined();
@@ -127,6 +153,12 @@ describe("space button", () => {
     expect(spaceButtonState(state, now, seen).needsYou).toBe(false);
     expect(acknowledgeHandoff(seen, state.activity, space.id)).toBe(seen);
     expect(acknowledgeHandoff(seen, state.activity, "personal")).toBe(seen);
+  });
+  it("a waiting request raises the alert dot", () => {
+    const state = initialState();
+    expect(spaceButtonState(state, now, new Set()).needsYou).toBe(false);
+    state.spaceRequests.push({ id: "request", reason: "Book a table", at: now });
+    expect(spaceButtonState(state, now, new Set()).needsYou).toBe(true);
   });
   it("names the button after the current space and what agents need", () => {
     expect(spacesCopy.button("Personal", 0, false)).toBe("Spaces: Personal");

@@ -1720,6 +1720,7 @@ describe("local automation socket", () => {
       "POST /spaces/:id/resume": {},
       "POST /spaces/:id/wait-for-control": { timeoutMs: 1000 },
       "POST /spaces/:id/finish": { keep: "all" },
+      "POST /space-requests": { reason: "Book a table" },
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
       "POST /tabs/:id/snapshot": {},

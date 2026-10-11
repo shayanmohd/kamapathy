@@ -1541,10 +1541,8 @@ try {
     "manually created agent spaces require an explicit grant to the running API",
   );
   const manualBar = page.getByRole("region", { name: "Manual task" });
-  await manualBar.getByRole("button", { name: "Stop all agents" }).click();
-  await manualBar
-    .getByText("Stop every agent and turn off agent access?")
-    .waitFor();
+  await manualBar.getByRole("button", { name: "Stop", exact: true }).click();
+  await manualBar.getByText("Stop the agent in this space?").waitFor();
   await manualBar.getByRole("button", { name: "Stop all agents" }).click();
   await waitForState(
     page,
@@ -1552,7 +1550,7 @@ try {
   );
   await manualBar.getByText("Manual task · Agent access is off").waitFor();
   assert.equal(
-    await manualBar.getByRole("button", { name: "Stop all agents" }).count(),
+    await manualBar.getByRole("button", { name: "Stop", exact: true }).count(),
     0,
   );
   assert.equal(await page.locator(".page-frame.agent-ring").count(), 0);

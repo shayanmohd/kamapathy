@@ -335,6 +335,7 @@ export function createPreviewBridge(): KamapathyBridge {
       case "space:grant":
       case "space:stop":
       case "space:keep":
+      case "space-request:answer":
         break;
       case "page:devtools":
       case "page:screenshot":

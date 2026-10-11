@@ -31,7 +31,7 @@ import type {
   SignIns,
   SpaceColor,
 } from "../shared/types";
-import { HOME_URL, initialState } from "../shared/state";
+import { agentRules, HOME_URL, initialState } from "../shared/state";
 import { hostname, isGoogleSignInRejectedUrl } from "../shared/url";
 import { bridge, isDesktop } from "./lib/bridge";
 import { decodeFrames, Freezer, nextPaint } from "./lib/freeze";
@@ -47,6 +47,7 @@ import { AgentBar } from "./components/AgentBar";
 import { acknowledgeHandoff, agentStatus } from "./lib/spaces";
 import { SpaceButton } from "./components/SpaceButton";
 import { SpacePopover } from "./components/SpacePopover";
+import { SpaceRequestDialog } from "./components/SpaceRequestDialog";
 import { ActivityDialog } from "./components/ActivityDialog";
 import { SpacesOverview } from "./components/SpacesOverview";
 import { FindPill } from "./components/FindPill";
@@ -73,7 +74,8 @@ type Overlay =
   | "activity"
   | "spaces-grid"
   | "welcome"
-  | "import";
+  | "import"
+  | "space-request";
 export default function App() {
   const [state, setState] = useState<BrowserState>(() => initialState());
   const [ready, setReady] = useState(false);
@@ -121,8 +123,7 @@ export default function App() {
   const isHome = !active || active.url === HOME_URL;
   const googleSignInRejected =
     isDesktop && !!active && isGoogleSignInRejectedUrl(active.url);
-  const ownedByAgent =
-    activeSpace.kind === "agent" && activeSpace.owner === "agent";
+  const ownedByAgent = agentRules(activeSpace) && activeSpace.owner === "agent";
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring = barStatus === "browsing" || barStatus === "idle";
   const mac = state.platform === "darwin";
@@ -299,6 +300,9 @@ export default function App() {
     )
       close();
   }, [overlay, activitySpaceId, state.spaces, close]);
+  useEffect(() => {
+    if (overlay === "space-request" && !state.spaceRequests.length) close();
+  }, [overlay, state.spaceRequests, close]);
 
   const navigate = useCallback(
     (url: string) => {
@@ -1025,6 +1029,13 @@ export default function App() {
           setActivitySpaceId(id);
           void show("activity");
         }}
+        onRequest={() => void show("space-request")}
+      />
+      <SpaceRequestDialog
+        open={overlay === "space-request"}
+        state={state}
+        onClose={close}
+        attempt={attempt}
       />
       <ActivityDialog
         space={

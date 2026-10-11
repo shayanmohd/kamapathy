@@ -9,7 +9,9 @@ export type AgentStatus =
   | "idle"
   | "needs-you"
   | "in-control"
-  | "paused";
+  | "paused"
+  | "finished"
+  | "stopped";
 
 export function isAgentAction(item: Activity): boolean {
   return !!item.spaceId && item.message.startsWith("Agent ");
@@ -36,7 +38,10 @@ export function agentStatus(
   now: number,
   seen: ReadonlySet<string>,
 ): AgentStatus | undefined {
-  if (space.kind !== "agent") return undefined;
+  // A personal space has a status only while an agent may use it.
+  if (space.kind !== "agent" && space.access !== "granted") return undefined;
+  if (space.access === "ended")
+    return space.ended?.by === "agent" ? "finished" : "stopped";
   if (space.owner === "human") {
     const handoff = latestHandoffId(state.activity, space.id);
     return handoff && !seen.has(handoff) ? "needs-you" : "in-control";
@@ -83,7 +88,8 @@ export function spaceButtonState(
       (status) => status === "browsing" || status === "idle",
     ).length,
     spinning: statuses.includes("browsing"),
-    needsYou: statuses.includes("needs-you"),
+    needsYou:
+      statuses.includes("needs-you") || state.spaceRequests.length > 0,
   };
 }
 

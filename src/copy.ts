@@ -83,12 +83,17 @@ export const agentBarCopy = {
     paused: "Agent access is off",
     "in-control": "You're in control",
     "needs-you": "You're in control",
+    finished: "Agent finished",
+    stopped: "You stopped the agent",
   },
   takeOver: "Take over",
   letContinue: "Let agent continue",
-  stop: "Stop all agents",
-  confirmStop: "Stop every agent and turn off agent access?",
+  stop: "Stop",
+  stopAll: "Stop all agents",
+  confirmStop: "Stop the agent in this space?",
   cancel: "Cancel",
+  keep: "Keep as personal space",
+  keepWarning: "Its temporary sign-ins end and its pages reload.",
 } as const;
 
 export const spacesCopy = {
@@ -120,6 +125,18 @@ export const spacesCopy = {
   kind: "Kind of space",
   personal: "Personal",
   agent: "Agent",
+  grant: "Let an agent use this space",
+  accessLine:
+    "Agents can read and act on this space's tabs, run their own scripts there while Page scripts is on, and use its sign-ins until you stop them.",
+  stopAccess: "Stop agent access",
+  request: "An agent is asking for a space",
+} as const;
+
+export const spaceRequestCopy = {
+  title: "Let an agent use a space?",
+  from: "From the agent",
+  allow: "Allow",
+  deny: "Don't allow",
 } as const;
 
 export const statusCopy = {
@@ -128,6 +145,8 @@ export const statusCopy = {
   "needs-you": "Needs you",
   "in-control": "You're in control",
   paused: "Agent access is off",
+  finished: "Agent finished",
+  stopped: "You stopped the agent",
 } as const;
 
 export const overviewCopy = {

@@ -154,3 +154,19 @@
   font-size: 12px;
   color: var(--danger);
 }
+.space-request-access {
+  margin: 8px 0 12px;
+  font-size: 13px;
+  color: var(--secondary);
+}
+.space-request-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.space-request-choices label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

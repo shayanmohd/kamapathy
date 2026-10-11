@@ -38,6 +38,7 @@ interface ListProps {
   onAction: (name: ActionName) => void;
   onAgentSettings: () => void;
   onViewActivity: (spaceId: string) => void;
+  onRequest: () => void;
   mac: boolean;
 }
 
@@ -69,6 +70,7 @@ function SpaceList({
   onAction,
   onAgentSettings,
   onViewActivity,
+  onRequest,
   mac,
 }: ListProps) {
   const [details, setDetails] = useState<string | null>(null);
@@ -99,6 +101,18 @@ function SpaceList({
   );
   return (
     <>
+      {state.spaceRequests.length > 0 && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onClose();
+            onRequest();
+          }}
+        >
+          {spacesCopy.request}
+        </button>
+      )}
       {!state.settings.automationEnabled ? (
         <>
           <p className="popover-heading">{spacesCopy.agents}</p>
@@ -179,6 +193,9 @@ function SpaceRow({
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(space.name);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [confirmGrant, setConfirmGrant] = useState(false);
+  const [confirmKeep, setConfirmKeep] = useState(false);
+  const granted = space.access === "granted";
   const current = space.id === state.activeSpaceId;
   const tabs = state.tabs.filter((tab) => tab.spaceId === space.id).length;
   return (
@@ -248,6 +265,17 @@ function SpaceRow({
               ? agentBarCopy.takeOver
               : agentBarCopy.letContinue}
           </button>
+          {granted && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                void dispatch({ type: "space:stop", id: space.id })
+              }
+            >
+              {agentBarCopy.stop}
+            </button>
+          )}
           <button type="button" role="menuitem" onClick={onViewActivity}>
             {spacesCopy.viewAll}
           </button>
@@ -303,11 +331,55 @@ function SpaceRow({
               />
             ))}
           </div>
+          {space.kind === "personal" &&
+            (granted ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() =>
+                  void dispatch({ type: "space:stop", id: space.id })
+                }
+              >
+                {spacesCopy.stopAccess}
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() =>
+                  confirmGrant
+                    ? void dispatch({ type: "space:grant", id: space.id })
+                    : setConfirmGrant(true)
+                }
+              >
+                {spacesCopy.grant}
+              </button>
+            ))}
+          {confirmGrant && !granted && (
+            <p className="popover-warning">{spacesCopy.accessLine}</p>
+          )}
+          {space.kind === "agent" && space.access === "ended" && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                space.signIns === "separate" && !confirmKeep
+                  ? setConfirmKeep(true)
+                  : void dispatch({ type: "space:keep", id: space.id })
+              }
+            >
+              {agentBarCopy.keep}
+            </button>
+          )}
+          {confirmKeep && (
+            <p className="popover-warning">{agentBarCopy.keepWarning}</p>
+          )}
           {space.kind === "personal" && (
             <button
               type="button"
               role="menuitemcheckbox"
               aria-checked={space.signIns === "separate"}
+              disabled={granted}
               onClick={() =>
                 void dispatch({
                   type: "space:sign-ins",

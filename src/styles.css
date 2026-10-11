@@ -699,6 +699,11 @@ kbd {
 .color-option.selected {
   outline-color: var(--space-color);
 }
+/* Words an agent wrote, never shown as Kamapathy's own. */
+.agent-text {
+  font-style: italic;
+  color: var(--secondary);
+}
 .form-error {
   font-size: 11px;
   line-height: 1.7;

@@ -13,12 +13,13 @@ export function AgentBar({
   status: AgentStatus;
   attempt: (action: BrowserAction) => Promise<string>;
 }) {
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<"stop" | "keep" | null>(null);
   const [error, setError] = useState("");
   async function run(action: BrowserAction) {
-    setConfirming(false);
+    setConfirming(null);
     setError(await attempt(action));
   }
+  const keep = { type: "space:keep", id: space.id } as const;
   return (
     <div className="agent-bar" role="region" aria-label={space.name}>
       <span
@@ -28,12 +29,18 @@ export function AgentBar({
       <span className="agent-bar-status" role="status">
         {space.name} · {agentBarCopy.status[status]}
       </span>
-      {confirming ? (
+      {confirming === "stop" ? (
         <>
           <span className="agent-bar-question">{agentBarCopy.confirmStop}</span>
           <button
             type="button"
             className="agent-bar-danger"
+            onClick={() => run({ type: "space:stop", id: space.id })}
+          >
+            {agentBarCopy.stop}
+          </button>
+          <button
+            type="button"
             onClick={() =>
               run({
                 type: "settings:update",
@@ -41,37 +48,59 @@ export function AgentBar({
               })
             }
           >
-            {agentBarCopy.stop}
+            {agentBarCopy.stopAll}
           </button>
-          <button type="button" onClick={() => setConfirming(false)}>
+          <button type="button" onClick={() => setConfirming(null)}>
             {agentBarCopy.cancel}
           </button>
         </>
-      ) : space.owner === "agent" ? (
+      ) : confirming === "keep" ? (
         <>
-          <button
-            type="button"
-            onClick={() =>
-              run({ type: "space:ownership", id: space.id, owner: "human" })
-            }
-          >
-            {agentBarCopy.takeOver}
+          <span className="agent-bar-question">{agentBarCopy.keepWarning}</span>
+          <button type="button" onClick={() => run(keep)}>
+            {agentBarCopy.keep}
           </button>
-          {status !== "paused" && (
-            <button type="button" onClick={() => setConfirming(true)}>
+          <button type="button" onClick={() => setConfirming(null)}>
+            {agentBarCopy.cancel}
+          </button>
+        </>
+      ) : (
+        <>
+          {space.owner === "agent" ? (
+            <button
+              type="button"
+              onClick={() =>
+                run({ type: "space:ownership", id: space.id, owner: "human" })
+              }
+            >
+              {agentBarCopy.takeOver}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() =>
+                run({ type: "space:ownership", id: space.id, owner: "agent" })
+              }
+            >
+              {agentBarCopy.letContinue}
+            </button>
+          )}
+          {space.access === "granted" && status !== "paused" && (
+            <button type="button" onClick={() => setConfirming("stop")}>
               {agentBarCopy.stop}
             </button>
           )}
+          {space.kind === "agent" && space.access === "ended" && (
+            <button
+              type="button"
+              onClick={() =>
+                space.signIns === "separate" ? setConfirming("keep") : run(keep)
+              }
+            >
+              {agentBarCopy.keep}
+            </button>
+          )}
         </>
-      ) : (
-        <button
-          type="button"
-          onClick={() =>
-            run({ type: "space:ownership", id: space.id, owner: "agent" })
-          }
-        >
-          {agentBarCopy.letContinue}
-        </button>
       )}
       {error && (
         <p className="agent-bar-error" role="alert">

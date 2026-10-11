@@ -222,6 +222,19 @@ describe("interactive preview state invariants", () => {
     expect(() => bridge.hidePages()).not.toThrow();
     await expect(bridge.unfreeze()).resolves.toBeUndefined();
   });
+  it("ignores grants, stops, keeps and request answers in the web preview", async () => {
+    const bridge = create();
+    const before = structuredClone(await bridge.getState());
+    for (const action of [
+      { type: "space:grant", id: "work" },
+      { type: "space:stop", id: "work" },
+      { type: "space:keep", id: "work" },
+      { type: "space-request:answer", id: "request", allow: true, spaceId: "work" },
+    ] as const)
+      expect((await bridge.dispatch(action)).spaces, action.type).toEqual(
+        before.spaces,
+      );
+  });
   it("has no thumbnails in the web preview", async () => {
     expect(await create().thumbnails()).toEqual({});
   });

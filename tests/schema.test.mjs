@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
+import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
@@ -141,7 +142,11 @@ describe("API schema", () => {
       },
       sessions: { get() {} },
     };
-    const impls = { ...spaceRoutes(deps), ...tabRoutes(deps) };
+    const impls = {
+      ...spaceRoutes(deps),
+      ...tabRoutes(deps),
+      ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
+    };
     expect(keys.sort()).toEqual([...Object.keys(impls), "GET /health"].sort());
     // The router's lane, budget and body limit come from each entry.
     const built = buildRoutes(impls);

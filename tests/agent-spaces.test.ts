@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { request as httpRequest } from "node:http";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   startAutomation,
   type AutomationServer,
@@ -1565,5 +1566,195 @@ describe("agent spaces", () => {
       { label: "p1", closedBy: "person" },
       { label: "p2", closedBy: "agent" },
     ]);
+  });
+
+  it("an approved request grants the chosen space under agent rules with unmanaged tabs; declined, expired and withdrawn requests grant nothing", async () => {
+    const ask = (body: Record<string, unknown>) =>
+      request("/space-requests", "POST", body);
+    const waiting = () => controller.state.spaceRequests;
+    const work = controller.openPersonTab("work", "https://example.com/work");
+    controller.state.activeSpaceId = "work";
+    controller.state.activeTabId = work.id;
+    const approved = ask({ reason: "Book a table", name: "Work" });
+    await expect.poll(() => waiting().length).toBe(1);
+    expect(waiting()).toEqual([
+      {
+        id: expect.any(String),
+        reason: "Book a table",
+        name: "Work",
+        at: expect.any(Number),
+      },
+    ]);
+    expect(() =>
+      api.answerRequest("missing", { allow: true, spaceId: "work" }),
+    ).toThrow("That request is no longer waiting.");
+    api.answerRequest(waiting()[0].id, { allow: true, spaceId: "work" });
+    expect(await approved).toEqual({
+      status: 200,
+      body: {
+        space: expect.objectContaining({
+          id: "work",
+          kind: "personal",
+          owner: "agent",
+          createdBy: "person",
+        }),
+        tabs: [
+          expect.objectContaining({
+            label: "p1",
+            openedBy: "person",
+            managed: false,
+            active: false,
+          }),
+          expect.objectContaining({
+            id: work.id,
+            label: "p2",
+            openedBy: "person",
+            managed: false,
+            active: true,
+          }),
+        ],
+        active: expect.objectContaining({ id: work.id, active: true }),
+      },
+    });
+    expect(waiting()).toEqual([]);
+    expect(
+      agentRules(controller.state.spaces.find((item) => item.id === "work")!),
+    ).toBe(true);
+    expect((await request(`/tabs/${work.id}/snapshot`)).body.error.code).toBe(
+      "tab_unmanaged",
+    );
+    expect((await request(`/tabs/${work.id}/adopt`, "POST", {})).status).toBe(
+      200,
+    );
+    const personal = () =>
+      controller.state.spaces.find((item) => item.id === "personal")!;
+    // A request nobody answers expires.
+    expect(await ask({ reason: "Check the calendar", timeoutMs: 5000 })).toEqual(
+      {
+        status: 504,
+        body: {
+          error: {
+            code: "request_timeout",
+            message: "The person did not answer within 5000 ms.",
+            awaited: "approval",
+            timeoutMs: 5000,
+          },
+        },
+      },
+    );
+    expect(waiting()).toEqual([]);
+    // A request whose client goes away is withdrawn.
+    const raw = httpRequest({
+      socketPath: socket.path,
+      path: "/space-requests",
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    raw.on("error", () => {});
+    raw.end(JSON.stringify({ reason: "Check the calendar" }));
+    await expect.poll(() => waiting().length).toBe(1);
+    const withdrawn = waiting()[0].id;
+    raw.destroy();
+    await expect.poll(() => waiting().length).toBe(0);
+    expect(() => api.answerRequest(withdrawn, { allow: false })).toThrow(
+      "That request is no longer waiting.",
+    );
+    // A declined request says nothing about the person's spaces.
+    const declined = ask({ reason: "Check the calendar" });
+    await expect.poll(() => waiting().length).toBe(1);
+    api.answerRequest(waiting()[0].id, { allow: false });
+    expect(await declined).toEqual({
+      status: 403,
+      body: {
+        error: {
+          code: "request_declined",
+          message: "The person did not let an agent use a space.",
+        },
+      },
+    });
+    expect(personal().access).toBeUndefined();
+    expect(await listed()).toEqual(["work"]);
+  }, 20000);
+
+  it("requests are capped, a decline cools down, and request text loses control and bidirectional characters", async () => {
+    const ask = (body: Record<string, unknown>) =>
+      request("/space-requests", "POST", body);
+    const waiting = () => controller.state.spaceRequests;
+    for (const [body, field] of [
+      [{ reason: "\u202e\u0000\t" }, "reason"],
+      [{ reason: "x".repeat(121) }, "reason"],
+      [{ reason: "Book a table", name: "\u2066\u2069" }, "name"],
+      [{ reason: "Book a table", timeoutMs: 4999 }, "timeoutMs"],
+    ] as const) {
+      const refused = await ask(body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.body.error).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    expect(
+      (await ask({ reason: "\u202e\u0000\t" })).body.error.expected,
+    ).toBe("text that is not empty after cleaning");
+    expect(waiting()).toEqual([]);
+    const first = ask({
+      reason: "Book\u202e a\ttable\u0000 \u2028now",
+      name: "  Wo\u200erk ",
+    });
+    await expect.poll(() => waiting().length).toBe(1);
+    expect(waiting()[0]).toMatchObject({ reason: "Book a table now", name: "Work" });
+    const answers: { status: number; body: { error: Record<string, unknown> } }[] =
+      [];
+    const more = Array.from({ length: 3 }, (_, index) =>
+      ask({ reason: `Request ${index}` }).then((answer) => {
+        answers.push(answer);
+        return answer;
+      }),
+    );
+    await expect.poll(() => answers.length).toBe(1);
+    expect(answers[0]).toEqual({
+      status: 429,
+      body: {
+        error: {
+          code: "busy",
+          message:
+            "Three requests for a space are already waiting. Try again later.",
+          scope: "server",
+          retryable: true,
+        },
+      },
+    });
+    expect(waiting()).toHaveLength(3);
+    api.answerRequest(waiting()[0].id, { allow: false });
+    expect((await first).status).toBe(403);
+    const cooling = await ask({ reason: "Book a table" });
+    expect(cooling).toEqual({
+      status: 429,
+      body: {
+        error: {
+          code: "busy",
+          message: "The person declined a request just now. Try again later.",
+          scope: "server",
+          retryAfterMs: expect.any(Number),
+          retryable: true,
+        },
+      },
+    });
+    expect(cooling.body.error.retryAfterMs).toBeGreaterThan(0);
+    expect(cooling.body.error.retryAfterMs).toBeLessThanOrEqual(60000);
+    for (const item of [...waiting()])
+      api.answerRequest(item.id, { allow: false });
+    expect((await Promise.all(more)).map((answer) => answer.status).sort()).toEqual(
+      [403, 403, 429],
+    );
+    // Closing the server withdraws a request that still waits.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 60001);
+    const last = ask({ reason: "Book a table" }).catch(() => "closed");
+    await expect.poll(() => waiting().length).toBe(1);
+    vi.useRealTimers();
+    await api.close();
+    expect(await last).toBe("closed");
+    expect(waiting()).toEqual([]);
   });
 });

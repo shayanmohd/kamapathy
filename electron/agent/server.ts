@@ -8,6 +8,7 @@ import type {
   ClosedBy,
   HoldReason,
   Space,
+  SpaceRequest,
   Tab,
 } from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
@@ -21,6 +22,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
@@ -78,6 +80,9 @@ export interface AutomationController {
   resetAgentAccess(): void;
   /** An agent space whose access ended becomes a personal space. */
   keepAsPersonal(spaceId: string): Promise<void>;
+  /** Shows the person an agent's request for one of their spaces. */
+  addSpaceRequest(request: { reason: string; name?: string }): SpaceRequest;
+  removeSpaceRequest(id: string): void;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */
@@ -88,6 +93,8 @@ export interface AutomationServer {
   grantSpace(id: string): Space;
   /** The person's Stop for one space. */
   endSpace(id: string): void;
+  /** The person's answer to a request for a space. */
+  answerRequest(id: string, answer: { allow: boolean; spaceId?: string }): void;
   close(): Promise<void>;
 }
 // End-to-end checks read tab sessions through this probe on globalThis in the
@@ -159,7 +166,17 @@ export async function startAutomation(
     referenceSession,
   });
   const deps: RouteDeps = { controller, authority, actions, sessions };
-  const routes = buildRoutes({ ...spaceRoutes(deps), ...tabRoutes(deps) });
+  const grantSpace = (id: string) => {
+    const space = authority.grantSpace(id);
+    sessions.sync();
+    return space;
+  };
+  const requests = spaceRequestRoutes({ ...deps, grantSpace });
+  const routes = buildRoutes({
+    ...spaceRoutes(deps),
+    ...tabRoutes(deps),
+    ...requests.routes,
+  });
   const versions = Object.fromEntries(
     Object.entries({
       electron: process.versions.electron,
@@ -324,11 +341,8 @@ export async function startAutomation(
   return {
     endpoint: options.socketPath,
     instance,
-    grantSpace(id: string) {
-      const space = authority.grantSpace(id);
-      sessions.sync();
-      return space;
-    },
+    grantSpace,
+    answerRequest: requests.answer,
     endSpace(id: string) {
       const space = controller.state.spaces.find((item) => item.id === id);
       if (!space) throw new Error("Space was not found.");
@@ -343,6 +357,7 @@ export async function startAutomation(
         if (probe && host.__kamapathyTest === probe)
           delete host.__kamapathyTest;
         authority.stop();
+        requests.close();
         scheduler.close();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
