@@ -33,10 +33,38 @@ const pages = {
     `<div id="item" draggable="true" style="width:120px;padding:12px;border:1px solid">Drag me</div><div id="zone" style="margin-top:40px;width:240px;height:80px;border:1px dashed">Drop here</div>`,
     `document.getElementById('item').ondragstart=(event)=>event.dataTransfer.setData('text/plain','item');const zone=document.getElementById('zone');zone.ondragover=(event)=>event.preventDefault();zone.ondrop=(event)=>{event.preventDefault();zone.textContent='dropped '+event.dataTransfer.getData('text/plain');};`,
   ),
+  "/timers": page(
+    `<p id="ticks">Counting timer ticks</p>`,
+    `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
+  ),
+  "/audio": page(
+    `<button id="play">Play sound</button><p id="sound">Silent</p>`,
+    `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
+  ),
   ...framePages,
 };
+// One second of 8 kHz, 8-bit mono PCM: a 44-byte RIFF header, then 8000
+// samples at the silent midpoint 0x80.
+const silence = Buffer.alloc(44 + 8000, 0x80);
+silence.write("RIFF", 0, "ascii");
+silence.writeUInt32LE(36 + 8000, 4);
+silence.write("WAVEfmt ", 8, "ascii");
+silence.writeUInt32LE(16, 16);
+silence.writeUInt16LE(1, 20);
+silence.writeUInt16LE(1, 22);
+silence.writeUInt32LE(8000, 24);
+silence.writeUInt32LE(8000, 28);
+silence.writeUInt16LE(1, 32);
+silence.writeUInt16LE(8, 34);
+silence.write("data", 36, "ascii");
+silence.writeUInt32LE(8000, 40);
 const site = createServer((request, response) => {
-  const html = pages[new URL(request.url, "http://x").pathname];
+  const path = new URL(request.url, "http://x").pathname;
+  if (path === "/silence.wav") {
+    response.writeHead(200, { "Content-Type": "audio/wav" });
+    return response.end(silence);
+  }
+  const html = pages[path];
   response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
   response.end(html || "");
 });
@@ -263,6 +291,32 @@ try {
   const png = Buffer.from(await shot.response.arrayBuffer());
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   passed("screenshots capture an unwatched agent tab");
+
+  const timers = await open("/timers");
+  const ticked = await poll(
+    async () => /ticks (\d+)/.exec((await snapshot(timers)).text),
+    { timeoutMs: 10000, label: "a second of timer ticks in an unwatched agent tab" },
+  );
+  assert.ok(
+    Number(ticked[1]) >= 30,
+    `Only ${ticked[1]} ticks of a 16 ms interval ran in one second`,
+  );
+  passed("an unwatched agent tab keeps 60 Hz timers with its session attached");
+
+  const audio = await open("/audio");
+  await poll(async () => (await controls(audio)).includes("Play sound"), {
+    timeoutMs: 10000,
+    label: "the audio fixture",
+  });
+  const play = await api(`/tabs/${audio}/click`, "POST", { selector: "#play" });
+  assert.equal(play.status, 200, JSON.stringify(await play.response.json()));
+  const played = await api(`/tabs/${audio}/wait`, "POST", {
+    selector: "#sound",
+    text: "played",
+    timeoutMs: 5000,
+  });
+  assert.equal(played.status, 200, JSON.stringify(await played.response.json()));
+  passed("an unwatched agent tab plays audio after a native click");
 
   console.log(`Native launch passed: ${checks.length} checks.`);
 } finally {

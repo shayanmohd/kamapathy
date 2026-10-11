@@ -1307,6 +1307,49 @@ try {
   const after = await (await api(`/tabs/${agentTab}/snapshot`)).json();
   assert.match(after.text, /Kamapathy research complete/);
   checked("agent fills and clicks real page elements");
+  // Kamapathy holds a debugger session on the agent's tab and on no other
+  // page from this origin, including the person's tabs.
+  const attachedPages = await app.evaluate(
+    ({ webContents }, origin) =>
+      webContents
+        .getAllWebContents()
+        .filter(
+          (contents) =>
+            contents.debugger.isAttached() &&
+            contents.getURL().startsWith(origin),
+        )
+        .map((contents) => contents.id),
+    origin,
+  );
+  assert.equal(attachedPages.length, 1, JSON.stringify(attachedPages));
+  const [agentContents] = attachedPages;
+  const devtoolsOpen = () =>
+    app.evaluate(
+      ({ webContents }, id) => webContents.fromId(id).isDevToolsOpened(),
+      agentContents,
+    );
+  await app.evaluate(
+    ({ webContents }, id) =>
+      webContents.fromId(id).openDevTools({ mode: "detach" }),
+    agentContents,
+  );
+  await poll(devtoolsOpen, { label: "developer tools on the agent tab" });
+  const inspected = await api(`/tabs/${agentTab}/snapshot`);
+  assert.equal(inspected.status, 200, await inspected.text());
+  await app.evaluate(
+    ({ webContents }, id) => webContents.fromId(id).closeDevTools(),
+    agentContents,
+  );
+  await poll(async () => !(await devtoolsOpen()), {
+    label: "developer tools closed on the agent tab",
+  });
+  await poll(
+    async () => (await api(`/tabs/${agentTab}/snapshot`)).status === 200,
+    { timeoutMs: 5000, label: "a snapshot after developer tools close" },
+  );
+  checked(
+    "developer tools on an agent tab leave its requests working, and snapshots work after they close",
+  );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 409);
   await poll(

@@ -12,6 +12,7 @@ import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
+import type { FrameInfo } from "./session/types";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -39,6 +40,47 @@ export interface AutomationServer {
   instance: string;
   grantSpace(id: string): void;
   close(): Promise<void>;
+}
+// End-to-end checks read tab sessions through this probe on globalThis in the
+// main process. It exists only while KAMAPATHY_TEST_HOOKS=1.
+export interface TestProbe {
+  attaches(tabId: string): number;
+  hasSession(tabId: string): boolean;
+  frames(tabId: string): Promise<FrameInfo[]>;
+  ready(tabId: string, frameId: string): Promise<string>;
+  networkIdle(
+    tabId: string,
+    idleMs: number,
+    timeoutMs: number,
+  ): Promise<number>;
+}
+type ProbeHost = { __kamapathyTest?: TestProbe };
+
+function testProbe(sessions: TabSessions): TestProbe {
+  const session = (tabId: string) => {
+    const found = sessions.get(tabId);
+    if (!found) throw new Error(`Tab ${tabId} has no session.`);
+    return found;
+  };
+  return {
+    attaches: (tabId) => sessions.attaches(tabId),
+    hasSession: (tabId) => sessions.get(tabId) !== undefined,
+    frames: async (tabId) =>
+      session(tabId).frames({ deadline: Date.now() + 5000 }),
+    ready: async (tabId, frameId) =>
+      (
+        await session(tabId).evaluateInFrame(frameId, "ready", {}, {
+          deadline: Date.now() + 5000,
+          namespace: "internal",
+        })
+      ).readyState as string,
+    networkIdle: async (tabId, idleMs, timeoutMs) => {
+      await session(tabId).network.waitForIdle(idleMs, {
+        deadline: Date.now() + timeoutMs,
+      });
+      return Date.now();
+    },
+  };
 }
 
 // The API listens only on a Unix socket or Windows named pipe. Browsers cannot
@@ -197,6 +239,9 @@ export async function startAutomation(
   // made unreadable to other accounts.
   if (process.platform !== "win32") chmodSync(options.socketPath, 0o600);
   sessions.start();
+  const probe =
+    process.env.KAMAPATHY_TEST_HOOKS === "1" ? testProbe(sessions) : undefined;
+  if (probe) (globalThis as unknown as ProbeHost).__kamapathyTest = probe;
   let closing: Promise<void> | undefined;
   return {
     endpoint: options.socketPath,
@@ -207,6 +252,9 @@ export async function startAutomation(
     },
     close() {
       if (!closing) {
+        const host = globalThis as unknown as ProbeHost;
+        if (probe && host.__kamapathyTest === probe)
+          delete host.__kamapathyTest;
         authority.stop();
         scheduler.close();
         closing = new Promise<void>((resolve) => {

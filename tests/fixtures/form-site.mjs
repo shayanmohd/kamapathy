@@ -4,10 +4,12 @@ import { edgeCases } from './edge-cases.mjs';
 import { componentPages } from './component-pages.mjs';
 import { actionPages } from './action-pages.mjs';
 import { framePages } from './frame-pages.mjs';
+import { driverPages, SLOW_IMAGE_MS } from './driver-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
 const document = (title, body, script = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><style>${styles}</style></head><body><header><strong>Kamapathy form lab</strong><nav aria-label="Lab navigation"><a href="/">Overview</a><a href="/forms/new">Create a form</a><a href="/lab">Interaction lab</a><a href="/benchmark">Reference page</a></nav></header><main>${body}</main><footer>Local test fixture. Submissions remain on this machine and are discarded when the server closes.</footer>${script ? `<script>${script}</script>` : ''}</body></html>`;
+const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 
 export async function startFormSite() {
   const forms = new Map();
@@ -30,7 +32,12 @@ export async function startFormSite() {
     };
     try {
       if (request.method === 'GET' && url.pathname === '/edges') return send('Browser edge cases', edgeCases.body, edgeCases.script);
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname]);
+      if (request.method === 'GET' && url.pathname === '/driver/slow.png') {
+        await new Promise(resolve => setTimeout(resolve, SLOW_IMAGE_MS));
+        response.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+        return response.end(pixel, () => events.push({ type: 'slow-image-served', at: Date.now() }));
+      }
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         return response.end(page);

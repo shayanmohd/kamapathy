@@ -18,6 +18,8 @@ The script is an ES module: top level `await` works and it may import Node built
 
 Your own Node program can import the module instead: `import { connect } from "<skill>/scripts/api.mjs"`, then `const kamapathy = await connect()`. It depends on Node built-ins only and carries JSDoc types.
 
+Calls on different spaces run at the same time. Calls on one space run one at a time in the order Kamapathy receives them, except that a wait lets the space's other calls run between checks.
+
 ## Client
 
 | Call | Returns | Route |

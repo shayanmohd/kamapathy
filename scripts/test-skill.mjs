@@ -5,6 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { startFormSite } from "../tests/fixtures/form-site.mjs";
 
@@ -20,6 +21,7 @@ const environment = {
   ...process.env,
   KAMAPATHY_USER_DATA: join(temporary, "profile"),
   KAMAPATHY_NO_LAUNCH: "1",
+  KAMAPATHY_TEST_HOOKS: "1",
 };
 delete environment.ELECTRON_RUN_AS_NODE;
 const checks = [];
@@ -199,6 +201,24 @@ const wait = (selector, text) => ({
   ...(text ? { text } : {}),
   timeoutMs: 5000,
 });
+// KAMAPATHY_TEST_HOOKS makes the server install this probe in Kamapathy's
+// main process. It reports the tab sessions behind the routes.
+const probe = (name, ...args) =>
+  browser.evaluate(
+    (_electron, [name, args]) => globalThis.__kamapathyTest[name](...args),
+    [name, args],
+  );
+// The loopback port changes every run and refs keep counting through a run,
+// so captures are compared with both renumbered.
+function normalizeCapture(text) {
+  const refs = new Map();
+  return text
+    .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:3000")
+    .replace(/@e\d+/g, (reference) => {
+      if (!refs.has(reference)) refs.set(reference, `@e${refs.size + 1}`);
+      return refs.get(reference);
+    });
+}
 try {
   browser = await electron.launch({
     executablePath: process.env.KAMAPATHY_EXECUTABLE
@@ -255,6 +275,40 @@ try {
   );
   passed(
     "skill batch creates a form through a real POST and follows its redirect",
+  );
+  assert.equal(await probe("attaches", tab.id), 1);
+  const existingTabs = (
+    await chrome.evaluate(() => window.kamapathy.getState())
+  ).tabs.map((item) => item.id);
+  const personal = (
+    await chrome.evaluate(
+      (url) =>
+        window.kamapathy.dispatch({
+          type: "tab:create",
+          spaceId: "personal",
+          url,
+          background: true,
+        }),
+      `${fixture.origin}/lab`,
+    )
+  ).tabs.find((item) => !existingTabs.includes(item.id));
+  await waitForState(
+    chrome,
+    (state, id) =>
+      state.tabs.some(
+        (item) =>
+          item.id === id && item.title === "Interaction lab" && !item.loading,
+      ),
+    personal.id,
+  );
+  assert.equal(await probe("attaches", personal.id), 0);
+  assert.equal(await probe("hasSession", personal.id), false);
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    personal.id,
+  );
+  passed(
+    "one debugger attach per agent tab across snapshot, click and navigate, and none for a personal tab",
   );
   await cli(["click", tab.id, ref(created, "Submit response")]);
   assert.equal(fixture.submissions.length, 0);
@@ -526,6 +580,81 @@ try {
   passed(
     "skill resume takes control back after a handoff or a takeover in Kamapathy, and page actions work again",
   );
+  // The snapshot waits for every frame of the page to finish loading.
+  await json(["navigate", tab.id, `${fixture.origin}/frames/outer`]);
+  await observe(tab.id);
+  const crossSite = await poll(
+    async () =>
+      (await probe("frames", tab.id)).find(
+        (frame) => frame.crossOrigin && frame.sessionId,
+      ),
+    { timeoutMs: 10000, label: "the cross-site frame's own session" },
+  );
+  assert.equal(await probe("ready", tab.id, crossSite.frameId), "complete");
+  passed(
+    "the cross-site frame of /frames/outer has its own session and an isolated read succeeds",
+  );
+  await json(["navigate", tab.id, `${fixture.origin}/driver/slow`]);
+  await cli(["wait", tab.id, "--stdin"], {
+    text: "Slow image page",
+    timeoutMs: 5000,
+  });
+  const idleAt = await probe("networkIdle", tab.id, 500, 10000);
+  const served = await poll(
+    () => fixture.events.find((event) => event.type === "slow-image-served"),
+    { timeoutMs: 5000, label: "the slow image response" },
+  );
+  // 50 ms of slack covers timer granularity across the two processes.
+  assert.ok(
+    idleAt >= served.at + 500 - 50,
+    `Network idle at ${idleAt} came less than 500 ms after the image finished at ${served.at}`,
+  );
+  passed("network idle settles only after the slow image");
+  await json(["navigate", tab.id, `${fixture.origin}/driver/worker`]);
+  await cli(["wait", tab.id, "--stdin"], {
+    selector: "#worker-result",
+    text: "worker-ready",
+    timeoutMs: 3000,
+  });
+  passed("a blob worker runs in an agent tab");
+  const { space: parallel } = await json(["space", "create", "Parallel review"]);
+  const { tab: parallelTab } = await json([
+    "open",
+    parallel.id,
+    `${fixture.origin}/lab`,
+  ]);
+  await observe(parallelTab.id);
+  const missing = cli(
+    ["wait", tab.id, "--stdin"],
+    { text: "Never shown on this page", timeoutMs: 5000 },
+    { failure: true },
+  );
+  // Lets the wait reach Kamapathy before the other space asks.
+  await sleep(1000);
+  const snapshotStarted = Date.now();
+  await observe(parallelTab.id);
+  const snapshotTime = Date.now() - snapshotStarted;
+  // The run check near the end expects exactly two spaces.
+  await cli(["space", "close", parallel.id]);
+  assert.match((await missing).errors, /408 wait_timeout/);
+  assert.ok(
+    snapshotTime < 1500,
+    `The snapshot in the other space took ${snapshotTime} ms`,
+  );
+  passed(
+    "a 5 second wait in one space leaves a snapshot in another under 1.5 seconds",
+  );
+  await json(["navigate", tab.id, `${fixture.origin}/lab`]);
+  await observe(tab.id);
+  await Promise.all([
+    cli(["wait", tab.id, "--stdin"], {
+      selector: "#delayed-result",
+      text: "Delayed content ready",
+      timeoutMs: 5000,
+    }),
+    sleep(200).then(() => cli(["click", tab.id, "#delayed"])),
+  ]);
+  passed("a wait and a click in one space both succeed together");
   await json(["navigate", tab.id, `${fixture.origin}/benchmark`]);
   const reference = await observe(tab.id);
   assert.equal(reference.truncated, false);
@@ -533,12 +662,22 @@ try {
   assert.ok(
     reference.interactables.some((control) => control.label === "Read note 18"),
   );
-  await writeFile(
-    join(artifacts, "kamapathy-reference.txt"),
-    (await cli(["snapshot", tab.id, "--full"])).output,
-  );
+  const referenceCapture = (await cli(["snapshot", tab.id, "--full"])).output;
+  await writeFile(join(artifacts, "kamapathy-reference.txt"), referenceCapture);
   passed(
     "full-content observation retains every reference page note and control",
+  );
+  assert.equal(
+    normalizeCapture(referenceCapture),
+    normalizeCapture(
+      await readFile(
+        resolve("tests/fixtures/benchmarks/kamapathy-reference.txt"),
+        "utf8",
+      ),
+    ),
+  );
+  passed(
+    "the full snapshot of /benchmark matches the reference with the port and refs normalized",
   );
   await json(["navigate", tab.id, `${fixture.origin}/edges`]);
   const edges = await observe(tab.id);

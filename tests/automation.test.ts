@@ -9,6 +9,7 @@ import {
   startAutomation,
   type AutomationController,
   type AutomationServer,
+  type TestProbe,
 } from "../electron/agent/server";
 import { HOME_URL, initialState, newTab } from "../shared/state";
 import type { BrowserAction, BrowserState, Space, Tab } from "../shared/types";
@@ -1981,5 +1982,66 @@ describe("local automation socket", () => {
     expect(await running.result).toEqual({ status: 200 });
     for (const result of await Promise.all(queued))
       expect(result).toEqual({ status: 200 });
+  });
+
+  it("installs the test probe only under KAMAPATHY_TEST_HOOKS=1 and removes it on close", async () => {
+    const installed = () =>
+      (globalThis as unknown as { __kamapathyTest?: TestProbe })
+        .__kamapathyTest;
+    const original = process.env.KAMAPATHY_TEST_HOOKS;
+    // The server reads the variable once, at start, so each value gets a
+    // fresh server and the variable is put back right after.
+    const restart = async (value: string | undefined) => {
+      await api.close();
+      socket.cleanup();
+      if (value === undefined) delete process.env.KAMAPATHY_TEST_HOOKS;
+      else process.env.KAMAPATHY_TEST_HOOKS = value;
+      try {
+        socket = testSocket();
+        api = await startAutomation(controller, { socketPath: socket.path });
+        send = socketFetch(socket.path);
+      } finally {
+        if (original === undefined) delete process.env.KAMAPATHY_TEST_HOOKS;
+        else process.env.KAMAPATHY_TEST_HOOKS = original;
+      }
+    };
+    for (const value of [undefined, "0", "true"]) {
+      await restart(value);
+      expect(installed(), String(value)).toBeUndefined();
+    }
+    await restart("1");
+    const probe = installed();
+    expect(probe).toBeDefined();
+    expect(Object.keys(probe!).sort()).toEqual([
+      "attaches",
+      "frames",
+      "hasSession",
+      "networkIdle",
+      "ready",
+    ]);
+    const { tab } = await createPage();
+    await expect.poll(() => probe!.attaches(tab.id)).toBe(1);
+    expect(probe!.hasSession(tab.id)).toBe(true);
+    const person = controller.state.tabs.find(
+      (item) => item.spaceId === "manual-agent",
+    )!;
+    expect(probe!.attaches(person.id)).toBe(0);
+    expect(probe!.hasSession(person.id)).toBe(false);
+    await expect(probe!.frames(person.id)).rejects.toThrow("has no session");
+    const frames = await probe!.frames(tab.id);
+    expect(frames.map((frame) => [frame.path, frame.crossOrigin])).toEqual([
+      ["", false],
+    ]);
+    controller.contents.result = { ok: true, readyState: "complete" };
+    expect(await probe!.ready(tab.id, frames[0].frameId)).toBe("complete");
+    const ready = controller.contents.scripts.at(-1)!;
+    expect(ready.world).toBe("kamapathy");
+    expect(ready.code.endsWith(')("ready",{},"internal")')).toBe(true);
+    const asked = Date.now();
+    expect(await probe!.networkIdle(tab.id, 50, 2000)).toBeGreaterThanOrEqual(
+      asked,
+    );
+    await api.close();
+    expect(installed()).toBeUndefined();
   });
 });

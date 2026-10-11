@@ -10,6 +10,7 @@ flowchart LR
   Agent[Local agent client] --> API[Local socket API, same account]
   API --> Main
   Main --> Views[Native WebContentsView pages]
+  Main --> Sessions[Debugger session per managed agent tab]
   Views --> Shared[Shared persistent partition]
   Views --> Separate[Separate partitions per space]
   Main --> State[Local state file]
@@ -23,6 +24,10 @@ The shell renderer owns layout, keyboard interactions, panels, and the command p
 The main process owns the authoritative native state and tab lifecycle. Each remote tab is a separate `WebContentsView`. Remote pages use sandboxing, context isolation, and disabled Node integration. They do not receive the browser shell preload. See [Electron's WebContentsView documentation](https://www.electronjs.org/docs/latest/api/web-contents-view) for the rendering primitive.
 
 The renderer reports the rectangle reserved for web content. The main process positions the active native view in that rectangle, or positions two views for split view. Native views draw above the shell, so before a popover, grid or dialog covers the page the renderer asks the main process for still captures of the visible views, draws them in their place, and only then asks it to hide the views. Closing shows the views again before the captures are removed, so the page area is never blank. If a capture fails or takes longer than 300 ms, the page area is shown empty instead.
+
+## Agent engine
+
+The agent server lives in `electron/agent/`. `server.ts` listens on the private socket and checks each request's origin and authority. Routes in `routes/` declare a lane and a time budget, and `scheduler.ts` runs one request at a time per space and up to six spaces at once, letting a wait step aside between checks. Each tab an agent manages gets one `TabSession` (`session/tab-session.ts`), the only code that uses Electron's debugger: it follows the tab's frames, loads, network activity and dialogs, sends fixed trusted input, and runs Kamapathy's fixed page functions in an isolated world in each web frame. `session/tab-sessions.ts` attaches a session when a managed agent tab gets its page, before the page loads, and releases it on takeover, when the space closes and when agent access is turned off.
 
 ## State and sessions
 
@@ -57,7 +62,8 @@ Signing and publishing are disabled in the development configuration. macOS also
 | `src/`               | Shared browser UI, dialogs, command palette, styling, web preview bridge |
 | `shared/`            | Data contracts, initial state, address handling                          |
 | `shared/topsites.ts` | Ranks history and bookmarks into the welcome dialog's top sites          |
-| `electron/`          | Native browser, preload, persistence, automation server                  |
+| `electron/`          | Native browser, preload, persistence                                     |
+| `electron/agent/`    | Agent socket server, per-space lanes, routes and tab sessions            |
 | `electron/import.ts` | Reads bookmarks and history from other browsers, without Electron        |
 | `scripts/`           | Native smoke test, copy validation, development helpers                  |
 | `tests/`             | Behavior and boundary tests                                              |
