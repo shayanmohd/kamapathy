@@ -1,17 +1,35 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PageOperation } from "../electron/automation-dom";
+import { errorBody, toApiError } from "../electron/agent/errors";
+import type { AutomationController } from "../electron/agent/server";
 import {
   CdpTimeoutError,
+  ContextLostError,
+  FrameBlockedError,
+  FrameGoneError,
   PageCrashedError,
   SessionLostError,
   TabClosedError,
   TargetRefusedError,
 } from "../electron/agent/session/errors";
+import {
+  OPERATIONS,
+  WORLD_NAME,
+  operationExpression,
+} from "../electron/agent/session/operations";
 import { TabSession } from "../electron/agent/session/tab-session";
+import { TabSessions } from "../electron/agent/session/tab-sessions";
 import type {
   CdpEvent,
   SendStep,
   SessionHost,
 } from "../electron/agent/session/types";
+import { initialState, newTab } from "../shared/state";
+import type { BrowserState, Space } from "../shared/types";
 import { FakeHost, frameTree, type FakeDebugger } from "./fake-cdp";
 
 beforeEach(() => vi.useFakeTimers());
@@ -915,5 +933,537 @@ describe("TabSession", () => {
     expect(cdp.listenerCount("detach")).toBe(0);
     await session.release();
     expect(cdp.detachCount).toBe(0);
+  });
+});
+// A ready session on a loaded page. Its worlds get ids 1, 2 and so on, and
+// each evaluation answers with the context it ran in.
+async function worldSession() {
+  const host = new FakeHost({ url: "https://example.com/" });
+  let contexts = 0;
+  host.debugger.reply("Page.createIsolatedWorld", () => ({
+    executionContextId: ++contexts,
+  }));
+  host.debugger.reply("Runtime.evaluate", (params) => ({
+    result: { type: "object", value: { ok: true, contextId: params.contextId } },
+  }));
+  const session = new TabSession(host as unknown as SessionHost, {
+    tabId: "tab-1",
+    waitForSpaceIdle: async () => {},
+  });
+  session.attach();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(session.state).toBe("ready");
+  const sent = (method: string) =>
+    host.debugger.sent.filter((command) => command.method === method);
+  return { host, session, sent };
+}
+const evaluation = () => ({ deadline: Date.now() + 5000, namespace: "test" });
+const rejection = (promise: Promise<unknown>) =>
+  promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+describe("evaluateInFrame", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("creates one isolated world per document with Page.createIsolatedWorld and reuses it", async () => {
+    const { host, session, sent } = await worldSession();
+    expect(
+      await session.evaluateInFrame(
+        "main",
+        "snapshot",
+        { mode: "compact" },
+        evaluation(),
+      ),
+    ).toEqual({ ok: true, contextId: 1 });
+    await session.evaluateInFrame(
+      "main",
+      "check",
+      { text: "Ready" },
+      evaluation(),
+    );
+    expect(WORLD_NAME).toBe("kamapathy");
+    expect(
+      sent("Page.createIsolatedWorld").map((command) => command.params),
+    ).toEqual([
+      { frameId: "main", worldName: "kamapathy", grantUniveralAccess: false },
+    ]);
+    expect(sent("Runtime.evaluate")[0].params).toEqual({
+      expression: operationExpression("snapshot", { mode: "compact" }, "test"),
+      contextId: 1,
+      returnByValue: true,
+      awaitPromise: true,
+      silent: true,
+    });
+    host.debugger.event("Page.frameNavigated", {
+      frame: {
+        id: "main",
+        loaderId: "loader-2",
+        url: "https://example.com/next",
+        securityOrigin: "https://example.com",
+        mimeType: "text/html",
+      },
+      type: "Navigation",
+    });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, contextId: 2 });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, contextId: 2 });
+    expect(sent("Page.createIsolatedWorld")).toHaveLength(2);
+    const methods = host.debugger.sent.map((command) => command.method);
+    expect(methods).not.toContain("Runtime.enable");
+    expect(methods).not.toContain("DOM.enable");
+  });
+
+  it("recreates a missing world and retries once", async () => {
+    const { host, session, sent } = await worldSession();
+    let missing = 1;
+    host.debugger.reply("Runtime.evaluate", (params) => {
+      if (missing-- > 0)
+        throw new Error("Cannot find context with specified id");
+      return {
+        result: {
+          type: "object",
+          value: { ok: true, contextId: params.contextId },
+        },
+      };
+    });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, contextId: 2 });
+    expect(sent("Page.createIsolatedWorld")).toHaveLength(2);
+    expect(
+      sent("Runtime.evaluate").map((command) => command.params.contextId),
+    ).toEqual([1, 2]);
+    // A context still missing after one new world means the page moved on
+    // before the call ran.
+    missing = 2;
+    const error = await rejection(
+      session.evaluateInFrame("main", "check", {}, evaluation()),
+    );
+    expect(error).toBeInstanceOf(ContextLostError);
+    expect((error as ContextLostError).started).toBe(false);
+    expect(sent("Page.createIsolatedWorld")).toHaveLength(3);
+  });
+
+  it("reports a context destroyed mid-call as ContextLostError with started true", async () => {
+    const { host, session, sent } = await worldSession();
+    for (const message of [
+      "Execution context was destroyed.",
+      "Inspected target navigated or closed",
+    ]) {
+      host.debugger.reply("Runtime.evaluate", () => {
+        throw new Error(message);
+      });
+      const error = await rejection(
+        session.evaluateInFrame(
+          "main",
+          "fill",
+          { selector: "#name", value: "Ada" },
+          evaluation(),
+        ),
+      );
+      expect(error, message).toBeInstanceOf(ContextLostError);
+      expect((error as ContextLostError).started).toBe(true);
+    }
+    expect(sent("Runtime.evaluate")).toHaveLength(2);
+  });
+
+  it("never reuses the main frame's world after a cross-document navigation starts, even before frameNavigated arrives", async () => {
+    const { host, session, sent } = await worldSession();
+    await session.evaluateInFrame("main", "check", {}, evaluation());
+    host.emit("did-start-navigation", {
+      url: "https://example.com/next",
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, contextId: 2 });
+    host.emit("did-start-navigation", {
+      url: "https://example.com/next#part",
+      isMainFrame: true,
+      isSameDocument: true,
+    });
+    host.emit("did-start-navigation", {
+      url: "https://frame.example/",
+      isMainFrame: false,
+      isSameDocument: false,
+    });
+    expect(
+      await session.evaluateInFrame("main", "check", {}, evaluation()),
+    ).toEqual({ ok: true, contextId: 2 });
+    expect(sent("Page.createIsolatedWorld")).toHaveLength(2);
+  });
+
+  it("marks dispatch for mutating operations and never for reads", async () => {
+    const { session } = await worldSession();
+    const marked: string[] = [];
+    for (const op of Object.keys(OPERATIONS) as PageOperation[]) {
+      const dispatch = { dispatched: false };
+      await session.evaluateInFrame("main", op, {}, {
+        ...evaluation(),
+        dispatch,
+      });
+      if (dispatch.dispatched) marked.push(op);
+    }
+    expect(marked.sort()).toEqual([
+      "click",
+      "fill",
+      "focus",
+      "scroll",
+      "upload",
+    ]);
+  });
+});
+// Pages that open like BrowserController's views: the view-created listeners
+// run before the first load.
+class FakeViews {
+  state: BrowserState = initialState("linux");
+  pages = new Map<string, FakeHost>();
+  peeked: string[] = [];
+  private subscribers = new Set<(state: BrowserState) => void>();
+  private created = new Set<(tabId: string, contents: WebContents) => void>();
+  subscribe(listener: (state: BrowserState) => void) {
+    this.subscribers.add(listener);
+    return () => {
+      this.subscribers.delete(listener);
+    };
+  }
+  onViewCreated(listener: (tabId: string, contents: WebContents) => void) {
+    this.created.add(listener);
+    return () => {
+      this.created.delete(listener);
+    };
+  }
+  peekWebContents(tabId: string) {
+    this.peeked.push(tabId);
+    return this.pages.get(tabId) as unknown as WebContents | undefined;
+  }
+  emit() {
+    for (const listener of this.subscribers) listener(this.state);
+  }
+  addSpace(id: string): Space {
+    const space: Space = {
+      id,
+      name: id,
+      color: "purple",
+      kind: "agent",
+      owner: "agent",
+      signIns: "shared",
+      createdAt: 0,
+    };
+    this.state.spaces.push(space);
+    return space;
+  }
+  addTab(spaceId: string) {
+    const tab = newTab(spaceId, "https://example.com/");
+    this.state.tabs.push(tab);
+    return tab;
+  }
+  // Returns the page and the methods its debugger had received when its
+  // first load began.
+  open(tabId: string) {
+    const page = new FakeHost({ url: "" });
+    this.pages.set(tabId, page);
+    for (const listener of this.created)
+      listener(tabId, page as unknown as WebContents);
+    const beforeLoad = page.debugger.sent.map((command) => command.method);
+    page.navigate("https://example.com/");
+    return { page, beforeLoad };
+  }
+}
+
+// The attach policy over FakeViews, with the space's running request
+// finishing at once unless a test holds it.
+function attachPolicy() {
+  const views = new FakeViews();
+  const driven = new Set<string>();
+  const unmanaged = new Set<string>();
+  const idle = {
+    wait: (_spaceId: string, _timeoutMs: number) => Promise.resolve(),
+  };
+  const sessions = new TabSessions({
+    controller: views as unknown as AutomationController,
+    agentDriven: (spaceId) => driven.has(spaceId),
+    managedTab: (tabId) => !unmanaged.has(tabId),
+    waitForSpaceIdle: (spaceId, timeoutMs) => idle.wait(spaceId, timeoutMs),
+  });
+  return { views, sessions, driven, unmanaged, idle };
+}
+
+describe("TabSessions", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("attaches only to tabs with a view in an agent-driven space that the registry predicate marks managed", async () => {
+    const { views, sessions, driven, unmanaged } = attachPolicy();
+    const personal = views.state.tabs[0];
+    const space = views.addSpace("agent");
+    const handedOver = views.addSpace("handed-over");
+    driven.add(space.id);
+    const page = views.addTab(space.id);
+    const blank = views.addTab(space.id);
+    const person = views.addTab(space.id);
+    const elsewhere = views.addTab(handedOver.id);
+    unmanaged.add(person.id);
+    for (const tab of [personal, page, person, elsewhere]) views.open(tab.id);
+    sessions.start();
+    expect(sessions.get(page.id)?.contents).toBe(views.pages.get(page.id));
+    for (const tab of [personal, blank, person, elsewhere])
+      expect(sessions.get(tab.id)).toBeUndefined();
+    expect(
+      [...views.pages]
+        .filter(([, host]) => host.debugger.attachCount > 0)
+        .map(([id]) => id),
+    ).toEqual([page.id]);
+    for (const tab of [personal, person, elsewhere])
+      expect(views.peeked).not.toContain(tab.id);
+    // A tab without a page gets its session when the page opens.
+    views.open(blank.id);
+    expect(sessions.get(blank.id)?.contents).toBe(views.pages.get(blank.id));
+    expect(sessions.attaches(page.id)).toBe(1);
+    expect(sessions.attaches(blank.id)).toBe(1);
+  });
+
+  it("attaches inside onViewCreated before the page loads", async () => {
+    const { views, sessions, driven } = attachPolicy();
+    const space = views.addSpace("agent");
+    driven.add(space.id);
+    const tab = views.addTab(space.id);
+    sessions.start();
+    const { page, beforeLoad } = views.open(tab.id);
+    expect(beforeLoad).toEqual(
+      expect.arrayContaining([
+        "Page.enable",
+        "Page.setLifecycleEventsEnabled",
+        "Network.enable",
+        "Page.getFrameTree",
+      ]),
+    );
+    expect(sessions.get(tab.id)?.contents).toBe(page);
+    expect(page.debugger.attachCount).toBe(1);
+    views.emit();
+    expect(page.debugger.attachCount).toBe(1);
+    expect(sessions.attaches(tab.id)).toBe(1);
+  });
+
+  it("gives a person tab in an agent space no session until adopted and releases it on release", async () => {
+    const { views, sessions, driven, unmanaged } = attachPolicy();
+    const space = views.addSpace("agent");
+    driven.add(space.id);
+    const tab = views.addTab(space.id);
+    unmanaged.add(tab.id);
+    sessions.start();
+    const { page } = views.open(tab.id);
+    views.emit();
+    expect(sessions.get(tab.id)).toBeUndefined();
+    expect(page.debugger.attachCount).toBe(0);
+    unmanaged.delete(tab.id);
+    sessions.sync();
+    expect(sessions.get(tab.id)).toBeDefined();
+    expect(page.debugger.attached).toBe(true);
+    unmanaged.add(tab.id);
+    sessions.sync();
+    expect(sessions.get(tab.id)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(page.debugger.attached).toBe(false);
+    expect(sessions.attaches(tab.id)).toBe(1);
+  });
+
+  it("releases on takeover and attaches a new session after the previous release when control returns", async () => {
+    const { views, sessions, driven, idle } = attachPolicy();
+    const space = views.addSpace("agent");
+    driven.add(space.id);
+    const tab = views.addTab(space.id);
+    sessions.start();
+    const { page } = views.open(tab.id);
+    const first = sessions.get(tab.id)!;
+    // The space's running request has not finished yet.
+    let finish!: () => void;
+    idle.wait = () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    driven.delete(space.id);
+    views.emit();
+    expect(sessions.get(tab.id)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(page.debugger.attached).toBe(true);
+    driven.add(space.id);
+    views.emit();
+    const second = sessions.get(tab.id)!;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(page.debugger.attachCount).toBe(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.state).toBe("released");
+    expect(page.debugger.attachCount).toBe(2);
+    expect(page.debugger.attached).toBe(true);
+    expect(sessions.get(tab.id)).toBe(second);
+    expect(sessions.attaches(tab.id)).toBe(2);
+  });
+
+  it("releases every session on close", async () => {
+    const { views, sessions, driven, idle } = attachPolicy();
+    const spaces = [views.addSpace("one"), views.addSpace("two")];
+    for (const space of spaces) driven.add(space.id);
+    const tabs = [
+      views.addTab(spaces[0].id),
+      views.addTab(spaces[0].id),
+      views.addTab(spaces[1].id),
+    ];
+    sessions.start();
+    const pages = tabs.map((tab) => views.open(tab.id).page);
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    idle.wait = (spaceId) =>
+      spaceId === spaces[0].id ? running : Promise.resolve();
+    let closed = false;
+    const closing = sessions.close().then(() => {
+      closed = true;
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(closed).toBe(false);
+    expect(pages.map((page) => page.debugger.attached)).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    finish();
+    await closing;
+    expect(pages.map((page) => page.debugger.attached)).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(tabs.map((tab) => sessions.get(tab.id))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    // Nothing attaches once closed.
+    const late = views.addTab(spaces[1].id);
+    expect(views.open(late.id).page.debugger.attachCount).toBe(0);
+    views.emit();
+    expect(pages.map((page) => page.debugger.attachCount)).toEqual([1, 1, 1]);
+  });
+});
+it("uses webContents.debugger only in tab-session.ts and never calls isAttached", () => {
+  const root = fileURLToPath(new URL("../electron/", import.meta.url));
+  const sources = readdirSync(root, { encoding: "utf8", recursive: true })
+    .filter((file) => file.endsWith(".ts"))
+    .map((file) => ({
+      file: file.split(sep).join("/"),
+      // Comments may name either; only code counts.
+      code: readFileSync(join(root, file), "utf8").replace(
+        /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+        "",
+      ),
+    }));
+  expect(
+    sources
+      .filter(({ code }) => /\.debugger\b/.test(code))
+      .map(({ file }) => file),
+  ).toEqual(["agent/session/tab-session.ts"]);
+  expect(
+    sources
+      .filter(({ code }) => /\bisAttached\s*\(/.test(code))
+      .map(({ file }) => file),
+  ).toEqual([]);
+});
+
+it("maps session errors to API errors", () => {
+  const mapped = (error: unknown) => {
+    const known = toApiError(error);
+    return (
+      known && {
+        status: known.status,
+        code: known.code,
+        message: known.message,
+        fields: known.fields,
+      }
+    );
+  };
+  for (const error of [
+    new ContextLostError(true),
+    new FrameGoneError("child"),
+    new FrameBlockedError("child"),
+  ])
+    expect(mapped(error), error.constructor.name).toEqual({
+      status: 409,
+      code: "page_changed",
+      message:
+        "The page navigated during this operation. Inspect the new page before continuing.",
+      fields: {},
+    });
+  expect(mapped(new PageCrashedError())).toEqual({
+    status: 409,
+    code: "page_crashed",
+    message:
+      "The page process stopped. Navigate the tab to load it again before continuing.",
+    fields: {},
+  });
+  expect(mapped(new SessionLostError("devtools"))).toEqual({
+    status: 409,
+    code: "debugger_busy",
+    message:
+      "Developer tools on this tab block agent access. Ask the person to close them.",
+    fields: { reason: "devtools" },
+  });
+  expect(mapped(new SessionLostError("unavailable"))).toEqual({
+    status: 409,
+    code: "debugger_busy",
+    message: "Kamapathy lost its connection to this tab. Try again shortly.",
+    fields: { reason: "unavailable" },
+  });
+  expect(mapped(new TargetRefusedError("Target.getTargets"))).toEqual({
+    status: 403,
+    code: "cdp_method_blocked",
+    message:
+      "This protocol command is limited to this tab's own page and frames.",
+    fields: { method: "Target.getTargets", reason: "scope" },
+  });
+  expect(mapped(new CdpTimeoutError("page"))).toEqual({
+    status: 504,
+    code: "page_timeout",
+    message: "The page did not respond in time.",
+    fields: { awaited: "page" },
+  });
+  expect(mapped(new TabClosedError())).toEqual({
+    status: 409,
+    code: "tab_closed",
+    message: "The tab was closed.",
+    fields: {},
+  });
+  expect(toApiError(new Error("Protocol error"))).toBeUndefined();
+  // The envelope spreads a mapped error's fields and hides anything else.
+  expect(errorBody(new SessionLostError("devtools"), "Fallback.")).toEqual({
+    status: 409,
+    error: {
+      code: "debugger_busy",
+      message:
+        "Developer tools on this tab block agent access. Ask the person to close them.",
+      reason: "devtools",
+    },
+  });
+  expect(errorBody(new Error("Protocol error"), "Fallback.")).toEqual({
+    status: 500,
+    error: { code: "operation_failed", message: "Fallback." },
   });
 });

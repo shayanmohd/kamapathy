@@ -1,10 +1,14 @@
+import type { PageOperation } from "../../automation-dom";
 import {
   CdpTimeoutError,
+  ContextLostError,
+  FrameGoneError,
   PageCrashedError,
   SessionLostError,
   TabClosedError,
   TargetRefusedError,
 } from "./errors";
+import { OPERATIONS, WORLD_NAME, operationExpression } from "./operations";
 import type {
   CdpEvent,
   SendStep,
@@ -40,6 +44,11 @@ const releasesInput = (method: string, params: Record<string, unknown>) =>
 const report = (error: unknown) =>
   console.error("A tab session listener failed:", error);
 
+// How many main-frame navigations each page has started while a session
+// watched it. A page's next session counts on from there, so refs from
+// before a takeover keep their namespace when the agent takes the page back.
+const pageEpochs = new WeakMap<SessionHost, number>();
+
 // The only code that uses a tab's webContents.debugger, for as long as an
 // agent drives the tab.
 export class TabSession {
@@ -66,6 +75,15 @@ export class TabSession {
   private listeners = new Map<string, Set<Listener>>();
   private pending = new Set<Pending>();
   private waiters = new Set<() => void>();
+  // Kamapathy's world in each frame document, keyed
+  // `${sessionId ?? ""}|${frameId}|${loaderId}`. Execution context ids restart
+  // in each renderer process, so a world is never reused for another document.
+  private worlds = new Map<
+    string,
+    { epoch: number; contextId: Promise<number> }
+  >();
+  // Each frame's current document, from Page.frameNavigated.
+  private loaders = new Map<string, string>();
 
   constructor(
     readonly contents: SessionHost,
@@ -73,6 +91,7 @@ export class TabSession {
   ) {
     this.tabId = options.tabId;
     this.cdp = contents.debugger;
+    this.navigations = pageEpochs.get(contents) ?? 0;
     contents.on("did-start-navigation", this.onStartNavigation);
     contents.on("did-navigate", this.onNavigate);
     contents.on("did-fail-load", this.onFailLoad);
@@ -81,6 +100,13 @@ export class TabSession {
     contents.on("destroyed", this.onDestroyed);
     this.cdp.on("message", this.onMessage);
     this.cdp.on("detach", this.onDetach);
+    this.on("Page.frameNavigated", ({ params }) => {
+      this.loaders.set(params.frame.id, params.frame.loaderId);
+    });
+    this.on("detached", () => {
+      this.loaders.clear();
+      this.worlds.clear();
+    });
   }
 
   get state(): SessionState {
@@ -187,6 +213,100 @@ export class TabSession {
     const reply = await this.send<FrameTree>("Page.getFrameTree", {}, step);
     this.keepMain(reply.frameTree.frame);
     return reply.frameTree.frame.id;
+  }
+
+  // Runs one of Kamapathy's fixed page operations in the frame's Kamapathy
+  // world. Only the main frame is served until frames are tracked.
+  async evaluateInFrame(
+    frameId: string,
+    op: PageOperation,
+    payload: object,
+    step: Step & { namespace: string; timeoutMs?: number },
+  ): Promise<Record<string, unknown>> {
+    if (frameId !== (await this.mainFrameId(step)))
+      throw new FrameGoneError(frameId);
+    const expression = operationExpression(op, payload, step.namespace);
+    for (let attempt = 0; ; attempt += 1) {
+      const contextId = await this.worldContext(frameId, step, attempt > 0);
+      let reply: {
+        result?: { value?: unknown };
+        exceptionDetails?: {
+          text?: string;
+          exception?: { description?: string };
+        };
+      };
+      try {
+        reply = await this.send(
+          "Runtime.evaluate",
+          {
+            expression,
+            contextId,
+            returnByValue: true,
+            awaitPromise: true,
+            silent: true,
+          },
+          {
+            deadline: step.deadline,
+            signal: step.signal,
+            guard: step.guard,
+            dispatch: step.dispatch,
+            timeoutMs: step.timeoutMs,
+            ...(OPERATIONS[op].mutates ? { mutates: true as const } : {}),
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        // The world was gone before the call ran: make it again, once.
+        if (/Cannot find context with specified id/.test(message)) {
+          if (attempt === 0) continue;
+          throw new ContextLostError(false);
+        }
+        if (
+          /Execution context was destroyed|Inspected target navigated or closed/.test(
+            message,
+          )
+        )
+          throw new ContextLostError(true);
+        throw error;
+      }
+      if (reply.exceptionDetails)
+        throw new Error(
+          reply.exceptionDetails.exception?.description ??
+            reply.exceptionDetails.text ??
+            "The page operation failed.",
+        );
+      return reply.result?.value as Record<string, unknown>;
+    }
+  }
+
+  // The frame's Kamapathy world for its current document, made on first use.
+  // The main frame is on the page session, whose part of the key is empty.
+  private worldContext(
+    frameId: string,
+    step: Step,
+    fresh: boolean,
+  ): Promise<number> {
+    const frame = `|${frameId}|`;
+    const key = `${frame}${this.loaders.get(frameId) ?? ""}`;
+    const cached = this.worlds.get(key);
+    // epoch counts the main frame's next document as soon as it starts,
+    // before Page.frameNavigated arrives.
+    if (cached && !fresh && cached.epoch === this.epoch)
+      return cached.contextId;
+    for (const other of this.worlds.keys())
+      if (other.startsWith(frame)) this.worlds.delete(other);
+    const contextId = this.send<{ executionContextId: number }>(
+      "Page.createIsolatedWorld",
+      // The protocol spells grantUniveralAccess this way.
+      { frameId, worldName: WORLD_NAME, grantUniveralAccess: false },
+      { deadline: step.deadline, signal: step.signal, guard: step.guard },
+    ).then((reply) => reply.executionContextId);
+    const world = { epoch: this.epoch, contextId };
+    this.worlds.set(key, world);
+    contextId.catch(() => {
+      if (this.worlds.get(key) === world) this.worlds.delete(key);
+    });
+    return contextId;
   }
 
   private connect(): boolean {
@@ -502,6 +622,7 @@ export class TabSession {
   private async leave(): Promise<void> {
     if (this.closed) return;
     this.releasing = true;
+    pageEpochs.set(this.contents, this.navigations);
     this.stopRetries();
     clearTimeout(this.setupTimer);
     this.notify();

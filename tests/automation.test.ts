@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -13,41 +12,17 @@ import {
 } from "../electron/agent/server";
 import { HOME_URL, initialState, newTab } from "../shared/state";
 import type { BrowserAction, BrowserState, Space, Tab } from "../shared/types";
+import { FakeHost } from "./fake-cdp";
 import { isWebUrl } from "../shared/url";
 
-class FakeContents extends EventEmitter {
-  scripts: { worldId: number; code: string }[] = [];
+// A page whose debugger answers page operations with `result`. It records
+// each operation with the world it ran in, and each input command.
+class FakeContents extends FakeHost {
+  scripts: { world: string; code: string }[] = [];
   captureCalls = 0;
   captureError?: Error;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
-  private attached = false;
-  private protocol = new EventEmitter();
-  debugger = {
-    isAttached: () => this.attached,
-    attach: () => {
-      this.attached = true;
-    },
-    detach: () => {
-      this.attached = false;
-    },
-    on: (event: string, listener: (...args: unknown[]) => void) =>
-      this.protocol.on(event, listener),
-    removeListener: (event: string, listener: (...args: unknown[]) => void) =>
-      this.protocol.removeListener(event, listener),
-    sendCommand: async (
-      method: string,
-      parameters: Record<string, unknown>,
-    ) => {
-      this.inputs.push({ method, parameters });
-      this.afterInput?.();
-      return {};
-    },
-  };
-  // A protocol event Chromium sends to an attached debugger.
-  emitProtocol(method: string, parameters: Record<string, unknown>) {
-    this.protocol.emit("message", {}, method, parameters);
-  }
   result: unknown = {
     url: "https://example.com/",
     title: "Example",
@@ -55,23 +30,40 @@ class FakeContents extends EventEmitter {
     interactables: [],
     truncated: false,
   };
-  isDestroyed() {
-    return false;
+  private contextWorlds = new Map<number, string>();
+  constructor() {
+    super({ url: "https://example.com/" });
+    this.debugger.reply("Page.createIsolatedWorld", (params) => {
+      const executionContextId = this.contextWorlds.size + 1;
+      this.contextWorlds.set(executionContextId, params.worldName);
+      return { executionContextId };
+    });
+    this.debugger.reply("Runtime.evaluate", async (params) => {
+      const code: string = params.expression;
+      this.scripts.push({
+        world: this.contextWorlds.get(params.contextId) ?? "",
+        code,
+      });
+      const value = await (typeof this.result === "function"
+        ? this.result(code)
+        : this.result);
+      return { result: { type: "object", value } };
+    });
+    for (const method of [
+      "Input.dispatchMouseEvent",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchDragEvent",
+      "Input.setInterceptDrags",
+    ])
+      this.debugger.reply(method, (parameters) => {
+        this.inputs.push({ method, parameters });
+        this.afterInput?.();
+        return {};
+      });
   }
-  isLoadingMainFrame() {
-    return false;
-  }
-  getURL() {
-    return "https://example.com/";
-  }
-  async executeJavaScriptInIsolatedWorld(
-    worldId: number,
-    scripts: { code: string }[],
-  ) {
-    this.scripts.push({ worldId, code: scripts[0].code });
-    return typeof this.result === "function"
-      ? this.result(scripts[0].code)
-      : this.result;
+  // A protocol event Chromium sends to an attached debugger.
+  emitProtocol(method: string, parameters: Record<string, unknown>) {
+    this.debugger.event(method, parameters);
   }
   async capturePage() {
     this.captureCalls += 1;
@@ -330,6 +322,7 @@ describe("local automation socket", () => {
   });
   const beginUpload = async (tabId: string) => {
     const encoded = JSON.stringify(uploadBody());
+    const accessed = controller.accessedTabs.length;
     let client!: ReturnType<typeof httpRequest>;
     const result = new Promise<{ status: number; data: any }>((resolve, reject) => {
       client = httpRequest({
@@ -352,8 +345,14 @@ describe("local automation socket", () => {
       client.once("error", reject);
       client.write(encoded.slice(0, 1));
     });
-    await expect.poll(() => controller.contents.listenerCount("did-start-navigation")).toBeGreaterThan(0);
+    // The upload holds its reservation once it has looked up the page.
+    await expect.poll(() => controller.accessedTabs.length).toBeGreaterThan(accessed);
     return { client, result, finish: () => client.end(encoded.slice(1)) };
+  };
+  // One debugger attach serves a tab for as long as the agent has it.
+  const expectOneAttach = () => {
+    expect(controller.contents.debugger.attachCount).toBe(1);
+    expect(controller.contents.debugger.attached).toBe(true);
   };
   beforeEach(async () => {
     controller = new FakeController();
@@ -557,7 +556,7 @@ describe("local automation socket", () => {
     const snapshot = await request(`/tabs/${tab.id}/snapshot`);
     expect(snapshot.status).toBe(200);
     expect((await snapshot.json()).text).toBe("Hello from the agent page");
-    expect(controller.contents.scripts[0].worldId).toBe(1001);
+    expect(controller.contents.scripts[0].world).toBe("kamapathy");
   });
 
   it("lets the agent take control back from a person's own takeover and act again", async () => {
@@ -680,12 +679,15 @@ describe("local automation socket", () => {
       id: space.id,
       owner: "human",
     });
-    const queued = request(`/spaces/${space.id}/resume`, "POST", {});
+    const queued = request(`/spaces/${space.id}/resume`, "POST", {}).then(
+      () => "answered",
+      () => "closed",
+    );
     await new Promise((resolve) => setTimeout(resolve, 50));
     await api.close();
     release();
     // Stopping closes every connection, so no response can reach the agent.
-    await expect(queued).rejects.toThrow();
+    expect(await queued).toBe("closed");
     await expect(
       request(`/spaces/${space.id}/resume`, "POST", {}),
     ).rejects.toThrow();
@@ -800,7 +802,7 @@ describe("local automation socket", () => {
         `)("fill",${JSON.stringify({ selector, value: 'quote " and newline\n' })},`,
       ),
     ).toBe(true);
-    expect(executed.worldId).toBe(1001);
+    expect(executed.world).toBe("kamapathy");
     expect(
       (
         await request(`/tabs/${tab.id}/evaluate`, "POST", {
@@ -879,6 +881,29 @@ describe("local automation socket", () => {
     expect(
       controller.contents.scripts.at(-1)!.code.endsWith(`${tab.id}:1")`),
     ).toBe(true);
+  });
+
+  it("keeps the reference namespace of a page across a handoff and resume", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    // The page's first load, which its session saw start.
+    page.emit("did-start-navigation", {
+      url: "https://example.com/",
+      isSameDocument: false,
+      isMainFrame: true,
+    });
+    await request(`/tabs/${tab.id}/snapshot`);
+    expect(page.scripts.at(-1)!.code.endsWith(`${tab.id}:1")`)).toBe(true);
+    expect(
+      (await request(`/spaces/${space.id}/handoff`, "POST", {})).status,
+    ).toBe(200);
+    await expect.poll(() => page.debugger.attached).toBe(false);
+    expect(
+      (await request(`/spaces/${space.id}/resume`, "POST", {})).status,
+    ).toBe(200);
+    await expect.poll(() => page.debugger.attached).toBe(true);
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    expect(page.scripts.at(-1)!.code.endsWith(`${tab.id}:1")`)).toBe(true);
   });
 
   it("rejects ambiguous targets and propagates stale refs without falling back to a selector", async () => {
@@ -1054,7 +1079,7 @@ describe("local automation socket", () => {
         (input) => input.method === "Input.dispatchMouseEvent",
       ),
     ).toBe(true);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
     controller.contents.inputs = [];
     expect(
       (
@@ -1117,7 +1142,7 @@ describe("local automation socket", () => {
         (input) => input.parameters.type === "mousePressed",
       ),
     ).toHaveLength(3);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
   });
 
   it("checks ownership immediately before each native input event", async () => {
@@ -1126,6 +1151,7 @@ describe("local automation socket", () => {
     controller.contents.afterInput = () => {
       controller.state.spaces.find((item) => item.id === space.id)!.owner =
         "human";
+      controller.emit();
     };
     expect(
       (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
@@ -1133,7 +1159,42 @@ describe("local automation socket", () => {
     expect(
       controller.contents.inputs.map((input) => input.parameters.type),
     ).toEqual(["mouseMoved"]);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    await expect.poll(() => controller.contents.debugger.attached).toBe(false);
+    expect(controller.contents.debugger.attachCount).toBe(1);
+  });
+
+  it("keeps one debugger attach per tab across actions, and detaches after takeover and after the space closes", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true, x: 25, y: 45 };
+    for (const [route, body] of [
+      ["snapshot", {}],
+      ["click", { ref: "@e1" }],
+      ["press", { key: "Enter", ref: "@e1" }],
+      ["fill", { ref: "@e1", value: "Ada" }],
+    ] as const)
+      expect(
+        (await request(`/tabs/${tab.id}/${route}`, "POST", body)).status,
+        route,
+      ).toBe(200);
+    expect(page.debugger.attachCount).toBe(1);
+    expect(page.debugger.attached).toBe(true);
+    expect(page.scripts.every((script) => script.world === "kamapathy")).toBe(
+      true,
+    );
+    expect(
+      (await request(`/spaces/${space.id}/handoff`, "POST", {})).status,
+    ).toBe(200);
+    await expect.poll(() => page.debugger.attached).toBe(false);
+    expect(
+      (await request(`/spaces/${space.id}/resume`, "POST", {})).status,
+    ).toBe(200);
+    await expect.poll(() => page.debugger.attached).toBe(true);
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    expect(page.debugger.attachCount).toBe(2);
+    expect((await request(`/spaces/${space.id}`, "DELETE")).status).toBe(200);
+    await expect.poll(() => page.debugger.attached).toBe(false);
+    expect(page.debugger.attachCount).toBe(2);
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
@@ -1184,7 +1245,7 @@ describe("local automation socket", () => {
     expect(
       controller.contents.inputs.map((input) => input.parameters.type),
     ).toEqual(["mouseMoved"]);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
   });
 
   it("still releases the mouse when a valid press triggers navigation", async () => {
@@ -1285,7 +1346,7 @@ describe("local automation socket", () => {
       y: 220,
       button: "left",
     });
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
     expect(controller.activity.at(-1)!.message).toBe("Agent dragged an element");
   });
 
@@ -1310,7 +1371,7 @@ describe("local automation socket", () => {
     );
     expect(drags.every((input) => input.parameters.data === dragData)).toBe(true);
     expect(drags.at(-1)!.parameters).toMatchObject({ x: 110, y: 220 });
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
   });
 
   it("ends an HTML drag when the person takes over, without a drop or mouse release", async () => {
@@ -1320,9 +1381,11 @@ describe("local automation socket", () => {
     controller.contents.result = dragPage(started);
     controller.contents.afterInput = () => {
       startDrag();
-      if (controller.contents.inputs.at(-1)!.parameters.type === "dragOver")
+      if (controller.contents.inputs.at(-1)!.parameters.type === "dragOver") {
         controller.state.spaces.find((item) => item.id === space.id)!.owner =
           "human";
+        controller.emit();
+      }
     };
     const response = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
     expect(response.status).toBe(409);
@@ -1334,7 +1397,8 @@ describe("local automation socket", () => {
       "intercept false",
     ]);
     expect(steps()).not.toContain("mouseReleased");
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    await expect.poll(() => controller.contents.debugger.attached).toBe(false);
+    expect(controller.contents.debugger.attachCount).toBe(1);
   });
 
   it("releases the mouse and reports an HTML drag that never reaches Kamapathy", async () => {
@@ -1353,7 +1417,7 @@ describe("local automation socket", () => {
       "mouseReleased",
       "intercept false",
     ]);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
   });
 
   it("refuses to drag when Chromium cannot take over drags", async () => {
@@ -1372,7 +1436,7 @@ describe("local automation socket", () => {
         (input) => input.method === "Input.dispatchMouseEvent",
       ),
     ).toBe(false);
-    expect(controller.contents.debugger.isAttached()).toBe(false);
+    expectOneAttach();
   });
 
   it("clicks a control drawn with no size in the page, without native input, and reports it", async () => {
@@ -1548,7 +1612,7 @@ describe("local automation socket", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, selected: 1 });
     expect(controller.contents.scripts).toHaveLength(1);
-    expect(controller.contents.scripts[0].worldId).toBe(1001);
+    expect(controller.contents.scripts[0].world).toBe("kamapathy");
     expect(controller.contents.scripts[0].code).toContain(`)("upload",${JSON.stringify(body)},`);
     expect(controller.contents.inputs).toEqual([]);
   });

@@ -9,6 +9,7 @@ import {
   type RouteCall,
   type RouteDeps,
 } from "../http";
+import type { TabSession } from "../session/tab-session";
 import {
   parseToolAction,
   stringField,
@@ -19,7 +20,8 @@ import {
 export function tabRoutes({
   controller,
   authority,
-  actions: { trackContents, readyContents, evaluatePage, executeToolAction },
+  actions: { readyContents, evaluatePage, executeToolAction },
+  sessions,
 }: RouteDeps): Route[] {
   const { authorizeTab } = authority;
   let uploading = false;
@@ -179,7 +181,7 @@ export function tabRoutes({
             );
         };
         requireCaptureWindow();
-        const contents = await readyContents(tab!.id, remaining(run.deadline));
+        const { contents } = await readyContents(tab!.id, remaining(run.deadline));
         requireCaptureWindow();
         const screenshot = await bounded(
           contents.capturePage(undefined, { stayHidden: true }),
@@ -242,8 +244,16 @@ export function tabRoutes({
               "no_web_page",
               "Open a web page before uploading files.",
             );
+          const session = sessions.get(tab!.id);
+          if (!session || session.contents !== contents)
+            return fail(
+              409,
+              "debugger_busy",
+              "Kamapathy lost its connection to this tab. Try again shortly.",
+              { reason: "unavailable" },
+            );
           return {
-            prepared: { contents, epoch: trackContents(contents).epoch },
+            prepared: { contents, session, epoch: session.epoch },
             release,
           };
         } catch (error) {
@@ -252,14 +262,16 @@ export function tabRoutes({
         }
       },
       handler: async ({ response, body, tab, run, prepared }) => {
-        const { contents, epoch } = prepared as {
+        const { contents, session, epoch } = prepared as {
           contents: WebContents;
+          session: TabSession;
           epoch: number;
         };
         if (
           contents.isDestroyed() ||
           controller.getWebContents(tab!.id) !== contents ||
-          trackContents(contents).epoch !== epoch
+          sessions.get(tab!.id) !== session ||
+          session.epoch !== epoch
         )
           return fail(
             409,
@@ -269,7 +281,7 @@ export function tabRoutes({
         const payload = uploadFields(body!);
         const result = await evaluatePage(
           tab!.id,
-          contents,
+          session,
           "upload",
           payload,
           run.deadline,

@@ -4,6 +4,7 @@ import type { Actions } from "./actions";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
 import type { AutomationController } from "./server";
+import type { TabSessions } from "./session/tab-sessions";
 
 export const BODY_LIMIT = 65536;
 export const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
@@ -43,6 +44,7 @@ export interface RouteDeps {
   controller: AutomationController;
   authority: Authority;
   actions: Actions;
+  sessions: TabSessions;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

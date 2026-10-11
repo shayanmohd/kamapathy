@@ -42,6 +42,8 @@ export class FakeDebugger extends EventEmitter {
     return this.attached;
   }
   attach(_protocolVersion?: string) {
+    if (this.attached)
+      throw new Error("Debugger is already attached to the target");
     if (this.attachError) throw this.attachError;
     this.attached = true;
     this.attachCount += 1;

@@ -9,6 +9,7 @@ export interface Authority {
   authorizeTab(id: string): Tab;
   grantSpace(id: string): void;
   stop(): void;
+  agentDriven(spaceId: string): boolean;
 }
 
 export function createAuthority(controller: AutomationController): Authority {
@@ -59,6 +60,19 @@ export function createAuthority(controller: AutomationController): Authority {
     stop() {
       stopped = true;
       managedSpaces.clear();
+    },
+    // The agent drives a space it manages while it has control. Only then
+    // do the space's tabs hold debugger sessions.
+    agentDriven(spaceId: string) {
+      const space = controller.state.spaces.find(
+        (item) => item.id === spaceId,
+      );
+      return (
+        !stopped &&
+        managedSpaces.has(spaceId) &&
+        space?.kind === "agent" &&
+        space.owner === "agent"
+      );
     },
   };
 }

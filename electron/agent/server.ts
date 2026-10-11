@@ -6,10 +6,11 @@ import type { BrowserAction, BrowserState, Space } from "../../shared/types";
 import { createActions } from "./actions";
 import { createAuthority } from "./authority";
 import { errorBody, fail } from "./errors";
-import { findRoute, readBody, send } from "./http";
+import { findRoute, readBody, send, type RouteDeps } from "./http";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
+import { TabSessions } from "./session/tab-sessions";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -49,12 +50,22 @@ export async function startAutomation(
   const instance = randomBytes(16).toString("hex");
   const authority = createAuthority(controller);
   const scheduler = new Scheduler();
+  const sessions = new TabSessions({
+    controller,
+    agentDriven: (spaceId) => authority.agentDriven(spaceId),
+    managedTab: () => true,
+    waitForSpaceIdle: (spaceId, timeoutMs) =>
+      scheduler.whenIdle(spaceId, timeoutMs),
+  });
   const referenceSession = randomBytes(12).toString("hex");
-  const actions = createActions({ controller, authority, referenceSession });
-  const routes = [
-    ...spaceRoutes({ controller, authority, actions }),
-    ...tabRoutes({ controller, authority, actions }),
-  ];
+  const actions = createActions({
+    controller,
+    authority,
+    sessions,
+    referenceSession,
+  });
+  const deps: RouteDeps = { controller, authority, actions, sessions };
+  const routes = [...spaceRoutes(deps), ...tabRoutes(deps)];
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Kamapathy-Instance", instance);
@@ -183,22 +194,23 @@ export async function startAutomation(
   // The private directory is the real boundary; the socket itself is also
   // made unreadable to other accounts.
   if (process.platform !== "win32") chmodSync(options.socketPath, 0o600);
+  sessions.start();
   let closing: Promise<void> | undefined;
   return {
     endpoint: options.socketPath,
     instance,
     grantSpace(id: string) {
       authority.grantSpace(id);
+      sessions.sync();
     },
     close() {
       if (!closing) {
         authority.stop();
         scheduler.close();
-        actions.dispose();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();
-        });
+        }).then(() => sessions.close());
       }
       return closing;
     },

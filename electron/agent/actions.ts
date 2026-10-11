@@ -1,13 +1,16 @@
 import type { WebContents } from "electron";
-import { pageOperation, type PageOperation } from "../automation-dom";
+import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import { allocateRefs } from "./refs";
 import type { AutomationController } from "./server";
+import { CdpTimeoutError, PageCrashedError } from "./session/errors";
+import type { TabSession } from "./session/tab-session";
+import type { TabSessions } from "./session/tab-sessions";
+import type { Step } from "./session/types";
 import { PRESS_KEYS, type ToolAction } from "./validate";
 
-const WORLD_ID = 1001;
 export type Point = { x: number; y: number };
 
 export const finitePoint = (point: unknown): point is Point =>
@@ -18,7 +21,10 @@ export const finitePoint = (point: unknown): point is Point =>
 export const reboundOf = (result: Record<string, unknown>) =>
   Array.isArray(result.rebound) ? { rebound: result.rebound } : {};
 
-export async function bounded<T>(operation: Promise<T>, timeout = 15000): Promise<T> {
+export async function bounded<T>(
+  operation: Promise<T>,
+  timeout = 15000,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -55,60 +61,46 @@ export function remaining(deadline: number): number {
 }
 
 export interface Actions {
-  trackContents(contents: WebContents): { epoch: number };
   readyContents(
     id: string,
     timeout?: number,
     allowLoading?: boolean,
     park?: Park,
-  ): Promise<WebContents>;
+  ): Promise<{ contents: WebContents; session: TabSession }>;
   evaluatePage(
     id: string,
-    contents: WebContents,
+    session: TabSession,
     operation: PageOperation,
     payload: Record<string, unknown>,
     deadline: number,
+    step?: Step,
   ): Promise<Record<string, unknown>>;
   executeToolAction(
     id: string,
     action: ToolAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
-  dispose(): void;
 }
 
 export function createActions(deps: {
   controller: AutomationController;
   authority: Authority;
+  sessions: TabSessions;
   referenceSession: string;
 }): Actions {
-  const { controller, referenceSession } = deps;
-  const { authorizeTab } = deps.authority;
-  const trackedContents = new Map<
-    WebContents,
-    {
-      epoch: number;
-      listener: (
-        event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
-      ) => void;
-      destroyed: () => void;
-    }
-  >();
-  const trackContents = (contents: WebContents) => {
-    let tracked = trackedContents.get(contents);
-    if (!tracked) {
-      tracked = {
-        epoch: 0,
-        listener: (details) => {
-          if (details.isMainFrame && !details.isSameDocument) tracked!.epoch++;
-        },
-        destroyed: () => trackedContents.delete(contents),
-      };
-      trackedContents.set(contents, tracked);
-      contents.on("did-start-navigation", tracked.listener);
-      contents.once("destroyed", tracked.destroyed);
-    }
-    return tracked;
+  const { controller, authority, sessions, referenceSession } = deps;
+  const { authorizeTab } = authority;
+  // Each page of a tab the agent controls has a debugger session from the
+  // moment its view exists.
+  const sessionOf = (id: string, contents: WebContents): TabSession => {
+    const session = sessions.get(id);
+    if (session?.contents === contents) return session;
+    return fail(
+      409,
+      "debugger_busy",
+      "Kamapathy lost its connection to this tab. Try again shortly.",
+      { reason: "unavailable" },
+    );
   };
   const readyContents = async (
     id: string,
@@ -124,65 +116,74 @@ export function createActions(deps: {
         "no_web_page",
         "Navigate this tab to an HTTP or HTTPS page first.",
       );
-    trackContents(contents);
+    sessionOf(id, contents);
     if (!allowLoading && contents.isLoadingMainFrame()) {
-      const loading = () => new Promise<void>((resolve, reject) => {
-        const cleanup = () => {
-          clearTimeout(timer);
-          contents.removeListener("did-stop-loading", loaded);
-          contents.removeListener("destroyed", destroyed);
-        };
-        const loaded = () => {
-          cleanup();
-          resolve();
-        };
-        const destroyed = () => {
-          cleanup();
-          reject(new ApiError(409, "tab_closed", "The tab was closed."));
-        };
-        const timer = setTimeout(() => {
-          cleanup();
-          reject(
-            new ApiError(
-              504,
-              "page_timeout",
-              "The page is still loading. Try again.",
-              { awaited: "load" },
-            ),
-          );
-        }, timeout);
-        contents.once("did-stop-loading", loaded);
-        contents.once("destroyed", destroyed);
-      });
-      await (park ? park(loading) : loading());
+      const load = () =>
+        new Promise<void>((resolve, reject) => {
+          const cleanup = () => {
+            clearTimeout(timer);
+            contents.removeListener("did-stop-loading", loaded);
+            contents.removeListener("destroyed", destroyed);
+          };
+          const loaded = () => {
+            cleanup();
+            resolve();
+          };
+          const destroyed = () => {
+            cleanup();
+            reject(new ApiError(409, "tab_closed", "The tab was closed."));
+          };
+          const timer = setTimeout(() => {
+            cleanup();
+            reject(
+              new ApiError(
+                504,
+                "page_timeout",
+                "The page is still loading. Try again.",
+                { awaited: "load" },
+              ),
+            );
+          }, timeout);
+          contents.once("did-stop-loading", loaded);
+          contents.once("destroyed", destroyed);
+        });
+      await (park ? park(load) : load());
     }
     authorizeTab(id);
     if (contents.isDestroyed())
       return fail(409, "tab_closed", "The tab was closed.");
-    return contents;
+    const session = sessionOf(id, contents);
+    if (session.state === "crashed") throw new PageCrashedError();
+    return { contents, session };
   };
+
   const evaluatePage = async (
     id: string,
-    contents: WebContents,
+    session: TabSession,
     operation: PageOperation,
     payload: Record<string, unknown>,
     deadline: number,
+    step?: Step,
   ) => {
     authorizeTab(id);
-    const epoch = trackContents(contents).epoch;
+    const epoch = session.epoch;
     const namespace = `${referenceSession}:${id}:${epoch}`;
-    const result = (await bounded(
-      contents.executeJavaScriptInIsolatedWorld(WORLD_ID, [
-        {
-          code: `(${pageOperation.toString()})(${JSON.stringify(operation)},${JSON.stringify(payload)},${JSON.stringify(namespace)})`,
-        },
-      ]),
-      remaining(deadline),
-    )) as Record<string, unknown>;
+    const frameId = await session.mainFrameId({
+      deadline,
+      signal: step?.signal,
+    });
+    const result = await session.evaluateInFrame(frameId, operation, payload, {
+      deadline,
+      signal: step?.signal,
+      guard: () => authorizeTab(id),
+      dispatch: step?.dispatch,
+      namespace,
+      timeoutMs: remaining(deadline),
+    });
     authorizeTab(id);
     if (
       ["snapshot", "target", "focus", "drag"].includes(operation) &&
-      trackContents(contents).epoch !== epoch
+      session.epoch !== epoch
     )
       return fail(
         409,
@@ -203,46 +204,29 @@ export function createActions(deps: {
   };
   const nativeInput = async (
     id: string,
-    contents: WebContents,
+    session: TabSession,
     commands: {
       method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent";
       parameters: Record<string, unknown>;
     }[],
-    deadline: number,
+    gesture: Step,
     epoch: number,
   ) => {
-    authorizeTab(id);
-    if (contents.debugger.isAttached())
-      return fail(
-        409,
-        "debugger_busy",
-        "Close this tab's developer tools before using native agent input.",
-      );
-    contents.debugger.attach("1.3");
-    try {
-      for (const command of commands) {
-        authorizeTab(id);
-        if (
-          !["mouseReleased", "keyUp"].includes(
-            command.parameters.type as string,
-          ) &&
-          trackContents(contents).epoch !== epoch
-        )
-          return fail(
-            409,
-            "page_changed",
-            "The page navigated before input completed. Inspect the new page before continuing.",
-          );
-        await bounded(
-          contents.debugger.sendCommand(command.method, command.parameters),
-          remaining(deadline),
+    for (const command of commands) {
+      authorizeTab(id);
+      if (
+        !["mouseReleased", "keyUp"].includes(
+          command.parameters.type as string,
+        ) &&
+        session.epoch !== epoch
+      )
+        return fail(
+          409,
+          "page_changed",
+          "The page navigated before input completed. Inspect the new page before continuing.",
         );
-      }
-    } finally {
-      if (!contents.isDestroyed() && contents.debugger.isAttached())
-        contents.debugger.detach();
+      await session.send(command.method, command.parameters, gesture);
     }
-    authorizeTab(id);
   };
   // Presses on the source, moves past the distance pages wait for before a
   // drag starts (4 pixels in Chromium, 5 to 8 in pointer libraries), then on to
@@ -250,33 +234,20 @@ export function createActions(deps: {
   // operating system drag begins, and is moved with drag events instead.
   const nativeDrag = async (
     id: string,
-    contents: WebContents,
+    session: TabSession,
     from: Point,
     to: Point,
     armed: Record<string, unknown>,
-    deadline: number,
+    gesture: Step,
     epoch: number,
   ): Promise<"html5" | "mouse"> => {
     authorizeTab(id);
-    if (contents.debugger.isAttached())
-      return fail(
-        409,
-        "debugger_busy",
-        "Close this tab's developer tools before using native agent input.",
-      );
-    contents.debugger.attach("1.3");
     let data: unknown;
     let intercepted = () => {};
-    const listener = (
-      _event: Electron.Event,
-      method: string,
-      parameters: { data?: unknown },
-    ) => {
-      if (method !== "Input.dragIntercepted") return;
-      data = parameters.data;
+    const stopListening = session.on("Input.dragIntercepted", (event) => {
+      data = event.params.data;
       intercepted();
-    };
-    contents.debugger.on("message", listener);
+    });
     let dragging = false;
     let dropped = false;
     let last = from;
@@ -287,16 +258,13 @@ export function createActions(deps: {
       final = false,
     ) => {
       authorizeTab(id);
-      if (!final && trackContents(contents).epoch !== epoch)
+      if (!final && session.epoch !== epoch)
         return fail(
           409,
           "page_changed",
           "The page navigated before input completed. Inspect the new page before continuing.",
         );
-      await bounded(
-        contents.debugger.sendCommand(method, parameters),
-        remaining(deadline),
-      );
+      await session.send(method, parameters, gesture);
     };
     const mouse = (type: string, point: Point, buttons: number, final = false) =>
       send(
@@ -316,9 +284,12 @@ export function createActions(deps: {
     const pause = () => new Promise((resolve) => setTimeout(resolve, 16));
     try {
       try {
-        await contents.debugger.sendCommand("Input.setInterceptDrags", {
-          enabled: true,
-        });
+        // No guard: a takeover here is reported by the first mouse event.
+        await session.send(
+          "Input.setInterceptDrags",
+          { enabled: true },
+          { deadline: gesture.deadline, dispatch: gesture.dispatch },
+        );
       } catch {
         return fail(
           409,
@@ -343,8 +314,15 @@ export function createActions(deps: {
       last = start;
       // The page decides in its dragstart handlers whether an HTML drag
       // starts. Its data reaches Kamapathy shortly after.
-      await evaluatePage(id, contents, "frame", {}, deadline);
-      const counts = await evaluatePage(id, contents, "input", {}, deadline);
+      await evaluatePage(id, session, "frame", {}, gesture.deadline, gesture);
+      const counts = await evaluatePage(
+        id,
+        session,
+        "input",
+        {},
+        gesture.deadline,
+        gesture,
+      );
       if (
         data === undefined &&
         typeof armed.drag === "number" &&
@@ -389,31 +367,25 @@ export function createActions(deps: {
       await mouse("mouseReleased", to, 0, true);
       return "mouse";
     } finally {
-      const attached = () =>
-        !contents.isDestroyed() && contents.debugger.isAttached();
       // An intercepted drag holds the tab's mouse until it ends, so it is
       // cancelled even after the person takes over. A mouse release is never
       // sent then: pointer libraries drop on it.
-      if (data !== undefined && !dropped && attached())
-        await bounded(
-          contents.debugger.sendCommand("Input.dispatchDragEvent", {
-            type: "dragCancel",
-            x: last.x,
-            y: last.y,
-            data,
-          }),
-          2000,
-        ).catch(() => {});
-      if (attached()) {
-        await bounded(
-          contents.debugger.sendCommand("Input.setInterceptDrags", {
-            enabled: false,
-          }),
-          2000,
-        ).catch(() => {});
-        if (attached()) contents.debugger.detach();
-      }
-      contents.debugger.removeListener("message", listener);
+      if (data !== undefined && !dropped)
+        await session
+          .send(
+            "Input.dispatchDragEvent",
+            { type: "dragCancel", x: last.x, y: last.y, data },
+            { deadline: Date.now() + 2000, timeoutMs: 2000 },
+          )
+          .catch(() => {});
+      await session
+        .send(
+          "Input.setInterceptDrags",
+          { enabled: false },
+          { deadline: Date.now() + 2000, timeoutMs: 2000 },
+        )
+        .catch(() => {});
+      stopListening();
     }
   };
   // Chromium reports a successful dispatch for native input that it drops while a
@@ -421,18 +393,25 @@ export function createActions(deps: {
   // received the input and repeat only input that provably never arrived.
   const deliverNativeInput = async <T>(
     id: string,
-    contents: WebContents,
+    session: TabSession,
     kind: "mouse" | "key",
     deliver: (armed: Record<string, unknown>) => Promise<T>,
-    deadline: number,
+    step: Step,
     epoch: number,
   ): Promise<T> => {
     for (let attempt = 0; ; attempt += 1) {
-      const armed = await evaluatePage(id, contents, "input", {}, deadline);
+      const armed = await evaluatePage(id, session, "input", {}, step.deadline, step);
       const delivered = await deliver(armed);
       // Input that already changed the page was delivered.
-      if (trackContents(contents).epoch !== epoch) return delivered;
-      const received = await evaluatePage(id, contents, "input", {}, deadline);
+      if (session.epoch !== epoch) return delivered;
+      const received = await evaluatePage(
+        id,
+        session,
+        "input",
+        {},
+        step.deadline,
+        step,
+      );
       const before = armed[kind];
       const after = received[kind];
       // Repeat input only on positive evidence that the page never received it.
@@ -446,10 +425,11 @@ export function createActions(deps: {
         );
       await evaluatePage(
         id,
-        contents,
+        session,
         "frame",
         {},
-        Math.min(deadline, Date.now() + 2000),
+        Math.min(step.deadline, Date.now() + 2000),
+        step,
       ).catch(() => {});
     }
   };
@@ -458,19 +438,34 @@ export function createActions(deps: {
     action: ToolAction,
     run: Run,
   ): Promise<Record<string, unknown>> => {
-    const { deadline, park } = run;
     const tab = authorizeTab(id);
+    const deadline = run.deadline;
+    // One dispatch record per request, and per batch step.
+    const step: Step = {
+      deadline,
+      signal: run.signal,
+      guard: () => authorizeTab(id),
+      dispatch: { dispatched: false },
+    };
+    // A gesture runs to its end even if the client goes away.
+    const gesture: Step = {
+      deadline,
+      guard: step.guard,
+      dispatch: step.dispatch,
+    };
     const waitDeadline =
       action.type === "wait"
         ? Math.min(deadline, Date.now() + (action.payload.timeoutMs as number))
         : deadline;
-    const contents = await readyContents(
+    const ready = await readyContents(
       id,
       remaining(deadline),
       action.type === "wait",
-      park,
+      run.park,
     );
-    const epoch = trackContents(contents).epoch;
+    const contents = ready.contents;
+    let session = ready.session;
+    const epoch = session.epoch;
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
@@ -479,31 +474,33 @@ export function createActions(deps: {
         tabId: id,
         ...(await evaluatePage(
           id,
-          contents,
+          session,
           "snapshot",
           { ...payload, firstRef },
           deadline,
+          step,
         )),
       };
     } else if (action.type === "click") {
       const point = await evaluatePage(
         id,
-        contents,
+        session,
         "target",
         payload,
         deadline,
+        step,
       );
       // A control drawn with no size has no point to press, so the page
       // clicks it, once its surroundings are on screen and uncovered.
       const empty = point.empty === true;
       if (empty) {
-        if (trackContents(contents).epoch !== epoch)
+        if (session.epoch !== epoch)
           return fail(
             409,
             "page_changed",
             "The page navigated during this operation. Inspect the new page before continuing.",
           );
-        await evaluatePage(id, contents, "click", payload, deadline);
+        await evaluatePage(id, session, "click", payload, deadline, step);
       }
       else {
         if (!finitePoint(point))
@@ -514,12 +511,12 @@ export function createActions(deps: {
           );
         await deliverNativeInput(
           id,
-          contents,
+          session,
           "mouse",
           () =>
             nativeInput(
               id,
-              contents,
+              session,
               [
                 {
                   method: "Input.dispatchMouseEvent",
@@ -546,17 +543,17 @@ export function createActions(deps: {
                   },
                 },
               ],
-              deadline,
+              gesture,
               epoch,
             ),
-          deadline,
+          step,
           epoch,
         );
       }
       // Let synchronous submit/navigation handlers start, then wait for their load.
       // No input operation is retried, including when navigation times out.
-      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, park);
+      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, run.park);
       result = {
         ok: true,
         url: contents.getURL(),
@@ -564,9 +561,16 @@ export function createActions(deps: {
         ...reboundOf(point),
       };
     } else if (action.type === "fill") {
-      result = await evaluatePage(id, contents, "fill", payload, deadline);
+      result = await evaluatePage(id, session, "fill", payload, deadline, step);
     } else if (action.type === "drag") {
-      const points = await evaluatePage(id, contents, "drag", payload, deadline);
+      const points = await evaluatePage(
+        id,
+        session,
+        "drag",
+        payload,
+        deadline,
+        step,
+      );
       const from = points.from as Point,
         to = points.to as Point;
       if (!finitePoint(from) || !finitePoint(to))
@@ -577,14 +581,14 @@ export function createActions(deps: {
         );
       const mode = await deliverNativeInput(
         id,
-        contents,
+        session,
         "mouse",
-        (armed) => nativeDrag(id, contents, from, to, armed, deadline, epoch),
-        deadline,
+        (armed) => nativeDrag(id, session, from, to, armed, gesture, epoch),
+        step,
         epoch,
       );
-      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, park);
+      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, run.park);
       result = {
         ok: true,
         url: contents.getURL(),
@@ -594,7 +598,14 @@ export function createActions(deps: {
     } else if (action.type === "press") {
       let focused: Record<string, unknown> = {};
       if (payload.ref || payload.selector)
-        focused = await evaluatePage(id, contents, "focus", payload, deadline);
+        focused = await evaluatePage(
+          id,
+          session,
+          "focus",
+          payload,
+          deadline,
+          step,
+        );
       const key = PRESS_KEYS[payload.key as string];
       const parameters = {
         key: key.key,
@@ -605,12 +616,12 @@ export function createActions(deps: {
       };
       await deliverNativeInput(
         id,
-        contents,
+        session,
         "key",
         () =>
           nativeInput(
             id,
-            contents,
+            session,
             [
               {
                 method: "Input.dispatchKeyEvent",
@@ -630,17 +641,17 @@ export function createActions(deps: {
                 },
               },
             ],
-            deadline,
+            gesture,
             epoch,
           ),
-        deadline,
+        step,
         epoch,
       );
-      await park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, park);
+      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      await readyContents(id, remaining(deadline), false, run.park);
       result = { ok: true, url: contents.getURL(), ...reboundOf(focused) };
     } else if (action.type === "scroll") {
-      result = await evaluatePage(id, contents, "scroll", payload, deadline);
+      result = await evaluatePage(id, session, "scroll", payload, deadline, step);
     } else {
       for (;;) {
         authorizeTab(id);
@@ -648,21 +659,21 @@ export function createActions(deps: {
         try {
           observation = await evaluatePage(
             id,
-            contents,
+            session,
             "check",
             payload,
             // Zero makes one attempt with a short IPC response allowance.
             payload.timeoutMs === 0
               ? Math.min(deadline, Date.now() + 250)
               : Math.min(deadline, Math.max(Date.now() + 1, waitDeadline)),
+            step,
           );
         } catch (error) {
-          if (
-            !(error instanceof ApiError) ||
-            !["page_timeout", "action_timeout"].includes(error.code) ||
-            Date.now() < waitDeadline
-          )
-            throw error;
+          const timedOut =
+            error instanceof CdpTimeoutError ||
+            (error instanceof ApiError &&
+              ["page_timeout", "action_timeout"].includes(error.code));
+          if (!timedOut || Date.now() < waitDeadline) throw error;
           return fail(
             408,
             "wait_timeout",
@@ -679,13 +690,14 @@ export function createActions(deps: {
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
           );
-        await park(
+        await run.park(
           () =>
             new Promise((resolve) =>
               setTimeout(resolve, Math.min(100, waitDeadline - Date.now())),
             ),
         );
-        await readyContents(id, remaining(deadline), true, park);
+        session = (await readyContents(id, remaining(deadline), true, run.park))
+          .session;
       }
     }
     authorizeTab(id);
@@ -701,19 +713,5 @@ export function createActions(deps: {
     controller.addActivity(tab.spaceId, descriptions[action.type], "info");
     return result;
   };
-  return {
-    trackContents,
-    readyContents,
-    evaluatePage,
-    executeToolAction,
-    dispose() {
-      for (const [contents, tracked] of trackedContents) {
-        if (!contents.isDestroyed()) {
-          contents.removeListener("did-start-navigation", tracked.listener);
-          contents.removeListener("destroyed", tracked.destroyed);
-        }
-      }
-      trackedContents.clear();
-    },
-  };
+  return { readyContents, evaluatePage, executeToolAction };
 }
