@@ -1700,3 +1700,184 @@ describe("tab origins and agent rules", () => {
     expect(page.capturePage).toHaveBeenCalledOnce();
   });
 });
+
+describe("agent access", () => {
+  it("grants apply and remove agent rules", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/");
+    expect(browser.state.history.map((entry) => entry.url)).toEqual([
+      "https://example.com/",
+    ]);
+    // Only the agent service grants a space, and a personal space nobody
+    // granted has no owner but the person.
+    await expect(
+      browser.dispatch({ type: "space:grant", id: "work" }),
+    ).rejects.toThrow("Turn on agent access first.");
+    await expect(
+      browser.dispatch({ type: "space:ownership", id: "work", owner: "human" }),
+    ).rejects.toThrow("change ownership");
+    browser.grantAccess("work");
+    const work = browser.state.spaces.find((space) => space.id === "work")!;
+    expect(work).toMatchObject({
+      kind: "personal",
+      owner: "agent",
+      access: "granted",
+    });
+    expect(tab).toMatchObject({
+      label: "p1",
+      openedBy: "person",
+      managed: false,
+    });
+    expect(page.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    // The whole space follows agent rules: no history, prompts or downloads.
+    page.commit("https://example.org/");
+    expect(browser.state.history.map((entry) => entry.url)).toEqual([
+      "https://example.com/",
+    ]);
+    const shared = sessions.get("persist:space-personal")!;
+    const answer = vi.fn();
+    shared.setPermissionRequestHandler.mock.calls[0][0](
+      page,
+      "notifications",
+      answer,
+      { requestingUrl: "https://example.org/", isMainFrame: true },
+    );
+    expect(answer).toHaveBeenCalledExactlyOnceWith(false);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    const download = { preventDefault: vi.fn() };
+    shared.emit("will-download", download, {}, page);
+    expect(download.preventDefault).toHaveBeenCalledOnce();
+    // The person can take over a granted space and hand it back.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: "work",
+      owner: "human",
+    });
+    expect(work).toMatchObject({
+      owner: "human",
+      control: { reason: "manual" },
+    });
+    await browser.dispatch({
+      type: "space:ownership",
+      id: "work",
+      owner: "agent",
+    });
+    expect(work.owner).toBe("agent");
+    // Stop ends the grant and its rules, and the pages throttle again.
+    await browser.dispatch({ type: "space:stop", id: "work" });
+    expect(work).toMatchObject({
+      owner: "human",
+      access: "ended",
+      ended: { by: "person", reason: "stopped" },
+    });
+    expect(tab.managed).toBe(false);
+    expect(page.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: "work",
+      message: "You stopped the agent",
+      kind: "info",
+    });
+    page.commit("https://example.net/");
+    expect(browser.state.history[0].url).toBe("https://example.net/");
+    // Finish ends a grant the same way, and so does agent access going off.
+    browser.grantAccess("work");
+    expect(work.ended).toBeUndefined();
+    expect(page.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    browser.endAccess("work", { by: "agent", reason: "finished" });
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: "work",
+      message: "Agent finished",
+      kind: "success",
+    });
+    browser.grantAccess("work");
+    browser.resetAgentAccess();
+    expect(work).toMatchObject({ kind: "personal", owner: "human" });
+    expect(work.access).toBeUndefined();
+    expect(page.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+  });
+
+  it("a kept isolated space moves to a persistent partition and a shared one keeps its pages", async () => {
+    const browser = controller();
+    const isolated = browser.createAgentSpace("Clean", { isolated: true });
+    const shared = browser.createAgentSpace("Task");
+    const open = async (spaceId: string) => {
+      const tab = browser.state.tabs.find((item) => item.spaceId === spaceId)!;
+      await browser.dispatch({
+        type: "tab:navigate",
+        id: tab.id,
+        url: "https://example.com/",
+      });
+      return { tab, page: contents(browser, tab.id) };
+    };
+    const clean = await open(isolated.id);
+    const task = await open(shared.id);
+    const temporary = [...sessions.keys()].find((partition) =>
+      partition.endsWith(isolated.id),
+    )!;
+    expect(temporary).toMatch(/^agent-/);
+    // Only an agent space whose access ended can be kept.
+    for (const id of [isolated.id, "work"])
+      await expect(
+        browser.dispatch({ type: "space:keep", id }),
+      ).rejects.toThrow(
+        "Only a space whose agent has finished or stopped can be kept.",
+      );
+    browser.endAccess(isolated.id, { by: "agent", reason: "finished" });
+    await browser.dispatch({ type: "space:keep", id: isolated.id });
+    expect(isolated).toMatchObject({
+      kind: "personal",
+      owner: "human",
+      signIns: "separate",
+    });
+    expect(isolated.access).toBeUndefined();
+    expect(isolated.ended).toBeUndefined();
+    // Its temporary sign-ins end, and its pages reload in its own
+    // persistent session.
+    expect(clean.page.destroyed).toBe(true);
+    expect(sessions.get(temporary)!.clearStorageData).toHaveBeenCalledOnce();
+    const reloaded = contents(browser, clean.tab.id);
+    expect(reloaded).not.toBe(clean.page);
+    expect(reloaded.loadURL).toHaveBeenCalledWith("https://example.com/");
+    expect(sessions.has(`persist:space-${isolated.id}`)).toBe(true);
+    // Shared sign-ins stay and so do the pages, which now throttle like any
+    // personal page.
+    browser.endAccess(shared.id, { by: "person", reason: "stopped" });
+    await browser.dispatch({ type: "space:keep", id: shared.id });
+    expect(shared).toMatchObject({
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+    });
+    expect(task.page.destroyed).toBe(false);
+    expect(contents(browser, task.tab.id)).toBe(task.page);
+    expect(task.page.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+    expect(
+      sessions.get("persist:space-personal")!.clearStorageData,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("space:sign-ins refuses a granted space", async () => {
+    const browser = controller();
+    browser.grantAccess("work");
+    await expect(
+      browser.dispatch({ type: "space:sign-ins", id: "work", signIns: "separate" }),
+    ).rejects.toThrow(
+      "Stop agent access to this space before changing its sign-ins.",
+    );
+    expect(browser.state.spaces[1].signIns).toBe("shared");
+    await browser.dispatch({ type: "space:stop", id: "work" });
+    await browser.dispatch({
+      type: "space:sign-ins",
+      id: "work",
+      signIns: "separate",
+    });
+    expect(browser.state.spaces[1].signIns).toBe("separate");
+  });
+});

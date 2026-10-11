@@ -255,6 +255,37 @@ export class FakeController implements AutomationController {
     this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
     this.emit();
   }
+  grantAccess(spaceId: string) {
+    this.registry.grant(spaceId);
+    this.emit();
+  }
+  endAccess(
+    spaceId: string,
+    ended: { by: "agent" | "person"; reason: "finished" | "stopped" },
+  ) {
+    this.registry.end(spaceId, ended);
+    this.addActivity(
+      spaceId,
+      ended.by === "agent" ? "Agent finished" : "You stopped the agent",
+      ended.by === "agent" ? "success" : "info",
+    );
+    this.emit();
+  }
+  resetAgentAccess() {
+    this.registry.reset();
+    this.emit();
+  }
+  async keepAsPersonal(spaceId: string) {
+    const space = this.state.spaces.find((item) => item.id === spaceId);
+    if (space?.kind !== "agent" || space.access !== "ended")
+      throw new Error(
+        "Only a space whose agent has finished or stopped can be kept.",
+      );
+    space.kind = "personal";
+    delete space.access;
+    delete space.ended;
+    this.emit();
+  }
   // A popup the page at openerId opens, as BrowserController adopts one.
   openPopup(openerId: string, url: string): Tab {
     const opener = this.getTab(openerId);
@@ -334,8 +365,7 @@ export class FakeController implements AutomationController {
         this.registry.handOver(action.id, {
           reason: action.reason ?? "manual",
         });
-      else
-        this.registry.takeBack(action.id, this.shownTab(action.id) ?? null);
+      else this.registry.takeBack(action.id, this.shownTab(action.id) ?? null);
     } else if (action.type === "space:delete") {
       this.state.spaces = this.state.spaces.filter(
         (space) => space.id !== action.id,

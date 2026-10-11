@@ -125,6 +125,13 @@ export const ERRORS = {
     ["spaceId", "signIns"],
     2,
   ),
+  space_ended: code(
+    409,
+    false,
+    "The agent finished this space or the person stopped it. Only the person can let an agent use it again.",
+    ["spaceId", "endedBy", "reason"],
+    2,
+  ),
   tab_limit: code(409, false, "The space already has its most tabs."),
   space_limit: code(409, false, "The API already manages its most spaces."),
   screenshot_unavailable: code(

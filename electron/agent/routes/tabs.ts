@@ -167,6 +167,7 @@ export function tabRoutes({
             );
             const withheld = [
               "human_control",
+              "space_ended",
               "automation_stopped",
               "tab_not_found",
               "space_not_found",

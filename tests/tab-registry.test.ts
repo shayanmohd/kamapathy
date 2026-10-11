@@ -5,7 +5,7 @@ import {
   type TabOrigin,
 } from "../electron/agent/tab-registry";
 import { initialState, newTab } from "../shared/state";
-import type { ClosedBy, Tab } from "../shared/types";
+import type { ClosedBy, Space, Tab } from "../shared/types";
 
 const agent: TabOrigin = { openedBy: "agent", managed: true };
 const person: TabOrigin = { openedBy: "person", managed: false };
@@ -270,5 +270,138 @@ describe("tab registry", () => {
       opened: [],
       closed: [],
     });
+  });
+});
+
+describe("access", () => {
+  it("grant marks every tab person and unmanaged and labels them; end unmanages and records who ended it; reset ends every grant", () => {
+    const state = initialState();
+    let now = 1000;
+    const registry = new TabRegistry(
+      () => state,
+      () => now,
+    );
+    const person: TabOrigin = { openedBy: "person", managed: false };
+    const agent: TabOrigin = { openedBy: "agent", managed: true };
+    // Registered before it joins the state, as the controller does.
+    const add = (
+      spaceId: string,
+      url: string,
+      origin: TabOrigin,
+      pinned = false,
+    ) => {
+      const tab = { ...newTab(spaceId, url), pinned };
+      registry.register(tab, origin);
+      state.tabs.push(tab);
+      return tab;
+    };
+    const work = state.spaces.find((space) => space.id === "work")!;
+    const first = state.tabs.find((tab) => tab.spaceId === "work")!;
+    registry.register(first, person);
+    const pinned = add("work", "https://example.com/pinned", person, true);
+    // A personal space follows the person's rules until it is granted.
+    expect([first.label, pinned.label]).toEqual([undefined, undefined]);
+    // Whatever control the space had ends with the grant.
+    work.control = { reason: "manual", since: 1 };
+    registry.grant("work");
+    expect(work).toMatchObject({
+      kind: "personal",
+      owner: "agent",
+      access: "granted",
+    });
+    expect(work.control).toBeUndefined();
+    // Labels follow the tab strip: pinned tabs first.
+    expect(pinned).toMatchObject({
+      label: "p1",
+      openedBy: "person",
+      managed: false,
+    });
+    expect(first).toMatchObject({
+      label: "p2",
+      openedBy: "person",
+      managed: false,
+    });
+    const page = add("work", "https://example.com/page", agent);
+    expect(page).toMatchObject({ label: "p3", openedBy: "agent", managed: true });
+    expect(registry.used("work")).toBe(1);
+
+    now = 2000;
+    registry.end("work", { by: "agent", reason: "finished" });
+    expect(work).toMatchObject({
+      owner: "human",
+      access: "ended",
+      ended: { by: "agent", reason: "finished", at: 2000 },
+    });
+    expect(page).toMatchObject({
+      label: "p3",
+      openedBy: "agent",
+      managed: false,
+    });
+    expect(registry.used("work")).toBe(0);
+    // A new grant makes every tab present the person's, keeps labels and
+    // forgets the end.
+    registry.grant("work");
+    expect(work.ended).toBeUndefined();
+    expect(page).toMatchObject({
+      label: "p3",
+      openedBy: "person",
+      managed: false,
+    });
+
+    const task: Space = {
+      id: "task",
+      name: "Task",
+      color: "purple",
+      kind: "agent",
+      owner: "agent",
+      signIns: "shared",
+      createdAt: 0,
+      createdBy: "agent",
+      access: "granted",
+    };
+    state.spaces.push(task);
+    const own = add("task", "https://example.com/own", agent);
+    registry.handOver("task", { reason: "manual" });
+    const meanwhile = add("task", "https://example.com/meanwhile", person);
+    expect(registry.takeBack("task", own).opened).toEqual([meanwhile]);
+    registry.handOver("task", {
+      reason: "approval",
+      prompt: "clearing site data",
+    });
+    now = 3000;
+    registry.end("task", { by: "person", reason: "stopped" });
+    expect(task).toMatchObject({
+      owner: "human",
+      access: "ended",
+      ended: { by: "person", reason: "stopped", at: 3000 },
+    });
+    expect(task.control).toBeUndefined();
+    expect(own.managed).toBe(false);
+    // A grant starts a new boundary: nothing opened or closed since.
+    registry.grant("task");
+    expect(task).toMatchObject({ owner: "agent", access: "granted" });
+    expect(own).toMatchObject({
+      label: "p1",
+      openedBy: "person",
+      managed: false,
+    });
+    expect(registry.lastBoundary("task", own)).toEqual({
+      active: own,
+      opened: [],
+      closed: [],
+    });
+
+    // Agent access off ends every grant, ended ones included.
+    registry.end("work", { by: "person", reason: "stopped" });
+    registry.setManaged(own, true);
+    registry.reset();
+    expect(work).toMatchObject({ kind: "personal", owner: "human" });
+    expect(task).toMatchObject({ kind: "agent", owner: "agent" });
+    for (const space of [work, task]) {
+      expect(space.access).toBeUndefined();
+      expect(space.ended).toBeUndefined();
+      expect(space.control).toBeUndefined();
+    }
+    expect(state.tabs.some((tab) => tab.managed)).toBe(false);
   });
 });

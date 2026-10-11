@@ -304,6 +304,44 @@ describe("desktop session persistence", () => {
     );
   });
 
+  it("saves a kept space as a personal one without what the agent left on it", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    original.spaces.push({
+      id: "kept",
+      name: "Kept task",
+      color: "purple",
+      kind: "personal",
+      owner: "human",
+      signIns: "separate",
+      createdAt: 7,
+      createdBy: "agent",
+      pageBudget: 5,
+    });
+    const keptTab = {
+      ...newTab("kept", "https://kept.example/"),
+      label: "p2",
+      openedBy: "agent" as const,
+      managed: false,
+    };
+    original.tabs.push(keptTab);
+    writeState(path, original);
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.spaces.find((space) => space.id === "kept")).toEqual({
+      id: "kept",
+      name: "Kept task",
+      color: "purple",
+      kind: "personal",
+      owner: "human",
+      signIns: "separate",
+      createdAt: 7,
+    });
+    const tab = restored.tabs.find((item) => item.id === keptTab.id)!;
+    expect(tab).toMatchObject({ spaceId: "kept", url: "https://kept.example/" });
+    for (const field of ["label", "openedBy", "managed"])
+      expect(tab).not.toHaveProperty(field);
+  });
+
   it("starts one blank tab per personal space when session restoration is disabled", () => {
     const path = statePath();
     const original = initialState();

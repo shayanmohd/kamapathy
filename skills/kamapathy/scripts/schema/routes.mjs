@@ -234,6 +234,20 @@ export const ROUTES = [
     { lane: "none", budget: { field: "timeoutMs" }, since: 2 },
   ),
   route(
+    "POST",
+    "/spaces/:id/finish",
+    "Ends the agent's task in a space: closes the pages it does not keep, keeps the person's tabs and ends its access.",
+    "{ ok: true, spaceId, closedSpace, closed: label[], kept: label[], protected: label[] }",
+    {
+      keep: {
+        kind: "json",
+        required: true,
+        description: '"all", or up to 20 unique tab ids to keep open.',
+      },
+    },
+    { since: 2 },
+  ),
+  route(
     "GET",
     "/spaces/:id/tabs",
     "Lists every tab of a space with its label and origin, the last 100 closed labels and the page budget.",

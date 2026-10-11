@@ -331,6 +331,11 @@ export function createPreviewBridge(): KamapathyBridge {
       case "tab:reload":
       case "tab:stop":
         break;
+      // The web preview has no agent service.
+      case "space:grant":
+      case "space:stop":
+      case "space:keep":
+        break;
       case "page:devtools":
       case "page:screenshot":
       case "page:zoom":

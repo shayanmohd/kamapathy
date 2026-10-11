@@ -4,7 +4,7 @@ import {
   type AutomationServer,
 } from "../electron/agent/server";
 import type { SpaceView, TabView } from "../electron/agent/views";
-import { HOME_URL } from "../shared/state";
+import { agentRules, HOME_URL } from "../shared/state";
 import { FakeController, socketFetch, testSocket } from "./fake-automation";
 
 describe("agent spaces", () => {
@@ -45,11 +45,27 @@ describe("agent spaces", () => {
   };
   const stateTab = (id: string) =>
     controller.state.tabs.find((tab) => tab.id === id);
+  const spaceTabs = (spaceId: string) =>
+    controller.state.tabs.filter((tab) => tab.spaceId === spaceId);
+  const listed = async () =>
+    (await request("/spaces")).body.spaces.map(
+      (space: { id: string }) => space.id,
+    );
+  const within = <T>(promise: Promise<T>, ms: number) =>
+    Promise.race([
+      promise,
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), ms),
+      ),
+    ]);
+  const restart = async () => {
+    api = await startAutomation(controller, { socketPath: socket.path });
+    send = socketFetch(socket.path);
+  };
   beforeEach(async () => {
     controller = new FakeController();
     socket = testSocket();
-    api = await startAutomation(controller, { socketPath: socket.path });
-    send = socketFetch(socket.path);
+    await restart();
   });
   afterEach(async () => {
     await api.close();
@@ -1094,5 +1110,460 @@ describe("agent spaces", () => {
     });
     expect(listed).not.toHaveProperty("recentTabTitles");
     expect((await request(`/spaces/${space.id}`)).body.space).toEqual(listed);
+  });
+
+  it("finish checks every id, closes unkept agent and popup pages, protects person tabs, deletes a space with nothing left, then answers space_ended", async () => {
+    const { space, tab: first } = await createSpace();
+    const kept = await openPage(space.id, "https://example.com/kept");
+    const other = await openPage(space.id, "https://example.com/other");
+    const popup = controller.openPopup(kept.id, "https://example.com/popup");
+    const person = controller.openPersonTab(space.id, "https://example.com/person");
+    expect([first, kept, other, popup, person].map((tab) => tab.label)).toEqual(
+      ["p1", "p2", "p3", "p4", "p5"],
+    );
+    const finish = (id: string, keep: unknown) =>
+      request(`/spaces/${id}/finish`, "POST", { keep });
+    const before = spaceTabs(space.id).map((tab) => tab.id);
+    for (const keep of [
+      "some",
+      {},
+      [7],
+      [kept.id, kept.id],
+      Array.from({ length: 21 }, (_, index) => `tab-${index}`),
+    ]) {
+      const refused = await finish(space.id, keep);
+      expect(refused.status, JSON.stringify(keep)).toBe(400);
+      expect(refused.body.error).toMatchObject({
+        code: "invalid_field",
+        field: "keep",
+        expected: '"all" or up to 20 unique tab ids',
+      });
+    }
+    const missing = await request(`/spaces/${space.id}/finish`, "POST", {});
+    expect([missing.status, missing.body.error.code]).toEqual([
+      400,
+      "invalid_field",
+    ]);
+    // Every id is checked before anything closes.
+    const elsewhere = await createSpace({ name: "Elsewhere" });
+    for (const tabId of ["missing", elsewhere.tab.id]) {
+      const refused = await finish(space.id, [kept.id, tabId]);
+      expect(refused.status).toBe(404);
+      expect(refused.body.error).toMatchObject({
+        code: "tab_not_found",
+        tabId,
+      });
+    }
+    // Finishing needs agent control.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect((await finish(space.id, "all")).body.error.code).toBe(
+      "human_control",
+    );
+    expect(
+      (await request(`/spaces/${space.id}/resume`, "POST", {})).status,
+    ).toBe(200);
+    expect(spaceTabs(space.id).map((tab) => tab.id)).toEqual(before);
+
+    expect(await finish(space.id, [kept.id])).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        spaceId: space.id,
+        closedSpace: false,
+        closed: ["p1", "p3", "p4"],
+        kept: ["p2"],
+        protected: ["p5"],
+      },
+    });
+    expect(
+      spaceTabs(space.id).map((tab) => [tab.label, tab.managed]),
+    ).toEqual([
+      ["p2", false],
+      ["p5", false],
+    ]);
+    expect(controller.registry.closed(space.id)).toMatchObject([
+      { label: "p1", closedBy: "agent" },
+      { label: "p3", closedBy: "agent" },
+      { label: "p4", closedBy: "agent" },
+    ]);
+    expect(
+      controller.state.spaces.find((item) => item.id === space.id),
+    ).toMatchObject({
+      owner: "human",
+      access: "ended",
+      ended: { by: "agent", reason: "finished" },
+    });
+    expect(controller.activity.at(-1)).toEqual({
+      spaceId: space.id,
+      message: "Agent finished",
+      kind: "success",
+    });
+    const ended = {
+      code: "space_ended",
+      message:
+        "The agent finished this space. Open or create another space to continue.",
+      spaceId: space.id,
+      endedBy: "agent",
+      reason: "finished",
+    };
+    for (const [path, method, body] of [
+      [`/spaces/${space.id}`, "GET", undefined],
+      [`/spaces/${space.id}/tabs`, "GET", undefined],
+      [`/spaces/${space.id}/resume`, "POST", {}],
+      [`/spaces/${space.id}/finish`, "POST", { keep: "all" }],
+      [`/tabs/${kept.id}/snapshot`, "GET", undefined],
+    ] as const)
+      expect(await request(path, method, body), path).toEqual({
+        status: 409,
+        body: { error: ended },
+      });
+
+    // A space with nothing kept or protected is deleted.
+    const done = await createSpace({ name: "Done" });
+    await openPage(done.space.id);
+    expect(await finish(done.space.id, [])).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        spaceId: done.space.id,
+        closedSpace: true,
+        closed: ["p1", "p2"],
+        kept: [],
+        protected: [],
+      },
+    });
+    expect(controller.calls).toContainEqual({
+      type: "space:delete",
+      id: done.space.id,
+    });
+    expect(
+      controller.state.spaces.some((item) => item.id === done.space.id),
+    ).toBe(false);
+    expect(
+      (await request(`/spaces/${done.space.id}/tabs`)).body.error.code,
+    ).toBe("space_not_found");
+    // "all" keeps every page the agent manages.
+    const all = await createSpace({ name: "Keep all" });
+    await openPage(all.space.id);
+    expect((await finish(all.space.id, "all")).body).toEqual({
+      ok: true,
+      spaceId: all.space.id,
+      closedSpace: false,
+      closed: [],
+      kept: ["p1", "p2"],
+      protected: [],
+    });
+    expect(await listed()).toEqual([elsewhere.space.id]);
+    // A space the person keeps leaves the agent until they grant it.
+    await controller.keepAsPersonal(space.id);
+    expect(
+      (await request(`/spaces/${space.id}/tabs`)).body.error.code,
+    ).toBe("space_not_found");
+    api.grantSpace(space.id);
+    expect((await request(`/spaces/${space.id}/tabs`)).status).toBe(200);
+  });
+
+  it("Stop ends one space and refuses resume until granted again while another works", async () => {
+    const one = await createSpace({ name: "One" });
+    const page = await openPage(one.space.id);
+    const two = await createSpace({ name: "Two" });
+    const other = await openPage(two.space.id);
+    // Steps in flight fail at their next check and withhold earlier results.
+    let observed = 0;
+    const record = controller.addActivity.bind(controller);
+    controller.addActivity = (spaceId, message, kind) => {
+      record(spaceId, message, kind);
+      if (++observed === 1) api.endSpace(one.space.id);
+    };
+    const batch = await request(`/tabs/${page.id}/actions`, "POST", {
+      actions: [{ type: "snapshot" }, { type: "snapshot" }],
+    });
+    controller.addActivity = record;
+    expect(batch.status).toBe(409);
+    expect(batch.body).toMatchObject({
+      ok: false,
+      failedIndex: 1,
+      results: [
+        { index: 0, type: "snapshot", result: { ok: true, withheld: true } },
+      ],
+      error: { code: "space_ended", endedBy: "person", reason: "stopped" },
+    });
+    expect(JSON.stringify(batch.body)).not.toContain(
+      "Hello from the agent page",
+    );
+    const stopped = controller.state.spaces.find(
+      (item) => item.id === one.space.id,
+    )!;
+    expect(stopped).toMatchObject({
+      owner: "human",
+      access: "ended",
+      ended: { by: "person", reason: "stopped" },
+    });
+    expect(controller.activity.at(-1)).toEqual({
+      spaceId: one.space.id,
+      message: "You stopped the agent",
+      kind: "info",
+    });
+    // Stop closes no tab.
+    expect(
+      spaceTabs(one.space.id).map((tab) => [tab.label, tab.managed]),
+    ).toEqual([
+      ["p1", false],
+      ["p2", false],
+    ]);
+    const ended = {
+      code: "space_ended",
+      message:
+        "The person stopped the agent in this space. Stop here and tell them; only they can let an agent use it again.",
+      spaceId: one.space.id,
+      endedBy: "person",
+      reason: "stopped",
+    };
+    for (const path of [
+      `/spaces/${one.space.id}/resume`,
+      `/spaces/${one.space.id}/wait-for-control`,
+      `/tabs/${page.id}/adopt`,
+    ])
+      expect(await request(path, "POST", {}), path).toEqual({
+        status: 409,
+        body: { error: ended },
+      });
+    // A second Stop changes nothing, and the other space keeps working.
+    api.endSpace(one.space.id);
+    expect(
+      controller.activity.filter(
+        (item) => item.message === "You stopped the agent",
+      ),
+    ).toHaveLength(1);
+    expect((await request(`/tabs/${other.id}/snapshot`)).status).toBe(200);
+    expect(await listed()).toEqual([two.space.id]);
+    // Only the person can let an agent use it again, and then every tab is
+    // theirs until the agent adopts it.
+    expect(api.grantSpace(one.space.id)).toBe(stopped);
+    expect(stopped).toMatchObject({ owner: "agent", access: "granted" });
+    expect(stopped.ended).toBeUndefined();
+    expect(await listed()).toEqual([one.space.id, two.space.id]);
+    expect(
+      (await request(`/tabs/${page.id}/snapshot`)).body.error.code,
+    ).toBe("tab_unmanaged");
+    expect(
+      (await request(`/tabs/${page.id}/adopt`, "POST", {})).status,
+    ).toBe(200);
+    const contents = controller.pages.get(page.id)!;
+    await expect.poll(() => contents.debugger.attached).toBe(true);
+    expect((await request(`/tabs/${page.id}/snapshot`)).status).toBe(200);
+    expect(
+      (await request(`/spaces/${one.space.id}/resume`, "POST", {})).body,
+    ).toMatchObject({ ok: true, owner: "agent", opened: [], closed: [] });
+  });
+
+  it("wait-for-control ends with space_ended on Stop", async () => {
+    const { space } = await createSpace();
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const waiting = request(`/spaces/${space.id}/wait-for-control`, "POST", {
+      timeoutMs: 10000,
+    });
+    expect(await within(waiting, 200)).toBe("pending");
+    api.endSpace(space.id);
+    const ended = {
+      status: 409,
+      body: {
+        error: {
+          code: "space_ended",
+          message:
+            "The person stopped the agent in this space. Stop here and tell them; only they can let an agent use it again.",
+          spaceId: space.id,
+          endedBy: "person",
+          reason: "stopped",
+        },
+      },
+    };
+    expect(await within(waiting, 2000)).toEqual(ended);
+    // Control never returns to a stopped space, so a new wait ends at once.
+    expect(
+      await within(
+        request(`/spaces/${space.id}/wait-for-control`, "POST", {}),
+        2000,
+      ),
+    ).toEqual(ended);
+  });
+
+  it("listings list a personal space only while it is granted, under agent rules with unmanaged, labeled tabs", async () => {
+    controller.openPersonTab("work", "https://example.com/work");
+    expect(await listed()).toEqual([]);
+    expect((await request("/spaces/work/tabs")).status).toBe(404);
+    const work = api.grantSpace("work");
+    expect(work).toMatchObject({
+      id: "work",
+      kind: "personal",
+      owner: "agent",
+      access: "granted",
+    });
+    expect(agentRules(work)).toBe(true);
+    expect(await listed()).toEqual(["work"]);
+    expect((await request("/spaces")).body.spaces[0]).toMatchObject({
+      id: "work",
+      kind: "personal",
+      owner: "agent",
+      createdBy: "person",
+      pageBudget: 20,
+    });
+    const listing = await request("/spaces/work/tabs");
+    expect(listing.status).toBe(200);
+    expect(listing.body.tabs).toMatchObject([
+      { label: "p1", openedBy: "person", managed: false, url: HOME_URL },
+      {
+        label: "p2",
+        openedBy: "person",
+        managed: false,
+        url: "https://example.com/work",
+      },
+    ]);
+    expect(listing.body.budget.used).toBe(0);
+    // The agent's own pages there are labeled in turn and managed.
+    expect(await openPage("work", "https://example.com/agent")).toMatchObject({
+      label: "p3",
+      openedBy: "agent",
+      managed: true,
+    });
+    api.endSpace("work");
+    expect(await listed()).toEqual([]);
+    expect(work).toMatchObject({ owner: "human", access: "ended" });
+    expect(agentRules(work)).toBe(false);
+    expect((await request("/spaces/work/tabs")).body.error.code).toBe(
+      "space_ended",
+    );
+    api.grantSpace("work");
+    expect(await listed()).toEqual(["work"]);
+    // Turning agent access off ends every grant.
+    await api.close();
+    controller.resetAgentAccess();
+    expect(work).toMatchObject({ kind: "personal", owner: "human" });
+    expect(work.access).toBeUndefined();
+    await restart();
+    expect(await listed()).toEqual([]);
+    expect((await request("/spaces/work/tabs")).status).toBe(404);
+  });
+
+  it("a grant gives no tab a session until adopted, and finish, Stop and access off detach every session", async () => {
+    const work = controller.openPersonTab("work", "https://example.com/work");
+    const workPage = controller.pages.get(work.id)!;
+    api.grantSpace("work");
+    expect(work).toMatchObject({
+      label: "p2",
+      openedBy: "person",
+      managed: false,
+    });
+    expect((await request(`/tabs/${work.id}/snapshot`)).body.error.code).toBe(
+      "tab_unmanaged",
+    );
+    expect(workPage.debugger.attachCount).toBe(0);
+    expect(
+      (await request(`/tabs/${work.id}/adopt`, "POST", {})).status,
+    ).toBe(200);
+    await expect.poll(() => workPage.debugger.attached).toBe(true);
+    expect((await request(`/tabs/${work.id}/snapshot`)).status).toBe(200);
+    // Finish keeps the person's tabs open and ends their sessions.
+    expect(
+      (await request("/spaces/work/finish", "POST", { keep: "all" })).body,
+    ).toEqual({
+      ok: true,
+      spaceId: "work",
+      closedSpace: false,
+      closed: [],
+      kept: [],
+      protected: ["p1", "p2"],
+    });
+    await expect.poll(() => workPage.debugger.attached).toBe(false);
+    // Stop ends the sessions of an agent space.
+    const stopped = await createSpace({ name: "Stopped" });
+    const stoppedPage = controller.pages.get(
+      (await openPage(stopped.space.id)).id,
+    )!;
+    await expect.poll(() => stoppedPage.debugger.attached).toBe(true);
+    api.endSpace(stopped.space.id);
+    await expect.poll(() => stoppedPage.debugger.attached).toBe(false);
+    // Agent access off ends the rest, and nothing attaches again.
+    const running = await createSpace({ name: "Running" });
+    const runningPage = controller.pages.get(
+      (await openPage(running.space.id)).id,
+    )!;
+    api.grantSpace("work");
+    expect(
+      (await request(`/tabs/${work.id}/adopt`, "POST", {})).status,
+    ).toBe(200);
+    await expect
+      .poll(() => runningPage.debugger.attached && workPage.debugger.attached)
+      .toBe(true);
+    await api.close();
+    controller.resetAgentAccess();
+    expect([runningPage.debugger.attached, workPage.debugger.attached]).toEqual(
+      [false, false],
+    );
+    expect(controller.state.tabs.some((tab) => tab.managed)).toBe(false);
+    const attaches = [runningPage, workPage].map(
+      (page) => page.debugger.attachCount,
+    );
+    await restart();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(
+      [runningPage, workPage].map((page) => page.debugger.attachCount),
+    ).toEqual(attaches);
+  });
+
+  it("a granted personal space refuses to close, and finish ends its grant with a blank tab replacing a last closed tab", async () => {
+    const work = api.grantSpace("work");
+    const own = spaceTabs("work")[0];
+    expect(await request("/spaces/work", "DELETE")).toEqual({
+      status: 409,
+      body: {
+        error: {
+          code: "space_protected",
+          message:
+            "This space belongs to the person, so the agent cannot close it. Finish it instead.",
+          tabs: [{ id: own.id, label: "p1", title: own.title, url: own.url }],
+        },
+      },
+    });
+    const page = await openPage("work", "https://example.com/agent");
+    // The person closes their own tab, so only the agent's page is left.
+    controller.closeTab(own.id, "person");
+    expect((await request("/spaces/work", "DELETE")).body.error).toMatchObject({
+      code: "space_protected",
+      tabs: [],
+    });
+    expect(await request("/spaces/work/finish", "POST", { keep: [] })).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        spaceId: "work",
+        closedSpace: false,
+        closed: [page.label],
+        kept: [],
+        protected: [],
+      },
+    });
+    expect(controller.state.spaces).toContain(work);
+    expect(work).toMatchObject({
+      kind: "personal",
+      owner: "human",
+      access: "ended",
+      ended: { by: "agent", reason: "finished" },
+    });
+    expect(spaceTabs("work")).toMatchObject([
+      { url: HOME_URL, label: "p3", openedBy: "agent", managed: false },
+    ]);
+    expect(controller.registry.closed("work")).toMatchObject([
+      { label: "p1", closedBy: "person" },
+      { label: "p2", closedBy: "agent" },
+    ]);
   });
 });

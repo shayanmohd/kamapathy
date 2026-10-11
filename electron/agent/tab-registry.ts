@@ -202,6 +202,56 @@ export class TabRegistry {
     };
   }
 
+  // The person lets an agent use a space. Every tab already there is the
+  // person's and unmanaged until the agent adopts it.
+  grant(spaceId: string): void {
+    const space = this.state().spaces.find((item) => item.id === spaceId);
+    if (!space) return;
+    space.access = "granted";
+    delete space.ended;
+    delete space.control;
+    space.owner = "agent";
+    // Handing over and taking back at once leaves a boundary with nothing
+    // opened or closed before the grant.
+    this.handOver(spaceId, { reason: "manual" });
+    this.takeBack(spaceId, null);
+    for (const tab of this.state().tabs)
+      if (tab.spaceId === spaceId) {
+        tab.openedBy = "person";
+        this.setManaged(tab, false);
+      }
+    this.labelSpace(spaceId);
+  }
+
+  // Finish or the person's Stop. The space stays open with the person, and
+  // none of its tabs is the agent's any more.
+  end(
+    spaceId: string,
+    ended: { by: "agent" | "person"; reason: "finished" | "stopped" },
+  ): void {
+    const space = this.state().spaces.find((item) => item.id === spaceId);
+    if (!space) return;
+    space.access = "ended";
+    space.ended = { by: ended.by, reason: ended.reason, at: this.now() };
+    space.owner = "human";
+    delete space.control;
+    for (const tab of this.state().tabs)
+      if (tab.spaceId === spaceId) this.setManaged(tab, false);
+  }
+
+  // Agent access went off: every grant ends.
+  reset(): void {
+    const { spaces, tabs } = this.state();
+    for (const space of spaces) {
+      if (!space.access) continue;
+      delete space.access;
+      delete space.ended;
+      delete space.control;
+      if (space.kind === "personal") space.owner = "human";
+    }
+    for (const tab of tabs) if (tab.managed) this.setManaged(tab, false);
+  }
+
   on(listener: (event: RegistryEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

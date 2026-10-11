@@ -12,7 +12,7 @@ import type {
 } from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
-import { createAuthority } from "./authority";
+import { activeSpace, createAuthority } from "./authority";
 import { envelope, fail } from "./errors";
 import {
   buildRoutes,
@@ -67,13 +67,27 @@ export interface AutomationController {
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
   /** Returns control to the agent unless the person took over since. */
   releaseHold(holdId: string): void;
+  /** The person lets an agent use the space; every tab in it stays unmanaged. */
+  grantAccess(spaceId: string): void;
+  /** Finish or the person's Stop: the space stays open and leaves the agent. */
+  endAccess(
+    spaceId: string,
+    ended: { by: "agent" | "person"; reason: "finished" | "stopped" },
+  ): void;
+  /** Agent access went off: every grant ends. */
+  resetAgentAccess(): void;
+  /** An agent space whose access ended becomes a personal space. */
+  keepAsPersonal(spaceId: string): Promise<void>;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */
   endpoint: string;
   /** Random per start; returned on every response so clients can verify it. */
   instance: string;
-  grantSpace(id: string): void;
+  /** The person's grant from the app. Throws, changing nothing, when it cannot. */
+  grantSpace(id: string): Space;
+  /** The person's Stop for one space. */
+  endSpace(id: string): void;
   close(): Promise<void>;
 }
 // End-to-end checks read tab sessions through this probe on globalThis in the
@@ -311,8 +325,17 @@ export async function startAutomation(
     endpoint: options.socketPath,
     instance,
     grantSpace(id: string) {
-      authority.grantSpace(id);
+      const space = authority.grantSpace(id);
       sessions.sync();
+      return space;
+    },
+    endSpace(id: string) {
+      const space = controller.state.spaces.find((item) => item.id === id);
+      if (!space) throw new Error("Space was not found.");
+      // A second Stop, or a Stop on a space no agent may use, changes
+      // nothing.
+      if (activeSpace(space))
+        controller.endAccess(id, { by: "person", reason: "stopped" });
     },
     close() {
       if (!closing) {

@@ -180,6 +180,9 @@ export type BrowserAction =
       owner: "human" | "agent";
       reason?: "handoff";
     }
+  | { type: "space:grant"; id: string }
+  | { type: "space:stop"; id: string }
+  | { type: "space:keep"; id: string }
   | { type: "bookmark:add"; url: string; title: string }
   | { type: "bookmark:remove"; id: string }
   | { type: "bookmark:update"; id: string; url: string; title: string }

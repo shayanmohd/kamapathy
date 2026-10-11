@@ -236,18 +236,46 @@ describe("local automation socket", () => {
     expect(controller.accessedTabs).toEqual([]);
   });
 
-  it("accepts an explicit UI grant for an agent space and rejects grants for personal spaces", async () => {
-    expect(() => api.grantSpace("personal")).toThrow();
+  it("accepts an explicit UI grant: personal spaces can now be granted, and granting an active managed space changes nothing", async () => {
+    expect((await request("/spaces/personal/tabs")).status).toBe(404);
+    const personal = api.grantSpace("personal");
+    expect(personal).toMatchObject({
+      id: "personal",
+      kind: "personal",
+      owner: "agent",
+      access: "granted",
+    });
+    expect(
+      controller.state.tabs
+        .filter((tab) => tab.spaceId === "personal")
+        .every((tab) => tab.openedBy === "person" && tab.managed === false),
+    ).toBe(true);
+    expect((await request("/spaces/personal/tabs")).status).toBe(200);
     expect((await request("/spaces/manual-agent/tabs")).status).toBe(404);
-    api.grantSpace("manual-agent");
+    const manual = api.grantSpace("manual-agent");
     expect((await request("/spaces/manual-agent/tabs")).status).toBe(200);
+    const tab = controller.state.tabs.find(
+      (item) => item.spaceId === "manual-agent",
+    )!;
+    expect(tab).toMatchObject({ openedBy: "person", managed: false });
+    expect((await request(`/tabs/${tab.id}/adopt`, "POST", {})).status).toBe(
+      200,
+    );
+    // A grant in force is never handed over again, so the adopted tab stays
+    // the agent's.
+    expect(api.grantSpace("manual-agent")).toBe(manual);
+    expect(tab.managed).toBe(true);
     await controller.dispatch({
       type: "space:ownership",
       id: "manual-agent",
       owner: "human",
     });
     expect((await request("/spaces/manual-agent/tabs")).status).toBe(409);
-    expect(() => api.grantSpace("manual-agent")).toThrow();
+    api.grantSpace("manual-agent");
+    expect(manual.owner).toBe("human");
+    expect(() => api.grantSpace("missing")).toThrow("Space was not found.");
+    await api.close();
+    expect(() => api.grantSpace("work")).toThrow("Turn on agent access first.");
   });
 
   it("creates isolated background spaces and tabs without changing the personal selection", async () => {
@@ -1691,6 +1719,7 @@ describe("local automation socket", () => {
       "POST /spaces/:id/handoff": {},
       "POST /spaces/:id/resume": {},
       "POST /spaces/:id/wait-for-control": { timeoutMs: 1000 },
+      "POST /spaces/:id/finish": { keep: "all" },
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
       "POST /tabs/:id/snapshot": {},

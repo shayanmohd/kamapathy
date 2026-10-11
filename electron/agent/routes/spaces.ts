@@ -1,5 +1,6 @@
 import { PAGE_BUDGET } from "../../../shared/state";
 import type { Space, Tab } from "../../../shared/types";
+import { activeSpace } from "../authority";
 import { fail } from "../errors";
 import { send, type RouteDeps, type RouteImpl } from "../http";
 import type { AutomationController } from "../server";
@@ -37,10 +38,11 @@ export function spaceRoutes({
   authority,
 }: RouteDeps): Record<string, RouteImpl> {
   const { managedSpaces, authorizeSpace } = authority;
-  // The spaces this connection created or was granted, in creation order.
+  // What this connection sees, in creation order: spaces it manages and may
+  // still use, the person's own spaces only while granted.
   const listedSpaces = () =>
     controller.state.spaces.filter(
-      (space) => managedSpaces.has(space.id) && space.kind === "agent",
+      (space) => managedSpaces.has(space.id) && activeSpace(space),
     );
   // What changed the last time control came back to the agent.
   const boundaryOf = (spaceId: string) => {
@@ -89,10 +91,7 @@ export function spaceRoutes({
             created: false,
           });
         }
-        for (const id of managedSpaces)
-          if (!controller.state.spaces.some((space) => space.id === id))
-            managedSpaces.delete(id);
-        if (managedSpaces.size >= 12)
+        if (authority.activeCount() >= 12)
           return fail(
             "space_limit",
             "Close an agent space before creating another. The limit is 12.",
@@ -202,8 +201,8 @@ export function spaceRoutes({
               awaited: "control",
               timeoutMs,
               reason:
-                controller.state.spaces.find((item) => item.id === id)
-                  ?.control?.reason ?? "manual",
+                controller.state.spaces.find((item) => item.id === id)?.control
+                  ?.reason ?? "manual",
             },
           );
         return send(response, 200, {
@@ -213,8 +212,95 @@ export function spaceRoutes({
         });
       },
     },
+    "POST /spaces/:id/finish": {
+      handler: async ({ response, body, space, run }) => {
+        const id = space!.id;
+        const keep = body!.keep;
+        if (
+          keep !== "all" &&
+          !(
+            Array.isArray(keep) &&
+            keep.length <= 20 &&
+            keep.every((item) => typeof item === "string") &&
+            new Set(keep).size === keep.length
+          )
+        )
+          return fail(
+            "invalid_field",
+            'keep must be "all" or up to 20 unique tab ids.',
+            { field: "keep", expected: '"all" or up to 20 unique tab ids' },
+          );
+        const ids = keep === "all" ? undefined : (keep as string[]);
+        const tabs = controller.state.tabs.filter((tab) => tab.spaceId === id);
+        // Every id is checked before anything closes.
+        for (const tabId of ids ?? [])
+          if (!tabs.some((tab) => tab.id === tabId))
+            return fail("tab_not_found", "Agent tab was not found.", {
+              tabId,
+            });
+        // The person's tabs, and tabs the agent never adopted, stay open.
+        const isProtected = (tab: Tab) =>
+          tab.openedBy === "person" || !tab.managed;
+        const protectedTabs = tabs.filter(isProtected);
+        const kept = tabs.filter(
+          (tab) => !isProtected(tab) && (!ids || ids.includes(tab.id)),
+        );
+        const closing = tabs.filter(
+          (tab) => !isProtected(tab) && !kept.includes(tab),
+        );
+        const labels = (list: Tab[]) =>
+          list.flatMap((tab) => (tab.label ? [tab.label] : []));
+        run.dispatch.dispatched = true;
+        if (space!.kind === "agent" && !kept.length && !protectedTabs.length) {
+          await controller.dispatch({ type: "space:delete", id });
+          authority.managedSpaces.delete(id);
+          return send(response, 200, {
+            ok: true,
+            spaceId: id,
+            closedSpace: true,
+            closed: labels(closing),
+            kept: [],
+            protected: [],
+          });
+        }
+        const closed: string[] = [];
+        for (const tab of closing) {
+          const result = controller.closeTab(tab.id, "agent");
+          if (result.closed) closed.push(result.closed);
+        }
+        // A granted personal space is never deleted. closeTab gives it a
+        // blank tab if the last one closed.
+        controller.endAccess(id, { by: "agent", reason: "finished" });
+        return send(response, 200, {
+          ok: true,
+          spaceId: id,
+          closedSpace: false,
+          closed,
+          kept: labels(kept),
+          protected: labels(protectedTabs),
+        });
+      },
+    },
     "DELETE /spaces/:id": {
       handler: async ({ response, space }) => {
+        if (space!.kind === "personal")
+          return fail(
+            "space_protected",
+            "This space belongs to the person, so the agent cannot close it. Finish it instead.",
+            {
+              tabs: controller.state.tabs
+                .filter(
+                  (tab) =>
+                    tab.spaceId === space!.id && tab.openedBy === "person",
+                )
+                .map(({ id, label, title, url }) => ({
+                  id,
+                  label,
+                  title,
+                  url,
+                })),
+            },
+          );
         const personTabs = controller.state.tabs.filter(
           (tab) => tab.spaceId === space!.id && tab.openedBy === "person",
         );

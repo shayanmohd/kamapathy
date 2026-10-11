@@ -141,6 +141,8 @@ async function syncAutomation(): Promise<void> {
         await closing.close();
         releaseSocket(agent, closing.endpoint);
         controller?.setAutomation(false);
+        // Agent access off ends every grant.
+        controller?.resetAgentAccess();
       }
     }
     // The client reads this to avoid starting Kamapathy after access was turned off.
@@ -234,32 +236,33 @@ function registerIpc(): void {
   ipcMain.handle("kamapathy:state", (event) => validateSender(event).state);
   ipcMain.handle("kamapathy:dispatch", async (event, action: BrowserAction) => {
     const owner = validateSender(event);
-    if (
-      action?.type === "space:ownership" &&
-      action.owner === "agent" &&
-      !automation
-    )
-      throw new Error(
-        "Turn on the agent connection before letting an agent continue.",
-      );
-    const state = await owner.dispatch(action);
+    // Only the person's own click in the app grants a space to agents.
+    if (action?.type === "space:grant") {
+      if (!automation) throw new Error("Turn on agent access first.");
+      automation.grantSpace(action.id);
+      return owner.state;
+    }
     if (action?.type === "space:ownership" && action.owner === "agent") {
-      try {
-        if (!automation)
-          throw new Error(
-            "The agent connection stopped. Turn it on before continuing.",
-          );
-        automation.grantSpace(action.id);
-      } catch (error) {
-        await owner.dispatch({
-          type: "space:ownership",
-          id: action.id,
-          owner: "human",
-        });
-        throw error;
+      if (!automation)
+        throw new Error(
+          "Turn on the agent connection before letting an agent continue.",
+        );
+      // Let agent continue on a space without access is a new grant. A grant
+      // changes nothing when it fails, so there is nothing to undo.
+      const { id } = action;
+      if (
+        owner.state.spaces.find((space) => space.id === id)?.access !==
+        "granted"
+      ) {
+        automation.grantSpace(id);
+        return owner.state;
       }
     }
-    return state;
+    if (action?.type === "space:stop" && automation) {
+      automation.endSpace(action.id);
+      return owner.state;
+    }
+    return owner.dispatch(action);
   });
   ipcMain.on("kamapathy:bounds", (event, bounds: ContentBounds) => {
     try {

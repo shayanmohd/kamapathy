@@ -1115,6 +1115,74 @@ export class BrowserController {
     this.emit();
   }
 
+  // The person lets an agent use a space, from the app or an approved
+  // request. Its pages keep painting while nobody watches them.
+  grantAccess(spaceId: string): void {
+    this.getSpace(spaceId);
+    this.registry.grant(spaceId);
+    this.setThrottling(spaceId, false);
+    this.emit();
+  }
+
+  // Finish or the person's Stop. A personal space throttles its background
+  // pages again.
+  endAccess(
+    spaceId: string,
+    ended: { by: "agent" | "person"; reason: "finished" | "stopped" },
+  ): void {
+    const space = this.getSpace(spaceId);
+    this.registry.end(spaceId, ended);
+    if (space.kind === "personal") this.setThrottling(spaceId, true);
+    this.addActivity(
+      spaceId,
+      ended.by === "agent" ? "Agent finished" : "You stopped the agent",
+      ended.by === "agent" ? "success" : "info",
+    );
+  }
+
+  // Agent access went off: every grant ends.
+  resetAgentAccess(): void {
+    const granted = this.state.spaces.filter(
+      (space) => space.kind === "personal" && space.access,
+    );
+    this.registry.reset();
+    for (const space of granted) this.setThrottling(space.id, true);
+    this.emit();
+  }
+
+  async keepAsPersonal(spaceId: string): Promise<void> {
+    const space = this.getSpace(spaceId);
+    if (space.kind !== "agent" || space.access !== "ended")
+      throw new Error(
+        "Only a space whose agent has finished or stopped can be kept.",
+      );
+    const previous = this.partitionFor(space);
+    space.kind = "personal";
+    delete space.access;
+    delete space.ended;
+    if (space.signIns === "separate") {
+      // Its temporary sign-ins end, and its pages reload in its own
+      // persistent session.
+      for (const tab of this.state.tabs.filter(
+        (item) => item.spaceId === space.id,
+      )) {
+        this.destroyTab(tab.id);
+        tab.loading = false;
+      }
+    } else this.setThrottling(space.id, true);
+    this.emit();
+    if (previous !== SHARED_PARTITION) await this.discardPartition(previous);
+  }
+
+  private setThrottling(spaceId: string, throttled: boolean): void {
+    for (const tab of this.state.tabs) {
+      if (tab.spaceId !== spaceId) continue;
+      const contents = this.views.get(tab.id)?.webContents;
+      if (contents && !contents.isDestroyed())
+        contents.setBackgroundThrottling(throttled);
+    }
+  }
+
   // Closes one tab for whoever asked: its label retires, its space keeps at
   // least one tab, and a shown tab passes the selection to a neighbor.
   private removeTab(
@@ -1374,6 +1442,10 @@ export class BrowserController {
         const signIns = signInsOf(action.signIns);
         if (space.kind !== "personal")
           throw new Error("Only personal spaces can change their sign-ins.");
+        if (space.access === "granted")
+          throw new Error(
+            "Stop agent access to this space before changing its sign-ins.",
+          );
         if (space.signIns === signIns) break;
         // A switch back while the old partition is still being cleared waits.
         await this.discards.get(`persist:space-${space.id}`);
@@ -1394,7 +1466,7 @@ export class BrowserController {
       case "space:ownership": {
         const space = this.getSpace(action.id);
         if (
-          space.kind !== "agent" ||
+          !agentRules(space) ||
           !["human", "agent"].includes(action.owner) ||
           ![undefined, "handoff"].includes(action.reason)
         )
@@ -1403,8 +1475,7 @@ export class BrowserController {
           this.registry.handOver(space.id, {
             reason: action.reason ?? "manual",
           });
-        else
-          this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
+        else this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
         this.addActivity(
           space.id,
           action.owner === "human"
@@ -1414,6 +1485,20 @@ export class BrowserController {
         );
         break;
       }
+      case "space:grant":
+        // main.ts grants through the agent service while it runs.
+        throw new Error("Turn on agent access first.");
+      case "space:stop": {
+        const space = this.getSpace(action.id);
+        // A second Stop, or a Stop on a space no agent may use, changes
+        // nothing.
+        if (space.access !== "ended" && agentRules(space))
+          this.endAccess(space.id, { by: "person", reason: "stopped" });
+        break;
+      }
+      case "space:keep":
+        await this.keepAsPersonal(action.id);
+        break;
       case "space:delete": {
         const space = this.getSpace(action.id);
         if (
