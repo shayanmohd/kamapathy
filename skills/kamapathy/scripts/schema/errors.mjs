@@ -279,6 +279,20 @@ export const ERRORS = {
     false,
     "The request failed without an error code.",
   ),
+  run_timeout: code(
+    null,
+    false,
+    "The run passed its deadline. A call in progress may still have taken effect.",
+    ["timeoutMs"],
+    2,
+  ),
+  interrupted: code(
+    null,
+    false,
+    "A signal or Ctrl+C stopped the run. A call in progress may still have taken effect.",
+    ["signal"],
+    2,
+  ),
   page_not_found: code(
     null,
     false,

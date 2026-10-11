@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -1533,6 +1534,411 @@ describe("scripted sessions", () => {
     expect(unawaited.stderr).toBe("error: stale_ref: Observe again.\n");
     expect(await leftovers()).toEqual(before);
   }, 30000);
+
+  // Runs a script in this process; its output arrives in the sinks once it
+  // settles.
+  const runIn = async (code, routeTable, extra = {}) => {
+    const api = fakeApi(routeTable);
+    const stdout = sink();
+    const stderr = sink();
+    const status = await runCli(["run", ...(extra.args ?? []), "-e", code], {
+      env,
+      fetch: api.fetch,
+      health: level2,
+      stdout,
+      stderr,
+      ...extra.options,
+    });
+    return { status, stdout: stdout.text(), stderr: stderr.text(), api };
+  };
+  const refusal = (status, error) => () => Response.json({ error }, { status });
+  const firstPage = 'const page = (await (await space("space-1")).tabs())[0];';
+  const takeover =
+    "Kamapathy stopped this run: the person has control of the space.\n";
+  const withheld =
+    "Output from this run was withheld. Stop here, do not retry or work around it, and continue only when the person asks.\n";
+  const stopGuidance =
+    "Kamapathy stopped this run: the person stopped the agent in this space.\nOutput from this run was withheld. Stop here and tell the person; only they can let an agent use it again.\n";
+  const accessGuidance =
+    "Kamapathy stopped this run: agent access is turned off.\nOutput from this run was withheld. Stop here and tell the person. Only they can turn agent access on, in Settings under Agents.\n";
+
+  it("a caught human_control with reason manual withholds output, sends no later request and prints only the guidance", async () => {
+    const message = "The person took over this space. Stop, and resume only when they ask you to.";
+    const run = await runIn(
+      `${firstPage}
+      process.stdout.write("before\\n");
+      const error = await page.click("@e2").catch((error) => error);
+      const again = await page.fill("@e1", "A").catch((error) => error);
+      globalThis.__scripted = { first: error.hardStop, again: again.hardStop, code: again.code };
+      process.stdout.write("after\\n");`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message, reason: "manual", spaceId: "space-1" }),
+      },
+    );
+    expect(run).toMatchObject({ status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` });
+    expect(globalThis.__scripted).toEqual({ first: true, again: true, code: "human_control" });
+    expect(paths(run.api)).toEqual(["GET /spaces/space-1", "GET /spaces/space-1/tabs", "POST /tabs/tab-1/click"]);
+  });
+
+  it("hard-stop guidance follows the human_control reason", async () => {
+    const message = "Taken.";
+    const hold = "Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control space-1 and start a new run when it returns.\n";
+    for (const [reason, expected] of [
+      ["manual", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
+      ["handoff", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
+      [undefined, { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
+      ["permission", { status: 1, stdout: "kept\n", stderr: `error: human_control: ${message}\n${hold}` }],
+      ["failed", { status: 1, stdout: "kept\n", stderr: `error: human_control: ${message}\n` }],
+    ])
+      expect(
+        await runIn(`${firstPage} process.stdout.write("kept\\n"); await page.click("@e2");`, {
+          ...sectionTwo,
+          "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message, reason, spaceId: "space-1" }),
+        }),
+        String(reason),
+      ).toMatchObject(expected);
+  });
+
+  it("a caught hold is not a hard stop: waitForControl returns when the fake hands control back and later calls send", async () => {
+    const run = await runIn(
+      `const research = await space("space-1");
+      const page = (await research.tabs())[0];
+      await page.click("@e2").catch(() => {});
+      await research.waitForControl();
+      await page.fill("@e1", "A");
+      process.stdout.write("done\\n");`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message: "Asked.", reason: "permission", prompt: "camera", spaceId: "space-1" }),
+      },
+    );
+    expect(run).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
+    expect(paths(run.api).slice(-2)).toEqual(["POST /spaces/space-1/wait-for-control", "POST /tabs/tab-1/fill"]);
+  });
+
+  it("the person's Stop is a hard stop with its own guidance, also when it ends a waitForControl; space_ended after the agent's own finish is an ordinary error", async () => {
+    const stopped = { code: "space_ended", message: "Stopped.", spaceId: "space-1", endedBy: "person", reason: "stopped" };
+    expect(
+      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2").catch(() => {});`, {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(409, stopped),
+      }),
+    ).toMatchObject({ status: 3, stdout: "", stderr: stopGuidance });
+    expect(
+      await runIn('process.stdout.write("x\\n"); await (await space("space-1")).waitForControl();', {
+        ...sectionTwo,
+        "POST /spaces/space-1/wait-for-control": refusal(409, stopped),
+      }),
+    ).toMatchObject({ status: 3, stdout: "", stderr: stopGuidance });
+    expect(
+      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`, {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(409, { ...stopped, endedBy: "agent", reason: "finished", message: "Finished." }),
+      }),
+    ).toMatchObject({ status: 1, stdout: "x\n", stderr: "error: space_ended: Finished.\n" });
+  });
+
+  it("automation_stopped and an off marker at the first call are hard stops; a delayed waitForControl answer is not", async () => {
+    expect(
+      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`, {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(503, { code: "automation_stopped", message: "Automation is disabled." }),
+      }),
+    ).toMatchObject({ status: 3, stdout: "", stderr: accessGuidance });
+    const { paths: agent, userData } = await profile();
+    await writeFile(agent.off, "", { mode: 0o600 });
+    const stdout = sink();
+    const stderr = sink();
+    expect(
+      await runCli(["run", "-e", 'process.stdout.write("x\\n"); await spaces();'], {
+        env: { KAMAPATHY_USER_DATA: userData },
+        stdout,
+        stderr,
+      }),
+    ).toBe(3);
+    expect([stdout.text(), stderr.text()]).toEqual(["", accessGuidance]);
+    expect(
+      await runIn('const result = await (await space("space-1")).waitForControl(); process.stdout.write(`${result.owner}\\n`);', {
+        ...sectionTwo,
+        "POST /spaces/space-1/wait-for-control": async () => {
+          await new Promise((done) => setTimeout(done, 100));
+          return Response.json(boundary);
+        },
+      }),
+    ).toMatchObject({ status: 0, stdout: "agent\n", stderr: "" });
+  });
+
+  it("end-of-run hooks run once, in order, with the touched tab ids, after the module settles, throws or stalls; a hard stop skips them, the 5000 ms cap cuts them short, and their errors print nothing and keep the exit status", async () => {
+    const calls = [];
+    const hooks = [
+      async ({ touched, signal }) => {
+        calls.push(["first", touched, signal instanceof AbortSignal]);
+        throw new Error("ignored");
+      },
+      async ({ touched }) => {
+        calls.push(["second", touched]);
+      },
+    ];
+    expect(
+      await runIn(`${firstPage} await page.click("@e2"); process.stdout.write("ok\\n");`, sectionTwo, { options: { endHooks: hooks } }),
+    ).toMatchObject({ status: 0, stdout: "ok\n", stderr: "" });
+    expect(calls).toEqual([["first", ["tab-1"], true], ["second", ["tab-1"]]]);
+    calls.length = 0;
+    expect(
+      await runIn(`${firstPage} await page.click("@e2"); throw new Error("boom");`, sectionTwo, { options: { endHooks: hooks } }),
+    ).toMatchObject({ status: 1, stderr: "error: boom\n" });
+    expect(calls.map(([name]) => name)).toEqual(["first", "second"]);
+    calls.length = 0;
+    await runIn(`${firstPage} await page.click("@e2").catch(() => {});`, {
+      ...sectionTwo,
+      "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message: "Taken.", reason: "manual" }),
+    }, { options: { endHooks: hooks } });
+    expect(calls).toEqual([]);
+    // The cap ends the step, and later hooks never start.
+    const started = Date.now();
+    const capped = await runIn('process.stdout.write("ok\\n");', sectionTwo, {
+      options: {
+        endCapMs: 100,
+        endHooks: [
+          ({ signal }) => new Promise((done) => signal.addEventListener("abort", done)),
+          async () => calls.push(["late"]),
+        ],
+      },
+    });
+    expect(capped).toMatchObject({ status: 0, stdout: "ok\n", stderr: "" });
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(calls).toEqual([]);
+    // A script whose work never settles still runs the step, once.
+    const directory = await mkdtemp(join(tmpdir(), "kamapathy-run-driver-"));
+    directories.push(directory);
+    const driver = join(directory, "driver.mjs");
+    await writeFile(
+      driver,
+      [
+        `import { writeSync } from "node:fs";`,
+        `import { runScript } from ${JSON.stringify(pathToFileURL(join(process.cwd(), "skills/kamapathy/scripts/lib/run.mjs")).href)};`,
+        `runScript(["-e", "await new Promise(() => {})"], {`,
+        `  env: { KAMAPATHY_NO_LAUNCH: "1" },`,
+        `  fetch: async () => Response.json({}),`,
+        `  endHooks: [async () => writeSync(2, "hook\\n")],`,
+        `}).then((status) => (process.exitCode = status));`,
+      ].join("\n"),
+    );
+    const child = spawn(process.execPath, [driver]);
+    let output = "";
+    child.stderr.on("data", (chunk) => (output += chunk));
+    const status = await new Promise((done) => child.once("close", done));
+    expect([status, output]).toEqual([1, "hook\nerror: The script stopped with work still pending. Await every call.\n"]);
+  }, 20000);
+
+  it("the deadline aborts the call in progress, flushes and exits 1 with run_timeout", async () => {
+    let aborted = false;
+    const run = await runIn(`process.stdout.write("started\\n"); await spaces();`, {
+      ...sectionTwo,
+      "GET /spaces": (_body, options) =>
+        new Promise((_done, reject) =>
+          options.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(options.signal.reason);
+          }),
+        ),
+    }, { args: ["--timeout", "1000"] });
+    expect(aborted).toBe(true);
+    expect(run).toMatchObject({
+      status: 1,
+      stdout: "started\n",
+      stderr:
+        "error: run_timeout: The script did not finish within 1000 ms. A call in progress may still have taken effect, so inspect the page before retrying. Use --timeout for longer tasks.\n",
+    });
+  });
+
+  it("SIGTERM aborts the call in progress, flushes and exits 143 with interrupted", async () => {
+    const { paths: agent, env: profileEnv } = await profile();
+    let closed = false;
+    let arrived;
+    const request = new Promise((done) => (arrived = done));
+    await fakeKamapathy(agent, {
+      handler: (incoming, response) => {
+        if (incoming.url === "/health") {
+          response.writeHead(200, { "Content-Type": "application/json" });
+          return response.end(JSON.stringify({ status: "ok", version: "test", apiLevel: 2 }));
+        }
+        response.once("close", () => (closed = true));
+        arrived();
+      },
+    });
+    const child = spawn(
+      process.execPath,
+      ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", 'process.stdout.write("started\\n"); await spaces();'],
+      { env: { ...process.env, ...profileEnv } },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    await request;
+    child.kill("SIGTERM");
+    const status = await new Promise((done) => child.once("close", done));
+    expect([status, stdout, stderr]).toEqual([
+      143,
+      "started\n",
+      "error: interrupted: The run was stopped by SIGTERM. A call in progress may still have taken effect, so inspect the page before retrying.\n",
+    ]);
+    await expect.poll(() => closed).toBe(true);
+  }, 20000);
+
+  it("held output keeps its order through process.exit and rejections, each queued notice prints once as a notice: line before the error line, and past 4 MiB is dropped with a count", async () => {
+    const { paths: agent, env: profileEnv } = await profile();
+    await fakeKamapathy(agent, {
+      handler: (incoming, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify(
+            incoming.url === "/health"
+              ? { status: "ok", version: "9.0.0", apiLevel: schema.API_LEVEL + 1 }
+              : { spaces: [] },
+          ),
+        );
+      },
+    });
+    const run = async (code) => {
+      const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", code], {
+        env: { ...process.env, ...profileEnv },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => (stdout += chunk));
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      const status = await new Promise((done) => child.once("close", done));
+      return { status, stdout, stderr };
+    };
+    expect(
+      await run(
+        [
+          'process.stdout.write("one\\n");',
+          'console.error("two");',
+          'Promise.reject(new Error("late"));',
+          "await new Promise((done) => setTimeout(done, 10));",
+          "await spaces();",
+          'process.stdout.write("x".repeat(5 * 1024 * 1024));',
+          'process.stdout.write("three\\n");',
+          'throw new Error("final");',
+        ].join(" "),
+      ),
+    ).toEqual({
+      status: 1,
+      stdout: "one\nthree\n",
+      stderr: [
+        "two",
+        "error: late",
+        "notice: Update this skill copy, then read its SKILL.md again.",
+        "error: final",
+        `Kamapathy: ${5 * 1024 * 1024} more bytes of output were dropped after the first 4 MiB. Write large results to a file.`,
+        "",
+      ].join("\n"),
+    });
+    expect(await run('process.stdout.write("a\\n"); console.error("b"); process.exit(5);')).toEqual({
+      status: 5,
+      stdout: "a\n",
+      stderr: "b\n",
+    });
+  }, 30000);
+
+  it("an idle script ends at once under --timeout 60000; out-of-range timeouts fail before connecting", async () => {
+    const { env: profileEnv } = await profile();
+    const started = Date.now();
+    const child = spawn(
+      process.execPath,
+      ["skills/kamapathy/scripts/kamapathy.mjs", "run", "--timeout", "60000", "-e", 'process.stdout.write("idle\\n")'],
+      { env: { ...process.env, ...profileEnv } },
+    );
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    expect(await new Promise((done) => child.once("close", done))).toBe(0);
+    expect(stdout).toBe("idle\n");
+    expect(Date.now() - started).toBeLessThan(10000);
+    const fetch = vi.fn();
+    for (const [args, runEnv, message] of [
+      [["--timeout", "999"], env, "--timeout must be an integer from 1000 to 3600000 milliseconds."],
+      [["--timeout", "3600001"], env, "--timeout must be an integer from 1000 to 3600000 milliseconds."],
+      [[], { ...env, KAMAPATHY_RUN_TIMEOUT_MS: "soon" }, "KAMAPATHY_RUN_TIMEOUT_MS must be an integer from 1000 to 3600000 milliseconds."],
+      [["--fast"], env, "Unknown run option: --fast. Run help for usage."],
+    ])
+      await expect(
+        runCli(["run", ...args, "-e", "1"], { env: runEnv, fetch, stdout: sink(), stderr: sink() }),
+      ).rejects.toThrow(message);
+    expect(fetch).not.toHaveBeenCalled();
+  }, 20000);
+
+  it("stdin for fill, wait, batch and run - fails on an open pipe", async () => {
+    const fetch = vi.fn();
+    for (const args of [
+      ["fill", "tab-1", "@e1", "--stdin"],
+      ["wait", "tab-1", "--stdin"],
+      ["batch", "tab-1"],
+      ["run", "-"],
+    ]) {
+      const stdin = new PassThrough();
+      stdin.write("{");
+      await expect(
+        runCli(args, { env, fetch, stdin, stdinTimeoutMs: 200, stdout: sink(), stderr: sink() }),
+        args.join(" "),
+      ).rejects.toThrow("Standard input did not end within 0.2 seconds. Pipe the complete value and close the input.");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("a script that never calls Kamapathy never starts it", async () => {
+    const { userData } = await profile();
+    const launch = vi.fn();
+    const stdout = sink();
+    expect(
+      await runCli(["run", "-e", 'process.stdout.write("hi\\n")'], {
+        env: { KAMAPATHY_USER_DATA: userData },
+        connect: { launch },
+        stdout,
+        stderr: sink(),
+      }),
+    ).toBe(0);
+    expect(stdout.text()).toBe("hi\n");
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("globals forward to the client methods and are not enumerable", async () => {
+    const run = await runIn(
+      `const names = ["kamapathy", "createSpace", "openSpace", "space", "spaces", "requestSpace"];
+      globalThis.__scripted = names.map((name) => {
+        const { enumerable, writable, configurable } = Object.getOwnPropertyDescriptor(globalThis, name);
+        return [name, enumerable, writable, configurable, Object.keys(globalThis).includes(name)];
+      });
+      await openSpace("Research");
+      await requestSpace({ reason: "Book a table" });`,
+      sectionTwo,
+    );
+    expect(run.status).toBe(0);
+    expect(globalThis.__scripted).toEqual(
+      ["kamapathy", "createSpace", "openSpace", "space", "spaces", "requestSpace"].map((name) => [name, false, true, true, false]),
+    );
+    expect(run.api.requests).toEqual([
+      { method: "POST", path: "/spaces", body: { name: "Research", reuse: true } },
+      { method: "POST", path: "/space-requests", body: { reason: "Book a table" } },
+    ]);
+  });
+
+  it("the CLI refuses Node older than 22.13 for every command but help, --help, -h, --version and -v", async () => {
+    const fetch = vi.fn(async () => Response.json({ status: "ok" }));
+    const stderr = sink();
+    expect(await main(["health"], { env, fetch, stderr, nodeVersion: "22.12.0" })).toBe(1);
+    expect(stderr.text()).toBe("Kamapathy: Kamapathy's client needs Node.js 22.13 or later. This is Node.js 22.12.0.\n");
+    expect(fetch).not.toHaveBeenCalled();
+    for (const argv of [["help"], ["--help"], ["-h"], ["tabs", "--help"], ["--version"], ["-v"]]) {
+      const output = sink();
+      await main(argv, { env, fetch, stdout: sink(), stderr: output, nodeVersion: "20.0.0" });
+      expect(output.text(), argv.join(" ")).not.toContain("needs Node.js");
+    }
+    expect(await main(["health"], { env, fetch, stdout: sink(), stderr: sink(), nodeVersion: "22.13.0" })).toBe(0);
+  });
 
   it("creates isolated spaces from the command line and says how each space signs in", async () => {
     for (const [args, body] of [

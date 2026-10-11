@@ -1,11 +1,7 @@
 #!/usr/bin/env node
-import { randomBytes } from "node:crypto";
-import { rmSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { connect } from "./api.mjs";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatResult, line, printable } from "./lib/format.mjs";
 import {
@@ -24,7 +20,7 @@ import {
   Session,
   takeNotices,
 } from "./lib/request.mjs";
-import { exists } from "./lib/transport.mjs";
+import { runScript } from "./lib/run.mjs";
 import {
   checkBody,
   findCommand,
@@ -96,10 +92,13 @@ Usage: node kamapathy.mjs <command> [arguments] [--json]
   resume <space-id>                   Take control back when the person says to continue
   wait-for-control <space-id> [--timeout <ms>]
                                       Wait until the agent has control again
-  run <file.mjs>                      Run a script with the connected client as
-                                      the globals kamapathy, createSpace, space
-                                      and spaces; run - reads it from stdin and
-                                      run -e <code> runs the code itself
+  run [--timeout <ms>] <file.mjs>      Run a script with the client as the
+                                      globals kamapathy, createSpace,
+                                      openSpace, space, spaces and
+                                      requestSpace; run - reads it from stdin
+                                      and run -e <code> runs the code itself.
+                                      It stops after --timeout, 300000 by
+                                      default
 
 A <tab-id> may also be <space-id>:<label>, such as s1:p2.
 Default output is concise text. --json returns compact JSON for programs.
@@ -121,84 +120,6 @@ function integer(value, label, minimum = 0) {
     throw new Error(`${label} must be an integer of at least ${minimum}.`);
   return parsed;
 }
-// Runs an agent's script in this Node process with a connected client as
-// globals. The script reaches pages only through the API's documented routes.
-async function runScript(args, options) {
-  const stderr = options.stderr || process.stderr;
-  let source;
-  let file;
-  if (args[0] === "-e") source = required(args[1], "script code");
-  else if (args[0] === "-")
-    source = await readInput(options.stdin || process.stdin);
-  else {
-    file = resolve(required(args[0], "script file"));
-    if (!(await exists(file)))
-      throw new Error(
-        "Script file not found. Use run <file.mjs>, run - or run -e <code>.",
-      );
-  }
-  const client = await connect({
-    env: options.env,
-    connect: options.connect,
-    fetch: options.fetch,
-  });
-  Object.assign(globalThis, {
-    kamapathy: client,
-    createSpace: (name, choices) => client.createSpace(name, choices),
-    space: (id) => client.space(id),
-    spaces: () => client.spaces(),
-  });
-  let temporary;
-  let failed = false;
-  const report = (error) => {
-    const code = typeof error?.code === "string" ? `${error.code}: ` : "";
-    const message = error instanceof Error ? error.message : String(error);
-    stderr.write(`error: ${code}${printable(message)}\n`);
-  };
-  // A rejection the script never awaited would otherwise print Node's stack.
-  const rejected = (error) => {
-    failed = true;
-    process.exitCode = 1;
-    report(error);
-  };
-  // process.exit() inside the script skips the finally block below.
-  const exited = () => {
-    if (temporary) rmSync(temporary, { force: true });
-  };
-  // The loop drained before the import settled: an await that never resolves.
-  const stalled = () => {
-    failed = true;
-    process.exitCode = 1;
-    stderr.write(
-      "error: The script stopped with work still pending. Await every call.\n",
-    );
-    exited();
-  };
-  process.on("unhandledRejection", rejected);
-  process.once("exit", exited);
-  process.once("beforeExit", stalled);
-  let outcome = 0;
-  try {
-    if (source !== undefined) {
-      temporary = join(
-        tmpdir(),
-        `kamapathy-run-${randomBytes(8).toString("hex")}.mjs`,
-      );
-      await writeFile(temporary, source, { mode: 0o600, flag: "wx" });
-      file = temporary;
-    }
-    await import(pathToFileURL(file).href);
-  } catch (error) {
-    report(error);
-    outcome = 1;
-  } finally {
-    process.off("beforeExit", stalled);
-    if (temporary) await rm(temporary, { force: true });
-  }
-  // A rejection can land while the file is being removed, so this comes last.
-  return failed ? 1 : outcome;
-}
-
 const UPLOAD_LIMIT = 24 * 1024 * 1024;
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
 
@@ -244,7 +165,7 @@ function budget(value, env) {
 // the command itself and returns its exit status.
 export const PARSERS = {
   help: (_args, { stdout }) => {
-    stdout.write(HELP);
+    (stdout || process.stdout).write(HELP);
     return 0;
   },
   health: () => ({ path: "/health" }),
@@ -399,7 +320,7 @@ export const PARSERS = {
     method: "POST",
     body: target(args[1]),
   }),
-  fill: async (args, { stdin }) => {
+  fill: async (args, { stdin, stdinTimeoutMs }) => {
     if (args[2] !== "--stdin")
       throw new Error(
         "Use fill <tab-id> <ref-or-selector> --stdin and pipe the field value.",
@@ -407,7 +328,12 @@ export const PARSERS = {
     return {
       path: `/tabs/${tab(args[0])}/fill`,
       method: "POST",
-      body: { ...target(args[1]), value: await readInput(stdin) },
+      body: {
+        ...target(args[1]),
+        value: await readInput(stdin || process.stdin, {
+          timeoutMs: stdinTimeoutMs,
+        }),
+      },
     };
   },
   upload: async (args) => ({
@@ -459,18 +385,22 @@ export const PARSERS = {
       },
     };
   },
-  wait: async (args, { stdin }) => {
+  wait: async (args, { stdin, stdinTimeoutMs }) => {
     if (args[1] !== "--stdin")
       throw new Error("Use wait <tab-id> --stdin and pipe JSON wait options.");
     const path = `/tabs/${tab(args[0])}/wait`;
-    const body = await readJson(stdin);
+    const body = await readJson(stdin || process.stdin, {
+      timeoutMs: stdinTimeoutMs,
+    });
     if (!body || typeof body !== "object" || Array.isArray(body))
       throw new Error("Wait options must be a JSON object.");
     return { path, method: "POST", body };
   },
-  batch: async (args, { stdin }) => {
+  batch: async (args, { stdin, stdinTimeoutMs }) => {
     const path = `/tabs/${tab(args[0])}/actions`;
-    const input = await readJson(stdin);
+    const input = await readJson(stdin || process.stdin, {
+      timeoutMs: stdinTimeoutMs,
+    });
     const body = Array.isArray(input) ? { actions: input } : input;
     if (
       !body ||
@@ -493,7 +423,6 @@ export const PARSERS = {
 };
 
 export async function runCli(argv, options = {}) {
-  const stdin = options.stdin || process.stdin;
   const stdout = options.stdout || process.stdout;
   const json = argv.includes("--json");
   const [command = "help", ...rest] = argv.filter(
@@ -514,11 +443,11 @@ export async function runCli(argv, options = {}) {
     throw new Error(`Unknown command: ${command}. Run help for usage.`);
   }
   const env = options.env || process.env;
+  // Parsers get the caller's own streams, so run can tell a test's sinks
+  // from the real process.
   const parsed = await parse(name === command ? rest : rest.slice(1), {
     ...options,
     env,
-    stdin,
-    stdout,
   });
   if (typeof parsed === "number") return parsed;
   const { path, method = "GET", body, output, limit } = parsed;
@@ -592,8 +521,27 @@ export async function runCli(argv, options = {}) {
   return data?.ok === false ? 1 : 0;
 }
 
+// Every command but help and version needs this Node.js.
+function supported(version) {
+  const [major, minor] = version.split(".").map(Number);
+  return major > 22 || (major === 22 && minor >= 13);
+}
+
 export async function main(argv = process.argv.slice(2), options = {}) {
   const stderr = options.stderr || process.stderr;
+  const version = options.nodeVersion ?? process.versions.node;
+  if (
+    argv[0] !== "help" &&
+    !argv.some((argument) =>
+      ["--help", "-h", "--version", "-v"].includes(argument),
+    ) &&
+    !supported(version)
+  ) {
+    stderr.write(
+      `Kamapathy: Kamapathy's client needs Node.js 22.13 or later. This is Node.js ${printable(version)}.\n`,
+    );
+    return 1;
+  }
   let status;
   let failure;
   try {

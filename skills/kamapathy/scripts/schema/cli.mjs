@@ -399,8 +399,8 @@ export const COMMANDS = [
   command(
     "run",
     "Scripts",
-    "run <file.mjs>",
-    "Run a script with the connected client as the globals kamapathy, createSpace, space and spaces; run - reads it from stdin and run -e <code> runs the code itself",
+    "run [--timeout <ms>] <file.mjs>",
+    "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself",
     {
       arguments: [
         {
@@ -410,6 +410,12 @@ export const COMMANDS = [
       ],
       flags: [
         { name: "-e", value: "<code>", description: "Run the code itself" },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "Stop the script after this long, 1000 to 3600000, default 300000 or KAMAPATHY_RUN_TIMEOUT_MS.",
+        },
       ],
       stdin: "The script, with run -.",
     },

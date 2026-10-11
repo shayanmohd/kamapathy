@@ -116,13 +116,41 @@ export class Session {
       ...(versions.node ? { node: versions.node } : {}),
     };
   }
+  // After a run's hard stop, later calls throw a copy and send nothing.
+  #gate() {
+    if (this.run && this.hardStop && !this.endStep)
+      throw new KamapathyError(this.hardStop.code, this.hardStop.message, {
+        ...ownFields(this.hardStop),
+        hardStop: true,
+      });
+  }
+  // A run records the first error that stops it for good, so catching that
+  // error does not undo it.
+  #record(error) {
+    if (
+      this.run &&
+      !this.endStep &&
+      !this.hardStop &&
+      error instanceof KamapathyError &&
+      hardStopCause(error)
+    ) {
+      error.hardStop = true;
+      this.hardStop = error;
+    }
+  }
   // Finds Kamapathy once per connection. Only the first discovery may start
   // it.
   async ready() {
+    this.#gate();
     if (!this.injected && !this.connection)
-      await (this.#finding ??= this.#find().finally(() => {
-        this.#finding = undefined;
-      }));
+      try {
+        await (this.#finding ??= this.#find().finally(() => {
+          this.#finding = undefined;
+        }));
+      } catch (error) {
+        this.#record(error);
+        throw error;
+      }
     const app = this.app;
     if (app && app.apiLevel > API_LEVEL)
       this.notice(
@@ -149,11 +177,7 @@ export class Session {
   }
   // One request, answered with the raw Response.
   async send(path, { method = "GET", body, budgetMs, limit = 65536 } = {}) {
-    if (this.run && this.hardStop && !this.endStep)
-      throw new KamapathyError(this.hardStop.code, this.hardStop.message, {
-        ...ownFields(this.hardStop),
-        hardStop: true,
-      });
+    this.#gate();
     const encoded = encode(body, limit);
     await this.ready();
     const tab = /^\/tabs\/([^/]+)/.exec(path)?.[1];
@@ -229,16 +253,7 @@ export class Session {
         );
       return data;
     } catch (error) {
-      // A run records the first error that stops it for good, so catching
-      // that error does not undo it.
-      if (
-        this.run &&
-        !this.endStep &&
-        !this.hardStop &&
-        error instanceof KamapathyError &&
-        hardStopCause(error)
-      )
-        this.hardStop = error;
+      this.#record(error);
       throw error;
     }
   }

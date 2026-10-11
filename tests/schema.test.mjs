@@ -14,6 +14,7 @@ import {
   schema,
 } from "../skills/kamapathy/scripts/api.mjs";
 import { PARSERS } from "../skills/kamapathy/scripts/kamapathy.mjs";
+import { installGlobals } from "../skills/kamapathy/scripts/lib/run.mjs";
 
 const {
   ACTIONS,
@@ -106,18 +107,14 @@ describe("API schema", () => {
         [...getters, ...Object.keys(instance)].sort(),
       );
     }
-    // run defines the globals in one Object.assign on globalThis.
-    const cli = read("skills/kamapathy/scripts/kamapathy.mjs");
-    const assigned = cli.match(
-      /Object\.assign\(globalThis, \{([\s\S]*?)\}\);/,
-    )[1];
+    // run defines exactly the declared globals.
+    const globals = {};
+    installGlobals(globals, new Client(send));
     expect(
       ENTRIES.filter((item) => item.kind === "global")
         .map((item) => item.name)
         .sort(),
-    ).toEqual(
-      [...assigned.matchAll(/^\s*(\w+)[:,]/gm)].map((m) => m[1]).sort(),
-    );
+    ).toEqual(Object.getOwnPropertyNames(globals).sort());
     // The CLI's commands: one parser each, keyed by the command's name.
     const commands = COMMANDS.map((item) => item.name);
     expect(new Set(commands).size).toBe(commands.length);

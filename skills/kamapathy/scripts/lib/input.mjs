@@ -12,22 +12,46 @@ export function target(value) {
   const text = required(value, "element ref or CSS selector");
   return /^@e\d+$/.test(text) ? { ref: text } : { selector: text };
 }
-export async function readInput(stream, { limit = 65536 } = {}) {
+// Reads standard input to its end, at most limit bytes, and gives up on a
+// pipe that stays open longer than timeoutMs.
+export async function readInput(
+  stream,
+  { limit = 65536, timeoutMs = 30000 } = {},
+) {
   if (stream.isTTY)
     throw new Error("Pipe the requested value or JSON into standard input.");
   const chunks = [];
   let size = 0;
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > limit) throw new Error("Standard input exceeds 64 KiB.");
-    chunks.push(buffer);
+  const read = (async () => {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > limit) throw new Error("Standard input exceeds 64 KiB.");
+      chunks.push(buffer);
+    }
+  })();
+  let timer;
+  const expired = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      read.catch(() => {});
+      stream.destroy?.();
+      reject(
+        new Error(
+          `Standard input did not end within ${timeoutMs / 1000} seconds. Pipe the complete value and close the input.`,
+        ),
+      );
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([read, expired]);
+  } finally {
+    clearTimeout(timer);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-export async function readJson(stream) {
+export async function readJson(stream, options) {
   try {
-    return JSON.parse(await readInput(stream));
+    return JSON.parse(await readInput(stream, options));
   } catch (error) {
     if (error instanceof SyntaxError)
       throw new Error("Standard input must be valid JSON.");
