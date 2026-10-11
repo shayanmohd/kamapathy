@@ -13,6 +13,11 @@ import {
   it,
   vi,
 } from "vitest";
+import {
+  DialogOpenError,
+  TargetRefusedError,
+} from "../electron/agent/session/errors";
+import { EventBufferPool } from "../electron/agent/session/event-buffer";
 import { TabSession } from "../electron/agent/session/tab-session";
 import type { FrameInfo, Step } from "../electron/agent/session/types";
 import {
@@ -61,6 +66,7 @@ describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
     const session = new TabSession(page.host, {
       tabId: "tab-1",
       waitForSpaceIdle: async () => {},
+      buffer: new EventBufferPool().create("tab-1"),
     });
     tab = session;
     session.attach();
@@ -258,6 +264,7 @@ worker.onmessage = (event) => { document.getElementById("worker-result").textCon
     const opened = new TabSession(page.host, {
       tabId: "chromium",
       waitForSpaceIdle: async () => {},
+      buffer: new EventBufferPool().create("chromium"),
     });
     session = opened;
     opened.attach();
@@ -322,3 +329,226 @@ worker.onmessage = (event) => { document.getElementById("worker-result").textCon
     await opened.network.waitForIdle(300, step());
   }, 20000);
 });
+describe.skipIf(!chromiumAvailable)(
+  "dialogs, init scripts and agent sessions in Chromium",
+  () => {
+    let site: Server;
+    let origin: string;
+    let browser: ChromiumBrowser;
+    let page: ChromiumPage | undefined;
+    let session: TabSession | undefined;
+    beforeAll(async () => {
+      site = createServer((request, response) => {
+        const html =
+          framePages[new URL(request.url || "/", "http://x").pathname];
+        response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
+        response.end(html || "");
+      });
+      await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+      origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+      browser = await launchChromium();
+    }, 60000);
+    afterEach(async () => {
+      await session?.release();
+      await page?.close();
+      session = page = undefined;
+    });
+    afterAll(async () => {
+      await browser?.close();
+      site?.close();
+    });
+    const step = (): Step => ({ deadline: Date.now() + 5000 });
+    // Reads check until it returns a value, for up to 10 seconds.
+    const until = async <T>(
+      check: () => T | Promise<T>,
+    ): Promise<NonNullable<T>> => {
+      const end = Date.now() + 10000;
+      for (;;) {
+        const value = await check();
+        if (value) return value as NonNullable<T>;
+        if (Date.now() > end)
+          throw new Error("The page did not reach the expected state.");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    // A ready session on a blank page.
+    const attach = async () => {
+      page = await browser.newPage();
+      const opened = new TabSession(page.host, {
+        tabId: "chromium",
+        waitForSpaceIdle: async () => {},
+        buffer: new EventBufferPool().create("chromium"),
+      });
+      session = opened;
+      opened.attach();
+      await until(() => opened.state === "ready");
+      return opened;
+    };
+
+    it("runs an isolated init script in both frames of /frames/outer before their scripts", async () => {
+      const tab = await attach();
+      // Notes the URL and how many script elements its document holds when
+      // it runs. Only the isolated world sees the note.
+      await tab.addInitScript(
+        "globalThis.__kamapathyProbe = { url: location.href, scripts: document.scripts.length };",
+        { world: "isolated" },
+      );
+      const loaded = new Promise<void>((resolve) => {
+        const stop = tab.on("Page.loadEventFired", () => {
+          stop();
+          resolve();
+        });
+      });
+      await tab.send(
+        "Page.navigate",
+        { url: `${origin}/frames/outer` },
+        step(),
+      );
+      await loaded;
+      const probe = async (frameId: string) => {
+        const world = await tab.world(frameId, step());
+        const reply = await tab.send<{ result: { value?: unknown } }>(
+          "Runtime.evaluate",
+          {
+            expression: "globalThis.__kamapathyProbe",
+            contextId: world.contextId,
+            returnByValue: true,
+          },
+          { ...step(), sessionId: world.sessionId },
+        );
+        return reply.result.value;
+      };
+      const { inner, other } = await until(async () => {
+        const frames = await tab.frames(step()).catch(() => []);
+        const inner = frames.find((frame) =>
+          frame.url.endsWith("/frames/inner"),
+        );
+        const other = frames.find(
+          (frame) => frame.url.endsWith("/frames/other") && frame.sessionId,
+        );
+        return inner && other ? { inner, other } : undefined;
+      });
+      // The localhost frame runs in its own process, on its own session.
+      expect(other.sessionId).not.toBe(inner.sessionId);
+      for (const [frameId, url] of [
+        [await tab.mainFrameId(step()), `${origin}/frames/outer`],
+        [inner.frameId, `${origin}/frames/inner`],
+        [other.frameId, other.url],
+      ])
+        expect(
+          await until(() => probe(frameId).catch(() => undefined)),
+          url,
+        ).toEqual({ url, scripts: 0 });
+      const mainWorld = await tab.send<{ result: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression: "typeof globalThis.__kamapathyProbe", returnByValue: true },
+        step(),
+      );
+      expect(mainWorld.result.value).toBe("undefined");
+    }, 20000);
+
+    it("refuses Runtime.evaluate at once while an alert is open", async () => {
+      const tab = await attach();
+      const opened = new Promise<void>((resolve) => {
+        const stop = tab.on("dialog", ({ params }) => {
+          if (!params.dialog) return;
+          stop();
+          resolve();
+        });
+      });
+      // The alert opens just after this evaluation answers.
+      await tab.send(
+        "Runtime.evaluate",
+        { expression: "setTimeout(() => alert('Stop here'), 0)" },
+        step(),
+      );
+      await opened;
+      const dialog = {
+        type: "alert",
+        message: "Stop here",
+        frameId: await tab.mainFrameId(step()),
+      };
+      expect(tab.dialog()).toEqual(dialog);
+      const started = Date.now();
+      const refused = await tab
+        .send(
+          "Runtime.evaluate",
+          { expression: "1 + 1", returnByValue: true },
+          { deadline: Date.now() + 10000 },
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(refused).toBeInstanceOf(DialogOpenError);
+      expect(refused).toMatchObject({ dialog, started: false });
+      await expect(
+        tab.evaluateInFrame(dialog.frameId, "ready", {}, {
+          ...step(),
+          namespace: "internal",
+        }),
+      ).rejects.toBeInstanceOf(DialogOpenError);
+      await tab.handleDialog(true);
+      await until(() => tab.dialog() === undefined);
+      const reply = await tab.send<{ result: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression: "1 + 1", returnByValue: true },
+        step(),
+      );
+      expect(reply.result.value).toBe(2);
+    }, 20000);
+
+    it("opens an agent session on the tab's own target named by Target.getTargetInfo", async () => {
+      const tab = await attach();
+      const sendCommand = vi.spyOn(page!.host.debugger, "sendCommand");
+      // Chromium names a page target with its main frame's id.
+      expect(await tab.mainFrameId(step())).toBe(page!.targetId);
+      const agent = await tab.openAgentSession();
+      expect(
+        sendCommand.mock.calls
+          .filter(([method]) => method.startsWith("Target."))
+          .map(([method, params]) => [method, params]),
+      ).toEqual([
+        ["Target.getTargetInfo", {}],
+        ["Target.attachToTarget", { targetId: page!.targetId, flatten: true }],
+      ]);
+      // Both sessions reach the same page.
+      await tab.send(
+        "Runtime.evaluate",
+        { expression: "window.__kamapathyMark = 'own page'" },
+        step(),
+      );
+      const read = await tab.send<{ result: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression: "window.__kamapathyMark", returnByValue: true },
+        { ...step(), sessionId: agent },
+      );
+      expect(read.result.value).toBe("own page");
+      // The agent session got no setup of its own.
+      expect(
+        sendCommand.mock.calls
+          .filter(([, , sessionId]) => sessionId === agent)
+          .map(([method]) => method),
+      ).toEqual(["Runtime.evaluate"]);
+      // Chromium reports the detach before it answers, and the tab's own
+      // listeners never hear it.
+      const reported: string[] = [];
+      page!.host.debugger.on("message", (_event, method, params) => {
+        if (method === "Target.detachedFromTarget")
+          reported.push(params.sessionId);
+      });
+      const own = vi.fn();
+      tab.on("Target.detachedFromTarget", own);
+      await tab.closeAgentSession(agent);
+      expect(reported).toEqual([agent]);
+      expect(own).not.toHaveBeenCalled();
+      await expect(
+        tab.send("Runtime.evaluate", { expression: "1" }, {
+          ...step(),
+          sessionId: agent,
+        }),
+      ).rejects.toBeInstanceOf(TargetRefusedError);
+    }, 20000);
+  },
+);

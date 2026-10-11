@@ -2,6 +2,7 @@ import type { PageOperation } from "../../automation-dom";
 import {
   CdpTimeoutError,
   ContextLostError,
+  DialogOpenError,
   FrameBlockedError,
   FrameGoneError,
   PageCrashedError,
@@ -9,6 +10,7 @@ import {
   TabClosedError,
   TargetRefusedError,
 } from "./errors";
+import type { EventBuffer } from "./event-buffer";
 import { FrameRegistry, type FrameRecord } from "./frames";
 import { LifecycleTracker, reached } from "./lifecycle";
 import { NetworkTracker } from "./network";
@@ -20,6 +22,7 @@ import {
 } from "./operations";
 import type {
   CdpEvent,
+  DialogInfo,
   FrameInfo,
   SendStep,
   SessionHost,
@@ -34,10 +37,22 @@ export const REATTACH_AT_MS = [0, 250, 1000, 4000];
 export interface TabSessionOptions {
   tabId: string;
   waitForSpaceIdle(timeoutMs: number): Promise<void>;
+  buffer: EventBuffer;
 }
 
 type Listener = (event: CdpEvent) => void | Promise<unknown>;
-type Pending = { guard?: () => void; fail(error: unknown): void };
+type Pending = {
+  method: string;
+  guard?: () => void;
+  fail(error: unknown): void;
+};
+// An init script, with the identifier each live session gave it, keyed by
+// session id ("" for the page session).
+type InitScript = {
+  source: string;
+  world: "main" | "isolated";
+  identifiers: Map<string, string>;
+};
 type FrameTree = { frameTree: { frame: { id: string } } };
 type World = Promise<{ contextId: number }>;
 type FrameChange = {
@@ -48,6 +63,24 @@ type FrameChange = {
 const REFUSED = /^(Target|Browser)\./;
 const DISPATCHES =
   /^(Input\.|Page\.(navigate|reload|navigateToHistoryEntry)$|DOM\.setFileInputFiles$)/;
+// An open JavaScript dialog holds these until it closes.
+const DIALOG_HOLDS =
+  /^(Input\.|Runtime\.|DOM\.setFileInputFiles$|Page\.(navigate|reload)$)/;
+// Kamapathy's own sessions record only page and network events.
+const RECORDED = /^(Page|Network)\./;
+// Dialog text keeps tab and newline, and loses other control characters and
+// bidirectional overrides.
+const UNSAFE_TEXT =
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u{202A}-\u{202E}\u{2066}-\u{2069}]/gu;
+const dialogText = (text: unknown) =>
+  String(text ?? "")
+    .replace(UNSAFE_TEXT, "")
+    .slice(0, 2000);
+// An init script runs only in a web frame's document, so a blocked frame that
+// shares a session runs none. The check and the source run in separate
+// functions, so the source may declare any name.
+const initSource = (source: string) =>
+  `if ((() => { const p = location.protocol, o = location.origin; return ["http:", "https:", "about:", "data:", "blob:"].includes(p) && (o === "null" || o.startsWith("http:") || o.startsWith("https:")); })()) (() => { ${source}\n})();`;
 
 // Once release starts, only commands that let go of held keys and end an
 // intercepted drag reach the page.
@@ -149,6 +182,20 @@ export class TabSession {
   private listeners = new Map<string, Set<Listener>>();
   private pending = new Set<Pending>();
   private waiters = new Set<() => void>();
+  private readonly buffer: EventBuffer;
+  readonly events: Pick<
+    EventBuffer,
+    "recording" | "setRecording" | "setRedactor" | "drain"
+  >;
+  private shown?: DialogInfo;
+  private scripts = new Map<string, InitScript>();
+  private scriptCount = 0;
+  // Sessions openAgentSession attached, the targets it is attaching, and the
+  // sessions closeAgentSession is detaching until Chromium reports them gone.
+  private agents = new Set<string>();
+  private opening = new Map<string, number>();
+  private closingAgents = new Set<string>();
+  private targetId?: string;
   // The worlds handed out, by session and context id. Context ids restart in
   // each renderer process, so a call naming a world whose document ended
   // fails instead of running in whatever context has the id now.
@@ -198,6 +245,20 @@ export class TabSession {
     this.on("closed", () => {
       this.ending.abort(new TabClosedError());
     });
+    this.buffer = options.buffer;
+    this.events = this.buffer;
+    // A lost debugger takes its script identifiers, agent sessions, target id
+    // and dialog with it, and leaves a gap in the events recorded until a
+    // setup completes again.
+    this.on("detached", () => {
+      for (const script of this.scripts.values()) script.identifiers.clear();
+      this.agents.clear();
+      this.closingAgents.clear();
+      this.targetId = undefined;
+      this.setDialog(undefined);
+      this.buffer.openGap("debugger_detached");
+    });
+    this.on("attached", () => this.buffer.closeGap());
   }
 
   get state(): SessionState {
@@ -235,7 +296,10 @@ export class TabSession {
     const handle = this.handleFor(sessionId, params);
     if (
       REFUSED.test(method) ||
-      (!handle && sessionId !== undefined && !this.children.has(sessionId))
+      (!handle &&
+        sessionId !== undefined &&
+        !this.children.has(sessionId) &&
+        !this.agents.has(sessionId))
     )
       throw new TargetRefusedError(method);
     step?.guard?.();
@@ -262,12 +326,20 @@ export class TabSession {
       }
       step?.guard?.();
     }
+    if (this.shown && DIALOG_HOLDS.test(method))
+      throw new DialogOpenError(this.shown, false);
     const timeoutMs = Math.min(
       step?.timeoutMs ?? 15000,
       step ? step.deadline - Date.now() : Infinity,
     );
     if (timeoutMs <= 0) throw new CdpTimeoutError("page");
-    if (step?.dispatch && (step.mutates || DISPATCHES.test(method)))
+    // Anything sent on an agent session may change the page.
+    if (
+      step?.dispatch &&
+      (step.mutates ||
+        DISPATCHES.test(method) ||
+        (sessionId !== undefined && this.agents.has(sessionId)))
+    )
       step.dispatch.dispatched = true;
     let reply: T;
     try {
@@ -386,6 +458,7 @@ export class TabSession {
     payload: object,
     step: Step & { namespace: string; timeoutMs?: number },
   ): Promise<Record<string, unknown>> {
+    if (this.shown) throw new DialogOpenError(this.shown, false);
     const expression = operationExpression(op, payload, step.namespace);
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -659,6 +732,167 @@ export class TabSession {
       : undefined;
   }
 
+  dialog(): DialogInfo | undefined {
+    return this.shown;
+  }
+
+  // Answers the open dialog on the session that reported it. The dialog holds
+  // other commands, so this one is never refused.
+  async handleDialog(accept: boolean, promptText?: string): Promise<void> {
+    await this.command(
+      "Page.handleJavaScriptDialog",
+      { accept, ...(promptText === undefined ? {} : { promptText }) },
+      this.shown?.sessionId,
+      15000,
+    );
+  }
+
+  // Runs source in each web frame's new documents, and at once in the
+  // current ones. A re-attach runs it again, so sources must be idempotent.
+  async addInitScript(
+    source: string,
+    options: { world: "main" | "isolated" },
+  ): Promise<string> {
+    const id = `script-${++this.scriptCount}`;
+    const script: InitScript = {
+      source: initSource(source),
+      world: options.world,
+      identifiers: new Map(),
+    };
+    this.scripts.set(id, script);
+    if (this.connected && !this.releasing)
+      await Promise.allSettled(
+        [undefined, ...this.children.keys()].map((sessionId) =>
+          this.addScript(script, sessionId),
+        ),
+      );
+    return id;
+  }
+
+  async removeInitScript(id: string): Promise<void> {
+    const script = this.scripts.get(id);
+    this.scripts.delete(id);
+    if (!script || !this.connected) return;
+    await Promise.allSettled(
+      [...script.identifiers]
+        .filter(([key]) => key === "" || this.children.has(key))
+        .map(([key, identifier]) =>
+          this.command(
+            "Page.removeScriptToEvaluateOnNewDocument",
+            { identifier },
+            key || undefined,
+          ),
+        ),
+    );
+  }
+
+  // A separate flat session for section 8, on this tab's own target or one of
+  // its out-of-process frames. Any other target is refused before anything is
+  // sent, so no caller can reach another tab or window.
+  async openAgentSession(frameId?: string): Promise<string> {
+    if (frameId !== undefined) {
+      const frame = this.registry.get(frameId);
+      if (frame?.blocked) throw new FrameBlockedError(frameId);
+      if (!frame?.ownSession)
+        throw new TargetRefusedError("Target.attachToTarget");
+    }
+    if (this.current !== "ready" || this.releasing) throw this.lostError();
+    // An out-of-process frame's target id is its frame id.
+    const targetId = frameId ?? (await this.ownTarget());
+    this.opening.set(targetId, (this.opening.get(targetId) ?? 0) + 1);
+    try {
+      const { sessionId } = await this.command<{ sessionId: string }>(
+        "Target.attachToTarget",
+        { targetId, flatten: true },
+        undefined,
+        15000,
+      );
+      this.agents.add(sessionId);
+      return sessionId;
+    } finally {
+      const left = this.opening.get(targetId)! - 1;
+      if (left > 0) this.opening.set(targetId, left);
+      else this.opening.delete(targetId);
+    }
+  }
+
+  async closeAgentSession(sessionId: string): Promise<void> {
+    if (!this.agents.delete(sessionId))
+      throw new TargetRefusedError("Target.detachFromTarget");
+    // Chromium reports the detach before it answers, and the report must not
+    // reach the tab's own listeners.
+    this.closingAgents.add(sessionId);
+    await this.command(
+      "Target.detachFromTarget",
+      { sessionId },
+      undefined,
+      15000,
+    );
+  }
+
+  // Registers an init script on one session and keeps the identifier it
+  // returns there.
+  private addScript(script: InitScript, sessionId?: string): Promise<void> {
+    const generation = this.generation;
+    return this.command<{ identifier: string }>(
+      "Page.addScriptToEvaluateOnNewDocument",
+      {
+        source: script.source,
+        runImmediately: true,
+        ...(script.world === "isolated" ? { worldName: WORLD_NAME } : {}),
+      },
+      sessionId,
+    ).then(({ identifier }) => {
+      if (generation === this.generation)
+        script.identifiers.set(sessionId ?? "", identifier);
+    });
+  }
+
+  // The tab's own target, as Target.getTargetInfo names it, read once per
+  // attach. Chromium gives a page target its main frame's id, which serves
+  // when the reply names no page.
+  private async ownTarget(): Promise<string> {
+    if (this.targetId === undefined) {
+      const reply = await this.command<{
+        targetInfo: { targetId: string; type: string };
+      }>("Target.getTargetInfo", {}, undefined, 15000).catch(() => undefined);
+      this.targetId =
+        reply?.targetInfo.type === "page"
+          ? reply.targetInfo.targetId
+          : await this.mainFrameId({ deadline: Date.now() + 15000 });
+    }
+    return this.targetId;
+  }
+
+  private openDialog(params: any, sessionId?: string): void {
+    const dialog: DialogInfo = {
+      type: params.type,
+      message: dialogText(params.message),
+      ...(params.type === "prompt"
+        ? { defaultValue: dialogText(params.defaultPrompt) }
+        : {}),
+      ...(params.frameId ? { frameId: params.frameId } : {}),
+      ...(sessionId === undefined ? {} : { sessionId }),
+    };
+    this.setDialog(dialog);
+    // A held command was already sent, so its effect is unknown.
+    this.failPending(() => new DialogOpenError(dialog, true), DIALOG_HOLDS);
+  }
+
+  private setDialog(dialog: DialogInfo | undefined): void {
+    if (!dialog && !this.shown) return;
+    this.shown = dialog;
+    this.emit("dialog", { dialog: dialog ?? null });
+  }
+
+  // Agent sessions belong to section 8. Their events reach only on("agent")
+  // and the buffer, never the frame registry, the trackers or dialog state.
+  private fromAgent(method: string, params: unknown, sessionId: string): void {
+    const event: CdpEvent = { method, params, sessionId, at: Date.now() };
+    this.buffer.record(event);
+    this.deliver("agent", event);
+  }
+
   private connect(): boolean {
     try {
       this.cdp.attach("1.3");
@@ -724,6 +958,9 @@ export class TabSession {
           sessionId,
         ),
         ...[...this.hooks].map((hook) => hook(sessionId)),
+        ...[...this.scripts.values()].map((script) =>
+          this.addScript(script, sessionId),
+        ),
       ];
       if (waiting)
         replies.push(
@@ -763,6 +1000,7 @@ export class TabSession {
           : this.cdp.sendCommand(method, params, sessionId);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const entry: Pending = {
+        method,
         guard,
         fail: (error) => {
           clearTimeout(timer);
@@ -786,9 +1024,11 @@ export class TabSession {
 
   // Electron rejects every pending command when its session ends. Each fails
   // with the cause instead, or with its guard's error, so a command cut off
-  // by a takeover still reports the person's control.
-  private failPending(cause: () => Error): void {
+  // by a takeover still reports the person's control. A dialog fails only
+  // the commands it holds.
+  private failPending(cause: () => Error, held?: RegExp): void {
     for (const entry of [...this.pending]) {
+      if (held && !held.test(entry.method)) continue;
       let error: unknown = cause();
       try {
         entry.guard?.();
@@ -851,10 +1091,17 @@ export class TabSession {
     params: unknown,
     sessionId?: string,
   ): Promise<unknown>[] {
-    const event: CdpEvent =
+    return this.deliver(
+      name,
       sessionId === undefined
         ? { method: name, params, at: Date.now() }
-        : { method: name, params, sessionId, at: Date.now() };
+        : { method: name, params, sessionId, at: Date.now() },
+    );
+  }
+
+  // Calls the listeners of name with the event, and collects the promises
+  // they return.
+  private deliver(name: string, event: CdpEvent): Promise<unknown>[] {
     const waits: Promise<unknown>[] = [];
     for (const listener of [...(this.listeners.get(name) ?? [])]) {
       try {
@@ -1028,6 +1275,11 @@ export class TabSession {
       await this.options.waitForSpaceIdle(2000);
     } finally {
       if (this.connected) {
+        // Agent sessions end with the debugger, but are let go of first.
+        for (const sessionId of this.agents)
+          this.command("Target.detachFromTarget", { sessionId }).catch(
+            () => {},
+          );
         this.connected = false;
         this.generation += 1;
         this.failPending(() => new SessionLostError("unavailable"));
@@ -1054,6 +1306,8 @@ export class TabSession {
     this.contents.removeListener("destroyed", this.onDestroyed);
     this.cdp.removeListener("message", this.onMessage);
     this.cdp.removeListener("detach", this.onDetach);
+    this.agents.clear();
+    this.closingAgents.clear();
   }
 
   private trackLoading(event: CdpEvent): void {
@@ -1127,7 +1381,38 @@ export class TabSession {
   ) => {
     if (!this.connected) return;
     const source = sessionId || undefined;
+    if (source !== undefined && this.agents.has(source)) {
+      this.fromAgent(method, params, source);
+      return;
+    }
     if (source !== undefined && !this.children.has(source)) return;
+    // Chromium reports an agent session's attach and detach on the page
+    // session that asked for them, each before its reply.
+    if (
+      method === "Target.attachedToTarget" &&
+      source === undefined &&
+      (this.opening.has(params.targetInfo?.targetId) ||
+        this.agents.has(params.sessionId))
+    ) {
+      this.agents.add(params.sessionId);
+      return;
+    }
+    if (
+      method === "Target.detachedFromTarget" &&
+      (this.agents.delete(params.sessionId) ||
+        this.closingAgents.delete(params.sessionId))
+    )
+      return;
+    if (RECORDED.test(method))
+      this.buffer.record(
+        source === undefined
+          ? { method, params, at: Date.now() }
+          : { method, params, sessionId: source, at: Date.now() },
+      );
+    if (method === "Page.javascriptDialogOpening")
+      this.openDialog(params, source);
+    else if (method === "Page.javascriptDialogClosed")
+      this.setDialog(undefined);
     if (method === "Target.attachedToTarget") this.adopt(params, source);
     else if (method === "Target.detachedFromTarget")
       this.forget(params.sessionId);
@@ -1184,6 +1469,8 @@ export class TabSession {
   private readonly onGone = () => {
     if (!this.connected) return;
     this.failPending(() => new PageCrashedError());
+    // The renderer took its dialog with it.
+    this.setDialog(undefined);
     this.setState("crashed");
   };
 

@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageOperation } from "../electron/automation-dom";
@@ -9,6 +10,7 @@ import type { AutomationController } from "../electron/agent/server";
 import {
   CdpTimeoutError,
   ContextLostError,
+  DialogOpenError,
   FrameBlockedError,
   FrameGoneError,
   PageCrashedError,
@@ -16,6 +18,10 @@ import {
   TabClosedError,
   TargetRefusedError,
 } from "../electron/agent/session/errors";
+import {
+  EVENT_LIMITS,
+  EventBufferPool,
+} from "../electron/agent/session/event-buffer";
 import {
   FrameRegistry,
   PDF_VIEWER_ID,
@@ -135,6 +141,7 @@ function open(
   const session = new TabSession(host as unknown as SessionHost, {
     tabId: "tab-1",
     waitForSpaceIdle,
+    buffer: new EventBufferPool().create("tab-1"),
   });
   return { host, cdp: host.debugger, session, waitForSpaceIdle };
 }
@@ -958,6 +965,7 @@ async function worldSession() {
   const session = new TabSession(host as unknown as SessionHost, {
     tabId: "tab-1",
     waitForSpaceIdle: async () => {},
+    buffer: new EventBufferPool().create("tab-1"),
   });
   session.attach();
   await vi.advanceTimersByTimeAsync(0);
@@ -1193,7 +1201,7 @@ class FakeViews {
 
 // The attach policy over FakeViews, with the space's running request
 // finishing at once unless a test holds it.
-function attachPolicy() {
+function attachPolicy(buffers = new EventBufferPool()) {
   const views = new FakeViews();
   const driven = new Set<string>();
   const unmanaged = new Set<string>();
@@ -1205,6 +1213,7 @@ function attachPolicy() {
     agentDriven: (spaceId) => driven.has(spaceId),
     managedTab: (tabId) => !unmanaged.has(tabId),
     waitForSpaceIdle: (spaceId, timeoutMs) => idle.wait(spaceId, timeoutMs),
+    buffers,
   });
   return { views, sessions, driven, unmanaged, idle };
 }
@@ -2913,5 +2922,852 @@ describe("lifecycle and network", () => {
       status: 409,
       code: "tab_closed",
     });
+  });
+});
+describe("event buffer", () => {
+  // An event whose params are exactly bytes long as JSON. Events of one size
+  // share one string.
+  const fillers = new Map<number, string>();
+  const sized = (at: number, bytes: number): CdpEvent => {
+    if (!fillers.has(bytes)) fillers.set(bytes, "x".repeat(bytes - 11));
+    return {
+      method: "Network.dataReceived",
+      params: { data: fillers.get(bytes) },
+      at,
+    };
+  };
+  const recording = (pool: EventBufferPool, tabId: string) => {
+    const buffer = pool.create(tabId);
+    buffer.setRecording(true);
+    return buffer;
+  };
+
+  it("caps each tab at 10,000 events and 4 MiB and all tabs at 64 MiB, trimming the largest log's oldest events first", () => {
+    expect(EVENT_LIMITS).toEqual({
+      events: 10000,
+      tabBytes: 4 * 1024 * 1024,
+      totalBytes: 64 * 1024 * 1024,
+      eventBytes: 1024 * 1024,
+    });
+    const pool = new EventBufferPool();
+    const many = recording(pool, "many");
+    for (let at = 1; at <= 10005; at += 1)
+      many.record({ method: "Page.lifecycleEvent", params: {}, at });
+    const counted = many.drain(20000);
+    expect(counted.events).toHaveLength(10000);
+    expect(counted.events[0].at).toBe(6);
+    expect(counted.dropped).toBe(5);
+    many.dispose();
+    expect(pool.totalBytes).toBe(0);
+    // Five events of a million bytes pass the tab's 4 MiB.
+    const largest = recording(pool, "largest");
+    for (let at = 1; at <= 5; at += 1) largest.record(sized(at, 1000000));
+    expect(pool.totalBytes).toBe(4000000);
+    // Fifteen more tabs bring the pool to 63.4 million bytes.
+    const others = Array.from({ length: 15 }, (_, index) =>
+      recording(pool, `tab-${index}`),
+    );
+    for (const buffer of others)
+      for (let at = 1; at <= 4; at += 1) buffer.record(sized(at, 990000));
+    expect(pool.totalBytes).toBe(63400000);
+    const newest = recording(pool, "newest");
+    for (let at = 1; at <= 3; at += 1) newest.record(sized(at, 990000));
+    expect(pool.totalBytes).toBe(66370000);
+    // The next event passes 64 MiB, and the largest log loses its oldest.
+    newest.record(sized(4, 990000));
+    expect(pool.totalBytes).toBe(66360000);
+    const trimmed = largest.drain(10);
+    expect(trimmed.events.map((event) => event.at)).toEqual([3, 4, 5]);
+    expect(trimmed.dropped).toBe(2);
+    for (const buffer of [...others, newest])
+      expect(buffer.drain(10)).toMatchObject({ dropped: 0, remaining: 0 });
+  });
+
+  it("redacts before sizing and drops events the redactor returns null for", () => {
+    const pool = new EventBufferPool();
+    const buffer = recording(pool, "tab-1");
+    const seen: string[] = [];
+    buffer.setRedactor((event) => {
+      seen.push(event.method);
+      if (event.method === "Network.requestWillBeSentExtraInfo") return null;
+      return { ...event, params: { url: event.params.url } };
+    });
+    buffer.record({
+      method: "Network.requestWillBeSent",
+      params: {
+        url: "https://example.com/",
+        postData: "x".repeat(2 * 1024 * 1024),
+      },
+      at: 1,
+    });
+    buffer.record({
+      method: "Network.requestWillBeSentExtraInfo",
+      params: { headers: { cookie: "secret" } },
+      at: 2,
+    });
+    expect(seen).toEqual([
+      "Network.requestWillBeSent",
+      "Network.requestWillBeSentExtraInfo",
+    ]);
+    // Sized after redaction, the 2 MiB body is gone, so the event is whole.
+    expect(pool.totalBytes).toBe(
+      Buffer.byteLength(JSON.stringify({ url: "https://example.com/" })),
+    );
+    expect(buffer.drain(10)).toEqual({
+      events: [
+        {
+          method: "Network.requestWillBeSent",
+          params: { url: "https://example.com/" },
+          at: 1,
+        },
+      ],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
+  });
+
+  it("keeps an event over 1 MiB as a too_large stub", () => {
+    const pool = new EventBufferPool();
+    const buffer = recording(pool, "tab-1");
+    const MiB = 1024 * 1024;
+    buffer.record(sized(1, MiB));
+    buffer.record({ ...sized(2, MiB + 1), sessionId: "child-1" });
+    expect(pool.totalBytes).toBe(MiB);
+    expect(buffer.drain(10).events).toEqual([
+      sized(1, MiB),
+      {
+        method: "Network.dataReceived",
+        at: 2,
+        sessionId: "child-1",
+        omitted: "too_large",
+        bytes: MiB + 1,
+      },
+    ]);
+  });
+});
+describe("dialogs, init scripts, agent sessions and events", () => {
+  // The page holds an in-process frame and the PDF viewer's extension frame.
+  // Session child-1 hosts the out-of-process frame frame-oop, and child-2
+  // the frame-deep inside it.
+  const TREES: Record<string, object> = {
+    "": frameTree([
+      { id: "main", url: "https://example.com/", loaderId: "loader-1" },
+      { id: "frame-in", parentId: "main", url: "https://example.com/inner" },
+      {
+        id: "frame-ext",
+        parentId: "main",
+        url: `chrome-extension://${PDF_VIEWER_ID}/index.html`,
+        origin: `chrome-extension://${PDF_VIEWER_ID}`,
+      },
+    ]),
+    "child-1": frameTree([
+      { id: "frame-oop", parentId: "main", url: "https://frame.example/" },
+    ]),
+    "child-2": frameTree([
+      { id: "frame-deep", parentId: "frame-oop", url: "https://deep.example/" },
+    ]),
+  };
+  // A ready session on that page, with child-1 attached.
+  async function framed() {
+    const opened = open();
+    opened.cdp.reply(
+      "Page.getFrameTree",
+      (_params, sessionId) => TREES[sessionId ?? ""],
+    );
+    opened.session.attach();
+    await settle();
+    attachedTarget(opened.cdp, {
+      sessionId: "child-1",
+      targetId: "frame-oop",
+      url: "https://frame.example/",
+    });
+    await settle();
+    expect(opened.session.state).toBe("ready");
+    return opened;
+  }
+  const opening = (
+    type: string,
+    message: string,
+    frameId = "main",
+    defaultPrompt = "",
+  ) => ({
+    url: "https://example.com/",
+    frameId,
+    message,
+    type,
+    hasBrowserHandler: true,
+    defaultPrompt,
+  });
+
+  it("refuses Input, Runtime, DOM.setFileInputFiles, Page.navigate and Page.reload with started false while a dialog is open, rejects in-flight ones with started true, and always allows handleDialog on the reporting session", async () => {
+    const { session, cdp } = await framed();
+    cdp.holdReplies = true;
+    // An alert opened by a click handler holds that click's reply.
+    const click = track(
+      session.send(
+        "Input.dispatchMouseEvent",
+        { type: "mousePressed", x: 5, y: 5, button: "left", clickCount: 1 },
+        soon(),
+      ),
+    );
+    const read = track(
+      session.send("Runtime.evaluate", { expression: "1" }, soon("child-1")),
+    );
+    const tree = track(session.send("Page.getFrameTree", {}, soon()));
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("confirm", "Leave this page?", "frame-oop"),
+      "child-1",
+    );
+    await settle();
+    const dialog = {
+      type: "confirm",
+      message: "Leave this page?",
+      frameId: "frame-oop",
+      sessionId: "child-1",
+    };
+    expect(session.dialog()).toEqual(dialog);
+    for (const inFlight of [click, read]) {
+      expect(inFlight.error).toBeInstanceOf(DialogOpenError);
+      expect(inFlight.error).toMatchObject({ dialog, started: true });
+    }
+    expect(tree.settled).toBe(false);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(tree.settled).toBe(true);
+    const sent = cdp.sent.length;
+    for (const [method, sessionId] of [
+      ["Input.dispatchKeyEvent", undefined],
+      ["Input.insertText", undefined],
+      ["Runtime.evaluate", "child-1"],
+      ["Runtime.callFunctionOn", undefined],
+      ["DOM.setFileInputFiles", undefined],
+      ["Page.navigate", undefined],
+      ["Page.reload", undefined],
+    ] as const) {
+      const dispatch = { dispatched: false };
+      const refused = session.send(method, {}, { ...soon(sessionId), dispatch });
+      await expect(refused, method).rejects.toBeInstanceOf(DialogOpenError);
+      await expect(refused, method).rejects.toMatchObject({
+        dialog,
+        started: false,
+      });
+      expect(dispatch.dispatched, method).toBe(false);
+    }
+    await expect(
+      session.evaluateInFrame(
+        "main",
+        "snapshot",
+        {},
+        { deadline: Date.now() + 5000, namespace: "test" },
+      ),
+    ).rejects.toMatchObject({ dialog, started: false });
+    expect(cdp.sent).toHaveLength(sent);
+    // Commands the dialog does not hold still go through.
+    await expect(
+      session.send("Page.getNavigationHistory", {}, soon()),
+    ).resolves.toEqual({});
+    await session.handleDialog(false);
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Page.handleJavaScriptDialog",
+      params: { accept: false },
+      sessionId: "child-1",
+    });
+    cdp.event(
+      "Page.javascriptDialogClosed",
+      { result: false, userInput: "" },
+      "child-1",
+    );
+    expect(session.dialog()).toBeUndefined();
+    await expect(
+      session.send("Runtime.evaluate", {}, soon()),
+    ).resolves.toEqual({});
+    // A prompt reported on the page session is answered there, with its text.
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("prompt", "Your name?", "main", "Ada"),
+    );
+    await session.handleDialog(true, "Grace");
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Page.handleJavaScriptDialog",
+      params: { accept: true, promptText: "Grace" },
+    });
+  });
+
+  it("strips bidirectional overrides and control characters from dialog text and cuts it to 2000 characters", async () => {
+    const { session, cdp } = await framed();
+    const unsafe =
+      "\u0000\u0007\u000B\r\u001F\u007F\u0085\u009F\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}";
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening(
+        "prompt",
+        `Pay${unsafe} now\tor\nlater ${"a".repeat(2500)}`,
+        "main",
+        `\u{202E}Amount${unsafe}${"9".repeat(2500)}`,
+      ),
+    );
+    const dialog = session.dialog()!;
+    expect(dialog.message).toBe(
+      `Pay now\tor\nlater ${"a".repeat(2500)}`.slice(0, 2000),
+    );
+    expect(dialog.message).toHaveLength(2000);
+    expect(dialog.defaultValue).toBe(`Amount${"9".repeat(1994)}`);
+    const refused = session.send("Runtime.evaluate", {}, soon());
+    await expect(refused).rejects.toMatchObject({ dialog });
+    // Only a prompt carries a default value.
+    cdp.event("Page.javascriptDialogClosed", { result: true, userInput: "" });
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("alert", "Saved\u{202E}", "main", "ignored"),
+    );
+    expect(session.dialog()).toEqual({
+      type: "alert",
+      message: "Saved",
+      frameId: "main",
+    });
+  });
+
+  it("clears the dialog when it closes and ignores dialogs on agent sessions", async () => {
+    const { session, cdp, host } = await framed();
+    const changes: unknown[] = [];
+    session.on("dialog", (event) => {
+      changes.push(event.params);
+    });
+    const saved = { type: "alert", message: "Saved", frameId: "main" };
+    cdp.event("Page.javascriptDialogOpening", opening("alert", "Saved"));
+    expect(session.dialog()).toEqual(saved);
+    cdp.event("Page.javascriptDialogClosed", { result: true, userInput: "" });
+    expect(session.dialog()).toBeUndefined();
+    const agent = await session.openAgentSession();
+    cdp.event("Page.javascriptDialogOpening", opening("alert", "Saved"), agent);
+    expect(session.dialog()).toBeUndefined();
+    // A crash and a lost debugger each forget the dialog.
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("alert", "Saved"),
+      "child-1",
+    );
+    host.crash();
+    expect(session.dialog()).toBeUndefined();
+    host.navigate("https://example.com/");
+    await settle();
+    expect(session.state).toBe("ready");
+    cdp.event("Page.javascriptDialogOpening", opening("alert", "Saved"));
+    cdp.lose();
+    expect(session.dialog()).toBeUndefined();
+    expect(changes).toEqual([
+      { dialog: saved },
+      { dialog: null },
+      { dialog: { ...saved, sessionId: "child-1" } },
+      { dialog: null },
+      { dialog: saved },
+      { dialog: null },
+    ]);
+    await settle();
+  });
+
+  it("adds init scripts with runImmediately on the page session and every web child before resume, on later children and after re-attach, and never on blocked frames", async () => {
+    const { session, cdp } = await framed();
+    session.onSessionSetup(focusHook(session));
+    const sent = cdp.sent.length;
+    const isolated = await session.addInitScript("window.__isolated = 1;", {
+      world: "isolated",
+    });
+    const main = await session.addInitScript("window.__main = 1;", {
+      world: "main",
+    });
+    expect(isolated).not.toBe(main);
+    const add = (text: string, worldName?: string) => ({
+      method: "Page.addScriptToEvaluateOnNewDocument",
+      params: {
+        source: expect.stringContaining(text),
+        runImmediately: true,
+        ...(worldName ? { worldName } : {}),
+      },
+    });
+    const ISOLATED = add("window.__isolated = 1;", "kamapathy");
+    const MAIN = add("window.__main = 1;");
+    expect(cdp.sent.slice(sent)).toEqual([
+      ISOLATED,
+      { ...ISOLATED, sessionId: "child-1" },
+      MAIN,
+      { ...MAIN, sessionId: "child-1" },
+    ]);
+    // A later frame gets them after its hooks and before it resumes.
+    attachedTarget(cdp, {
+      parentSessionId: "child-1",
+      sessionId: "child-2",
+      targetId: "frame-deep",
+      url: "https://deep.example/",
+      waitingForDebugger: true,
+    });
+    expect(
+      cdp.sent.filter((command) => command.sessionId === "child-2"),
+    ).toEqual(
+      [
+        ...SETUP,
+        FOCUS,
+        ISOLATED,
+        MAIN,
+        { method: "Runtime.runIfWaitingForDebugger", params: {} },
+        FRAME_TREE,
+      ].map((command) => ({ ...command, sessionId: "child-2" })),
+    );
+    // A blocked frame's target gets none.
+    attachedTarget(cdp, {
+      parentSessionId: "child-1",
+      sessionId: "blocked-1",
+      targetId: "frame-pdf",
+      url: `chrome-extension://${PDF_VIEWER_ID}/index.html`,
+    });
+    await settle();
+    expect(cdp.methods("blocked-1")).not.toContain(
+      "Page.addScriptToEvaluateOnNewDocument",
+    );
+    // A re-attach registers them again, after the hooks.
+    const before = cdp.sent.length;
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(cdp.sent.slice(before)).toEqual([
+      ...SETUP,
+      FOCUS,
+      ISOLATED,
+      MAIN,
+      FRAME_TREE,
+    ]);
+  });
+
+  it("wraps init scripts to return at once outside web frames", async () => {
+    const { session, cdp } = await framed();
+    await session.addInitScript("ran.push(location.href);", { world: "main" });
+    // A source may declare the names the wrapper's own check uses.
+    await session.addInitScript("const p = 'p', o = 'o'; ran.push(p + o);", {
+      world: "main",
+    });
+    const [source, declaring] = cdp.sent
+      .filter(
+        (command) =>
+          command.method === "Page.addScriptToEvaluateOnNewDocument" &&
+          command.sessionId === undefined,
+      )
+      .map((command) => command.params.source);
+    const run = (href: string, origin: string, script = source) => {
+      const ran: string[] = [];
+      runInNewContext(script, {
+        ran,
+        location: { href, protocol: new URL(href).protocol, origin },
+      });
+      return ran;
+    };
+    for (const [href, origin] of [
+      ["https://example.com/", "https://example.com"],
+      ["http://127.0.0.1:3000/form", "http://127.0.0.1:3000"],
+      ["about:blank", "null"],
+      ["about:srcdoc", "https://example.com"],
+      ["data:text/html,hello", "null"],
+      ["blob:https://example.com/0f3c", "https://example.com"],
+    ])
+      expect(run(href, origin), href).toEqual([href]);
+    expect(
+      run("https://example.com/", "https://example.com", declaring),
+    ).toEqual(["po"]);
+    for (const [href, origin] of [
+      [
+        `chrome-extension://${PDF_VIEWER_ID}/index.html`,
+        `chrome-extension://${PDF_VIEWER_ID}`,
+      ],
+      ["chrome://settings/", "chrome://settings"],
+      ["devtools://devtools/bundled/inspector.html", "devtools://devtools"],
+      ["file:///Users/example/page.html", "file://"],
+      ["kamapathy://newtab/", "kamapathy://newtab"],
+      ["chrome-error://chromewebdata/", "null"],
+      [
+        `blob:chrome-extension://${PDF_VIEWER_ID}/0f3c`,
+        `chrome-extension://${PDF_VIEWER_ID}`,
+      ],
+    ])
+      expect(run(href, origin), href).toEqual([]);
+  });
+
+  it("removes an init script from every session", async () => {
+    const { session, cdp } = await framed();
+    const first = await session.addInitScript("window.__first = 1;", {
+      world: "isolated",
+    });
+    const second = await session.addInitScript("window.__second = 1;", {
+      world: "main",
+    });
+    // The fake numbers identifiers 1 and 2 for the first script, on the page
+    // session and child-1, and 3 and 4 for the second.
+    const sent = cdp.sent.length;
+    await session.removeInitScript(first);
+    expect(cdp.sent.slice(sent)).toEqual([
+      {
+        method: "Page.removeScriptToEvaluateOnNewDocument",
+        params: { identifier: "1" },
+      },
+      {
+        method: "Page.removeScriptToEvaluateOnNewDocument",
+        params: { identifier: "2" },
+        sessionId: "child-1",
+      },
+    ]);
+    await session.removeInitScript(first);
+    expect(cdp.sent).toHaveLength(sent + 2);
+    // A re-attach registers only the script left, under a new identifier.
+    const before = cdp.sent.length;
+    cdp.lose();
+    await settle();
+    expect(
+      cdp.sent
+        .slice(before)
+        .filter(
+          (command) =>
+            command.method === "Page.addScriptToEvaluateOnNewDocument",
+        )
+        .map((command) => command.params.source),
+    ).toEqual([expect.stringContaining("window.__second = 1;")]);
+    const reattached = cdp.sent.length;
+    await session.removeInitScript(second);
+    expect(cdp.sent.slice(reattached)).toEqual([
+      {
+        method: "Page.removeScriptToEvaluateOnNewDocument",
+        params: { identifier: "5" },
+      },
+    ]);
+  });
+
+  it("opens agent sessions only for the tab's own target or an out-of-process unblocked frame, refusing another target, a blocked frame and an in-process frame before sending anything", async () => {
+    const { session, cdp } = await framed();
+    const sent = cdp.sent.length;
+    for (const [frameId, refusal] of [
+      ["another-tab", TargetRefusedError],
+      ["frame-in", TargetRefusedError],
+      ["frame-ext", FrameBlockedError],
+    ] as const)
+      await expect(session.openAgentSession(frameId), frameId).rejects.toBeInstanceOf(
+        refusal,
+      );
+    expect(cdp.sent).toHaveLength(sent);
+    const own = await session.openAgentSession();
+    const frame = await session.openAgentSession("frame-oop");
+    expect([own, frame]).toEqual(["agent-1", "agent-2"]);
+    expect(cdp.sent.slice(sent)).toEqual([
+      { method: "Target.getTargetInfo", params: {} },
+      {
+        method: "Target.attachToTarget",
+        params: { targetId: "main", flatten: true },
+      },
+      {
+        method: "Target.attachToTarget",
+        params: { targetId: "frame-oop", flatten: true },
+      },
+    ]);
+    // Agent sessions get no setup, and are not taken for frames to let go.
+    expect(cdp.methods("agent-1")).toEqual([]);
+    expect(cdp.methods("agent-2")).toEqual([]);
+    // The tab's target is read once per attach.
+    await session.openAgentSession();
+    expect(
+      cdp.methods().filter((method) => method === "Target.getTargetInfo"),
+    ).toHaveLength(1);
+    // Commands on an agent session go through send and count as dispatched.
+    const dispatch = { dispatched: false };
+    await session.send(
+      "Runtime.evaluate",
+      { expression: "1" },
+      { ...soon(own), dispatch },
+    );
+    expect(dispatch.dispatched).toBe(true);
+    // Without a page target in the reply, the main frame's id names the tab.
+    cdp.lose();
+    await settle();
+    cdp.reply("Target.getTargetInfo", () => {
+      throw new Error("Target.getTargetInfo is not available.");
+    });
+    const fallback = cdp.sent.length;
+    await session.openAgentSession();
+    expect(cdp.sent.slice(fallback)).toEqual([
+      { method: "Target.getTargetInfo", params: {} },
+      {
+        method: "Target.attachToTarget",
+        params: { targetId: "main", flatten: true },
+      },
+    ]);
+  });
+
+  it("detaches only agent sessions it opened, and closes them on release and on debugger loss", async () => {
+    const { session, cdp } = await framed();
+    const agent = await session.openAgentSession();
+    const sent = cdp.sent.length;
+    for (const sessionId of ["child-1", "another-tab"])
+      await expect(
+        session.closeAgentSession(sessionId),
+        sessionId,
+      ).rejects.toBeInstanceOf(TargetRefusedError);
+    expect(cdp.sent).toHaveLength(sent);
+    // Chromium reports the detach on the page session before it answers.
+    // The report is the agent's: the tab's own listeners never hear it, and
+    // the tab keeps its requests in flight.
+    requestWillBeSent(cdp, {
+      requestId: "request-1",
+      frameId: "main",
+      loaderId: "loader-1",
+      url: "https://example.com/data",
+    });
+    const own = vi.fn();
+    session.on("Target.detachedFromTarget", own);
+    const reported = vi.fn();
+    cdp.on("message", reported);
+    await session.closeAgentSession(agent);
+    expect(cdp.sent.slice(sent)).toEqual([
+      { method: "Target.detachFromTarget", params: { sessionId: agent } },
+    ]);
+    expect(reported).toHaveBeenCalledWith(
+      {},
+      "Target.detachedFromTarget",
+      { sessionId: agent, targetId: "main" },
+      "",
+    );
+    expect(own).not.toHaveBeenCalled();
+    expect(session.network.inFlight()).toBe(1);
+    await expect(
+      session.send("Runtime.evaluate", {}, soon(agent)),
+    ).rejects.toBeInstanceOf(TargetRefusedError);
+    await expect(session.closeAgentSession(agent)).rejects.toBeInstanceOf(
+      TargetRefusedError,
+    );
+    // A lost debugger takes its agent sessions with it.
+    const lost = await session.openAgentSession();
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    await expect(
+      session.send("Runtime.evaluate", {}, soon(lost)),
+    ).rejects.toBeInstanceOf(TargetRefusedError);
+    // Release lets go of the rest before it detaches.
+    const kept = await session.openAgentSession();
+    let beforeDetach: unknown;
+    cdp.once("detach", () => {
+      beforeDetach = cdp.sent.at(-1);
+    });
+    await session.release();
+    expect(beforeDetach).toEqual({
+      method: "Target.detachFromTarget",
+      params: { sessionId: kept },
+    });
+    expect(
+      cdp.sent.filter(
+        (command) =>
+          command.method === "Target.detachFromTarget" &&
+          command.params.sessionId === lost,
+      ),
+    ).toEqual([]);
+    await expect(
+      session.send("Runtime.evaluate", {}, soon(kept)),
+    ).rejects.toBeInstanceOf(TargetRefusedError);
+  });
+
+  it("delivers agent session events to on(agent) and the buffer, never to the registry, trackers or dialog state", async () => {
+    const { session, cdp } = await framed();
+    const agent = await session.openAgentSession();
+    session.events.setRecording(true);
+    const heard: CdpEvent[] = [];
+    session.on("agent", (event) => {
+      heard.push(event);
+    });
+    const own = vi.fn();
+    for (const name of [
+      "Page.frameAttached",
+      "Page.lifecycleEvent",
+      "Network.requestWillBeSent",
+      "Page.javascriptDialogOpening",
+      "frame",
+      "lifecycle",
+      "dialog",
+    ])
+      session.on(name, own);
+    const events = [
+      [
+        "Page.frameAttached",
+        { frameId: "agent-frame", parentFrameId: "main" },
+      ],
+      [
+        "Page.lifecycleEvent",
+        { frameId: "main", loaderId: "loader-2", name: "init", timestamp: 1 },
+      ],
+      [
+        "Network.requestWillBeSent",
+        {
+          requestId: "agent-request",
+          loaderId: "loader-1",
+          documentURL: "https://example.com/",
+          request: { url: "https://example.com/data", method: "GET", headers: {} },
+          timestamp: 1,
+          wallTime: 1,
+          initiator: { type: "script" },
+          type: "Fetch",
+          frameId: "main",
+        },
+      ],
+      ["Page.javascriptDialogOpening", opening("alert", "From the agent")],
+    ] as const;
+    for (const [method, params] of events) cdp.event(method, params, agent);
+    expect(heard).toEqual(
+      events.map(([method, params]) => ({
+        method,
+        params,
+        sessionId: agent,
+        at: Date.now(),
+      })),
+    );
+    expect(own).not.toHaveBeenCalled();
+    expect(session.dialog()).toBeUndefined();
+    expect(session.network.inFlight()).toBe(0);
+    await expect(
+      session.evaluateInFrame(
+        "agent-frame",
+        "ready",
+        {},
+        { deadline: Date.now() + 5000, namespace: "internal" },
+      ),
+    ).rejects.toBeInstanceOf(FrameGoneError);
+    expect(session.events.drain(10).events).toEqual(heard);
+  });
+
+  it("records nothing until recording is on, then Page and Network events of its own sessions and every agent session event", async () => {
+    const { session, cdp } = await framed();
+    const agent = await session.openAgentSession();
+    const lifecycle = {
+      frameId: "main",
+      loaderId: "loader-1",
+      name: "load",
+      timestamp: 1,
+    };
+    const request = {
+      requestId: "request-1",
+      loaderId: "loader-oop",
+      documentURL: "https://frame.example/",
+      request: { url: "https://frame.example/data", method: "GET", headers: {} },
+      timestamp: 1,
+      wallTime: 1,
+      initiator: { type: "script" },
+      type: "Fetch",
+      frameId: "frame-oop",
+    };
+    const consoleCall = { type: "log", args: [], executionContextId: 1, timestamp: 1 };
+    cdp.event("Page.lifecycleEvent", lifecycle);
+    cdp.event("Runtime.consoleAPICalled", consoleCall, agent);
+    expect(session.events.recording).toBe(false);
+    expect(session.events.drain(10)).toEqual({
+      events: [],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
+    session.events.setRecording(true);
+    expect(session.events.recording).toBe(true);
+    cdp.event("Page.lifecycleEvent", lifecycle);
+    cdp.event("Network.requestWillBeSent", request, "child-1");
+    cdp.event("Runtime.consoleAPICalled", consoleCall);
+    cdp.event("Runtime.consoleAPICalled", consoleCall, agent);
+    cdp.event("Page.lifecycleEvent", lifecycle, "another-tab");
+    expect(session.events.drain(10)).toEqual({
+      events: [
+        { method: "Page.lifecycleEvent", params: lifecycle, at: Date.now() },
+        {
+          method: "Network.requestWillBeSent",
+          params: request,
+          sessionId: "child-1",
+          at: Date.now(),
+        },
+        {
+          method: "Runtime.consoleAPICalled",
+          params: consoleCall,
+          sessionId: agent,
+          at: Date.now(),
+        },
+      ],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
+  });
+
+  it("reports recording-off and lost-debugger gaps, dropped counts and remaining on drain", async () => {
+    // The tab gets its log from TabSessions, which keeps it across sessions.
+    const buffers = new EventBufferPool({ ...EVENT_LIMITS, events: 3 });
+    const { views, sessions, driven } = attachPolicy(buffers);
+    const space = views.addSpace("agent");
+    driven.add(space.id);
+    const tab = views.addTab(space.id);
+    sessions.start();
+    const cdp = views.open(tab.id).page.debugger;
+    await settle();
+    const session = sessions.get(tab.id)!;
+    expect(session.state).toBe("ready");
+    const mark = (index: number) => {
+      const event = {
+        method: "Page.lifecycleEvent",
+        params: { frameId: "main", loaderId: "loader-1", name: `mark-${index}`, timestamp: index },
+        at: Date.now(),
+      };
+      cdp.event(event.method, event.params);
+      return event;
+    };
+    session.events.setRecording(true);
+    const marks = [1, 2, 3, 4, 5].map(mark);
+    // The debugger is lost, and back 50 ms later.
+    const lost = Date.now();
+    cdp.holdReplies = true;
+    cdp.lose();
+    await vi.advanceTimersByTimeAsync(50);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(session.state).toBe("ready");
+    const back = Date.now();
+    // The person takes the space over for 200 ms, which releases the session.
+    session.events.setRecording(false, "human_control");
+    driven.delete(space.id);
+    views.emit();
+    mark(6);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.state).toBe("released");
+    // The tab's next session drains what the first one recorded.
+    driven.add(space.id);
+    views.emit();
+    await settle();
+    const next = sessions.get(tab.id)!;
+    expect(next).not.toBe(session);
+    next.events.setRecording(true);
+    expect(next.events.drain(2)).toEqual({
+      events: [marks[2], marks[3]],
+      dropped: 2,
+      gaps: [
+        { reason: "debugger_detached", from: lost, to: back },
+        { reason: "human_control", from: back, to: back + 200 },
+      ],
+      remaining: 1,
+    });
+    expect(next.events.drain(10)).toEqual({
+      events: [marks[4]],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
+    // The log goes when the tab closes, and the session, still letting go,
+    // records nothing more.
+    mark(7);
+    expect(buffers.totalBytes).toBeGreaterThan(0);
+    views.state.tabs = views.state.tabs.filter((item) => item.id !== tab.id);
+    views.emit();
+    expect(buffers.totalBytes).toBe(0);
+    mark(8);
+    expect(next.events.drain(10).events).toEqual([]);
   });
 });

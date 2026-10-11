@@ -5,7 +5,11 @@ import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import { allocateRefs } from "./refs";
 import type { AutomationController } from "./server";
-import { CdpTimeoutError, PageCrashedError } from "./session/errors";
+import {
+  CdpTimeoutError,
+  DialogOpenError,
+  PageCrashedError,
+} from "./session/errors";
 import type { TabSession } from "./session/tab-session";
 import type { TabSessions } from "./session/tab-sessions";
 import type { Step } from "./session/types";
@@ -102,6 +106,12 @@ export function createActions(deps: {
       { reason: "unavailable" },
     );
   };
+  // A dialog left open holds the page, so its requests fail at once.
+  const withoutDialog = (session: TabSession) => {
+    const dialog = session.dialog();
+    if (dialog) throw new DialogOpenError(dialog, false);
+    return session;
+  };
   const readyContents = async (
     id: string,
     timeout = 15000,
@@ -116,7 +126,7 @@ export function createActions(deps: {
         "no_web_page",
         "Navigate this tab to an HTTP or HTTPS page first.",
       );
-    sessionOf(id, contents);
+    const loading = withoutDialog(sessionOf(id, contents));
     if (!allowLoading && contents.isLoadingMainFrame()) {
       const load = () =>
         new Promise<void>((resolve, reject) => {
@@ -124,6 +134,7 @@ export function createActions(deps: {
             clearTimeout(timer);
             contents.removeListener("did-stop-loading", loaded);
             contents.removeListener("destroyed", destroyed);
+            stopDialog();
           };
           const loaded = () => {
             cleanup();
@@ -133,6 +144,12 @@ export function createActions(deps: {
             cleanup();
             reject(new ApiError(409, "tab_closed", "The tab was closed."));
           };
+          // A dialog that opens while the page loads ends the wait.
+          const stopDialog = loading.on("dialog", ({ params }) => {
+            if (!params.dialog) return;
+            cleanup();
+            reject(new DialogOpenError(params.dialog, false));
+          });
           const timer = setTimeout(() => {
             cleanup();
             reject(
@@ -152,7 +169,7 @@ export function createActions(deps: {
     authorizeTab(id);
     if (contents.isDestroyed())
       return fail(409, "tab_closed", "The tab was closed.");
-    const session = sessionOf(id, contents);
+    const session = withoutDialog(sessionOf(id, contents));
     if (session.state === "crashed") throw new PageCrashedError();
     return { contents, session };
   };

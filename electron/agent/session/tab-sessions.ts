@@ -1,6 +1,7 @@
 import type { WebContents } from "electron";
 import type { Tab } from "../../../shared/types";
 import type { AutomationController } from "../server";
+import type { EventBuffer, EventBufferPool } from "./event-buffer";
 import { TabSession } from "./tab-session";
 import type { SessionHost } from "./types";
 
@@ -9,6 +10,7 @@ export interface TabSessionsOptions {
   agentDriven(spaceId: string): boolean;
   managedTab(tabId: string): boolean;
   waitForSpaceIdle(spaceId: string, timeoutMs: number): Promise<void>;
+  buffers: EventBufferPool;
 }
 
 // Decides which tabs hold a debugger session: those with a page, in a space
@@ -24,6 +26,8 @@ export class TabSessions {
   private waiting = new WeakMap<TabSession, Promise<void>>();
   private stops: (() => void)[] = [];
   private closed = false;
+  // Each tab's event log, kept across its sessions until the tab closes.
+  private buffers = new Map<string, EventBuffer>();
 
   constructor(private readonly options: TabSessionsOptions) {}
 
@@ -48,6 +52,11 @@ export class TabSessions {
     }
     for (const [tabId, session] of this.current)
       if (wanted.get(tabId) !== session.contents) this.release(tabId);
+    for (const [tabId, buffer] of this.buffers)
+      if (!tabs.some((tab) => tab.id === tabId)) {
+        buffer.dispose();
+        this.buffers.delete(tabId);
+      }
     for (const tab of tabs) {
       const contents = wanted.get(tab.id);
       if (contents && !this.current.has(tab.id)) this.open(tab, contents);
@@ -73,6 +82,8 @@ export class TabSessions {
       for (const tabId of [...this.current.keys()]) this.release(tabId);
     }
     await Promise.all(this.releases.values());
+    for (const buffer of this.buffers.values()) buffer.dispose();
+    this.buffers.clear();
   }
 
   // The space is checked first, so the person's own tabs are never looked up.
@@ -104,10 +115,16 @@ export class TabSessions {
   }
 
   private open(tab: Tab, contents: WebContents): void {
+    let buffer = this.buffers.get(tab.id);
+    if (!buffer) {
+      buffer = this.options.buffers.create(tab.id);
+      this.buffers.set(tab.id, buffer);
+    }
     const session = new TabSession(contents, {
       tabId: tab.id,
       waitForSpaceIdle: (timeoutMs) =>
         this.options.waitForSpaceIdle(tab.spaceId, timeoutMs),
+      buffer,
     });
     this.current.set(tab.id, session);
     this.live.add(session);

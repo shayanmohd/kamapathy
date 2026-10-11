@@ -10,6 +10,7 @@ import { findRoute, readBody, send, type RouteDeps } from "./http";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
+import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 
 export interface AutomationController {
@@ -56,6 +57,7 @@ export async function startAutomation(
     managedTab: () => true,
     waitForSpaceIdle: (spaceId, timeoutMs) =>
       scheduler.whenIdle(spaceId, timeoutMs),
+    buffers: new EventBufferPool(),
   });
   const referenceSession = randomBytes(12).toString("hex");
   const actions = createActions({

@@ -1197,6 +1197,66 @@ describe("local automation socket", () => {
     expect(page.debugger.attachCount).toBe(2);
   });
 
+  it("fails a snapshot at once with dialog_open while a dialog is open", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const dialog = (type: string, message: string) => ({
+      url: "https://example.com/",
+      frameId: "main",
+      message,
+      type,
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      dialog("confirm", "Leave\u{202E} this page?"),
+    );
+    const started = Date.now();
+    const refused = await request(`/tabs/${tab.id}/snapshot`);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "dialog_open",
+        message:
+          "A JavaScript confirm is still open on this page. Hand off to the person to close it, then inspect the page.",
+        dialog: { type: "confirm", message: "Leave this page?" },
+        started: false,
+      },
+    });
+    expect(page.scripts).toEqual([]);
+    // A screenshot is a page request too, and nothing is captured.
+    const screenshot = await request(`/tabs/${tab.id}/screenshot`);
+    expect(screenshot.status).toBe(409);
+    expect((await screenshot.json()).error.code).toBe("dialog_open");
+    expect(page.captureCalls).toBe(0);
+    page.emitProtocol("Page.javascriptDialogClosed", {
+      result: true,
+      userInput: "",
+    });
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    // A dialog that opens while the page loads ends the wait for the load.
+    const listening = page.listenerCount("did-stop-loading");
+    page.isLoadingMainFrame = () => true;
+    const waiting = request(`/tabs/${tab.id}/snapshot`);
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(listening);
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      dialog("alert", "Still loading"),
+    );
+    const stopped = await waiting;
+    expect(stopped.status).toBe(409);
+    expect((await stopped.json()).error).toMatchObject({
+      code: "dialog_open",
+      dialog: { type: "alert", message: "Still loading" },
+      started: false,
+    });
+    expect(page.listenerCount("did-stop-loading")).toBe(listening);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {

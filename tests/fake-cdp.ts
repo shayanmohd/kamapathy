@@ -29,6 +29,10 @@ export class FakeDebugger extends EventEmitter {
   constructor(replies: Record<string, Reply> = {}) {
     super();
     let context = 0;
+    let scripts = 0;
+    let agents = 0;
+    // The target of each session Target.attachToTarget opened.
+    const opened = new Map<string, string>();
     this.replies = new Map(
       Object.entries({
         // A frame target's session reports the frame it was attached for.
@@ -46,6 +50,66 @@ export class FakeDebugger extends EventEmitter {
           ]);
         },
         "Page.createIsolatedWorld": () => ({ executionContextId: ++context }),
+        // Each session gives an init script its own identifier.
+        "Page.addScriptToEvaluateOnNewDocument": () => ({
+          identifier: String(++scripts),
+        }),
+        // The page session names its own target, whose id is the main
+        // frame's.
+        "Target.getTargetInfo": () => ({
+          targetInfo: {
+            targetId: "main",
+            type: "page",
+            title: "",
+            url: "https://example.com/",
+            attached: true,
+            canAccessOpener: false,
+          },
+        }),
+        // Chromium reports the new flat session on the session that asked,
+        // before it answers.
+        "Target.attachToTarget": (
+          params: Record<string, any>,
+          sessionId?: string,
+        ) => {
+          const attached = `agent-${++agents}`;
+          opened.set(attached, params.targetId);
+          this.event(
+            "Target.attachedToTarget",
+            {
+              sessionId: attached,
+              targetInfo: {
+                targetId: params.targetId,
+                type: params.targetId === "main" ? "page" : "iframe",
+                title: "",
+                url: "",
+                attached: true,
+                canAccessOpener: false,
+              },
+              waitingForDebugger: false,
+            },
+            sessionId,
+          );
+          return { sessionId: attached };
+        },
+        // Chromium reports the detach on the session that asked, before it
+        // answers.
+        "Target.detachFromTarget": (
+          params: Record<string, any>,
+          sessionId?: string,
+        ) => {
+          this.event(
+            "Target.detachedFromTarget",
+            {
+              sessionId: params.sessionId,
+              targetId:
+                opened.get(params.sessionId) ??
+                this.targets.get(params.sessionId)?.targetId,
+            },
+            sessionId,
+          );
+          return {};
+        },
         ...replies,
       }),
     );
