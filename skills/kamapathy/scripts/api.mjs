@@ -12,6 +12,8 @@ import {
   uploadRef,
 } from "./kamapathy.mjs";
 
+export * as schema from "./schema/index.mjs";
+
 const ORIGIN = "http://kamapathy.invalid";
 const REQUEST_TIMEOUT_MS = 45000;
 const BATCH_TIMEOUT_MS = 180000;

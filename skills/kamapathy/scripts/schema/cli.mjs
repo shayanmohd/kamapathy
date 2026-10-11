@@ -1,0 +1,289 @@
+// Every CLI command, with the usage line help prints.
+
+const command = (name, group, usage, summary, extra = {}) => ({
+  name,
+  group,
+  usage,
+  summary,
+  arguments: extra.arguments ?? [],
+  flags: extra.flags ?? [],
+  ...(extra.stdin ? { stdin: extra.stdin } : {}),
+  ...(extra.route ? { route: extra.route } : {}),
+  ...(extra.script ? { script: extra.script } : {}),
+  examples: extra.examples ?? [],
+  since: 1,
+});
+const SPACE_ID = { name: "space-id", description: "A space ID from spaces." };
+const TAB_ID = { name: "tab-id", description: "A tab ID from tabs or open." };
+const TARGET = {
+  name: "ref-or-selector",
+  description: "A ref such as @e3 from a current snapshot, or a CSS selector.",
+};
+
+export const COMMANDS = [
+  command("health", "Connection", "health", "Check the connection", {
+    route: "GET /health",
+  }),
+  command("spaces", "Spaces", "spaces", "List accessible spaces", {
+    route: "GET /spaces",
+    script: "spaces",
+  }),
+  command(
+    "space create",
+    "Spaces",
+    "space create <name> [--isolated]",
+    "Create a background agent space, with its own sign-ins when --isolated is given",
+    {
+      arguments: [
+        {
+          name: "name",
+          description: "The space's name, at most 48 characters.",
+        },
+      ],
+      flags: [
+        { name: "--isolated", description: "Give the space its own sign-ins." },
+      ],
+      route: "POST /spaces",
+      script: "createSpace",
+    },
+  ),
+  command(
+    "space close",
+    "Spaces",
+    "space close <space-id>",
+    "Close a space and its tabs",
+    {
+      arguments: [SPACE_ID],
+      route: "DELETE /spaces/:id",
+      script: "space.close",
+    },
+  ),
+  command(
+    "handoff",
+    "Spaces",
+    "handoff <space-id>",
+    "Pause automation for human control",
+    {
+      arguments: [SPACE_ID],
+      route: "POST /spaces/:id/handoff",
+      script: "space.handoff",
+    },
+  ),
+  command(
+    "resume",
+    "Spaces",
+    "resume <space-id>",
+    "Take control back when the person says to continue",
+    {
+      arguments: [SPACE_ID],
+      route: "POST /spaces/:id/resume",
+      script: "space.resume",
+    },
+  ),
+  command("tabs", "Pages", "tabs <space-id>", "List tabs in an agent space", {
+    arguments: [SPACE_ID],
+    route: "GET /spaces/:id/tabs",
+    script: "space.tabs",
+  }),
+  command("open", "Pages", "open <space-id> <url>", "Open a background tab", {
+    arguments: [
+      SPACE_ID,
+      { name: "url", description: "A complete http or https URL." },
+    ],
+    route: "POST /spaces/:id/tabs",
+    script: "space.open",
+  }),
+  command("navigate", "Pages", "navigate <tab-id> <url>", "Navigate a tab", {
+    arguments: [
+      TAB_ID,
+      { name: "url", description: "A complete http or https URL." },
+    ],
+    route: "POST /tabs/:id/navigate",
+    script: "page.navigate",
+  }),
+  command("close", "Pages", "close <tab-id>", "Close a tab", {
+    arguments: [TAB_ID],
+    route: "DELETE /tabs/:id",
+    script: "page.close",
+  }),
+  command(
+    "snapshot",
+    "Page actions",
+    "snapshot <tab-id> [options]",
+    "Read bounded page text and control refs",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        { name: "--full", description: "Request the larger snapshot mode" },
+        {
+          name: "--selector",
+          value: "<css>",
+          description: "Scope the snapshot to one element",
+        },
+        {
+          name: "--max-chars",
+          value: "<n>",
+          description: "Override the text bound",
+        },
+        {
+          name: "--max-controls",
+          value: "<n>",
+          description: "Override the control bound",
+        },
+      ],
+      route: "POST /tabs/:id/snapshot",
+      script: "page.snapshot",
+    },
+  ),
+  command(
+    "click",
+    "Page actions",
+    "click <tab-id> <ref-or-selector>",
+    "Click a control",
+    {
+      arguments: [TAB_ID, TARGET],
+      route: "POST /tabs/:id/click",
+      script: "page.click",
+    },
+  ),
+  command(
+    "fill",
+    "Page actions",
+    "fill <tab-id> <ref-or-selector> --stdin",
+    "Read the exact field value from stdin",
+    {
+      arguments: [TAB_ID, TARGET],
+      flags: [
+        { name: "--stdin", description: "Read the field value from stdin" },
+      ],
+      stdin: "The exact field value.",
+      route: "POST /tabs/:id/fill",
+      script: "page.fill",
+    },
+  ),
+  command(
+    "upload",
+    "Page actions",
+    "upload <tab-id> <ref> <file> [files]",
+    "Select up to 8 files, 16 MiB total",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "ref",
+          description: "A file input ref from a current snapshot.",
+        },
+        { name: "file", description: "One to 8 local files." },
+      ],
+      route: "POST /tabs/:id/upload",
+      script: "page.upload",
+    },
+  ),
+  command(
+    "press",
+    "Page actions",
+    "press <tab-id> <key> [ref-or-selector]",
+    "Press a supported key",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "key",
+          description: "Enter, Tab, Escape, an arrow key and others.",
+        },
+        TARGET,
+      ],
+      route: "POST /tabs/:id/press",
+      script: "page.press",
+    },
+  ),
+  command(
+    "drag",
+    "Page actions",
+    "drag <tab-id> <source> <target>",
+    "Drag one element onto another (refs or selectors)",
+    {
+      arguments: [
+        TAB_ID,
+        { name: "source", description: "The element to drag." },
+        { name: "target", description: "The element to drop on." },
+      ],
+      route: "POST /tabs/:id/drag",
+      script: "page.drag",
+    },
+  ),
+  command(
+    "scroll",
+    "Page actions",
+    "scroll <tab-id> <direction> [pixels] [ref-or-selector]",
+    "Scroll up, down, left or right: the page, the panel holding a control, or the panel in the middle when the page cannot scroll",
+    {
+      arguments: [
+        TAB_ID,
+        { name: "direction", description: "up, down, left or right." },
+        { name: "pixels", description: "1 to 2000, default 600." },
+        TARGET,
+      ],
+      route: "POST /tabs/:id/scroll",
+      script: "page.scroll",
+    },
+  ),
+  command(
+    "wait",
+    "Page actions",
+    "wait <tab-id> --stdin",
+    "Read wait options as JSON from stdin",
+    {
+      arguments: [TAB_ID],
+      flags: [{ name: "--stdin", description: "Read the options from stdin" }],
+      stdin: "A JSON object with selector, text and timeoutMs.",
+      route: "POST /tabs/:id/wait",
+      script: "page.wait",
+    },
+  ),
+  command(
+    "batch",
+    "Page actions",
+    "batch <tab-id>",
+    "Read an actions array or {actions} JSON",
+    {
+      arguments: [TAB_ID],
+      stdin: "A JSON array of 1 to 20 actions, or an object with actions.",
+      route: "POST /tabs/:id/actions",
+      script: "page.batch",
+    },
+  ),
+  command(
+    "screenshot",
+    "Page actions",
+    "screenshot <tab-id> <file.png>",
+    "Save a viewport PNG without overwriting",
+    {
+      arguments: [
+        TAB_ID,
+        { name: "file.png", description: "A new file ending in .png." },
+      ],
+      route: "GET /tabs/:id/screenshot",
+      script: "page.screenshot",
+    },
+  ),
+  command(
+    "run",
+    "Scripts",
+    "run <file.mjs>",
+    "Run a script with the connected client as the globals kamapathy, createSpace, space and spaces; run - reads it from stdin and run -e <code> runs the code itself",
+    {
+      arguments: [
+        {
+          name: "file.mjs",
+          description: "The script, or - to read it from stdin.",
+        },
+      ],
+      flags: [
+        { name: "-e", value: "<code>", description: "Run the code itself" },
+      ],
+      stdin: "The script, with run -.",
+    },
+  ),
+  command("help", "Help", "help", "Show the commands"),
+];

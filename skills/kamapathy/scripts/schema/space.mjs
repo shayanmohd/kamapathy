@@ -1,0 +1,85 @@
+// The members of Space.
+
+const property = (name, signature, summary, returns) => ({
+  name,
+  kind: "property",
+  signature,
+  summary,
+  args: [],
+  returns,
+  errors: [],
+  since: 1,
+});
+const method = (name, signature, summary, args, returns, route, errors) => ({
+  name,
+  kind: "method",
+  signature,
+  summary,
+  args,
+  returns,
+  route,
+  errors: [...errors, "space_not_found", "automation_stopped"],
+  since: 1,
+});
+
+export const SPACE = [
+  property("Space.id", "space.id", "The space's ID.", "string"),
+  property("Space.name", "space.name", "The space's name.", "string"),
+  property(
+    "Space.owner",
+    "space.owner",
+    "Who controls the space. handoff and resume update it.",
+    '"agent" | "human"',
+  ),
+  property(
+    "Space.signIns",
+    "space.signIns",
+    "Whether the space uses the person's sign-ins or its own.",
+    '"shared" | "separate" | undefined',
+  ),
+  method(
+    "Space.open",
+    "space.open(url)",
+    "Opens a background tab.",
+    [{ name: "url", kind: "url" }],
+    "Promise<Page>",
+    "POST /spaces/:id/tabs",
+    ["invalid_url", "tab_limit", "tab_creation_failed", "human_control"],
+  ),
+  method(
+    "Space.tabs",
+    "space.tabs()",
+    "Lists the space's tabs.",
+    [],
+    "Promise<Page[]>",
+    "GET /spaces/:id/tabs",
+    ["human_control"],
+  ),
+  method(
+    "Space.handoff",
+    "space.handoff()",
+    "Pauses automation so the person can continue, for example to sign in.",
+    [],
+    'Promise<{ ok: true, owner: "human" }>',
+    "POST /spaces/:id/handoff",
+    ["human_control"],
+  ),
+  method(
+    "Space.resume",
+    "space.resume()",
+    "Takes control back once the reason for the handoff is finished.",
+    [],
+    'Promise<{ ok: true, owner: "agent" }>',
+    "POST /spaces/:id/resume",
+    [],
+  ),
+  method(
+    "Space.close",
+    "space.close()",
+    "Closes the space and its tabs.",
+    [],
+    "Promise<{ ok: true }>",
+    "DELETE /spaces/:id",
+    ["human_control"],
+  ),
+];
