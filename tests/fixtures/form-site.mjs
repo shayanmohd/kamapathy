@@ -5,6 +5,7 @@ import { componentPages } from './component-pages.mjs';
 import { actionPages } from './action-pages.mjs';
 import { framePages } from './frame-pages.mjs';
 import { driverPages, SLOW_IMAGE_MS } from './driver-pages.mjs';
+import { popupPages } from './popup-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
@@ -37,7 +38,7 @@ export async function startFormSite() {
         response.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
         return response.end(pixel, () => events.push({ type: 'slow-image-served', at: Date.now() }));
       }
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname]);
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         return response.end(page);
@@ -51,6 +52,14 @@ export async function startFormSite() {
         for (const [field, file] of data) if (typeof file !== 'string') files.push({ field, name: file.name, type: file.type, bytes: Buffer.from(await file.arrayBuffer()) });
         events.push({ type: 'files-submitted', files });
         return send('Files received', `<h1 id="upload-confirmation">Files received</h1><p>${files.length} files received exactly once.</p><ul>${files.map(file=>`<li>${escape(file.name)}: ${file.bytes.length} bytes</li>`).join('')}</ul>`);
+      }
+      // A page that never answers, for runs that must hit their deadline.
+      if (request.method === 'GET' && url.pathname === '/hold') return;
+      if (request.method === 'POST' && url.pathname === '/popups/echo') {
+        const chunks = []; let size = 0;
+        for await (const chunk of request) { size += chunk.length; if (size > 32768) throw new Error('Form too large'); chunks.push(chunk); }
+        events.push({ type: 'popup-echo', contentType: request.headers['content-type'], body: Buffer.concat(chunks).toString('utf8'), origin: request.headers.origin, referer: request.headers.referer });
+        return send('Echo received', '<h1 id="echo">Echo received</h1>');
       }
       if (url.pathname === '/popup-receipt') {
         const chunks = []; let size = 0;

@@ -5,6 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { startFormSite } from "../tests/fixtures/form-site.mjs";
@@ -138,7 +139,7 @@ async function cli(args, input, options = {}) {
   const started = Date.now();
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [client, ...args], {
-      env: environment,
+      env: options.env ?? environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let output = "",
@@ -538,25 +539,27 @@ try {
   );
   // The agent takes control back with the client after its own handoff and
   // after the person took over in Kamapathy, and page actions work again.
-  for (const takeOver of [
-    () => cli(["handoff", space.id]),
-    () =>
-      chrome.evaluate(
-        (id) =>
-          window.kamapathy.dispatch({ type: "space:ownership", id, owner: "human" }),
-        space.id,
-      ),
+  // human_control says why the person has control, and resume reports
+  // what changed meanwhile.
+  for (const [takeOver, message] of [
+    [() => cli(["handoff", space.id]), /409 human_control: You handed this space to the person\./],
+    [
+      () =>
+        chrome.evaluate(
+          (id) =>
+            window.kamapathy.dispatch({ type: "space:ownership", id, owner: "human" }),
+          space.id,
+        ),
+      /409 human_control: The person took over this space\./,
+    ],
   ]) {
     await takeOver();
     const refused = await cli(["click", tab.id, "#delayed"], undefined, {
       failure: true,
     });
-    assert.match(refused.errors, /409 human_control: The person is using this space/);
-    assert.ok(refused.errors.includes(`resume ${space.id}`));
-    assert.equal(
-      (await cli(["resume", space.id])).output,
-      "ok: agent control resumed\n",
-    );
+    assert.match(refused.errors, message);
+    const resumedOutput = (await cli(["resume", space.id])).output;
+    assert.match(resumedOutput, /^ok: agent control resumed\nactive p\d+ /);
     await json(["navigate", tab.id, `${fixture.origin}/lab`]);
     const resumed = await observe(tab.id);
     await json(
@@ -819,6 +822,8 @@ try {
       (item) => !before.includes(item.id),
     );
     assert.ok(popup, "Submission opens one new agent tab");
+    assert.equal(popup.openedBy, "page");
+    assert.match(popup.label, /^p\d+$/);
     await cli(["wait", popup.id, "--stdin"], {
       selector: "#popup-confirmation",
       timeoutMs: 5000,
@@ -1330,6 +1335,229 @@ try {
   assert.match(refused.errors, /^error: invalid_url: /);
   await cli(["run", "-e", `await (await space(${JSON.stringify(scripted.space)})).close()`]);
   passed("run executes a whole task script over the socket, text() matches the CLI snapshot, and errors carry their code");
+  // Section 2 in the real app: real popups, finish, Stop, grants and requests.
+  const tabsOf = (spaceId) => json(["tabs", spaceId]);
+  const popupSpace = (await json(["space", "create", "Popup review"])).space;
+  const opener = (await json(["open", popupSpace.id, `${fixture.origin}/popups/opener`])).tab;
+  const press = async (button) =>
+    json(["click", opener.id, ref(await observe(opener.id), button)]);
+  await press("Sign in with popup");
+  const signIn = await poll(
+    async () => (await tabsOf(popupSpace.id)).tabs.find((item) => item.url.endsWith("/popups/oauth")),
+    { timeoutMs: 10000, label: "the sign-in popup" },
+  );
+  assert.equal(signIn.openedBy, "page");
+  assert.equal(signIn.openerId, opener.id);
+  assert.match(signIn.label, /^p\d+$/);
+  await cli(["wait", opener.id, "--stdin"], { text: "Token: token-123", timeoutMs: 10000 });
+  await poll(
+    async () =>
+      (await tabsOf(popupSpace.id)).closed.find(
+        (item) => item.label === signIn.label && item.closedBy === "page",
+      ),
+    { timeoutMs: 10000, label: "the sign-in popup closing itself" },
+  );
+  passed("an OAuth-style popup posts to its opener and closes itself");
+  const beforeBlank = (await tabsOf(popupSpace.id)).tabs.map((item) => item.id);
+  await press("Open blank popup");
+  const landing = await poll(
+    async () => (await tabsOf(popupSpace.id)).tabs.find((item) => item.url.endsWith("/popups/landing")),
+    { timeoutMs: 10000, label: "the blank popup's landing page" },
+  );
+  const afterBlank = (await tabsOf(popupSpace.id)).tabs.filter((item) => !beforeBlank.includes(item.id));
+  assert.deepEqual(afterBlank.map((item) => item.id), [landing.id]);
+  assert.equal(landing.label, `p${Number(signIn.label.slice(1)) + 1}`);
+  assert.equal(landing.openerId, opener.id);
+  passed("an about:blank popup written by its opener and navigated keeps its label");
+  await press("Open blob popup");
+  await poll(
+    async () =>
+      (await tabsOf(popupSpace.id)).tabs.find(
+        (item) => item.url.startsWith("blob:") && item.title === "Blob popup",
+      ),
+    { timeoutMs: 10000, label: "the blob popup's document" },
+  );
+  const beforeData = (await tabsOf(popupSpace.id)).tabs.length;
+  await press("Open data popup");
+  await cli(["wait", opener.id, "--stdin"], { text: "Data popup refused", timeoutMs: 5000 });
+  assert.equal((await tabsOf(popupSpace.id)).tabs.length, beforeData);
+  passed("blob: popups open and data: popups are refused");
+  for (const [button, type, body] of [
+    ["Echo urlencoded", "application/x-www-form-urlencoded", "message=Hello+popup"],
+    ["Echo multipart", "multipart/form-data", 'name="message"\r\n\r\nHello popup\r\n'],
+    ["Echo text", "text/plain", "message=Hello popup\r\n"],
+  ]) {
+    const before = fixture.events.filter((event) => event.type === "popup-echo").length;
+    await press(button);
+    const echo = await poll(
+      () => fixture.events.filter((event) => event.type === "popup-echo")[before],
+      { timeoutMs: 10000, label: `the ${type} echo` },
+    );
+    assert.ok(echo.contentType.startsWith(type), echo.contentType);
+    assert.ok(echo.body.includes(body), `${type} body: ${JSON.stringify(echo.body)}`);
+    assert.equal(echo.origin, fixture.origin);
+  }
+  await cli(["space", "close", popupSpace.id]);
+  passed("target=_blank forms keep urlencoded, multipart and text/plain bodies");
+  const finishing = (await json(["space", "create", "Finish review"])).space;
+  await json(["open", finishing.id, `${fixture.origin}/lab`]);
+  await chrome.evaluate(
+    ({ spaceId, url }) => window.kamapathy.dispatch({ type: "tab:create", spaceId, url, background: true }),
+    { spaceId: finishing.id, url: `${fixture.origin}/` },
+  );
+  const finished = await json(["space", "finish", finishing.id, "--keep", "p2"]);
+  assert.deepEqual(
+    [finished.closedSpace, finished.closed, finished.kept, finished.protected],
+    [false, ["p1"], ["p2"], ["p3"]],
+  );
+  assert.ok(!(await json(["spaces"])).spaces.some((item) => item.id === finishing.id));
+  assert.match(
+    (await cli(["tabs", finishing.id], undefined, { failure: true })).errors,
+    /409 space_ended: The agent finished this space/,
+  );
+  passed("finish keeps p2 and a person tab and leaves the space");
+  const ownSpace = (await chrome.evaluate(() => window.kamapathy.getState())).spaces.find(
+    (item) => item.kind === "personal",
+  );
+  await chrome.evaluate((id) => window.kamapathy.dispatch({ type: "space:activate", id }), ownSpace.id);
+  const shown = (await chrome.evaluate(() => window.kamapathy.getState())).activeTabId;
+  await chrome.evaluate(
+    ({ id, url }) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    { id: shown, url: `${fixture.origin}/lab` },
+  );
+  const asking = cli(["space", "request", "--reason", "Check the lab page", "--name", ownSpace.name, "--json"]);
+  const requested = await poll(
+    async () => (await chrome.evaluate(() => window.kamapathy.getState())).spaceRequests[0],
+    { timeoutMs: 10000, label: "the space request" },
+  );
+  assert.equal(requested.reason, "Check the lab page");
+  await chrome.evaluate(
+    ({ id, spaceId }) => window.kamapathy.dispatch({ type: "space-request:answer", id, allow: true, spaceId }),
+    { id: requested.id, spaceId: ownSpace.id },
+  );
+  const granted = JSON.parse((await asking).output);
+  assert.equal(granted.space.id, ownSpace.id);
+  assert.equal(granted.active.id, shown);
+  assert.equal(granted.active.managed, false);
+  assert.equal(await probe("attaches", shown), 0);
+  await json(["adopt", `${ownSpace.id}:${granted.active.label}`]);
+  assert.match((await observe(shown)).title, /Interaction lab/);
+  assert.ok((await probe("attaches", shown)) >= 1);
+  await chrome.evaluate((id) => window.kamapathy.dispatch({ type: "space:stop", id }), ownSpace.id);
+  await poll(async () => !(await probe("hasSession", shown)), { timeoutMs: 5000, label: "the stopped tab's session ending" });
+  passed("an approved request lets the agent adopt the person's active tab");
+  const first = (await json(["space", "create", "Stopped review"])).space;
+  const second = (await json(["space", "create", "Working review"])).space;
+  const firstTab = (await json(["open", first.id, `${fixture.origin}/lab`])).tab;
+  const secondTab = (await json(["open", second.id, `${fixture.origin}/lab`])).tab;
+  await chrome.evaluate((id) => window.kamapathy.dispatch({ type: "space:stop", id }), first.id);
+  assert.match(
+    (await cli(["snapshot", firstTab.id], undefined, { failure: true })).errors,
+    /409 space_ended: The person stopped the agent in this space/,
+  );
+  await observe(secondTab.id);
+  await cli(["space", "close", second.id]);
+  passed("Stop in one space leaves another working");
+  // Runs: a takeover stops the run for good; TypeScript; the deadline.
+  const runSpace = (await json(["space", "create", "Run review"])).space;
+  const runTab = (await json(["open", runSpace.id, `${fixture.origin}/lab`])).tab;
+  const ready = join(temporary, "run-ready");
+  const go = join(temporary, "run-go");
+  const takeoverScript = join(temporary, "takeover.mjs");
+  await writeFile(
+    takeoverScript,
+    [
+      'import { existsSync, writeFileSync } from "node:fs";',
+      `const page = (await (await space(${JSON.stringify(runSpace.id)})).tabs()).find((item) => item.id === ${JSON.stringify(runTab.id)});`,
+      'console.log("before the takeover");',
+      `writeFileSync(${JSON.stringify(ready)}, "");`,
+      `while (!existsSync(${JSON.stringify(go)})) await new Promise((done) => setTimeout(done, 50));`,
+      'await page.click("#bottom-button").catch(() => {});',
+      'console.log("after the takeover");',
+      "",
+    ].join("\n"),
+  );
+  const takenOver = cli(["run", takeoverScript], undefined, { failure: true });
+  await poll(async () => (await readFile(ready).then(() => true, () => false)), { timeoutMs: 20000, label: "the run reaching its wait" });
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:ownership", id, owner: "human" }),
+    runSpace.id,
+  );
+  await writeFile(go, "");
+  const stoppedRun = await takenOver;
+  assert.deepEqual([stoppedRun.code, stoppedRun.output, stoppedRun.errors], [
+    3,
+    "",
+    "Kamapathy stopped this run: the person has control of the space.\nThe person took over this space. Stop, and resume only when they ask you to.\nOutput from this run was withheld. Stop here, do not retry or work around it, and continue only when the person asks.\n",
+  ]);
+  await cli(["resume", runSpace.id]);
+  assert.ok(!(await observe(runTab.id)).text.includes("Bottom action completed"));
+  passed("a run the person takes over prints only the guidance and exits 3");
+  const typed = join(temporary, "task.mts");
+  await writeFile(typed, `const label: string = "typed"; const found = await space(${JSON.stringify(runSpace.id)}); console.log(\`\${label} \${found.name}\`);\n`);
+  assert.equal((await cli(["run", typed])).output, "typed Run review\n");
+  assert.equal(
+    (await cli(["run", "--ts", "-"], "const count: number = 2;\nconsole.log(`count ${count}`);\n")).output,
+    "count 2\n",
+  );
+  passed("TypeScript runs through run task.mts and run --ts -");
+  const held = await cli(
+    [
+      "run",
+      "--timeout",
+      "3000",
+      "-e",
+      `console.log("waiting for the page"); const page = (await (await space(${JSON.stringify(runSpace.id)})).tabs()).find((item) => item.id === ${JSON.stringify(runTab.id)}); await page.navigate(${JSON.stringify(`${fixture.origin}/hold`)}); await page.snapshot();`,
+    ],
+    undefined,
+    { failure: true },
+  );
+  assert.equal(held.code, 1);
+  assert.equal(held.output, "waiting for the page\n");
+  assert.match(held.errors, /^error: run_timeout: The script did not finish within 3000 ms\./);
+  await cli(["space", "close", runSpace.id]);
+  passed("run --timeout 3000 ends a script waiting on /hold with run_timeout after its earlier output");
+  // Section 11 in the real app: versions, help, diagnostics and field checks.
+  const versions = (await cli(["--version"])).output;
+  assert.match(versions, /API level 2/);
+  assert.match(versions, /Electron 44\./);
+  assert.match(versions, /Chromium 152\./);
+  passed("--version shows API level, Electron 44. and Chromium 152.");
+  const emptyProfile = join(temporary, "empty-profile");
+  const helped = await cli(["help", "snapshot"], undefined, {
+    env: { ...environment, KAMAPATHY_USER_DATA: emptyProfile, KAMAPATHY_NO_LAUNCH: "" },
+  });
+  assert.match(helped.output, /snapshot <tab-id>/);
+  assert.equal(await readFile(emptyProfile).then(() => true, () => false), false);
+  passed("help snapshot on an empty KAMAPATHY_USER_DATA profile exits 0 and starts nothing");
+  const broken = await cli(["run", "-e", "const a = 1;\nconst b = {,};\n"], undefined, { failure: true });
+  assert.match(broken.errors, /^error: SyntaxError: .+ \(-e:2:\d+\)\n  2 \| const b = \{,\};\n    \| +\^/);
+  passed("run -e with a broken second line prints (-e:2: and a caret");
+  const hinted = await cli(["run", "-e", "document.title"], undefined, { failure: true });
+  assert.match(
+    hinted.errors,
+    /hint: Scripts run in Node\.js on this computer, not in the page, so document does not exist here\./,
+  );
+  passed("run -e 'document.title' prints the page hint");
+  const waited = await cli(
+    ["run", "-e", `const page = (await (await space(${JSON.stringify(space.id)})).tabs())[0]; await page.wait({ state: "hidden" });`],
+    undefined,
+    { failure: true },
+  );
+  assert.match(waited.errors, /^error: invalid_option: page\.wait got unknown option "state"/);
+  passed('page.wait({ state: "hidden" }) fails with invalid_option');
+  const { resolveSocket, socketFetch } = await import(pathToFileURL(client).href);
+  const raw = await socketFetch(await resolveSocket(environment))("/spaces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Extra field", zz: 1 }),
+  });
+  assert.equal(raw.status, 400);
+  assert.deepEqual(
+    (({ code, field }) => ({ code, field }))((await raw.json()).error),
+    { code: "unknown_field", field: "zz" },
+  );
+  passed("a raw socket POST with an extra field gets 400 unknown_field");
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");

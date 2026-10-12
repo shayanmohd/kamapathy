@@ -1414,7 +1414,13 @@ try {
   assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 409);
   const resumed = await api(`/spaces/${task}/resume`, "POST", {});
   assert.equal(resumed.status, 200);
-  assert.deepEqual(await resumed.json(), { ok: true, owner: "agent" });
+  // The answer also says what changed while the person had control.
+  const resumedBody = await resumed.json();
+  assert.deepEqual(
+    [resumedBody.ok, resumedBody.owner, resumedBody.opened, resumedBody.closed],
+    [true, "agent", [], []],
+  );
+  assert.ok("active" in resumedBody, JSON.stringify(resumedBody));
   state = await page.evaluate(() => window.kamapathy.getState());
   assert.equal(state.spaces.find((space) => space.id === task).owner, "agent");
   assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 200);
@@ -1540,6 +1546,88 @@ try {
   checked(
     "manually created agent spaces require an explicit grant to the running API",
   );
+  // Section 2's controls in the window: Stop, Keep as personal space,
+  // grants from the popover and the request dialog.
+  const accessLine =
+    "Agents can read and act on this space's tabs, run their own scripts there while Page scripts is on, and use its sign-ins until you stop them.";
+  const agentSpace = async (name) =>
+    (await (await api("/spaces", "POST", { name })).json()).space.id;
+  const agentTab2 = async (spaceId) =>
+    (await (await api(`/spaces/${spaceId}/tabs`, "POST", { url: origin })).json()).tab.id;
+  const stopFirst = await agentSpace("Stop first");
+  const stopSecond = await agentSpace("Stop second");
+  const stoppedTab = await agentTab2(stopFirst);
+  const workingTab = await agentTab2(stopSecond);
+  await page.evaluate((id) => window.kamapathy.dispatch({ type: "space:activate", id }), stopFirst);
+  const firstBar = page.getByRole("region", { name: "Stop first" });
+  await firstBar.getByRole("button", { name: "Stop", exact: true }).click();
+  await firstBar.getByText("Stop the agent in this space?").waitFor();
+  await firstBar.getByRole("button", { name: "Stop", exact: true }).click();
+  await firstBar.getByText("Stop first · You stopped the agent").waitFor();
+  assert.equal((await api(`/tabs/${stoppedTab}/snapshot`)).status, 409);
+  assert.equal((await api(`/tabs/${workingTab}/snapshot`)).status, 200);
+  assert.ok((await page.evaluate(() => window.kamapathy.getState())).settings.automationEnabled);
+  checked("Stop asks once and stops only this space");
+  await firstBar.getByRole("button", { name: "Keep as personal space" }).click();
+  await waitForState(
+    page,
+    (state, id) => state.spaces.find((space) => space.id === id)?.kind === "personal",
+    stopFirst,
+  );
+  const kept = stopFirst;
+  await page.evaluate(() => window.kamapathy.dispatch({ type: "space:activate", id: "work" }));
+  await spacesButton.click();
+  await spacesMenu.getByRole("menuitem", { name: "Options for Work" }).click();
+  await spacesMenu.getByRole("menuitem", { name: "Let an agent use this space" }).click();
+  await spacesMenu.getByText(accessLine).waitFor();
+  await spacesMenu.getByRole("menuitem", { name: "Let an agent use this space" }).click();
+  await waitForState(
+    page,
+    (state) => state.spaces.find((space) => space.id === "work")?.access === "granted",
+  );
+  await page.keyboard.press("Escape");
+  const workBar = page.getByRole("region", { name: "Work" });
+  await workBar.getByRole("button", { name: "Stop", exact: true }).waitFor();
+  assert.equal((await api("/spaces/work/tabs")).status, 200);
+  await spacesButton.click();
+  await spacesMenu.getByRole("menuitem", { name: "Options for Work" }).click();
+  await spacesMenu.getByRole("menuitem", { name: "Stop agent access" }).click();
+  await waitForState(
+    page,
+    (state) => state.spaces.find((space) => space.id === "work")?.access === "ended",
+  );
+  await page.keyboard.press("Escape");
+  await poll(async () => (await workBar.count()) === 0, { label: "the Work bar closing" });
+  assert.equal((await api("/spaces/work/tabs")).status, 409);
+  checked("Let an agent use this space shows the bar until Stop");
+  const requesting = api("/space-requests", "POST", {
+    reason: "Compare prices for a trip",
+    name: "Personal",
+  });
+  // Awaited after the dialog; a failure surfaces there.
+  requesting.catch(() => {});
+  await waitForState(page, (state) => state.spaceRequests.length === 1);
+  assert.match(await spacesButton.getAttribute("aria-label"), /an agent needs you/);
+  await spacesButton.click();
+  await spacesMenu.getByRole("menuitem", { name: "An agent is asking for a space" }).click();
+  const requestDialog = page.getByRole("dialog", { name: "Let an agent use a space?" });
+  await requestDialog.waitFor();
+  assert.equal(
+    await requestDialog.locator(".agent-text").textContent(),
+    "Compare prices for a trip",
+  );
+  await requestDialog.getByText(accessLine).waitFor();
+  assert.ok(await requestDialog.getByRole("radio", { name: "Personal" }).isChecked());
+  await requestDialog.getByRole("button", { name: "Allow", exact: true }).click();
+  const granted2 = await requesting;
+  assert.equal(granted2.status, 200);
+  assert.equal((await granted2.json()).space.id, "personal");
+  await requestDialog.waitFor({ state: "detached" });
+  await page.evaluate(() => window.kamapathy.dispatch({ type: "space:stop", id: "personal" }));
+  checked(
+    "the request dialog shows the reason as agent text and the access line under it, and grants the chosen space",
+  );
+  await page.evaluate((id) => window.kamapathy.dispatch({ type: "space:activate", id }), manual);
   const manualBar = page.getByRole("region", { name: "Manual task" });
   await manualBar.getByRole("button", { name: "Stop", exact: true }).click();
   await manualBar.getByText("Stop the agent in this space?").waitFor();
@@ -1639,6 +1727,10 @@ try {
   checked(
     "restart restores personal state, excludes agent spaces, and records how to start Kamapathy without debugging ports",
   );
+  assert.ok(
+    state.spaces.some((space) => space.id === kept && space.kind === "personal"),
+  );
+  checked("a kept space survives a restart");
   const cookieCount = await app.evaluate(
     async ({ session }, { project, origin }) =>
       (

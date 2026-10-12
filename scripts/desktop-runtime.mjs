@@ -52,6 +52,9 @@ export async function prepareDesktopRuntime() {
     const { build, Platform } = await import("electron-builder");
     const source = join(staging, "source");
     await mkdir(source);
+    // electron-builder reads the project folder's package.json while it
+    // collects node modules; this runtime has none.
+    await writeFile(join(staging, "package.json"), JSON.stringify({ name: "kamapathy-runtime", private: true }));
     await writeFile(join(source, "package.json"), JSON.stringify({
       name: "kamapathy",
       productName: "Kamapathy",

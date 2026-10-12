@@ -37,6 +37,14 @@ const pages = {
     `<p id="ticks">Counting timer ticks</p>`,
     `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
   ),
+  "/opener": page(
+    `<button id="open">Open popup</button>`,
+    `document.getElementById('open').onclick=()=>window.open('/popup-timers');`,
+  ),
+  "/popup-timers": page(
+    `<p id="ticks">Counting timer ticks</p><button id="go" onclick="this.textContent='popup clicked'">Popup button</button>`,
+    `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
+  ),
   "/audio": page(
     `<button id="play">Play sound</button><p id="sound">Silent</p>`,
     `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
@@ -317,6 +325,38 @@ try {
   });
   assert.equal(played.status, 200, JSON.stringify(await played.response.json()));
   passed("an unwatched agent tab plays audio after a native click");
+
+  // A popup is adopted as a hidden tab no one watches. Without Kamapathy
+  // turning throttling off, its timers would crawl and it would take no
+  // input.
+  const opener = await open("/opener");
+  await poll(async () => (await controls(opener)).includes("Open popup"), {
+    timeoutMs: 10000,
+    label: "the popup opener",
+  });
+  const opened = await api(`/tabs/${opener}/click`, "POST", { selector: "#open" });
+  assert.equal(opened.status, 200, JSON.stringify(await opened.response.json()));
+  const popup = await poll(
+    async () =>
+      (await json(`/spaces/${space.id}/tabs`)).tabs.find((tab) =>
+        tab.url.endsWith("/popup-timers"),
+      ),
+    { timeoutMs: 10000, label: "the popup tab" },
+  );
+  assert.equal(popup.managed, true);
+  assert.equal(popup.openerId, opener);
+  const popupTicks = await poll(
+    async () => /ticks (\d+)/.exec((await snapshot(popup.id)).text),
+    { timeoutMs: 10000, label: "a second of timer ticks in the popup" },
+  );
+  assert.ok(
+    Number(popupTicks[1]) >= 30,
+    `Only ${popupTicks[1]} ticks of a 16 ms interval ran in the popup in one second`,
+  );
+  const popupClick = await api(`/tabs/${popup.id}/click`, "POST", { selector: "#go" });
+  assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
+  assert.ok((await controls(popup.id)).includes("popup clicked"));
+  passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
 
   console.log(`Native launch passed: ${checks.length} checks.`);
 } finally {
