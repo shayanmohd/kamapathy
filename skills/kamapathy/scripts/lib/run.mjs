@@ -286,7 +286,7 @@ export async function runScript(args, options = {}) {
           ? env.KAMAPATHY_RUN_SOURCE
           : source.value;
   delete env.KAMAPATHY_RUN_SOURCE;
-  await prepareWorkspace(env, parsed.envFiles, {
+  const { applied } = await prepareWorkspace(env, parsed.envFiles, {
     stderr: options.stderr || process.stderr,
   });
   const timeoutMs =
@@ -314,6 +314,7 @@ export async function runScript(args, options = {}) {
     health: options.health,
     lazy: true,
     run: true,
+    envFileNames: applied,
   });
   for (const hook of options.endHooks ?? []) session.onRunEnd(hook);
   const client = await connect({ session, lazy: true });

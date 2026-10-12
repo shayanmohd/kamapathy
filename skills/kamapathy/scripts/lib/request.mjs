@@ -71,9 +71,10 @@ export class Session {
   #controller = new AbortController();
   /**
    * @param {{ env?: NodeJS.ProcessEnv, fetch?: Function, connect?: object,
-   * health?: object, lazy?: boolean, run?: boolean }} [options] `fetch`
-   * replaces the socket, and with it discovery: the app is then the
-   * `health` body given, or level 1.
+   * health?: object, lazy?: boolean, run?: boolean, envFileNames?: string[] }}
+   * [options] `fetch` replaces the socket, and with it discovery: the app is
+   * then the `health` body given, or level 1. `envFileNames` are left out of
+   * the environment Kamapathy starts with.
    */
   constructor({
     env = process.env,
@@ -82,8 +83,10 @@ export class Session {
     health,
     lazy = false,
     run = false,
+    envFileNames = [],
   } = {}) {
     this.env = env;
+    this.envFileNames = envFileNames;
     this.lazy = lazy;
     this.run = run;
     this.connection = null;
@@ -166,6 +169,7 @@ export class Session {
     const { socket, instance, health } = await discover(this.env, {
       ...this.discovery,
       allowLaunch,
+      launchWithout: this.envFileNames,
     });
     this.connection = { socket, instance };
     this.health = health;

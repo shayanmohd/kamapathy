@@ -390,7 +390,7 @@ export const PARSERS = {
         throw new Error(
           `Unknown repl option: ${args[index]}. Run help for usage.`,
         );
-    await prepareWorkspace(options.env, envFiles, {
+    const { applied } = await prepareWorkspace(options.env, envFiles, {
       stderr: options.stderr || process.stderr,
     });
     const session = new Session({
@@ -399,6 +399,7 @@ export const PARSERS = {
       connect: options.connect,
       health: options.health,
       lazy: true,
+      envFileNames: applied,
     });
     return startRepl({
       input,

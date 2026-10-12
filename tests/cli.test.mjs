@@ -2107,6 +2107,65 @@ describe("scripted sessions", () => {
     }
   });
 
+  it("env files cannot set the variables that locate the profile or the installed app", async () => {
+    const home = await mkdtemp(join(tmpdir(), "kamapathy-cli-home-"));
+    const runEnv = { HOME: home, USERPROFILE: home, KAMAPATHY_NO_LAUNCH: "1" };
+    const { userData } = agentPaths(runEnv);
+    const workspace = join(userData, "workspace");
+    await mkdir(workspace, { recursive: true, mode: 0o700 });
+    const dotEnv = join(workspace, ".env");
+    // util.parseEnv returns names sorted, so the lines report them in that order.
+    const names = ["APPDATA", "HOME", "LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME"];
+    await writeFile(dotEnv, names.map((name) => `${name}=${join(home, "elsewhere")}\n`).join(""), { mode: 0o600 });
+    const stderr = sink();
+    expect(await runCli(["run", "-e", "1"], { env: runEnv, fetch: vi.fn(), stdout: sink(), stderr })).toBe(0);
+    expect(runEnv).toEqual({ HOME: home, USERPROFILE: home, KAMAPATHY_NO_LAUNCH: "1", KAMAPATHY_WORKSPACE: workspace });
+    expect(agentPaths(runEnv).userData).toBe(userData);
+    expect(stderr.text()).toBe(
+      names.map((name) => `Kamapathy: ${dotEnv} cannot set ${name}. Set it in the environment instead.\n`).join(""),
+    );
+  });
+
+  it("run and repl start Kamapathy without the variables their env files set", async () => {
+    for (const command of ["run", "repl"]) {
+      const { userData, paths } = await profile();
+      const workspace = join(userData, "workspace");
+      await mkdir(workspace, { mode: 0o700 });
+      await writeFile(join(workspace, ".env"), "SCRIPT_SECRET=s3cret\nHTTPS_PROXY=http://127.0.0.1:9\n", { mode: 0o600 });
+      const runEnv = { KAMAPATHY_USER_DATA: userData, FROM_SHELL: "kept" };
+      const launch = vi.fn(() =>
+        fakeKamapathy(paths, {
+          handler: (request, response) => {
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify(request.url === "/health" ? { status: "ok", version: "test" } : { spaces: [] }));
+          },
+        }),
+      );
+      const connect = { launch, intervalMs: 10, timeoutMs: 5000 };
+      if (command === "run")
+        expect(await runCli(["run", "-e", "await spaces()"], { env: runEnv, connect, stdout: sink(), stderr: sink() })).toBe(0);
+      else {
+        const input = new PassThrough();
+        const output = new PassThrough();
+        let text = "";
+        output.on("data", (chunk) => (text += chunk));
+        const ended = runCli(["repl"], { env: runEnv, connect, stdin: input, stdout: output, terminal: true });
+        await expect.poll(() => text).toContain("kamapathy> ");
+        input.write("(await spaces()).length\n");
+        await expect.poll(() => text).toContain("0");
+        input.write(".exit\n");
+        expect(await ended).toBe(0);
+      }
+      expect(runEnv, command).toMatchObject({ SCRIPT_SECRET: "s3cret", HTTPS_PROXY: "http://127.0.0.1:9" });
+      expect(launch, command).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1], command).toEqual({
+        KAMAPATHY_USER_DATA: userData,
+        FROM_SHELL: "kept",
+        KAMAPATHY_WORKSPACE: workspace,
+      });
+    }
+  }, 20000);
+
   it("workspace prints and creates the folder with mode 0700, and --json prints {\"workspace\": path}", async () => {
     const { userData } = await profile();
     const fetch = vi.fn();

@@ -7,7 +7,17 @@ import { join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { agentPaths } from "./transport.mjs";
 
-const PROTECTED = ["KAMAPATHY_USER_DATA", "KAMAPATHY_WORKSPACE"];
+// The profile, the workspace and the app the client starts are found from
+// these, so they come only from the environment.
+const PROTECTED = [
+  "KAMAPATHY_USER_DATA",
+  "KAMAPATHY_WORKSPACE",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+];
 
 // KAMAPATHY_WORKSPACE resolved against the current folder, else the
 // profile's own workspace.
@@ -72,8 +82,8 @@ async function readEnvFile(path) {
 }
 
 // Loads the files in order into env. Names in startNames never change, a
-// later file overrides an earlier one, and the profile and workspace
-// variables come only from the environment. Returns names, never values.
+// later file overrides an earlier one, and PROTECTED names come only from
+// the environment. Returns names, never values.
 export async function loadEnvFiles(
   paths,
   env,

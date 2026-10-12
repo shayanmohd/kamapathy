@@ -389,7 +389,13 @@ async function find(paths, env, options) {
       "not_running",
       "Kamapathy is not running. Start Kamapathy, then retry.",
     );
-  await (options.launch || launchKamapathy)(paths, env);
+  // Kamapathy never inherits the variables a run's env files set.
+  const launchEnv = Object.fromEntries(
+    Object.entries(env).filter(
+      ([name]) => !options.launchWithout?.includes(name),
+    ),
+  );
+  await (options.launch || launchKamapathy)(paths, launchEnv);
   const timeout = options.timeoutMs ?? 30000;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
