@@ -21,7 +21,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" />
   <link rel="stylesheet" href="/styles.css?v=c3848aa70f" />
   <script src="/theme.js?v=9975d340e2"></script>
-  <script src="/app.js?v=4d70243af7" defer></script>
+  <script src="/app.js?v=236eebdb7c" defer></script>
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" hidden aria-hidden="true">
@@ -142,7 +142,8 @@
               <span class="agent-status"><b data-agent-name></b> · <span data-agent-status></span></span>
               <button type="button" data-action="take-over">Take over</button>
               <button type="button" data-action="continue">Let agent continue</button>
-              <button type="button" data-action="stop">Stop all agents</button>
+              <button type="button" data-action="stop">Stop</button>
+              <button type="button" data-action="stop-all" hidden>Stop all agents</button>
             </div>
           </div>
           <svg class="cursor" data-cursor viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8-6 1.6L10 19z" /></svg>
@@ -174,7 +175,7 @@
       <article class="feature">
         <svg><use href="#i-robot" /></svg>
         <h3>Agents in plain sight</h3>
-        <p>A green ring and a small bar show when an agent is working. Take over pauses it, Let agent continue hands it back.</p>
+        <p>A green ring and a small bar show when an agent is working. Take over pauses it, Let agent continue hands it back, Stop ends its work in that space.</p>
       </article>
       <article class="feature">
         <svg><use href="#i-key" /></svg>
@@ -238,10 +239,10 @@
       <h2>Your agent drives. You keep the keys.</h2>
       <p>Kamapathy gives coding and research agents a real browser: yours, with your sign-ins, in spaces you can watch. Every step is visible, and the keys stay with you.</p>
       <ul class="points">
-        <li><svg><use href="#i-robot" /></svg><div><b>A space of its own.</b> Every agent works in a space you can watch, and never sees your tabs.</div></li>
+        <li><svg><use href="#i-robot" /></svg><div><b>A space of its own.</b> Every agent works in a space you can watch, and never sees your tabs unless you let it use a space.</div></li>
         <li><svg><use href="#i-key" /></svg><div><b>Your sign-ins, unless you isolate.</b> Agents use the sites you're signed in to, so they can act for you. Isolate one space, or all of them in Settings.</div></li>
         <li><svg><use href="#i-hand-palm" /></svg><div><b>Take over anytime.</b> One click pauses the agent. Let agent continue hands the space back, and an agent can ask for it back with resume.</div></li>
-        <li><svg><use href="#i-terminal" /></svg><div><b>One script, or one command at a time.</b> <code>node kamapathy.mjs run book.mjs</code> carries a whole task. The CLI does one step at a time when that's simpler.</div></li>
+        <li><svg><use href="#i-terminal" /></svg><div><b>One script, or one command at a time.</b> <code>node kamapathy.mjs run book.mjs</code> carries a whole task in JavaScript or TypeScript. The CLI does one step at a time when that's simpler.</div></li>
         <li><svg><use href="#i-eye" /></svg><div><b>Sees inside frames and shadow roots.</b> Snapshots read open shadow roots and same-origin frames. Frames from other origins are listed, so the agent asks you instead of guessing.</div></li>
         <li><svg><use href="#i-shield-check" /></svg><div><b>Local and switchable.</b> Agents connect over a private socket on your computer. One switch in Settings turns them all off.</div></li>
       </ul>
@@ -460,7 +461,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>Can an agent see my own tabs or accounts?</summary>
-        <p>Agents never see your tabs. They do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
+        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
       </details>
       <details>
         <summary>Can I import from Chrome?</summary>

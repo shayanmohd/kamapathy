@@ -51,7 +51,7 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
     </td>
     <td width="33%" valign="top">
       <h3>Agents in plain sight</h3>
-      A green ring and a small bar show when an agent is working. <b>Take over</b> pauses it, <b>Let agent continue</b> hands it back.
+      A green ring and a small bar show when an agent is working. <b>Take over</b> pauses it, <b>Let agent continue</b> hands it back, <b>Stop</b> ends its work in that space.
     </td>
     <td width="33%" valign="top">
       <h3>Your sign-ins, on purpose</h3>
@@ -196,7 +196,8 @@ sequenceDiagram
     K-->>Y: You're in control
     Y->>K: pay, then Let agent continue
     A->>K: resume, snapshot, confirm the booking
-    Note over Y,K: Take over or Stop all agents at any time
+    A->>K: finish, keeping the confirmation page for you
+    Note over Y,K: Take over or Stop at any time
 ```
 
 Install the skill in whichever way suits you:
@@ -229,20 +230,21 @@ await page.batch([
   { type: "wait", text: "Reserved", timeoutMs: 8000 },
 ]);
 console.log(await page.text());
+await dinner.finish({ keep: [page] });
 ```
 
 ```sh
 node kamapathy.mjs run book.mjs
 ```
 
-The script runs on your computer with `createSpace`, `space` and `spaces` as globals. A space has `open`, `tabs`, `handoff`, `resume` and `close`; a page has `snapshot`, `text`, `click`, `fill`, `press`, `scroll`, `drag`, `wait`, `batch`, `upload`, `screenshot` and `navigate`. Each call sends one documented request over the local socket, so no JavaScript from the script ever reaches a web page. The same work, one command at a time:
+The script runs on your computer, in JavaScript or TypeScript, with `createSpace`, `openSpace`, `requestSpace`, `space` and `spaces` as globals. `openSpace` finds a space again by name in a later run, and `requestSpace` asks you to let the agent use one of your own spaces. Pages have labels such as `p2` that are never reused in their space, so a later script picks up with `space.page("p2")`. A space has `open`, `newPage`, `page`, `tabs`, `adopt`, `handoff`, `resume` and `finish`, which closes the agent's other pages and leaves the space to you; a page has `snapshot`, `text`, `click`, `fill`, `press`, `scroll`, `drag`, `wait`, `batch`, `upload`, `screenshot` and `navigate`. Each call sends one documented request over the local socket, so no JavaScript from the script ever reaches a web page. If you take over or stop the agent, its run stops and the agent sees only a short note saying so. `node kamapathy.mjs help <command>` explains a command, `node kamapathy.mjs --version` shows client, app and engine versions, and `help()` in a script lists the whole API. The same work, one command at a time:
 
 ```console
 $ node kamapathy.mjs space create "Dinner booking"
 space 8c1f2e04 "Dinner booking" agent shared
 $ node kamapathy.mjs open 8c1f2e04 https://table.example/reserve
 tab 51a9d7c3 https://table.example/reserve
-$ node kamapathy.mjs snapshot 51a9d7c3
+$ node kamapathy.mjs snapshot 8c1f2e04:p2
 Reserve a table
 https://table.example/reserve
 
@@ -256,14 +258,39 @@ Controls:
 <summary><strong>What agents can and can't do</strong></summary>
 <br />
 
-- Agents reach only the spaces they create, or ones you hand them. Your own tabs stay out of reach.
-- Agent spaces use your sign-ins unless you isolate them. **Isolate agent spaces** in Settings > Agents gives every new agent space a temporary session of its own, and an agent can ask for one isolated space with `space create "Name" --isolated`. Either way, agent spaces disappear when you quit, deny downloads and never see a permission prompt.
+- Agents reach only the spaces they create and the ones you let them use: choose **Let an agent use this space** in a space's options, or allow an agent's request for one. Tabs in your other spaces stay out of reach, and in a space you let an agent use, each tab you had there stays yours until the agent adopts it.
+- Agent spaces use your sign-ins unless you isolate them. **Isolate agent spaces** in Settings > Agents gives every new agent space a temporary session of its own, and an agent can ask for one isolated space with `space create "Name" --isolated`. Either way, agent spaces deny downloads and never see a permission prompt, and they disappear when you quit unless you keep one as a personal space after its agent is done.
 - Snapshots are compact: visible text plus controls with short refs such as `@e12`, their state and current values. Password, one-time code and card fields read as `(value hidden)`. Snapshots read open shadow roots and same-origin frames, nested ones included, and list cross-origin frames without reading them.
 - Agents can click, fill, select files, press keys, drag, scroll, wait for changes and run several steps in one batch or one script.
 - Cross-origin frames, canvas editors and JavaScript dialogs still need a handoff: the agent asks you to continue there.
-- The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. Turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
+- The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. **Stop** in the agent bar ends the agent's access to that one space, and turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
 
 The [agent guide](docs/automation.md) covers every command and its limits, and the [security model](docs/SECURITY.md) explains the trust boundary.
+
+</details>
+
+## What changed for scripts and agents
+
+Since Kamapathy 0.2.0, a script or agent written for it can notice these changes. The [agent guide](docs/automation.md) has the details.
+
+<details>
+<summary><strong>The full list</strong></summary>
+<br />
+
+- Every command except `help` and `--version` needs Node.js 22.13 or later.
+- Tabs carry labels such as `p2`, never reused in their space, with `openedBy`, `openerId`, `managed` and `active`; spaces carry `kind`, `createdBy` and `pageBudget`. `tabs` prints one tab per line as its label, ID, origin and flags, then its URL and title.
+- Page commands refuse a tab the agent did not open or adopt with `409 tab_unmanaged`. A space lets the agent manage 20 pages by default, the old tab limit, and `open` past its page budget answers `409 page_budget`.
+- Links, forms and `window.open` that target a new window open real popups in the opener's space, and `window.open` returns a handle. `data:` popups are refused, and a page that closes itself closes its tab.
+- `human_control` carries `spaceId`, `reason`, `since` and one fixed message per reason, which no longer names `resume <id>`. `resume` also returns the page the person left and the pages opened and closed meanwhile.
+- The person can stop the agent in one space, and an agent can finish a space; requests there then answer `409 space_ended`. `space close` refuses a space where the person opened tabs with `409 space_protected`.
+- `stale_ref` and `element_obscured` answer 409 instead of 422, and `invalid_target` and `invalid_files` answer 400 instead of 422. A request authorized again after agent access was turned off answers `503 automation_stopped` instead of 404, and an unknown route answers `404 route_not_found` naming the route.
+- Errors carry `retryable: true` when the same call can be sent again and `dispatched: true` when the action reached the page, and single commands print a line saying which after their error. `busy` can carry `retryAfterMs`, and `/health` adds `apiLevel` and the engine `versions`.
+- The server refuses body and batch fields a route does not define with `400 unknown_field`. The client refuses unknown or invalid options and arguments before sending, and calls the running Kamapathy is too old for with `app_outdated`.
+- `run` holds a script's output until it ends, up to 4 MiB, and connects only at the script's first call. After a takeover, a handoff, your Stop or agent access going off, it prints only a short note and exits with status 3.
+- A run stops after 300000 ms unless `--timeout` or `KAMAPATHY_RUN_TIMEOUT_MS` allows longer, and exits with 128 plus the signal number after a signal. Standard input for `run -`, `fill`, `wait` and `batch` must end within 30 seconds.
+- A failed run prints where in the script it failed, a caret under a syntax error, whether the call can be retried and up to two hints.
+- `run` and `repl` load the workspace's `.env` and each `--env-file`, never changing a variable that is already set.
+- `<command> --help` and `-h` print that command's help and run nothing, and `--` ends option parsing.
 
 </details>
 

@@ -23,11 +23,15 @@ The shell renderer owns layout, keyboard interactions, panels, and the command p
 
 The main process owns the authoritative native state and tab lifecycle. Each remote tab is a separate `WebContentsView`. Remote pages use sandboxing, context isolation, and disabled Node integration. They do not receive the browser shell preload. See [Electron's WebContentsView documentation](https://www.electronjs.org/docs/latest/api/web-contents-view) for the rendering primitive.
 
+Popups are adopted rather than reloaded. When a page calls `window.open` or follows a link or form that targets a new window, the window open handler allows it with `outlivesOpener`, so the popup survives its opener, and a `createWindow` callback that wraps the child contents Chromium made in a `WebContentsView` and registers it as a tab in the opener's space. The popup keeps its opener, its name and any form body, and it shares the opener's session. Popup web preferences match tab views: both come from the same builder, so popups get the same sandboxing, isolation and throttling as tabs. Chromium makes no child contents for a click with a modifier key, so the controller creates that tab's view itself and loads the URL with its referrer and any URL-encoded or multipart form body. A popup's contents being destroyed, as after `window.close()`, closes its tab.
+
 The renderer reports the rectangle reserved for web content. The main process positions the active native view in that rectangle, or positions two views for split view. Native views draw above the shell, so before a popover, grid or dialog covers the page the renderer asks the main process for still captures of the visible views, draws them in their place, and only then asks it to hide the views. Closing shows the views again before the captures are removed, so the page area is never blank. If a capture fails or takes longer than 300 ms, the page area is shown empty instead.
 
 ## Agent engine
 
-The agent server lives in `electron/agent/`. `server.ts` listens on the private socket and checks each request's origin and authority. Routes in `routes/` declare a lane and a time budget, and `scheduler.ts` runs one request at a time per space and up to six spaces at once, letting a wait step aside between checks. Each tab an agent manages gets one `TabSession` (`session/tab-session.ts`), the only code that uses Electron's debugger: it follows the tab's frames, loads, network activity and dialogs, sends fixed trusted input, and runs Kamapathy's fixed page functions in an isolated world in each web frame. `session/tab-sessions.ts` attaches a session when a managed agent tab gets its page, before the page loads, and releases it on takeover, when the space closes and when agent access is turned off.
+The agent server lives in `electron/agent/`. `server.ts` listens on the private socket and checks each request's origin and authority. Routes in `routes/` declare a lane and a time budget, and `scheduler.ts` runs one request at a time per space and up to six spaces at once, letting a wait step aside between checks. Each tab an agent manages gets one `TabSession` (`session/tab-session.ts`), the only code that uses Electron's debugger: it follows the tab's frames, loads, network activity and dialogs, sends fixed trusted input, and runs Kamapathy's fixed page functions in an isolated world in each web frame. `session/tab-sessions.ts` attaches a session when a managed agent tab gets its page, before the page loads, and releases it on takeover, when the tab stops being managed, when the agent's access to the space ends, when the space closes and when agent access is turned off.
+
+`authority.ts` decides for every request whether the agent may use a space and a page: agent access must be on, the space must be one this server created or the person granted and whose access has not ended, the agent must have control for most routes, and page routes need a page the agent manages. `tab-registry.ts`, held by the controller, gives tabs their labels, origins and managed flags, counts each space's page budget, keeps the last 100 closed labels and records what changed while the person had control. `validate.ts` checks each body against the schema in `skills/kamapathy/scripts/schema/`, which electron-vite bundles into the main process, before the request waits for its lane. The routes in `routes/spaces.ts`, `routes/tabs.ts` and `routes/space-requests.ts` run on that scheduler, except waits for control and requests for a space, which wait outside the lanes. A personal space is granted only from the person's own click in the shell, through validated IPC, never from the API.
 
 ## State and sessions
 
@@ -35,9 +39,11 @@ The agent server lives in `electron/agent/`. `server.ts` listens on the private 
 
 Spaces share one persistent Electron session partition by default, `persist:space-personal`, so cookies and sign-ins made in any shared space are available in every other shared space and survive restart. Each space records its choice in `signIns`. A personal space with separate sign-ins uses `persist:space-<id>`, persistent and its own. An agent space with separate sign-ins uses a temporary in-memory partition, `agent-<run>-<id>`, that disappears when Kamapathy quits; an agent space is separate when the Isolate agent spaces setting is on or when the API asked for an isolated space. Session handlers for permissions and downloads are attached once per partition and resolve the space from the page that asked, so agent spaces deny both on the shared session too, and permission grants are keyed by space, origin, and permission. A personal space can switch between shared and separate later; its tabs reload in the new partition, and a separate partition it leaves behind is cleared. Deleting a space clears only a partition that space alone used. Agent spaces are excluded from session restoration. This is session separation inside one desktop application, not operating system user isolation.
 
+Agent state lives only while Kamapathy runs. Labels, origins, page budgets, grants, ended states and requests for a space are runtime fields, and `electron/persistence.ts` writes only the saved fields of personal spaces and their tabs, so a grant never outlives the run. An agent space the person keeps after its agent finished or was stopped becomes a personal space and is saved and restored like any other; one with separate sign-ins moves from its temporary partition to `persist:space-<id>`, and its pages reload there.
+
 The application persists personal spaces and tabs, bookmarks, personal browsing history, and settings in `browser-state.json` in its Electron user data directory. `KAMAPATHY_USER_DATA` can override that directory for testing. Writes use a temporary file and rename. Restored state is validated before use. Downloads and the live activity feed are runtime state. Agent visits are excluded from the saved history. Bookmarks and history imported from another browser go through `electron/import.ts`, a Node module that reads Chromium, Firefox, and Safari files, and merge into the same state deduplicated by URL and capped at 1000 each; `shared/topsites.ts` ranks that history for the welcome dialog. Chromium maintains page storage separately from the JSON application state. See [Electron's session documentation](https://www.electronjs.org/docs/latest/api/session) for partition behavior.
 
-Agent spaces start on the shared session unless isolated, so an agent can use the sites the person has signed in to, in a space the person can see. API operations are restricted to spaces created through the current server instance or explicitly granted by the user in Kamapathy. Ownership controls whether the automation API may operate a space. Taking control changes ownership to the human and prevents subsequent agent reads and actions on that space until the human returns control or the agent takes it back through the API's resume route. Turning agent access off stops all automation. The [automation reference](automation.md) documents the API boundary in detail.
+Agent spaces start on the shared session unless isolated, so an agent can use the sites the person has signed in to, in a space the person can see. API operations are restricted to spaces created through the current server instance or explicitly granted by the user in Kamapathy, including personal spaces, which follow agent rules while granted. Ownership controls whether the automation API may operate a space. Taking control changes ownership to the human and prevents subsequent agent reads and actions on that space until the human returns control or the agent takes it back through the API's resume route. The person's Stop ends the agent's access to one space, and turning agent access off stops all automation. The [automation reference](automation.md) documents the API boundary in detail.
 
 ## Web preview
 
@@ -57,19 +63,22 @@ Signing and publishing are disabled in the development configuration. macOS also
 
 ## Project map
 
-| Path                 | Responsibility                                                           |
-| -------------------- | ------------------------------------------------------------------------ |
-| `src/`               | Shared browser UI, dialogs, command palette, styling, web preview bridge |
-| `shared/`            | Data contracts, initial state, address handling                          |
-| `shared/topsites.ts` | Ranks history and bookmarks into the welcome dialog's top sites          |
-| `electron/`          | Native browser, preload, persistence                                     |
-| `electron/agent/`    | Agent socket server, per-space lanes, routes and tab sessions            |
-| `electron/import.ts` | Reads bookmarks and history from other browsers, without Electron        |
-| `scripts/`           | Native smoke test, copy validation, development helpers                  |
-| `tests/`             | Behavior and boundary tests                                              |
-| `build/`             | Native application icons                                                 |
-| `.github/workflows/` | Native verification and downloadable build artifacts                     |
-| `docs/`              | Architecture, automation, security model, screenshots                    |
+| Path                                 | Responsibility                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------ |
+| `src/`                               | Shared browser UI, dialogs, command palette, styling, web preview bridge |
+| `shared/`                            | Data contracts, initial state, address handling                          |
+| `shared/topsites.ts`                 | Ranks history and bookmarks into the welcome dialog's top sites          |
+| `electron/`                          | Native browser, preload, persistence                                     |
+| `electron/agent/`                    | Agent socket server, per-space lanes, routes and tab sessions            |
+| `electron/import.ts`                 | Reads bookmarks and history from other browsers, without Electron        |
+| `skills/kamapathy/`                  | Agent skill: CLI, scripting client, run and repl                         |
+| `skills/kamapathy/scripts/schema/`   | One schema for client checks, server checks, help and the API reference  |
+| `scripts/`                           | Native smoke test, copy validation, development helpers                  |
+| `scripts/generate-api-reference.mjs` | Writes the API reference and the automation guide's generated tables     |
+| `tests/`                             | Behavior and boundary tests                                              |
+| `build/`                             | Native application icons                                                 |
+| `.github/workflows/`                 | Native verification and downloadable build artifacts                     |
+| `docs/`                              | Architecture, automation, security model, screenshots                    |
 
 ## Current tradeoffs
 

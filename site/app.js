@@ -235,9 +235,9 @@ function renderChrome() {
   const inAgent = viewingAgent() && agent;
   mock.classList.toggle("working", agentState === "browsing");
   mock.classList.toggle("needs-you", agentState === "needs-you" && !viewingAgent());
-  mock.classList.toggle("agent-view", Boolean(inAgent) && agentState !== "off");
+  mock.classList.toggle("agent-view", Boolean(inAgent) && !["off", "stopped"].includes(agentState));
   mock.classList.toggle("paused", agentState === "in-control" || agentState === "needs-you");
-  mock.classList.toggle("idle", agentState === "idle" || agentState === "off");
+  mock.classList.toggle("idle", ["idle", "off", "stopped"].includes(agentState));
   $(".space-button").style.setProperty("--space-color", space().color);
   $(".space-button").setAttribute(
     "aria-label",
@@ -259,17 +259,19 @@ function renderChrome() {
     idle: "Agent is idle",
     "in-control": "You're in control",
     "needs-you": "You're in control",
+    stopped: "You stopped the agent",
     off: "Agent access is off",
   }[agentState];
   $("[data-agent-status]").textContent = confirmingStop
-    ? "Stop every agent and turn off agent access?"
+    ? "Stop the agent in this space?"
     : status;
-  const [takeOver, resume, stop] = $$("button", bar);
+  const [takeOver, resume, stop, stopAll] = $$("button", bar);
   takeOver.hidden = !confirmingStop && !["browsing", "idle"].includes(agentState);
   takeOver.textContent = confirmingStop ? "Cancel" : "Take over";
   resume.hidden = confirmingStop || !["in-control", "needs-you"].includes(agentState);
-  stop.hidden = agentState === "off";
+  stop.hidden = ["off", "stopped"].includes(agentState);
   stop.classList.toggle("confirm", confirmingStop);
+  stopAll.hidden = !confirmingStop;
 }
 
 function render() {
@@ -328,6 +330,7 @@ function showSpaces() {
     idle: "Idle",
     "in-control": "You're in control",
     "needs-you": "Needs you",
+    stopped: "You stopped the agent",
     off: "Off",
   };
   layer.innerHTML = `
@@ -683,12 +686,21 @@ function letContinue() {
   drive();
 }
 
-function stopAll() {
+function stopAgent() {
   if (!confirmingStop) {
     confirmingStop = true;
     renderChrome();
     return;
   }
+  confirmingStop = false;
+  agentRun += 1;
+  agent.state = "stopped";
+  cursor.classList.remove("on");
+  renderChrome();
+  say("You stopped the agent in this space. Its tabs stay open, and only you can let an agent use it again. Press Watch an agent book dinner to start over.");
+}
+
+function stopAll() {
   confirmingStop = false;
   agentRun += 1;
   agent.state = "off";
@@ -737,7 +749,7 @@ mock.addEventListener("click", (event) => {
     bookingTab().signedIn = true;
     render();
     say(
-      agent?.state === "off"
+      ["off", "stopped"].includes(agent?.state)
         ? "Signed in."
         : "Signed in. The agent was paused while you typed, and password fields stay hidden in its snapshots. Press Let agent continue.",
     );
@@ -754,7 +766,8 @@ mock.addEventListener("click", (event) => {
         renderChrome();
       } else takeOver();
     } else if (action === "continue") letContinue();
-    else if (action === "stop") stopAll();
+    else if (action === "stop") stopAgent();
+    else if (action === "stop-all") stopAll();
   }
 });
 
