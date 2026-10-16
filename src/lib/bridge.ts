@@ -2,12 +2,21 @@ import type {
   BrowserAction,
   BrowserState,
   KamapathyBridge,
+  PasswordResult,
 } from "../../shared/types";
 import { HOME_URL, id, initialState, newTab } from "../../shared/state";
 import { restoreState } from "../../shared/restore";
 import { hostname, normalizeUrl } from "../../shared/url";
 
 const STORAGE_KEY = "kamapathy-preview-v1";
+// The web preview has no password vault, so every call gets this answer.
+const unavailable = async (): Promise<PasswordResult<never>> => ({
+  error: {
+    code: "vault_unavailable",
+    reason: "web",
+    message: "Saved passwords are available in the desktop app.",
+  },
+});
 export function createPreviewBridge(): KamapathyBridge {
   let state = initialState();
   try {
@@ -361,6 +370,23 @@ export function createPreviewBridge(): KamapathyBridge {
     hidePages: () => {},
     unfreeze: async () => {},
     thumbnails: async () => ({}),
+    passwords: {
+      status: unavailable,
+      list: unavailable,
+      reveal: unavailable,
+      copy: unavailable,
+      add: unavailable,
+      update: unavailable,
+      remove: unavailable,
+      importFile: unavailable,
+      trashFile: unavailable,
+      exportFile: unavailable,
+      answer: unavailable,
+      retry: unavailable,
+      startOver: unavailable,
+      neverSaved: unavailable,
+      removeNeverSaved: unavailable,
+    },
     windowControl: () => {},
     importSources: async () => [],
     importBrowserData: async () => {

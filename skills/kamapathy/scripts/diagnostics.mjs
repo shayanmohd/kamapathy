@@ -44,6 +44,8 @@ const RETRY =
   "Kamapathy: Nothing reached the page, so the same command can be retried.";
 const INSPECT =
   "Kamapathy: The action reached the page before it failed. Inspect the page before retrying.";
+export const PASSWORD_HINT =
+  "hint: Saved passwords are for the person only. Hand the space to them with handoff() and say what to sign in to.";
 const WINDOW = 200;
 
 const callName = (entry) => entry.signature.split("(")[0];
@@ -96,7 +98,7 @@ function scriptFrame(error, paths) {
 
 /**
  * Hints for an error, at most two: page globals, page functions, then
- * dialogs or names.
+ * dialogs, or saved passwords followed by names.
  * @param {unknown} error
  * @param {{ client?: { app?: { version?: string, apiLevel: number } | null }, entries?: object[] }} [options]
  * @returns {string[]}
@@ -136,6 +138,13 @@ export function hintsFor(error, { client, entries = ENTRIES } = {}) {
       'hint: Kamapathy answers page dialogs as they open. Call page.setDialogPolicy({ accept: true }) before the action, then read the answer in its dialog field, page.dialogs() or page.waitForEvent("dialog").',
     );
   else {
+    // The password hint also covers bare calls, which get no names hint.
+    const called =
+      (error?.name === "TypeError" &&
+        /^(?:.+\.)?([\w$]+) is not a function$/.exec(message)?.[1]) ||
+      undefinedName;
+    if (called && /password|credential|autofill/i.test(called))
+      hints.push(PASSWORD_HINT);
     const name =
       notFunction?.[2] ??
       (undefinedName && !PAGE_GLOBALS.includes(undefinedName)

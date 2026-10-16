@@ -22,6 +22,10 @@ export function validSettings(value: unknown, base: Settings): Settings {
       typeof settings.showBookmarksBar === "boolean"
         ? settings.showBookmarksBar
         : base.showBookmarksBar,
+    offerToSavePasswords:
+      typeof settings.offerToSavePasswords === "boolean"
+        ? settings.offerToSavePasswords
+        : base.offerToSavePasswords,
     automationEnabled:
       typeof settings.automationEnabled === "boolean"
         ? settings.automationEnabled

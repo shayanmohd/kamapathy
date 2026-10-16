@@ -358,6 +358,57 @@ describe("desktop session persistence", () => {
     expect(readState(path, "darwin", "0.2.0").spaceRequests).toEqual([]);
   });
 
+  it("the setting defaults on and prompts are never written", () => {
+    const path = statePath();
+    expect(initialState().settings.offerToSavePasswords).toBe(true);
+    // A file saved before the setting existed.
+    const original = initialState("darwin");
+    const { offerToSavePasswords: _, ...older } = original.settings;
+    writeFileSync(path, JSON.stringify({ ...original, settings: older }));
+    expect(
+      readState(path, "darwin", "0.2.0").settings.offerToSavePasswords,
+    ).toBe(true);
+    original.settings.offerToSavePasswords = false;
+    writeState(path, original);
+    expect(
+      readState(path, "darwin", "0.2.0").settings.offerToSavePasswords,
+    ).toBe(false);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...original,
+        settings: { ...original.settings, offerToSavePasswords: "no" },
+      }),
+    );
+    expect(
+      readState(path, "darwin", "0.2.0").settings.offerToSavePasswords,
+    ).toBe(true);
+    original.passwordPrompts = [
+      {
+        id: "save-prompt",
+        tabId: original.tabs[0].id,
+        kind: "save",
+        host: "prompt-host.example",
+        username: "prompt-user@example.com",
+      },
+      {
+        id: "update-prompt",
+        tabId: original.tabs[1].id,
+        kind: "update",
+        host: "prompt-host.example",
+        username: "prompt-user@example.com",
+      },
+    ];
+    writeState(path, original);
+    const raw = readFileSync(path, "utf8");
+    expect(JSON.parse(raw)).not.toHaveProperty("passwordPrompts");
+    expect(raw).not.toContain("prompt-user");
+    expect(readState(path, "darwin", "0.2.0").passwordPrompts).toEqual([]);
+    // A file that holds them anyway restores none.
+    writeFileSync(path, JSON.stringify(original));
+    expect(readState(path, "darwin", "0.2.0").passwordPrompts).toEqual([]);
+  });
+
   it("starts one blank tab per personal space when session restoration is disabled", () => {
     const path = statePath();
     const original = initialState();
