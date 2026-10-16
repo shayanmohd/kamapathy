@@ -104,6 +104,29 @@ describe("tab registry", () => {
     ).not.toHaveProperty("label");
   });
 
+  it("file tabs get no label", () => {
+    const { state, registry, open } = setup();
+    // Under agent rules, as a defense: agent spaces never open files.
+    expect(open("one").label).toBe("p1");
+    const file = open("one", person, "file:///tmp/notes.pdf");
+    expect(file).not.toHaveProperty("label");
+    expect(file).toMatchObject({ openedBy: "person", managed: false });
+    expect(open("one").label).toBe("p2");
+    // A grant labels the web tabs around a file the person opened before.
+    const work = state.spaces.find((space) => space.id === "work")!;
+    const blank = state.tabs.find((tab) => tab.spaceId === "work")!;
+    const local = open("work", person, "file:///Users/me/report.pdf");
+    const page = open("work", person, "https://example.com/");
+    work.access = "granted";
+    registry.labelSpace("work");
+    expect([blank.label, page.label]).toEqual(["p1", "p2"]);
+    expect(local).not.toHaveProperty("label");
+    expect(open("work", person, "https://example.org/").label).toBe("p3");
+    expect(open("work", person, "file://localhost/tmp/a.png")).not.toHaveProperty(
+      "label",
+    );
+  });
+
   it("keeps the last 100 retired labels per space with who closed them", () => {
     const { clock, registry, open, close } = setup();
     const closers: ClosedBy[] = ["agent", "page", "person"];

@@ -1863,6 +1863,136 @@ describe("local automation socket", () => {
     expect(controller.accessedTabs).toEqual([]);
   });
 
+  it("file tabs hidden: never listed, labeled or returned, and tab routes answer tab_not_found", async () => {
+    const json = async (path: string, method = "GET", body?: unknown) => {
+      const response = await request(path, method, body);
+      return { status: response.status, body: await response.json() };
+    };
+    const notFound = (tabId: string) => ({
+      status: 404,
+      body: {
+        error: {
+          code: "tab_not_found",
+          message: "Agent tab was not found.",
+          tabId,
+        },
+      },
+    });
+    const ids = (tabs: { id: string }[]) => tabs.map((tab) => tab.id);
+    const workTabs = () =>
+      ids(controller.state.tabs.filter((tab) => tab.spaceId === "work"));
+    // The person reads a file on this computer beside a web page.
+    const blank = controller.state.tabs.find((tab) => tab.spaceId === "work")!;
+    const web = controller.openPersonTab("work", "https://example.com/work");
+    const file = controller.openPersonTab("work", "file:///tmp/notes.pdf");
+    controller.closeTab(blank.id, "person");
+    controller.state.activeSpaceId = "work";
+    controller.state.activeTabId = file.id;
+    // The person answers an agent's request with that space while the file
+    // is shown.
+    const asked = json("/space-requests", "POST", { reason: "Book a table" });
+    await expect.poll(() => controller.state.spaceRequests.length).toBe(1);
+    api.answerRequest(controller.state.spaceRequests[0].id, {
+      allow: true,
+      spaceId: "work",
+    });
+    expect(await asked).toEqual({
+      status: 200,
+      body: {
+        space: expect.objectContaining({ id: "work", owner: "agent" }),
+        tabs: [
+          expect.objectContaining({ id: web.id, label: "p1", active: false }),
+        ],
+        active: null,
+      },
+    });
+    expect(file).not.toHaveProperty("label");
+    const listing = await json("/spaces/work/tabs");
+    expect(listing.status).toBe(200);
+    expect(ids(listing.body.tabs)).toEqual([web.id]);
+    expect(listing.body.budget).toEqual({ used: 0, limit: 20 });
+    // Every tab route answers as if the tab did not exist, adopt included.
+    for (const [path, method, body] of [
+      [`/tabs/${file.id}/adopt`, "POST", {}],
+      [`/tabs/${file.id}/release`, "POST", {}],
+      [`/tabs/${file.id}/snapshot`, "POST", {}],
+      [`/tabs/${file.id}/snapshot`, "GET", undefined],
+      [`/tabs/${file.id}/navigate`, "POST", { url: "https://example.com/" }],
+      [`/tabs/${file.id}`, "DELETE", undefined],
+    ] as const)
+      expect(await json(path, method, body), `${method} ${path}`).toEqual(
+        notFound(file.id),
+      );
+    expect(file).toMatchObject({ managed: false, url: "file:///tmp/notes.pdf" });
+    expect(controller.accessedTabs).not.toContain(file.id);
+    expect(controller.calls.map((call) => call.type)).toEqual([]);
+    // A boundary taken while a file is shown has no active tab, and lists
+    // only the web pages opened meanwhile.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: "work",
+      owner: "human",
+    });
+    const later = controller.openPersonTab("work", "https://example.com/later");
+    const another = controller.openPersonTab("work", "file:///tmp/later.png");
+    controller.state.activeTabId = file.id;
+    const boundary = {
+      status: 200,
+      body: {
+        ok: true,
+        owner: "agent",
+        active: null,
+        opened: [expect.objectContaining({ id: later.id, label: "p2" })],
+        closed: [],
+      },
+    };
+    expect(await json("/spaces/work/resume", "POST", {})).toEqual(boundary);
+    expect(await json("/spaces/work/wait-for-control", "POST", {})).toEqual(
+      boundary,
+    );
+    controller.state.activeTabId = web.id;
+    expect(
+      (await json("/spaces/work/resume", "POST", {})).body.active,
+    ).toMatchObject({ id: web.id, active: true });
+    // A refusal to close the space lists the person's web pages only.
+    const refusal = await json("/spaces/work", "DELETE");
+    expect(refusal.status).toBe(409);
+    expect(refusal.body.error.code).toBe("space_protected");
+    expect(ids(refusal.body.error.tabs)).toEqual([web.id, later.id]);
+    // finish refuses a file tab in keep before anything closes.
+    const page = (
+      await json("/spaces/work/tabs", "POST", { url: "https://example.com/" })
+    ).body.tab;
+    expect(page.label).toBe("p3");
+    expect(
+      await json("/spaces/work/finish", "POST", { keep: [file.id] }),
+    ).toEqual(notFound(file.id));
+    expect(
+      await json("/spaces/work/finish", "POST", { keep: [page.id, another.id] }),
+    ).toEqual(notFound(another.id));
+    expect(workTabs()).toEqual([web.id, file.id, later.id, another.id, page.id]);
+    // Finishing closes the agent's page and leaves the files open, unlisted.
+    expect(await json("/spaces/work/finish", "POST", { keep: [] })).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        spaceId: "work",
+        closedSpace: false,
+        closed: ["p3"],
+        kept: [],
+        protected: ["p1", "p2"],
+      },
+    });
+    expect(workTabs()).toEqual([web.id, file.id, later.id, another.id]);
+    // An agent space never opens files, and its refusal would not list one.
+    const space = await createSpace();
+    const own = controller.openPersonTab(space.id, "https://example.com/own");
+    controller.openPersonTab(space.id, "file:///tmp/own.pdf");
+    const agentRefusal = await json(`/spaces/${space.id}`, "DELETE");
+    expect(agentRefusal.status).toBe(409);
+    expect(ids(agentRefusal.body.error.tabs)).toEqual([own.id]);
+  });
+
   it("admits a request for a tab without a page in a managed space to its space lane", async () => {
     const one = await createPage();
     const two = await createPage();

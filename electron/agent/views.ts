@@ -43,6 +43,12 @@ export interface SpaceView {
   recentTabTitles?: string[];
 }
 
+// Agents never see a tab showing a file on this computer, whatever host its
+// URL names.
+export function agentVisible(tab: Pick<Tab, "url">): boolean {
+  return !/^file:/i.test(tab.url);
+}
+
 // The tab fields agents see. `shown` is the tab its space shows, so the
 // result says whether this tab is the active one.
 export function tabView(tab: Tab, shown: Tab | undefined): TabView {
@@ -73,14 +79,19 @@ export interface BoundaryView {
 }
 
 // What resume and wait-for-control return about the person's time in
-// control.
+// control. A file shown there leaves no active tab.
 export function boundaryView(
   boundary: Boundary,
   shown: Tab | undefined,
 ): BoundaryView {
   return {
-    active: boundary.active ? tabView(boundary.active, shown) : null,
-    opened: boundary.opened.map((tab) => tabView(tab, shown)),
+    active:
+      boundary.active && agentVisible(boundary.active)
+        ? tabView(boundary.active, shown)
+        : null,
+    opened: boundary.opened
+      .filter(agentVisible)
+      .map((tab) => tabView(tab, shown)),
     closed: boundary.closed,
   };
 }

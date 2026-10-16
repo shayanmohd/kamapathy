@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { HOME_URL } from "../shared/state";
-import { googleSignInFallback, hostname, isGoogleSignInRejectedUrl, isPopupUrl, isWebUrl, normalizeUrl, displayUrl } from "../shared/url";
+import {
+  BLOCKED_EXTERNAL_SCHEMES,
+  extensionId,
+  fileKind,
+  googleSignInFallback,
+  hostname,
+  isExternalAppUrl,
+  isFileUrl,
+  isGoogleSignInRejectedUrl,
+  isPopupUrl,
+  isWebUrl,
+  normalizeUrl,
+  displayUrl,
+  URL_MESSAGES,
+} from "../shared/url";
 
 describe("Google sign-in fallback", () => {
   it("recognizes the rejection page and discards authentication query parameters", () => {
@@ -66,14 +80,13 @@ describe("address bar normalization", () => {
   it.each([
     "javascript:alert(1)",
     "data:text/html,<script>alert(1)</script>",
-    "file:///etc/passwd",
     "ftp://example.com/file",
     "mailto:someone@example.com",
     "chrome://settings",
     "kamapathy://settings",
   ])("rejects unsupported navigation scheme %s", (input) => {
     expect(() => normalizeUrl(input)).toThrow(
-      "Only HTTP and HTTPS addresses are supported.",
+      "Kamapathy opens web addresses and files only.",
     );
   });
 
@@ -95,6 +108,223 @@ describe("address bar normalization", () => {
       expect(() => normalizeUrl(input)).toThrow();
     },
   );
+});
+
+describe("files, extension pages and other apps", () => {
+  const allowFile = { allowFile: true };
+
+  it("file needs allowFile", () => {
+    for (const options of [undefined, {}, { allowFile: false }]) {
+      expect(() =>
+        normalizeUrl("file:///Users/me/report.pdf", "duckduckgo", options),
+      ).toThrow(URL_MESSAGES.fileSpace);
+      expect(() =>
+        normalizeUrl("file:///etc/passwd", "duckduckgo", options),
+      ).toThrow(URL_MESSAGES.fileSpace);
+    }
+    expect(
+      normalizeUrl(" file:///Users/me/report.pdf ", "duckduckgo", allowFile),
+    ).toBe("file:///Users/me/report.pdf");
+    expect(
+      normalizeUrl("file://localhost/tmp/a.PDF", "duckduckgo", allowFile),
+    ).toBe("file:///tmp/a.PDF");
+    expect(normalizeUrl("FILE:///tmp/a.pdf", "google", allowFile)).toBe(
+      "file:///tmp/a.pdf",
+    );
+    expect(
+      normalizeUrl("file:///tmp/a.pdf#page=2", "duckduckgo", allowFile),
+    ).toBe("file:///tmp/a.pdf#page=2");
+    // Only files on this computer: another host, a Windows share reached
+    // through an empty host, or credentials are not.
+    for (const url of [
+      "file://server/share/a.pdf",
+      "file:////server/share/a.pdf",
+      "file://127.0.0.1/tmp/a.pdf",
+      "file://user@localhost/tmp/a.pdf",
+    ])
+      expect(() => normalizeUrl(url, "duckduckgo", allowFile), url).toThrow(
+        URL_MESSAGES.unsupported,
+      );
+    for (const url of [
+      "file:///tmp/tool.exe",
+      "file:///tmp/notes",
+      "file:///tmp/",
+      "file:///etc/passwd",
+      "file:///tmp/a?x.pdf",
+    ])
+      expect(() => normalizeUrl(url, "duckduckgo", allowFile), url).toThrow(
+        URL_MESSAGES.fileType,
+      );
+    // Web addresses and searches work as before.
+    expect(normalizeUrl("example.com", "duckduckgo", allowFile)).toBe(
+      "https://example.com/",
+    );
+    expect(() =>
+      normalizeUrl("mailto:a@example.com", "duckduckgo", allowFile),
+    ).toThrow(URL_MESSAGES.unsupported);
+  });
+
+  it("isFileUrl accepts only files on this computer", () => {
+    for (const url of [
+      "file:///tmp/a.pdf",
+      "file://localhost/tmp/a.pdf",
+      "FILE:///tmp/a.pdf",
+      "file:///C:/Users/me/a.pdf",
+      "file:///tmp/notes",
+    ])
+      expect(isFileUrl(url), url).toBe(true);
+    for (const url of [
+      "file://server/share/a.pdf",
+      "file:////server/share/a.pdf",
+      "https://example.com/a.pdf",
+      "blob:file:///tmp/a.pdf",
+      "not a url",
+      "",
+    ])
+      expect(isFileUrl(url), url).toBe(false);
+  });
+
+  it("extension pages", () => {
+    const id = "abcdefghijklmnopabcdefghijklmnop";
+    const other = "ponmlkjihgfedcbaponmlkjihgfedcba";
+    const page = `chrome-extension://${id}/popup.html`;
+    expect(extensionId(page)).toBe(id);
+    expect(normalizeUrl(page, "duckduckgo", { extensionIds: [other, id] })).toBe(
+      page,
+    );
+    expect(
+      normalizeUrl(`CHROME-EXTENSION://${id}/options.html#a`, "duckduckgo", {
+        extensionIds: [id],
+      }),
+    ).toBe(`chrome-extension://${id}/options.html#a`);
+    for (const options of [undefined, {}, allowFile])
+      expect(() => normalizeUrl(page, "duckduckgo", options)).toThrow(
+        URL_MESSAGES.extensionSpace,
+      );
+    for (const extensionIds of [[other], []])
+      expect(() =>
+        normalizeUrl(page, "duckduckgo", { extensionIds }),
+      ).toThrow(URL_MESSAGES.extensionMissing);
+    // An id that is not 32 letters a to p is refused even when listed.
+    const malformed = [
+      "abcdefghijklmnopabcdefghijklmnoq",
+      "abcdefghijklmnop",
+      id.toUpperCase(),
+    ];
+    for (const url of [
+      ...malformed.map((bad) => `chrome-extension://${bad}/popup.html`),
+      `chrome-extension://${id}:80/popup.html`,
+      `chrome-extension://user@${id}/popup.html`,
+    ]) {
+      expect(extensionId(url), url).toBeUndefined();
+      expect(
+        () =>
+          normalizeUrl(url, "duckduckgo", {
+            extensionIds: [id, ...malformed],
+          }),
+        url,
+      ).toThrow(URL_MESSAGES.extensionMissing);
+    }
+    expect(extensionId("https://example.com/")).toBeUndefined();
+    expect(extensionId(`chrome://${id}/`)).toBeUndefined();
+  });
+
+  it("external blocklist", () => {
+    expect(BLOCKED_EXTERNAL_SCHEMES).toEqual([
+      "about",
+      "afp",
+      "blob",
+      "chrome",
+      "chrome-extension",
+      "chrome-untrusted",
+      "data",
+      "devtools",
+      "disk",
+      "disks",
+      "file",
+      "filesystem",
+      "hcp",
+      "ie.http",
+      "javascript",
+      "kamapathy",
+      "ms-help",
+      "ms-msdt",
+      "ms-officecmd",
+      "nntp",
+      "res",
+      "search",
+      "search-ms",
+      "shell",
+      "vbscript",
+      "view-source",
+      "vnd.ms.radio",
+    ]);
+    for (const scheme of BLOCKED_EXTERNAL_SCHEMES)
+      expect(isExternalAppUrl(`${scheme}:x`), scheme).toBe(false);
+    for (const url of [
+      "about:blank",
+      "javascript:alert(1)",
+      "ms-msdt:x",
+      "search-ms:query=x",
+      "vnd.ms.radio:x",
+      "ie.http://x",
+      "view-source:https://a.example/",
+      "kamapathy://newtab",
+      "JavaScript:alert(1)",
+    ])
+      expect(isExternalAppUrl(url), url).toBe(false);
+    for (const url of [
+      "mailto:a@example.com",
+      "zoommtg://zoom.us/join?confno=1",
+      "slack://open",
+      "MAILTO:a@example.com",
+      `mailto:${"a".repeat(2041)}`,
+      `${"a".repeat(32)}:x`,
+    ])
+      expect(isExternalAppUrl(url), url.slice(0, 40)).toBe(true);
+    for (const url of [
+      "https://example.com/",
+      "http://example.com/",
+      "file:///tmp/a.pdf",
+      `mailto:${"a".repeat(2042)}`,
+      `${"a".repeat(33)}:x`,
+      "c:\\Windows\\system32",
+      "not a url",
+      "",
+    ])
+      expect(isExternalAppUrl(url), url.slice(0, 40)).toBe(false);
+  });
+
+  it("fileKind", () => {
+    for (const type of [
+      "pdf",
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "webp",
+      "avif",
+      "txt",
+      "webm",
+    ])
+      expect(fileKind(`file:///tmp/a.${type}`), type).toBe("inert");
+    for (const type of ["html", "htm", "xhtml", "svg"])
+      expect(fileKind(`file:///tmp/a.${type}`), type).toBe("markup");
+    expect(fileKind("file:///tmp/REPORT.PDF")).toBe("inert");
+    expect(fileKind("file:///tmp/page.Html")).toBe("markup");
+    expect(fileKind("file:///tmp/a.pdf?x=1#page=2")).toBe("inert");
+    expect(fileKind("file://localhost/tmp/b.svg")).toBe("markup");
+    for (const url of [
+      "file:///tmp/tool.exe",
+      "file:///tmp/notes",
+      "file:///tmp/archive.pdf/",
+      "https://example.com/a.pdf",
+      "file:///tmp/a?x.pdf",
+      "file:///tmp/a#x.pdf",
+      "not a url",
+    ])
+      expect(fileKind(url), url).toBeUndefined();
+  });
 });
 
 describe("remote page URL validation", () => {

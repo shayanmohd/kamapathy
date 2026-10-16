@@ -2,7 +2,7 @@ import { cleanAgentText } from "../../../shared/agent-text";
 import type { Space } from "../../../shared/types";
 import { fail } from "../errors";
 import { send, type RouteDeps, type RouteImpl } from "../http";
-import { spaceView, tabView } from "../views";
+import { agentVisible, spaceView, tabView } from "../views";
 
 const WAITING = 3;
 const COOLDOWN_MS = 60000;
@@ -92,12 +92,13 @@ export function spaceRequestRoutes({
           );
         const { space } = outcome;
         const shown = controller.shownTab(space.id);
+        // A file shown in the space leaves no active tab.
         return send(response, 200, {
           space: spaceView(space, controller.state.tabs),
           tabs: controller.state.tabs
-            .filter((tab) => tab.spaceId === space.id)
+            .filter((tab) => tab.spaceId === space.id && agentVisible(tab))
             .map((tab) => tabView(tab, shown)),
-          active: shown ? tabView(shown, shown) : null,
+          active: shown && agentVisible(shown) ? tabView(shown, shown) : null,
         });
       },
     },
