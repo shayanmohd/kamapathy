@@ -10,7 +10,8 @@ import {
   updateSource,
   type UpdateSource,
 } from "../electron/update-release";
-import type { InstallKind } from "../shared/types";
+import { updateReminder } from "../shared/state";
+import type { InstallKind, UpdateState } from "../shared/types";
 import { compareVersions, isVersion, parseVersion } from "../shared/version";
 
 const read = (file: string) =>
@@ -457,5 +458,38 @@ describe("update releases", () => {
       "",
     ])
       expect(updateSource(repo, feed), feed).toEqual(defaults);
+  });
+
+  it("a reminder applies to ready, and to available or downloading only while checks are on", () => {
+    const latest = pick([release("0.3.0")])!;
+    const reminder = (
+      state: UpdateState["state"],
+      checks: boolean,
+      known = true,
+    ) =>
+      updateReminder(
+        { kind: "mac-arm64", state, ...(known ? { latest } : {}) },
+        checks,
+      );
+    for (const checks of [true, false])
+      expect(reminder("ready", checks)).toEqual({
+        version: "0.3.0",
+        state: "ready",
+      });
+    expect(reminder("available", true)).toEqual({
+      version: "0.3.0",
+      state: "available",
+    });
+    expect(reminder("downloading", true)).toEqual({
+      version: "0.3.0",
+      state: "downloading",
+    });
+    expect(reminder("available", false)).toBeNull();
+    expect(reminder("downloading", false)).toBeNull();
+    for (const state of ["current", "unchecked", "unsupported"] as const)
+      for (const checks of [true, false])
+        expect(reminder(state, checks), `${state} ${checks}`).toBeNull();
+    for (const state of ["available", "downloading", "ready"] as const)
+      expect(reminder(state, true, false), state).toBeNull();
   });
 });

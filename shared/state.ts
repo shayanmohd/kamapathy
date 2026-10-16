@@ -1,4 +1,10 @@
-import type { BrowserState, Space, Tab } from "./types";
+import type {
+  BrowserState,
+  Space,
+  Tab,
+  UpdateReminder,
+  UpdateState,
+} from "./types";
 import { version } from "../package.json";
 
 export const HOME_URL = "kamapathy://newtab";
@@ -114,9 +120,28 @@ export function initialState(
       automationEnabled: true,
       isolateAgentSpaces: false,
       welcomed: false,
+      updateChecks: true,
+      seenVersion: version,
     },
     platform,
     version,
     automation: { running: false },
+    // The updater works out the real kind and state when it starts.
+    update: { kind: "other", state: "unsupported" },
   };
+}
+// The Update Kamapathy menu item, the menu dot and /health remind about a
+// downloaded update always, and about a newer one only while checks are on.
+export function updateReminder(
+  update: UpdateState,
+  checks: boolean,
+): UpdateReminder | null {
+  const { state, latest } = update;
+  if (!latest) return null;
+  if (
+    state === "ready" ||
+    (checks && (state === "available" || state === "downloading"))
+  )
+    return { version: latest.version, state };
+  return null;
 }

@@ -97,6 +97,9 @@ export interface Settings {
   automationEnabled: boolean;
   isolateAgentSpaces: boolean;
   welcomed: boolean;
+  updateChecks: boolean;
+  // What's new lists the notes above this version.
+  seenVersion: string;
 }
 export interface ImportProfile {
   id: string;
@@ -153,6 +156,38 @@ export interface UpdateRelease {
   // The release's SHA256SUMS.txt.
   sums: string;
 }
+export interface UpdateError {
+  code: string;
+  message: string;
+  reason?: string;
+  retryable?: boolean;
+  httpStatus?: number;
+  retryAfterMs?: number;
+  file?: string;
+}
+export interface UpdateState {
+  kind: InstallKind;
+  state:
+    | "unchecked"
+    | "current"
+    | "available"
+    | "downloading"
+    | "ready"
+    | "unsupported";
+  checkedAt?: number;
+  latest?: UpdateRelease;
+  progress?: { receivedBytes: number; totalBytes: number };
+  installer?: { path: string; sha256: string };
+  error?: UpdateError;
+}
+export interface UpdateStatus extends UpdateState {
+  version: string;
+  checks: boolean;
+}
+export interface UpdateReminder {
+  version: string;
+  state: "available" | "downloading" | "ready";
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
@@ -168,6 +203,7 @@ export interface BrowserState {
   platform: "darwin" | "win32" | "linux" | "web";
   version: string;
   automation: { running: boolean };
+  update: UpdateState;
 }
 export type BrowserAction =
   | { type: "tab:create"; url?: string; spaceId?: string; background?: boolean }
