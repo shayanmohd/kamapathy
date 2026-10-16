@@ -1,4 +1,4 @@
-import type { Session } from "electron";
+import type { Session, WebContents } from "electron";
 import type { Dirent } from "node:fs";
 import {
   mkdir,
@@ -11,6 +11,8 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  extensionIdOf,
+  extensionPermission,
   isComponentExtension,
   isExtensionId,
   restoreExtensions,
@@ -47,6 +49,14 @@ export interface HostOptions {
   locale: string;
   chromeVersion: string;
   now?: () => number;
+}
+// An extension's action popup or one of its windows: pages that aren't tabs.
+export interface SurfaceInfo {
+  kind: "popup" | "window";
+  extensionId: string;
+  partition: string;
+  spaceId?: string;
+  windowId?: number;
 }
 type SessionSetup = (partition: string, ses: Session) => (() => void) | void;
 
@@ -93,6 +103,7 @@ export class ExtensionHost {
   private hooks = new Set<SessionSetup>();
   private listeners = new Set<(event: HostEvent) => void>();
   private writing: Promise<void> = Promise.resolve();
+  private surfaces = new Map<WebContents, SurfaceInfo>();
 
   constructor(options: HostOptions) {
     this.userData = options.userData;
@@ -267,6 +278,46 @@ export class ExtensionHost {
 
   isLoaded(partition: string, id: string): boolean {
     return this.attached.get(partition)?.loaded.has(id) ?? false;
+  }
+
+  // A page of an extension loaded in that session gets the clipboard and
+  // location only when its manifest declares them, and nothing else. Other
+  // pages, the PDF viewer's included, aren't the host's to answer.
+  permissionFor(
+    partition: string,
+    requestingUrl: string,
+    permission: string,
+  ): boolean | undefined {
+    const id = extensionIdOf(requestingUrl);
+    if (!id || isComponentExtension(id)) return undefined;
+    const manifest = this.manifests.get(id);
+    return (
+      !!manifest &&
+      this.isLoaded(partition, id) &&
+      extensionPermission(manifest.permissions, permission)
+    );
+  }
+
+  // The host forgets a popup or window when its page is destroyed.
+  addSurface(contents: WebContents, info: SurfaceInfo): void {
+    if (contents.isDestroyed()) return;
+    if (!this.surfaces.has(contents))
+      contents.once("destroyed", () => this.surfaces.delete(contents));
+    this.surfaces.set(contents, info);
+  }
+
+  surfaceOf(contents: WebContents): SurfaceInfo | undefined {
+    return this.surfaces.get(contents);
+  }
+
+  surfacesOf(extensionId: string): WebContents[] {
+    return [...this.surfaces]
+      .filter(([, info]) => info.extensionId === extensionId)
+      .map(([contents]) => contents);
+  }
+
+  isExtensionSurface(contents: WebContents): boolean {
+    return this.surfaces.has(contents);
   }
 
   folderOf(entry: ExtensionEntry): string {

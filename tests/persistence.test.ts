@@ -403,6 +403,36 @@ describe("desktop session persistence", () => {
     expect(restored.settings.automationEnabled).toBe(true);
   });
 
+  it("restores extension pages in personal spaces", () => {
+    const path = statePath();
+    const original = initialState();
+    const id = "abcdefghijklmnopabcdefghijklmnop";
+    const kept = [
+      `chrome-extension://${id}/x.html`,
+      `chrome-extension://${id}/options/index.html?tab=general#top`,
+      `chrome-extension://${id}/`,
+    ];
+    const dropped = [
+      "chrome-extension://bad/",
+      `chrome-extension://${id.replace("a", "q")}/x.html`,
+      `chrome-extension://${id}`,
+      `chrome-extension://user:secret@${id}/x.html`,
+      `CHROME-EXTENSION://${id}/x.html`,
+      "chrome://extensions/",
+      "chrome-untrusted://print/",
+      "javascript:alert(1)",
+    ];
+    original.tabs = [...kept, ...dropped].map((url, index) => ({
+      ...newTab(index % 2 ? "work" : "personal", url),
+      title: `Page ${index}`,
+    }));
+    writeState(path, original);
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.tabs.map((tab) => [tab.url, tab.title])).toEqual(
+      kept.map((url, index) => [url, `Page ${index}`]),
+    );
+  });
+
   it("keeps agent access off for a person who turned it off", () => {
     const path = statePath();
     const original = initialState();

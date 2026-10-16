@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserWindow, Session } from "electron";
+import type { BrowserWindow, Session, WebContents } from "electron";
 import {
   PDF_VIEWER_EXTENSION_ID,
   restoreExtensions,
@@ -706,5 +706,156 @@ describe("extension host", () => {
     for (const fake of fakeSessions.values())
       for (const method of Object.values(fake.webRequest))
         expect(method).not.toHaveBeenCalled();
+  });
+});
+
+describe("extension pages", () => {
+  it("permissionFor answers only for pages of extensions loaded in that session", async () => {
+    const host = await hostFor(
+      profile(
+        [
+          storeEntry(A),
+          storeEntry(B),
+          storeEntry(C, "1.0.0", { enabled: false }),
+        ],
+        [],
+        {
+          [A]: {
+            ...manifestFile("Clipper", "1.0.0"),
+            permissions: [
+              "clipboardRead",
+              "clipboardWrite",
+              "geolocation",
+              "notifications",
+              "tabs",
+            ],
+          },
+          [C]: {
+            ...manifestFile("Off", "1.0.0"),
+            permissions: ["geolocation"],
+          },
+        },
+      ),
+    );
+    const personal = "persist:space-personal";
+    await host.attach(personal, asSession(sessionOf(personal)));
+    // Web pages and Kamapathy's own PDF viewer aren't the host's to answer.
+    for (const url of [
+      "https://example.com/",
+      "",
+      "kamapathy://newtab",
+      `chrome-extension://${PDF_VIEWER_EXTENSION_ID}/index.html`,
+      "chrome-extension://bad/",
+    ])
+      expect(host.permissionFor(personal, url, "geolocation"), url).toBe(
+        undefined,
+      );
+    // Pages, frames and the origin of a loaded extension get what its
+    // manifest declares, and nothing else.
+    for (const url of [
+      `chrome-extension://${A}/popup.html`,
+      `chrome-extension://${A}/`,
+      `chrome-extension://${A}`,
+    ]) {
+      for (const permission of [
+        "clipboard-read",
+        "clipboard-sanitized-write",
+        "geolocation",
+      ])
+        expect(host.permissionFor(personal, url, permission)).toBe(true);
+      for (const permission of [
+        "notifications",
+        "media",
+        "fullscreen",
+        "openExternal",
+        "clipboard-write",
+        "midi",
+      ])
+        expect(host.permissionFor(personal, url, permission)).toBe(false);
+    }
+    expect(
+      host.permissionFor(
+        personal,
+        `chrome-extension://${B}/popup.html`,
+        "geolocation",
+      ),
+    ).toBe(false);
+    // An extension not loaded in that session gets nothing.
+    for (const [partition, id] of [
+      [personal, C],
+      [personal, D],
+      ["persist:space-x", A],
+      ["agent-run-1-x", A],
+    ])
+      expect(
+        host.permissionFor(
+          partition,
+          `chrome-extension://${id}/x.html`,
+          "geolocation",
+        ),
+      ).toBe(false);
+    host.unloadEverywhere(A);
+    expect(
+      host.permissionFor(
+        personal,
+        `chrome-extension://${A}/x.html`,
+        "geolocation",
+      ),
+    ).toBe(false);
+  });
+
+  it("forgets popups and extension windows when they close", () => {
+    const host = new ExtensionHost({
+      userData: temporary("kamapathy-host-"),
+      locale: "en-US",
+      chromeVersion: CHROME,
+    });
+    const contents = () =>
+      Object.assign(new EventEmitter(), {
+        destroyed: false,
+        isDestroyed(this: { destroyed: boolean }) {
+          return this.destroyed;
+        },
+      });
+    const asContents = (fake: ReturnType<typeof contents>) =>
+      fake as unknown as WebContents;
+    const [popup, window, page, gone] = [
+      contents(),
+      contents(),
+      contents(),
+      contents(),
+    ];
+    const popupInfo = {
+      kind: "popup" as const,
+      extensionId: A,
+      partition: "persist:space-personal",
+      spaceId: "personal",
+    };
+    host.addSurface(asContents(popup), popupInfo);
+    host.addSurface(asContents(window), {
+      kind: "window",
+      extensionId: A,
+      partition: "persist:space-personal",
+      windowId: 3,
+    });
+    gone.destroyed = true;
+    host.addSurface(asContents(gone), popupInfo);
+    expect(host.isExtensionSurface(asContents(popup))).toBe(true);
+    expect(host.isExtensionSurface(asContents(window))).toBe(true);
+    expect(host.isExtensionSurface(asContents(page))).toBe(false);
+    expect(host.isExtensionSurface(asContents(gone))).toBe(false);
+    expect(host.surfaceOf(asContents(popup))).toEqual(popupInfo);
+    expect(host.surfaceOf(asContents(page))).toBeUndefined();
+    expect(host.surfacesOf(A)).toEqual([popup, window]);
+    expect(host.surfacesOf(B)).toEqual([]);
+    // Adding again replaces what the host knows about it.
+    host.addSurface(asContents(popup), { ...popupInfo, extensionId: B });
+    expect(host.surfacesOf(B)).toEqual([popup]);
+    expect(popup.listenerCount("destroyed")).toBe(1);
+    popup.destroyed = true;
+    popup.emit("destroyed");
+    expect(host.isExtensionSurface(asContents(popup))).toBe(false);
+    expect(host.surfacesOf(B)).toEqual([]);
+    expect(host.surfacesOf(A)).toEqual([window]);
   });
 });
