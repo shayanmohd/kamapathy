@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
 import { chromeUserAgent } from "./identity";
+import { incomingItem, incomingItems, incomingLimiter } from "./incoming";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
@@ -22,7 +23,6 @@ import {
   withdrawEndpoint,
   writeLaunchInfo,
 } from "./agent-socket";
-import { isWebUrl } from "../shared/url";
 import { version } from "../package.json";
 import type {
   BrowserAction,
@@ -366,14 +366,49 @@ function installMenu(): void {
   );
 }
 
+// Links and files from other apps open in a personal space no agent can
+// reach. They wait for the window, and a closed macOS window comes back.
+const pendingIncoming: string[] = [];
+const allowIncoming = incomingLimiter();
+
+function deliverIncoming(urls: readonly string[]): void {
+  if (!urls.length) return;
+  if (!app.isReady()) {
+    pendingIncoming.push(...urls);
+    return;
+  }
+  try {
+    if (!window) createWindow();
+    controller?.openIncoming(urls);
+  } catch (error) {
+    console.error(
+      "Links from other apps could not open:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  }
+}
+
+// macOS hands them over as events, from before ready on.
+function receiveIncoming(event: Electron.Event, value: string): void {
+  event.preventDefault();
+  if (!allowIncoming()) return;
+  const url = incomingItem(value, process.cwd());
+  if (url) deliverIncoming([url]);
+}
+app.on("open-url", receiveIncoming);
+app.on("open-file", receiveIncoming);
+
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", (_event, argv) => {
+  app.on("second-instance", (_event, argv, workingDirectory) => {
     if (!window) createWindow();
     if (window?.isMinimized()) window.restore();
     window?.focus();
-    const url = argv.find((argument) => isWebUrl(argument));
-    if (url) void controller?.dispatch({ type: "tab:create", url });
+    deliverIncoming(
+      incomingItems(argv, workingDirectory, {
+        defaultApp: externalApplication,
+      }),
+    );
   });
   app.on("before-quit", () => {
     quitting = true;
@@ -425,5 +460,11 @@ else {
     registerIpc();
     installMenu();
     createWindow();
+    deliverIncoming([
+      ...pendingIncoming.splice(0),
+      ...incomingItems(process.argv, process.cwd(), {
+        defaultApp: externalApplication,
+      }),
+    ]);
   });
 }

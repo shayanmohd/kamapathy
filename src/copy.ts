@@ -173,3 +173,8 @@ export const newTabCopy = {
   save: "Save shortcut",
   saved: "Shortcut saved.",
 } as const;
+
+export const fileCopy = {
+  icon: "File on this computer",
+  scriptsOff: "Scripts are off for files on this computer.",
+} as const;

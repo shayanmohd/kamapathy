@@ -128,7 +128,10 @@ class FakeView {
 }
 const sessions = new Map<string, FakeSession>();
 const controllers: BrowserController[] = [];
-function controller(statePath = "unused-test-state.json") {
+function controller(
+  statePath = "unused-test-state.json",
+  state = initialState(),
+) {
   const window = new EventEmitter() as EventEmitter & {
     webContents: FakeContents;
     contentView: {
@@ -140,9 +143,15 @@ function controller(statePath = "unused-test-state.json") {
     isVisible: () => boolean;
     isMinimized: () => boolean;
     close: ReturnType<typeof vi.fn>;
+    restore: ReturnType<typeof vi.fn>;
+    show: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
   };
   window.webContents = new FakeContents();
   window.close = vi.fn();
+  window.restore = vi.fn();
+  window.show = vi.fn();
+  window.focus = vi.fn();
   window.contentView = { addChildView: vi.fn(), removeChildView: vi.fn() };
   window.isDestroyed = () => false;
   window.getContentSize = () => [1400, 900];
@@ -150,7 +159,7 @@ function controller(statePath = "unused-test-state.json") {
   window.isMinimized = () => false;
   const result = new BrowserController(
     window as unknown as BrowserWindow,
-    initialState(),
+    state,
     statePath,
   );
   result.setContentBounds({
@@ -2815,5 +2824,186 @@ describe("files, extension pages and other apps", () => {
     browser.grantAccess("personal");
     answer({ response: 1, checkboxChecked: false });
     await vi.waitFor(() => expect(callback).toHaveBeenCalledWith(false));
+  });
+});
+
+describe("links and files from other apps", () => {
+  let folder: string;
+  const fileUrl = (name: string) => pathToFileURL(join(folder, name)).href;
+  const nativeWindow = (browser: BrowserController) =>
+    browser.window as unknown as {
+      isMinimized: () => boolean;
+      restore: ReturnType<typeof vi.fn>;
+      show: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+    };
+  const tabsIn = (browser: BrowserController, spaceId: string) =>
+    browser.state.tabs.filter((tab) => tab.spaceId === spaceId);
+  beforeAll(() => {
+    folder = mkdtempSync(join(tmpdir(), "kamapathy-incoming-"));
+    for (const name of ["doc.pdf", "page.html"])
+      writeFileSync(join(folder, name), "file");
+  });
+  afterAll(() => rmSync(folder, { recursive: true, force: true }));
+
+  it("incoming space: the active personal space, else the one used last, never an agent's or a granted one, else a new Personal space", async () => {
+    const browser = controller();
+    expect(browser.incomingSpace().id).toBe("personal");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    expect(browser.incomingSpace().id).toBe("work");
+    // A granted personal space is passed over for the one used before it.
+    browser.grantAccess("work");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("personal");
+    // With every personal space granted, a new one takes the links, and
+    // nothing changes the space in front.
+    browser.grantAccess("personal");
+    const spaces = browser.state.spaces.length;
+    const created = browser.incomingSpace();
+    expect(created).toMatchObject({
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdBy: "person",
+    });
+    expect(created).not.toHaveProperty("access");
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(tabsIn(browser, created.id)).toEqual([
+      expect.objectContaining({
+        url: HOME_URL,
+        openedBy: "person",
+        managed: false,
+      }),
+    ]);
+    expect(tabsIn(browser, created.id)[0]).not.toHaveProperty("label");
+    expect(browser.state.activeSpaceId).toBe("work");
+    // It is used again rather than making another.
+    expect(browser.incomingSpace()).toBe(created);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+  });
+
+  it("incoming space: a personal space not used this run comes before a new one, and the space and tab limits hold", async () => {
+    // Restored with Work in front, which an agent then gets.
+    const state = initialState();
+    state.activeSpaceId = "work";
+    state.activeTabId = state.tabs.find((tab) => tab.spaceId === "work")!.id;
+    const restored = controller(undefined, state);
+    restored.grantAccess("work");
+    expect(restored.incomingSpace().id).toBe("personal");
+    expect(restored.state.spaces).toHaveLength(2);
+    // A 31st space or a 201st tab is refused with the usual messages.
+    const browser = controller();
+    browser.grantAccess("personal");
+    browser.grantAccess("work");
+    while (browser.state.spaces.length < 30) browser.createAgentSpace("Task");
+    expect(() => browser.incomingSpace()).toThrow(
+      "The maximum of 30 spaces has been reached.",
+    );
+    const full = controller();
+    full.grantAccess("personal");
+    full.grantAccess("work");
+    while (full.state.tabs.length < 200) full.state.tabs.push(newTab("work"));
+    expect(() => full.incomingSpace()).toThrow(
+      "The maximum of 200 tabs has been reached.",
+    );
+  });
+
+  it("openIncoming opens each link and existing file as the person's tab in the incoming space, the last in front, and brings the window forward", async () => {
+    const browser = controller();
+    browser.setExtensionLookup(() => ["a".repeat(32)]);
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    const window = nativeWindow(browser);
+    window.isMinimized = () => true;
+    const before = browser.state.tabs.length;
+    browser.openIncoming([
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+      fileUrl("missing.pdf"),
+      "mailto:someone@example.com",
+      `chrome-extension://${"a".repeat(32)}/page.html`,
+      "example.com",
+      fileUrl("page.html"),
+      "https://b.example/",
+    ]);
+    const opened = browser.state.tabs.slice(before);
+    expect(opened.map((tab) => tab.url)).toEqual([
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+      fileUrl("page.html"),
+      "https://b.example/",
+    ]);
+    // Each has its page loading already, local markup without scripts.
+    const pages = opened.map(
+      (tab) => browser.peekWebContents(tab.id) as unknown as FakeContents,
+    );
+    for (const [index, tab] of opened.entries()) {
+      expect(tab, tab.url).toMatchObject({
+        spaceId: "work",
+        openedBy: "person",
+        managed: false,
+      });
+      expect(tab, tab.url).not.toHaveProperty("label");
+      expect(pages[index], tab.url).toBeDefined();
+      expect(pages[index].loadURL).toHaveBeenCalledExactlyOnceWith(tab.url);
+    }
+    expect(preferencesOf(pages[2]).javascript).toBe(false);
+    expect(browser.state.activeSpaceId).toBe("work");
+    expect(browser.state.activeTabId).toBe(opened[3].id);
+    expect(tabsIn(browser, agent.id)).toHaveLength(1);
+    expect(browser.incomingSpace().id).toBe("work");
+    expect(window.restore).toHaveBeenCalledOnce();
+    expect(window.show).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
+    const order = (mock: ReturnType<typeof vi.fn>) =>
+      mock.mock.invocationCallOrder[0];
+    expect(order(window.restore)).toBeLessThan(order(window.show));
+    expect(order(window.show)).toBeLessThan(order(window.focus));
+  });
+
+  it("openIncoming never opens in an agent space or a granted one, and stops at 200 tabs", async () => {
+    const browser = controller();
+    browser.grantAccess("personal");
+    browser.grantAccess("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    const spaces = browser.state.spaces.length;
+    browser.openIncoming(["https://a.example/", fileUrl("doc.pdf")]);
+    const space = browser.state.spaces.at(-1)!;
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(space).toMatchObject({ name: "Personal", kind: "personal" });
+    expect(tabsIn(browser, space.id).map((tab) => tab.url)).toEqual([
+      HOME_URL,
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+    ]);
+    for (const id of ["personal", "work", agent.id])
+      expect(tabsIn(browser, id), id).toHaveLength(1);
+    expect(browser.state.activeSpaceId).toBe(space.id);
+    const window = nativeWindow(browser);
+    expect(window.restore).not.toHaveBeenCalled();
+    expect(window.show).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
+    // Later links join the same space, as far as the tab limit allows.
+    while (browser.state.tabs.length < 198)
+      browser.state.tabs.push(newTab(agent.id));
+    browser.openIncoming([
+      "https://b.example/",
+      "https://c.example/",
+      "https://d.example/",
+    ]);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(browser.state.tabs).toHaveLength(200);
+    expect(
+      tabsIn(browser, space.id)
+        .map((tab) => tab.url)
+        .slice(3),
+    ).toEqual(["https://b.example/", "https://c.example/"]);
   });
 });

@@ -182,6 +182,8 @@ export class BrowserController {
   private viewKinds = new Map<string, ViewKind>();
   // Pages showing an "Open <App>?" box, by contents id.
   private externalPrompts = new Set<number>();
+  // Space ids, most recently active first.
+  private recentSpaces: string[];
 
   constructor(
     readonly window: BrowserWindow,
@@ -189,6 +191,7 @@ export class BrowserController {
     private statePath: string,
   ) {
     this.state = state;
+    this.recentSpaces = [state.activeSpaceId];
     // Restored tabs are the person's.
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
@@ -1318,6 +1321,10 @@ export class BrowserController {
       this.splitLeadingTabId = tab.id;
     this.state.activeSpaceId = tab.spaceId;
     this.state.activeTabId = tab.id;
+    this.recentSpaces = [
+      tab.spaceId,
+      ...this.recentSpaces.filter((id) => id !== tab.spaceId),
+    ].slice(0, 30);
   }
 
   private destroyTab(id: string): void {
@@ -1405,6 +1412,69 @@ export class BrowserController {
     if (isWebUrl(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
+  }
+
+  /** The personal space no agent can reach that links from other apps open in. */
+  incomingSpace(): Space {
+    const reachable = (space: Space | undefined): space is Space =>
+      space?.kind === "personal" && space.access !== "granted";
+    // The active space, else the one used last, else any the person has
+    // not used since Kamapathy started.
+    const known =
+      [this.state.activeSpaceId, ...this.recentSpaces]
+        .map((id) => this.state.spaces.find((space) => space.id === id))
+        .find(reachable) ?? this.state.spaces.find(reachable);
+    if (known) return known;
+    if (this.state.spaces.length >= 30)
+      throw new Error("The maximum of 30 spaces has been reached.");
+    if (this.state.tabs.length >= 200)
+      throw new Error("The maximum of 200 tabs has been reached.");
+    const space: Space = {
+      id: randomUUID(),
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdAt: Date.now(),
+      createdBy: "person",
+    };
+    this.state.spaces.push(space);
+    const tab = newTab(space.id);
+    this.registry.register(tab, { openedBy: "person", managed: false });
+    this.state.tabs.push(tab);
+    this.emit();
+    return space;
+  }
+
+  /** Opens each URL as the person's tab in incomingSpace(), the last one active,
+   *  then restores, shows and focuses the window. */
+  openIncoming(urls: readonly string[]): void {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    const space = this.incomingSpace();
+    let last: Tab | undefined;
+    for (const input of urls) {
+      if (this.state.tabs.length >= 200) break;
+      // Other apps hand over web pages and files, nothing else.
+      if (!isWebUrl(input) && !isFileUrl(input)) continue;
+      let url: string;
+      try {
+        url = this.openTarget(space, input);
+      } catch {
+        // Such as a file removed since it was handed over.
+        continue;
+      }
+      const tab = newTab(space.id, url);
+      this.registry.register(tab, { openedBy: "person", managed: false });
+      this.state.tabs.push(tab);
+      if (this.loadable(tab)) this.ensureView(tab);
+      last = tab;
+    }
+    if (last) this.activate(last);
+    this.emit();
+    if (this.window.isMinimized()) this.window.restore();
+    this.window.show();
+    this.window.focus();
   }
 
   closeTab(

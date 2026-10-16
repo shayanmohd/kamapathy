@@ -32,7 +32,7 @@ import type {
   SpaceColor,
 } from "../shared/types";
 import { agentRules, HOME_URL, initialState } from "../shared/state";
-import { hostname, isGoogleSignInRejectedUrl } from "../shared/url";
+import { fileKind, hostname, isGoogleSignInRejectedUrl } from "../shared/url";
 import { bridge, isDesktop } from "./lib/bridge";
 import { decodeFrames, Freezer, nextPaint } from "./lib/freeze";
 import { IconButton, Modal, SiteIcon } from "./components/ui";
@@ -52,7 +52,13 @@ import { ActivityDialog } from "./components/ActivityDialog";
 import { SpacesOverview } from "./components/SpacesOverview";
 import { FindPill } from "./components/FindPill";
 import { ImportPanel, Welcome } from "./components/Welcome";
-import { importCopy, newTabCopy, signInsCopy, spacesCopy } from "./copy";
+import {
+  fileCopy,
+  importCopy,
+  newTabCopy,
+  signInsCopy,
+  spacesCopy,
+} from "./copy";
 import { useAgentClock } from "./lib/useAgentClock";
 import { spaceTabs } from "./lib/tabs";
 import { type ActionName, isActionName } from "./lib/actions";
@@ -123,6 +129,8 @@ export default function App() {
   const isHome = !active || active.url === HOME_URL;
   const googleSignInRejected =
     isDesktop && !!active && isGoogleSignInRejectedUrl(active.url);
+  // Local HTML and SVG files load without scripts.
+  const scriptsOff = isDesktop && !!active && fileKind(active.url) === "markup";
   const ownedByAgent = agentRules(activeSpace) && activeSpace.owner === "agent";
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring = barStatus === "browsing" || barStatus === "idle";
@@ -236,6 +244,7 @@ export default function App() {
     findOpen,
     ownedByAgent,
     googleSignInRejected,
+    scriptsOff,
     ring,
     barStatus,
     toast,
@@ -530,6 +539,14 @@ export default function App() {
             >
               Open in default browser <ArrowSquareOut size={15} />
             </button>
+          </section>
+        )}
+        {scriptsOff && (
+          <section className="sign-in-notice file-notice" role="status">
+            <Info size={20} />
+            <div>
+              <p>{fileCopy.scriptsOff}</p>
+            </div>
           </section>
         )}
         {findOpen && (
