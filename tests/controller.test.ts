@@ -3,9 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserWindow } from "electron";
+import type { BrowserWindow, Session } from "electron";
 import { dialog, session, shell, WebContentsView } from "electron";
-import { BrowserController } from "../electron/controller";
+import {
+  BrowserController,
+  restoredPartitions,
+  type ExtensionSessions,
+} from "../electron/controller";
 import {
   agentRules,
   HOME_URL,
@@ -114,7 +118,10 @@ class FakeView {
 }
 const sessions = new Map<string, FakeSession>();
 const controllers: BrowserController[] = [];
-function controller(statePath = "unused-test-state.json") {
+function controller(
+  statePath = "unused-test-state.json",
+  extensions?: ExtensionSessions,
+) {
   const window = new EventEmitter() as EventEmitter & {
     webContents: FakeContents;
     contentView: {
@@ -138,6 +145,7 @@ function controller(statePath = "unused-test-state.json") {
     window as unknown as BrowserWindow,
     initialState(),
     statePath,
+    extensions,
   );
   result.setContentBounds({
     x: 200,
@@ -1074,6 +1082,104 @@ describe("partition housekeeping", () => {
     expect(sessions.get("persist:space-work")!.clearStorageData).toHaveBeenCalledOnce();
     expect(sessions.get("persist:space-personal")?.clearStorageData ?? vi.fn()).not.toHaveBeenCalled();
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("extension sessions", () => {
+  it("sessionFor attaches extensions to persistent partitions only, and discarding a partition detaches it first", async () => {
+    const extensions = {
+      attach: vi.fn(async (_partition: string, _ses: Session) => {}),
+      detach: vi.fn((_partition: string) => {}),
+      loadedIds: vi.fn((_partition: string) => new Set<string>()),
+    };
+    const browser = controller(undefined, extensions);
+    const open = async (id: string, url: string) => {
+      await browser.dispatch({ type: "tab:navigate", id, url });
+      contents(browser, id);
+    };
+    await open(browser.state.activeTabId, "https://a.example/");
+    const shared = sessions.get("persist:space-personal")!;
+    expect(extensions.attach).toHaveBeenCalledExactlyOnceWith(
+      "persist:space-personal",
+      shared,
+    );
+    // The session's own handlers are in place first.
+    const [attached] = extensions.attach.mock.invocationCallOrder;
+    expect(attached).toBeGreaterThan(
+      shared.setPermissionRequestHandler.mock.invocationCallOrder[0],
+    );
+    expect(attached).toBeGreaterThan(
+      shared.setPermissionCheckHandler.mock.invocationCallOrder[0],
+    );
+    const isolated = browser.createAgentSpace("Clean", { isolated: true });
+    await open(
+      browser.state.tabs.find((tab) => tab.spaceId === isolated.id)!.id,
+      "https://b.example/",
+    );
+    await browser.dispatch({
+      type: "space:create",
+      kind: "personal",
+      color: "blue",
+      name: "Private",
+      signIns: "separate",
+    });
+    const separate = `persist:space-${browser.state.activeSpaceId}`;
+    await open(browser.state.activeTabId, "https://c.example/");
+    expect([...sessions.keys()]).toEqual([
+      "persist:space-personal",
+      expect.stringMatching(new RegExp(`^agent-.*-${isolated.id}$`)),
+      separate,
+    ]);
+    expect(
+      extensions.attach.mock.calls.map(([partition]) => partition),
+    ).toEqual(["persist:space-personal", separate]);
+    expect(extensions.detach).not.toHaveBeenCalled();
+
+    const separateSession = sessions.get(separate)!;
+    await browser.dispatch({
+      type: "space:delete",
+      id: browser.state.activeSpaceId,
+    });
+    expect(extensions.detach).toHaveBeenCalledExactlyOnceWith(separate);
+    const [detached] = extensions.detach.mock.invocationCallOrder;
+    expect(detached).toBeLessThan(
+      separateSession.clearStorageData.mock.invocationCallOrder[0],
+    );
+    // The handlers come off after the extensions.
+    const handlers = separateSession.setPermissionCheckHandler.mock;
+    expect(detached).toBeLessThan(handlers.invocationCallOrder.at(-1)!);
+
+    // A partition no tab used this launch is attached as it is created for
+    // clearing, and detached before anything is cleared.
+    browser.state.spaces[1].signIns = "separate";
+    await browser.dispatch({ type: "space:delete", id: "work" });
+    const work = sessions.get("persist:space-work")!;
+    expect(extensions.attach).toHaveBeenLastCalledWith(
+      "persist:space-work",
+      work,
+    );
+    expect(extensions.detach).toHaveBeenLastCalledWith("persist:space-work");
+    expect(extensions.detach.mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      work.clearStorageData.mock.invocationCallOrder[0],
+    );
+    expect(extensions.attach).toHaveBeenCalledTimes(3);
+  });
+
+  it("restoredPartitions lists the shared partition and each separate personal space's", () => {
+    const state = initialState();
+    expect(restoredPartitions(state)).toEqual(["persist:space-personal"]);
+    state.spaces[0].signIns = "separate";
+    state.spaces[1].signIns = "separate";
+    state.spaces.push({
+      ...state.spaces[1],
+      id: "agent",
+      kind: "agent",
+      owner: "agent",
+    });
+    expect(restoredPartitions(state)).toEqual([
+      "persist:space-personal",
+      "persist:space-work",
+    ]);
   });
 });
 

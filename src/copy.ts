@@ -182,4 +182,5 @@ export const extensionRefusalCopy = {
   limit: "Kamapathy supports up to 100 extensions.",
   invalid: "Its manifest isn't valid.",
   noManifest: "That folder has no manifest.json.",
+  loadFailed: "Couldn't load it.",
 } as const;

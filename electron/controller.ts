@@ -47,6 +47,33 @@ const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 // Spaces that share sign-ins use the first space's partition, so sign-ins
 // made before shared sessions carry over.
 export const SHARED_PARTITION = "persist:space-personal";
+
+// The person's extensions load into persistent sessions as the controller
+// creates them, and unload before a partition is discarded.
+export interface ExtensionSessions {
+  attach(partition: string, ses: Session): Promise<void>;
+  detach(partition: string): void;
+  loadedIds(partition: string): ReadonlySet<string>;
+}
+export const NO_EXTENSIONS: ExtensionSessions = {
+  attach: async () => {},
+  detach: () => {},
+  loadedIds: () => new Set(),
+};
+// The sessions restored tabs open in: the shared one and each personal
+// space's with separate sign-ins.
+export function restoredPartitions(state: BrowserState): string[] {
+  return [
+    ...new Set([
+      SHARED_PARTITION,
+      ...state.spaces
+        .filter(
+          (space) => space.kind === "personal" && space.signIns === "separate",
+        )
+        .map((space) => `persist:space-${space.id}`),
+    ]),
+  ];
+}
 const cleanText = (value: unknown, maximum = 300): string => {
   if (typeof value !== "string" || value.length > maximum)
     throw new Error("Invalid text value.");
@@ -170,6 +197,7 @@ export class BrowserController {
     readonly window: BrowserWindow,
     state: BrowserState,
     private statePath: string,
+    private extensions: ExtensionSessions = NO_EXTENSIONS,
   ) {
     this.state = state;
     // Restored tabs are the person's.
@@ -565,6 +593,10 @@ export class BrowserController {
         (_contents, _permission, callback) => callback(false),
       );
     });
+    if (partition.startsWith("persist:"))
+      void this.extensions
+        .attach(partition, browsingSession)
+        .catch(() => undefined);
     return browsingSession;
   }
 
@@ -575,6 +607,8 @@ export class BrowserController {
     const pending = this.discards.get(partition);
     if (pending) return pending;
     const oldSession = this.sessionFor(partition);
+    // Extensions unload first, also when the session was only made here.
+    this.extensions.detach(partition);
     this.sessionCleanups.get(partition)?.();
     this.sessionCleanups.delete(partition);
     this.sessions.delete(partition);

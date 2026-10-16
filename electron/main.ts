@@ -1,9 +1,14 @@
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
-import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, Session } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserController } from "./controller";
+import {
+  BrowserController,
+  NO_EXTENSIONS,
+  restoredPartitions,
+} from "./controller";
+import { ExtensionHost } from "./extensions/host";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
@@ -43,6 +48,12 @@ const agent = agentPaths(app.getPath("userData"));
 
 let window: BrowserWindow | null = null;
 let controller: BrowserController | null = null;
+// The person's extensions, from ready on and across windows. Windows wait
+// until extensions.json is read.
+let extensionHost: ExtensionHost | null = null;
+let extensionsReady: Promise<void> = Promise.resolve();
+// A window waiting for its extensions; later calls share it.
+let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
 let automationSyncing = false;
 // A failed start waits until the person turns access off and on again. It is
@@ -165,7 +176,26 @@ function shortcut(name: string): void {
   }
 }
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
+  windowOpening ??= openWindow().finally(() => {
+    windowOpening = null;
+  });
+  return windowOpening;
+}
+
+// Extensions load into these sessions before the controller sets their
+// handlers, so until then they refuse every permission.
+function extensionSession(partition: string): Session {
+  const browsingSession = session.fromPartition(partition);
+  browsingSession.setPermissionRequestHandler(
+    (_contents, _permission, callback) => callback(false),
+  );
+  browsingSession.setPermissionCheckHandler(() => false);
+  return browsingSession;
+}
+
+async function openWindow(): Promise<void> {
+  await extensionsReady;
   const platform: BrowserState["platform"] =
     process.platform === "darwin"
       ? "darwin"
@@ -174,6 +204,13 @@ function createWindow(): void {
         : "linux";
   const statePath = join(app.getPath("userData"), "browser-state.json");
   const state = readState(statePath, platform, version);
+  const host = extensionHost;
+  if (host) {
+    await host.setDeveloperMode(state.settings.extensionDeveloperMode);
+    // Restored tabs open with their extensions, unless loading takes longer.
+    await host.attachAll(restoredPartitions(state), 5000, extensionSession);
+  }
+  if (quitting || window) return;
   window = new BrowserWindow({
     title: "Kamapathy",
     width: 1440,
@@ -202,7 +239,12 @@ function createWindow(): void {
     },
   });
   const currentWindow = window;
-  controller = new BrowserController(currentWindow, state, statePath);
+  controller = new BrowserController(
+    currentWindow,
+    state,
+    statePath,
+    host ?? NO_EXTENSIONS,
+  );
   const currentController = controller;
   currentController.subscribe(() => {
     void syncAutomation();
@@ -361,8 +403,8 @@ function installMenu(): void {
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", (_event, argv) => {
-    if (!window) createWindow();
+  app.on("second-instance", async (_event, argv) => {
+    if (!window) await createWindow();
     if (window?.isMinimized()) window.restore();
     window?.focus();
     const url = argv.find((argument) => isWebUrl(argument));
@@ -381,10 +423,10 @@ else {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("activate", () => {
-    if (!window) createWindow();
+    if (!window) void createWindow();
     else window.show();
   });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     if (existsSync(iconPath)) app.dock?.setIcon(iconPath);
     app.setAboutPanelOptions({
       applicationName: "Kamapathy",
@@ -415,8 +457,19 @@ else {
         error instanceof Error ? error.message : "Unknown error",
       );
     }
+    extensionHost = new ExtensionHost({
+      userData: app.getPath("userData"),
+      locale: app.getLocale(),
+      chromeVersion: process.versions.chrome,
+    });
+    extensionsReady = extensionHost.init().catch((error) => {
+      console.error(
+        "Extensions could not be prepared:",
+        error instanceof Error ? error.message : "Unknown error",
+      );
+    });
     registerIpc();
     installMenu();
-    createWindow();
+    await createWindow();
   });
 }
