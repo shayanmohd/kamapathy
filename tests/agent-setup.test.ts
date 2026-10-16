@@ -24,6 +24,13 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CODEX_BLOCK,
+  codexHome,
+  codexRulesFile,
+  codexRuleState,
+  setCodexRule,
+} from "../electron/agent/setup/codex";
+import {
   addCommandLink,
   addPathBlock,
   cmdLauncher,
@@ -42,6 +49,11 @@ import {
   windowsPath,
   writeLaunchers,
 } from "../electron/agent/setup/command";
+import {
+  createAgentSetup,
+  parseAgentSetupRequest,
+  SetupError as ExportedSetupError,
+} from "../electron/agent/setup/index";
 import {
   backupPath,
   entryState,
@@ -62,11 +74,13 @@ import {
   nodeStatus,
   probeShell,
 } from "../electron/agent/setup/probe";
+import { AGENT_IDS, agentRows } from "../electron/agent/setup/registry";
 import {
   refreshSkill,
   skillDigest,
   stableTarget,
 } from "../electron/agent/setup/skill";
+import type { AgentSetupRequest } from "../shared/types";
 
 const posix = process.platform !== "win32";
 const root = process.getuid?.() === 0;
@@ -976,4 +990,872 @@ describe("shell probe", () => {
       ).rejects.toThrow();
     },
   );
+});
+
+// A login shell, cmd.exe and the Windows PATH script, answering from these
+// fields.
+interface FakeShell {
+  onPath: boolean;
+  kamapathy: string | null;
+  node: string | null;
+  fails: boolean;
+  userPath: string[];
+  calls: string[];
+}
+function fakeShell(): { shell: FakeShell; run: Runner } {
+  const shell: FakeShell = {
+    onPath: false,
+    kamapathy: null,
+    node: "24.3.0",
+    fails: false,
+    userPath: [],
+    calls: [],
+  };
+  const answer = (stdout: string): Answer => ({
+    code: 0,
+    stdout,
+    stderr: "",
+    timedOut: false,
+  });
+  const run: Runner = async (file, _args, { env }) => {
+    shell.calls.push(file);
+    if (file.endsWith("powershell.exe")) {
+      const bin = env.KAMAPATHY_BIN.toLowerCase();
+      const present = shell.userPath.includes(bin);
+      const action = env.KAMAPATHY_PATH_ACTION;
+      if (action === "add" && !present) {
+        shell.userPath.push(bin);
+        return answer("added\r\n");
+      }
+      if (action === "remove" && present) {
+        shell.userPath = shell.userPath.filter((entry) => entry !== bin);
+        return answer("removed\r\n");
+      }
+      return answer(present ? "present\r\n" : "absent\r\n");
+    }
+    if (shell.fails)
+      return { code: null, stdout: "", stderr: "", timedOut: true };
+    if (file === "cmd.exe") return answer(`${shell.node ?? ""}\r\n`);
+    const path = ["/usr/bin", "/bin"];
+    if (shell.onPath) path.push(`${env.HOME}/.local/bin`);
+    return answer(
+      `Last login: today\n__KAMAPATHY_PATH__${path.join(":")}\n__KAMAPATHY_COMMAND__${shell.kamapathy ?? ""}\n__KAMAPATHY_NODE__${shell.node ?? ""}\n`,
+    );
+  };
+  return { shell, run };
+}
+function setupEnvironment(overrides: Partial<SetupEnvironment> = {}) {
+  const { shell, run } = fakeShell();
+  const env = environment({
+    bundledSkill: skillFolder({
+      "SKILL.md": "# Kamapathy\n",
+      "scripts/kamapathy.mjs": "one\n",
+    }),
+    run,
+    ...overrides,
+  });
+  return { env, shell, home: env.home, paths: toolPaths(env) };
+}
+const request = (
+  choices: Partial<AgentSetupRequest> = {},
+): AgentSetupRequest => ({
+  agents: [],
+  replace: [],
+  command: false,
+  path: false,
+  codexRule: false,
+  ...choices,
+});
+const lexists = (path: string) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+// Every path under a folder with its kind and its text or link target.
+function snapshot(folder: string) {
+  const entries: Record<string, string> = {};
+  const walk = (relative: string) => {
+    for (const name of readdirSync(join(folder, relative))) {
+      const path = join(relative, name);
+      const full = join(folder, path);
+      const metadata = lstatSync(full);
+      if (metadata.isSymbolicLink())
+        entries[path] = `link ${readlinkSync(full)}`;
+      else if (metadata.isDirectory()) {
+        entries[path] = "folder";
+        walk(path);
+      } else entries[path] = `file ${readFileSync(full, "utf8")}`;
+    }
+  };
+  walk("");
+  return entries;
+}
+const toolsFolder = posix ? ".local" : "AppData";
+
+describe("agent setup", () => {
+  it("lists ten agents with their skills folders and how each is detected", () => {
+    const env = environment({ platform: "darwin", home: "/Users/avery" });
+    expect(agentRows(env)).toEqual([
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        folder: "/Users/avery/.claude/skills",
+        detected: false,
+      },
+      {
+        id: "codex",
+        name: "Codex",
+        folder: "/Users/avery/.codex/skills",
+        detected: false,
+      },
+      {
+        id: "cursor",
+        name: "Cursor",
+        folder: "/Users/avery/.cursor/skills",
+        detected: false,
+      },
+      {
+        id: "gemini-cli",
+        name: "Gemini CLI",
+        folder: "/Users/avery/.gemini/skills",
+        detected: false,
+      },
+      {
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        folder: "/Users/avery/.copilot/skills",
+        detected: false,
+      },
+      {
+        id: "opencode",
+        name: "OpenCode",
+        folder: "/Users/avery/.config/opencode/skills",
+        detected: false,
+      },
+      {
+        id: "windsurf",
+        name: "Windsurf",
+        folder: "/Users/avery/.codeium/windsurf/skills",
+        detected: false,
+      },
+      {
+        id: "goose",
+        name: "Goose",
+        folder: "/Users/avery/.config/goose/skills",
+        detected: false,
+      },
+      {
+        id: "amp",
+        name: "Amp",
+        folder: "/Users/avery/.config/agents/skills",
+        detected: false,
+      },
+      {
+        id: "shared",
+        name: "Cline, Warp, Zed",
+        folder: "/Users/avery/.agents/skills",
+        detected: false,
+      },
+    ]);
+    expect(agentRows(env).map((row) => row.id)).toEqual(AGENT_IDS);
+
+    // Variables count only as found in the app's own environment.
+    const folders = (more: Partial<SetupEnvironment>) =>
+      agentRows({ ...env, ...more }).map((row) => row.folder);
+    expect(
+      folders({
+        env: {
+          CLAUDE_CONFIG_DIR: "/claude",
+          CODEX_HOME: "/codex",
+          XDG_CONFIG_HOME: "/config",
+        },
+      }),
+    ).toEqual([
+      "/claude/skills",
+      "/codex/skills",
+      "/Users/avery/.cursor/skills",
+      "/Users/avery/.gemini/skills",
+      "/Users/avery/.copilot/skills",
+      "/config/opencode/skills",
+      "/Users/avery/.codeium/windsurf/skills",
+      "/Users/avery/.config/goose/skills",
+      "/Users/avery/.config/agents/skills",
+      "/Users/avery/.agents/skills",
+    ]);
+    const windows = "C:\\Users\\avery";
+    expect(folders({ platform: "win32", home: windows, shell: null })).toEqual(
+      [
+        ".claude\\skills",
+        ".codex\\skills",
+        ".cursor\\skills",
+        ".gemini\\skills",
+        ".copilot\\skills",
+        ".config\\opencode\\skills",
+        ".codeium\\windsurf\\skills",
+        ".config\\goose\\skills",
+        ".config\\agents\\skills",
+        ".agents\\skills",
+      ].map((folder) => `${windows}\\${folder}`),
+    );
+
+    const detected = (...folders: string[][]) => {
+      const home = environment();
+      for (const folder of folders)
+        mkdirSync(join(home.home, ...folder), { recursive: true });
+      return agentRows(home)
+        .filter((row) => row.detected)
+        .map((row) => row.id);
+    };
+    expect(detected()).toEqual([]);
+    expect(detected([".config", "agents"])).toEqual([]);
+    expect(detected([".config", "amp"])).toEqual(["amp"]);
+    const zed = posix ? [".config", "zed"] : ["AppData", "Roaming", "Zed"];
+    for (const mark of [[".agents"], [".cline"], [".warp"], zed])
+      expect(detected(mark), mark.join("/")).toEqual(["shared"]);
+    expect(
+      detected(
+        [".claude"],
+        [".codex"],
+        [".cursor"],
+        [".gemini"],
+        [".copilot"],
+        [".config", "opencode"],
+        [".codeium", "windsurf"],
+        [".config", "goose"],
+      ),
+    ).toEqual(AGENT_IDS.slice(0, 8));
+  });
+
+  it("links only detected agents, never over own copies", async () => {
+    const { env, home, paths } = setupEnvironment();
+    mkdirSync(join(home, ".claude"));
+    const codexEntry = join(home, ".codex", "skills", "kamapathy");
+    mkdirSync(codexEntry, { recursive: true });
+    writeFileSync(join(codexEntry, "SKILL.md"), "theirs");
+    const claude = {
+      id: "claude-code",
+      name: "Claude Code",
+      folder: join(home, ".claude", "skills"),
+    };
+    const codex = {
+      id: "codex",
+      name: "Codex",
+      folder: join(home, ".codex", "skills"),
+    };
+    const setup = createAgentSetup(env);
+
+    const before = await setup.status();
+    expect(before).toMatchObject({
+      supported: true,
+      skillFolder: null,
+      node: null,
+    });
+    expect(before.agents).toEqual([
+      { ...claude, state: "available" },
+      { ...codex, state: "own_copy" },
+    ]);
+    // Reading the status changes nothing.
+    expect(readdirSync(home).sort()).toEqual([".claude", ".codex"]);
+
+    const after = await setup.apply(request({ agents: [...AGENT_IDS] }));
+    expect(after.skillFolder).toBe(paths.stable);
+    expect(after.agents).toEqual([
+      { ...claude, state: "linked" },
+      { ...codex, state: "own_copy" },
+    ]);
+    const claudeEntry = join(claude.folder, "kamapathy");
+    expect(entryState(claudeEntry, paths.stable, process.platform)).toBe(
+      "linked",
+    );
+    expect(readFileSync(join(claudeEntry, "SKILL.md"), "utf8")).toBe(
+      "# Kamapathy\n",
+    );
+    expect(readdirSync(codex.folder)).toEqual(["kamapathy"]);
+    expect(readFileSync(join(codexEntry, "SKILL.md"), "utf8")).toBe("theirs");
+    // Undetected agents get nothing, and the Codex rule stays off.
+    expect(readdirSync(home).sort()).toEqual([
+      ".claude",
+      ".codex",
+      toolsFolder,
+    ]);
+    expect(readdirSync(join(home, ".codex"))).toEqual(["skills"]);
+  });
+
+  it("replace keeps a backup", async () => {
+    const { env, home, paths } = setupEnvironment({
+      now: () => 1_700_000_000_000,
+    });
+    const folder = join(home, ".codex", "skills");
+    const entry = join(folder, "kamapathy");
+    mkdirSync(join(entry, "scripts"), { recursive: true });
+    writeFileSync(join(entry, "SKILL.md"), "theirs");
+    writeFileSync(join(entry, "scripts", "x.mjs"), "x");
+
+    const status = await createAgentSetup(env).apply(
+      request({ agents: ["codex"], replace: ["codex"] }),
+    );
+    const [row] = status.agents;
+    expect(row).toMatchObject({ id: "codex", state: "linked" });
+    const backup = row.backup!;
+    expect(dirname(backup)).toBe(folder);
+    expect(basename(backup)).toMatch(
+      /^\.kamapathy-backup-1700000000000-[0-9a-f]{8}$/,
+    );
+    expect(readdirSync(folder).sort()).toEqual(
+      [basename(backup), "kamapathy"].sort(),
+    );
+    expect(entryState(entry, paths.stable, process.platform)).toBe("linked");
+    expect(readFileSync(join(backup, "SKILL.md"), "utf8")).toBe("theirs");
+    expect(readFileSync(join(backup, "scripts", "x.mjs"), "utf8")).toBe("x");
+  });
+
+  it("unlinking one agent keeps the skill copy", async () => {
+    const { env, home, paths } = setupEnvironment();
+    mkdirSync(join(home, ".claude"));
+    mkdirSync(join(home, ".cursor"));
+    const setup = createAgentSetup(env);
+    await setup.apply(request({ agents: ["claude-code", "cursor"] }));
+    const copy = stableTarget(paths)!;
+    const claudeEntry = join(home, ".claude", "skills", "kamapathy");
+    const cursorEntry = join(home, ".cursor", "skills", "kamapathy");
+    expect(entryState(cursorEntry, paths.stable, process.platform)).toBe(
+      "linked",
+    );
+
+    const status = await setup.apply(request({ agents: ["claude-code"] }));
+    expect(status.agents.map((row) => [row.id, row.state])).toEqual([
+      ["claude-code", "linked"],
+      ["cursor", "available"],
+    ]);
+    expect(lexists(cursorEntry)).toBe(false);
+    expect(readdirSync(join(home, ".cursor", "skills"))).toEqual([]);
+    expect(stableTarget(paths)).toBe(copy);
+    expect(readFileSync(join(copy, "SKILL.md"), "utf8")).toBe("# Kamapathy\n");
+    expect(entryState(claudeEntry, paths.stable, process.platform)).toBe(
+      "linked",
+    );
+  });
+
+  it("remove deletes only Kamapathy entries, blocks and T", async () => {
+    const { env, home, paths, shell } = setupEnvironment();
+    for (const name of [".claude", ".codex", ".cursor"])
+      mkdirSync(join(home, name));
+    // Cursor links to another skill copy; Codex has its own folder.
+    const other = join(temporary(), "other");
+    mkdirSync(other);
+    writeFileSync(join(other, "SKILL.md"), "other");
+    const cursorEntry = join(home, ".cursor", "skills", "kamapathy");
+    mkdirSync(dirname(cursorEntry));
+    link(other, cursorEntry);
+    const codexEntry = join(home, ".codex", "skills", "kamapathy");
+    mkdirSync(codexEntry, { recursive: true });
+    writeFileSync(join(codexEntry, "SKILL.md"), "theirs");
+    const rules = codexRulesFile(env);
+    mkdirSync(dirname(rules));
+    const ownRule =
+      'prefix_rule(pattern=["git", "status"], decision="allow")\n';
+    writeFileSync(rules, ownRule);
+    const profile = join(home, ".zshrc");
+    if (posix) writeFileSync(profile, "alias ll='ls -l'\n");
+
+    const setup = createAgentSetup(env);
+    const applied = await setup.apply(
+      request({
+        agents: ["claude-code", "codex", "cursor"],
+        replace: ["codex"],
+        command: true,
+        path: true,
+        codexRule: true,
+      }),
+    );
+    const backup = applied.agents.find((row) => row.id === "codex")!.backup!;
+    expect(readFileSync(rules, "utf8")).toBe(ownRule + CODEX_BLOCK);
+    // The person edits the PATH lines and adds one of their own, and a link
+    // inside T leads out of it.
+    const editedPath = SH_PATH_BLOCK.replace("$HOME/.local/bin", "$HOME/bin");
+    const editedProfile = `alias ll='ls -l'\n${editedPath}export EDITOR=vi\n`;
+    if (posix) writeFileSync(profile, editedProfile);
+    const outside = temporary();
+    writeFileSync(join(outside, "keep.txt"), "keep");
+    link(outside, join(paths.tools, "outside"));
+
+    const removed = await setup.remove();
+    expect(lexists(paths.tools)).toBe(false);
+    expect(lexists(join(home, ".claude", "skills", "kamapathy"))).toBe(false);
+    expect(lexists(codexEntry)).toBe(false);
+    expect(readFileSync(join(backup, "SKILL.md"), "utf8")).toBe("theirs");
+    expect(readFileSync(join(cursorEntry, "SKILL.md"), "utf8")).toBe("other");
+    expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("keep");
+    expect(readFileSync(rules, "utf8")).toBe(ownRule);
+    expect(removed).toMatchObject({
+      supported: true,
+      skillFolder: null,
+      codex: { detected: true, allowed: false },
+      node: null,
+    });
+    expect(removed.agents.map((row) => [row.id, row.state])).toEqual([
+      ["claude-code", "available"],
+      ["codex", "available"],
+      ["cursor", "own_copy"],
+    ]);
+    if (posix) {
+      expect(lexists(paths.commandLink!)).toBe(false);
+      expect(readFileSync(profile, "utf8")).toBe(editedProfile);
+      expect(removed.command).toMatchObject({
+        state: "off",
+        pathAdded: false,
+        reason: "profile_changed",
+      });
+    } else expect(shell.userPath).toEqual([]);
+
+    // Unchanged PATH lines go, and an edited Codex block stays.
+    if (posix) writeFileSync(profile, "alias ll='ls -l'\n");
+    await setup.apply(
+      request({
+        agents: ["claude-code"],
+        command: true,
+        path: true,
+        codexRule: true,
+      }),
+    );
+    if (posix)
+      expect(readFileSync(profile, "utf8")).toBe(
+        `alias ll='ls -l'\n${SH_PATH_BLOCK}`,
+      );
+    const editedRule = CODEX_BLOCK.replace(
+      'decision="allow"',
+      'decision="prompt"',
+    );
+    writeFileSync(rules, ownRule + editedRule);
+    const again = await setup.remove();
+    expect(readFileSync(rules, "utf8")).toBe(ownRule + editedRule);
+    if (posix) {
+      expect(readFileSync(profile, "utf8")).toBe("alias ll='ls -l'\n");
+      expect(again.command.reason).toBeUndefined();
+    }
+    expect(lexists(paths.tools)).toBe(false);
+    expect(readFileSync(join(backup, "SKILL.md"), "utf8")).toBe("theirs");
+  });
+
+  it("apply is idempotent", async () => {
+    const { env, home } = setupEnvironment();
+    mkdirSync(join(home, ".claude"));
+    const codexEntry = join(home, ".codex", "skills", "kamapathy");
+    mkdirSync(codexEntry, { recursive: true });
+    writeFileSync(join(codexEntry, "SKILL.md"), "theirs");
+    if (posix) writeFileSync(join(home, ".zshrc"), "alias ll='ls -l'\n");
+    const setup = createAgentSetup(env);
+    const same = request({
+      agents: ["claude-code", "codex"],
+      replace: ["codex"],
+      command: true,
+      path: true,
+      codexRule: true,
+    });
+
+    const first = await setup.apply(same);
+    expect(first.agents[1].backup).toBeDefined();
+    const files = snapshot(home);
+    const second = await setup.apply(same);
+    expect(snapshot(home)).toEqual(files);
+    expect(second).toEqual({
+      ...first,
+      agents: first.agents.map(({ backup, ...row }) => row),
+    });
+    expect(
+      readdirSync(join(home, ".codex", "skills")).filter((name) =>
+        name.startsWith(".kamapathy-backup-"),
+      ),
+    ).toHaveLength(1);
+    expect(readFileSync(codexRulesFile(env), "utf8")).toBe(CODEX_BLOCK);
+    if (posix)
+      expect(readFileSync(join(home, ".zshrc"), "utf8")).toBe(
+        `alias ll='ls -l'\n${SH_PATH_BLOCK}`,
+      );
+  });
+
+  it("calls from one process wait for each other", async () => {
+    const { env, home } = setupEnvironment();
+    mkdirSync(join(home, ".claude"));
+    const setup = createAgentSetup(env);
+    const same = request({ agents: ["claude-code"], command: true });
+    const [first, between, second] = await Promise.all([
+      setup.apply(same),
+      setup.status(),
+      setup.apply(same),
+    ]);
+    expect(first.agents).toMatchObject([{ state: "linked" }]);
+    expect(between.agents).toMatchObject([{ state: "linked" }]);
+    expect(second).toEqual(first);
+  });
+
+  it.skipIf(!posix)(
+    "an occupied ~/.local/bin/kamapathy is command_taken",
+    async () => {
+      const { env, paths } = setupEnvironment();
+      const commandLink = paths.commandLink!;
+      mkdirSync(dirname(commandLink), { recursive: true });
+      writeFileSync(commandLink, "#!/bin/sh\necho mine\n");
+      const setup = createAgentSetup(env);
+
+      expect((await setup.status()).command).toEqual({
+        state: "off",
+        path: commandLink,
+        onPath: null,
+        profileFile: join(env.home, ".zshrc"),
+        pathAdded: false,
+        reason: "command_taken",
+      });
+      const taken = await setup.apply(request({ command: true }));
+      expect(taken.command).toMatchObject({
+        state: "error",
+        reason: "command_taken",
+      });
+      expect(readFileSync(commandLink, "utf8")).toBe("#!/bin/sh\necho mine\n");
+
+      rmSync(commandLink);
+      symlinkSync("/usr/bin/true", commandLink);
+      expect((await setup.status()).command).toMatchObject({
+        state: "off",
+        reason: "command_taken",
+      });
+      expect(
+        (await setup.apply(request({ command: true }))).command,
+      ).toMatchObject({ state: "error", reason: "command_taken" });
+      expect((await setup.apply(request())).command).toMatchObject({
+        state: "off",
+        reason: "command_taken",
+      });
+      expect(readlinkSync(commandLink)).toBe("/usr/bin/true");
+    },
+  );
+
+  it.skipIf(!posix)(
+    "status reads PATH, the command and Node from the login shell",
+    async () => {
+      const { env, paths, shell } = setupEnvironment();
+      const commandLink = paths.commandLink!;
+      const profile = join(env.home, ".zshrc");
+      const setup = createAgentSetup(env);
+      const off = {
+        state: "off",
+        path: commandLink,
+        onPath: null,
+        profileFile: profile,
+        pathAdded: false,
+      };
+
+      expect(await setup.status()).toMatchObject({ command: off, node: null });
+      expect(shell.calls).toEqual([]);
+      const probed = await setup.status({ probe: true });
+      expect(probed.command).toEqual({ ...off, onPath: false });
+      expect(probed.node).toEqual({ found: true, version: "24.3.0" });
+      expect(shell.calls).toEqual(["/bin/zsh"]);
+
+      const applied = await setup.apply(request({ command: true, path: true }));
+      expect(applied.command).toEqual({
+        ...off,
+        state: "on",
+        onPath: true,
+        pathAdded: true,
+      });
+      const elsewhere = join(temporary(), "kamapathy");
+      writeFileSync(elsewhere, "#!/bin/sh\n");
+      shell.kamapathy = elsewhere;
+      expect((await setup.status({ probe: true })).command.reason).toBe(
+        "shadowed",
+      );
+      shell.kamapathy = commandLink;
+      expect(
+        (await setup.status({ probe: true })).command.reason,
+      ).toBeUndefined();
+
+      shell.fails = true;
+      const failed = await setup.status({ probe: true });
+      expect(failed.command).toMatchObject({
+        onPath: true,
+        reason: "probe_failed",
+      });
+      expect(failed.node).toBeNull();
+
+      shell.fails = false;
+      shell.node = null;
+      writeFileSync(
+        profile,
+        SH_PATH_BLOCK.replace("$HOME/.local/bin", "$HOME/bin"),
+      );
+      const changed = await setup.status({ probe: true });
+      expect(changed.command).toMatchObject({
+        state: "on",
+        pathAdded: false,
+        reason: "profile_changed",
+      });
+      expect(changed.node).toEqual({ found: false, version: null });
+    },
+  );
+
+  it.skipIf(!posix || root)(
+    "a folder Kamapathy cannot write marks only that agent or the command",
+    async () => {
+      const { env, home, paths } = setupEnvironment();
+      mkdirSync(join(home, ".claude"));
+      const cursor = join(home, ".cursor");
+      mkdirSync(cursor);
+      chmodSync(cursor, 0o500);
+      const localBin = paths.localBin!;
+      mkdirSync(localBin, { recursive: true });
+      chmodSync(localBin, 0o500);
+      try {
+        const status = await createAgentSetup(env).apply(
+          request({ agents: ["claude-code", "cursor"], command: true }),
+        );
+        expect(status.agents).toEqual([
+          {
+            id: "claude-code",
+            name: "Claude Code",
+            folder: join(home, ".claude", "skills"),
+            state: "linked",
+          },
+          {
+            id: "cursor",
+            name: "Cursor",
+            folder: join(cursor, "skills"),
+            state: "error",
+            reason: "not_writable",
+          },
+        ]);
+        expect(status.command).toMatchObject({
+          state: "error",
+          reason: "not_writable",
+        });
+      } finally {
+        chmodSync(cursor, 0o700);
+        chmodSync(localBin, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(!posix)(
+    "a tools folder that is a link rejects the whole apply",
+    async () => {
+      const { env, home, paths } = setupEnvironment();
+      mkdirSync(join(home, ".claude"));
+      mkdirSync(dirname(paths.tools), { recursive: true });
+      symlinkSync(temporary(), paths.tools);
+      const setup = createAgentSetup(env);
+      const error = await setup
+        .apply(request({ agents: ["claude-code"], command: true, path: true }))
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(SetupError);
+      expect(error).toMatchObject({ reason: "not_private" });
+      expect(readdirSync(join(home, ".claude"))).toEqual([]);
+      expect(existsSync(join(home, ".zshrc"))).toBe(false);
+      expect(existsSync(join(home, ".local", "bin"))).toBe(false);
+      // Later calls still run.
+      expect((await setup.status()).agents).toMatchObject([
+        { id: "claude-code", state: "available" },
+      ]);
+    },
+  );
+
+  it("the Codex block follows CODEX_HOME", async () => {
+    expect(CODEX_BLOCK).toBe(
+      '# Added by Kamapathy: lets Codex run the kamapathy command without asking\nprefix_rule(pattern=["kamapathy"], decision="allow")\n# End of Kamapathy lines\n',
+    );
+    // A CODEX_HOME set only in the developer's shell is never read.
+    const shellCodex = temporary();
+    mkdirSync(join(shellCodex, "rules"));
+    writeFileSync(join(shellCodex, "rules", "default.rules"), CODEX_BLOCK);
+    const saved = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = shellCodex;
+    try {
+      const { env, home } = setupEnvironment();
+      const setup = createAgentSetup(env);
+      expect(codexHome(env)).toBe(join(home, ".codex"));
+      expect(codexRulesFile(env)).toBe(
+        join(home, ".codex", "rules", "default.rules"),
+      );
+      expect((await setup.status()).codex).toEqual({
+        detected: false,
+        allowed: false,
+      });
+      // Without Codex the rule is not written.
+      expect((await setup.apply(request({ codexRule: true }))).codex).toEqual({
+        detected: false,
+        allowed: false,
+      });
+      expect(existsSync(join(home, ".codex"))).toBe(false);
+
+      mkdirSync(join(home, ".codex"));
+      expect((await setup.apply(request({ codexRule: true }))).codex).toEqual({
+        detected: true,
+        allowed: true,
+      });
+      expect(readFileSync(codexRulesFile(env), "utf8")).toBe(CODEX_BLOCK);
+      expect((await setup.apply(request())).codex).toEqual({
+        detected: true,
+        allowed: false,
+      });
+      expect(readFileSync(codexRulesFile(env), "utf8")).toBe("");
+
+      const codex = join(temporary(), "codex-home");
+      const moved = { ...env, env: { CODEX_HOME: codex } };
+      const rules = join(codex, "rules", "default.rules");
+      expect(codexHome(moved)).toBe(codex);
+      expect(codexRulesFile(moved)).toBe(rules);
+      mkdirSync(dirname(rules), { recursive: true });
+      const own = 'prefix_rule(pattern=["git", "status"], decision="allow")';
+      writeFileSync(rules, own);
+      expect(codexRuleState(moved)).toBe("absent");
+      expect(setCodexRule(moved, true)).toBe("present");
+      expect(setCodexRule(moved, true)).toBe("present");
+      expect(readFileSync(rules, "utf8")).toBe(`${own}\n${CODEX_BLOCK}`);
+      const movedStatus = await createAgentSetup(moved).status();
+      expect(movedStatus.codex).toEqual({ detected: true, allowed: true });
+      expect(movedStatus.agents.find((row) => row.id === "codex")?.folder).toBe(
+        join(codex, "skills"),
+      );
+      expect(setCodexRule(moved, false)).toBe("absent");
+      expect(readFileSync(rules, "utf8")).toBe(`${own}\n`);
+
+      // An edited block is the person's and stays either way.
+      const edited = `${own}\n${CODEX_BLOCK.replace('decision="allow"', 'decision="prompt"')}`;
+      writeFileSync(rules, edited);
+      expect(codexRuleState(moved)).toBe("changed");
+      expect(setCodexRule(moved, false)).toBe("profile_changed");
+      expect(setCodexRule(moved, true)).toBe("profile_changed");
+      expect(readFileSync(rules, "utf8")).toBe(edited);
+      expect((await createAgentSetup(moved).status()).codex).toEqual({
+        detected: true,
+        allowed: false,
+      });
+      expect(
+        readFileSync(join(shellCodex, "rules", "default.rules"), "utf8"),
+      ).toBe(CODEX_BLOCK);
+    } finally {
+      if (saved === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = saved;
+    }
+  });
+
+  it("a test profile on the real home is unsupported", async () => {
+    const home = temporary();
+    mkdirSync(join(home, ".claude"));
+    const { env, paths, shell } = setupEnvironment({
+      home,
+      accountHome: home,
+    });
+    const setup = createAgentSetup(env);
+    expect(await setup.status({ probe: true })).toEqual({
+      supported: false,
+      reason: "test_profile",
+      skillFolder: null,
+      agents: [],
+      command: {
+        state: "off",
+        path: paths.commandLink ?? paths.launcherCmd,
+        onPath: null,
+        profileFile: null,
+        pathAdded: false,
+      },
+      codex: { detected: false, allowed: false },
+      node: null,
+    });
+    for (const call of [
+      () =>
+        setup.apply(
+          request({ agents: ["claude-code"], command: true, path: true }),
+        ),
+      () => setup.remove(),
+    ]) {
+      const error = await call().catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(SetupError);
+      expect(error).toMatchObject({ reason: "unsupported" });
+    }
+    await setup.refresh();
+    expect(readdirSync(home)).toEqual([".claude"]);
+    expect(shell.calls).toEqual([]);
+    expect(ExportedSetupError).toBe(SetupError);
+
+    const elsewhere = createAgentSetup({ ...env, accountHome: temporary() });
+    expect((await elsewhere.status()).supported).toBe(true);
+  });
+
+  it("rejects requests that are not exactly an AgentSetupRequest", () => {
+    const valid = {
+      agents: ["claude-code", "codex"],
+      replace: ["codex"],
+      command: true,
+      path: false,
+      codexRule: false,
+    };
+    const parsed = parseAgentSetupRequest(valid);
+    expect(parsed).toEqual(valid);
+    expect(parsed.agents).not.toBe(valid.agents);
+    expect(
+      parseAgentSetupRequest({ ...valid, agents: [...AGENT_IDS] }).agents,
+    ).toEqual(AGENT_IDS);
+
+    const sparse = new Array<string>(2);
+    sparse[1] = "codex";
+    const invalid: unknown[] = [
+      undefined,
+      null,
+      "request",
+      1,
+      [],
+      new Map(Object.entries(valid)),
+      {},
+      Object.assign(Object.create({ inherited: true }), valid),
+      { ...valid, extra: true },
+      { agents: [], replace: [], command: false, path: false },
+      { ...valid, agents: ["claude-code", "claude-code"] },
+      { ...valid, agents: ["claude-code", "vim"], replace: [] },
+      { ...valid, agents: "claude-code", replace: [] },
+      { ...valid, agents: [1], replace: [] },
+      { ...valid, agents: sparse },
+      { ...valid, agents: [...AGENT_IDS, "codex"] },
+      { ...valid, replace: ["cursor"] },
+      { ...valid, replace: ["codex", "codex"] },
+      { ...valid, replace: "codex" },
+      { ...valid, command: "true" },
+      { ...valid, path: 0 },
+      { ...valid, codexRule: null },
+    ];
+    for (const value of invalid)
+      expect(() => parseAgentSetupRequest(value)).toThrow(
+        /^Invalid agent setup request\.$/,
+      );
+  });
+
+  it("refresh at start updates S and launchers but never recreates a deleted agent entry", async () => {
+    const { env, home, paths } = setupEnvironment();
+    mkdirSync(join(home, ".claude"));
+    const setup = createAgentSetup(env);
+    // Before any setup a refresh changes nothing.
+    await setup.refresh();
+    expect(readdirSync(home)).toEqual([".claude"]);
+
+    await setup.apply(request({ agents: ["claude-code"], command: true }));
+    const first = stableTarget(paths);
+    const entry = join(home, ".claude", "skills", "kamapathy");
+    unlink(entry);
+    writeFileSync(paths.launcher, "#!/bin/sh\n# an older launcher\n");
+    writeFileSync(join(env.bundledSkill!, "scripts", "kamapathy.mjs"), "two\n");
+
+    await setup.refresh();
+    expect(stableTarget(paths)).not.toBe(first);
+    expect(
+      readFileSync(join(paths.stable, "scripts", "kamapathy.mjs"), "utf8"),
+    ).toBe("two\n");
+    expect(readFileSync(paths.launcher, "utf8")).toBe(
+      posix ? posixLauncher(paths.stable) : gitBashLauncher(),
+    );
+    expect(lexists(entry)).toBe(false);
+    expect(readdirSync(join(home, ".claude", "skills"))).toEqual([]);
+    if (posix) expect(commandLinkState(paths)).toBe("ours");
+  });
 });

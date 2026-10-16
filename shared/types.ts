@@ -188,6 +188,38 @@ export interface UpdateReminder {
   version: string;
   state: "available" | "downloading" | "ready";
 }
+export interface AgentSetupStatus {
+  supported: boolean;
+  reason?: "desktop_only" | "test_profile";
+  skillFolder: string | null;
+  agents: {
+    id: string;
+    name: string;
+    folder: string;
+    state: "linked" | "available" | "own_copy" | "error";
+    reason?: string;
+    backup?: string;
+  }[];
+  command: {
+    state: "on" | "off" | "error";
+    path: string;
+    onPath: boolean | null;
+    profileFile: string | null;
+    // Kamapathy's PATH lines are in place, so a later Set up keeps them.
+    pathAdded: boolean;
+    reason?: string;
+  };
+  codex: { detected: boolean; allowed: boolean };
+  // Null without a shell probe.
+  node: { found: boolean; version: string | null } | null;
+}
+export interface AgentSetupRequest {
+  agents: string[];
+  replace: string[];
+  command: boolean;
+  path: boolean;
+  codexRule: boolean;
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
