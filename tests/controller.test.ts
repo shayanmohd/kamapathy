@@ -13,6 +13,7 @@ import {
   newTab,
   PAGE_BUDGET,
 } from "../shared/state";
+import type { ControllerOptions } from "../electron/controller";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
@@ -39,6 +40,20 @@ class FakeSession extends EventEmitter {
   setPermissionRequestHandler = vi.fn();
   clearStorageData = vi.fn(async () => {});
   clearCache = vi.fn(async () => {});
+  registered: Electron.PreloadScript[] = [];
+  // Like Electron, registering an id twice on one session throws.
+  registerPreloadScript = vi.fn(
+    (script: Electron.PreloadScriptRegistration) => {
+      const id = script.id ?? "random";
+      if (this.registered.some((item) => item.id === id))
+        throw new Error(
+          `Cannot register preload script with existing ID '${id}'`,
+        );
+      this.registered.push({ ...script, id });
+      return id;
+    },
+  );
+  getPreloadScripts = vi.fn(() => this.registered);
 }
 interface FakeImage {
   isEmpty(): boolean;
@@ -114,7 +129,11 @@ class FakeView {
 }
 const sessions = new Map<string, FakeSession>();
 const controllers: BrowserController[] = [];
-function controller(statePath = "unused-test-state.json") {
+function controller(
+  statePath = "unused-test-state.json",
+  state = initialState(),
+  options?: ControllerOptions,
+) {
   const window = new EventEmitter() as EventEmitter & {
     webContents: FakeContents;
     contentView: {
@@ -136,8 +155,9 @@ function controller(statePath = "unused-test-state.json") {
   window.isMinimized = () => false;
   const result = new BrowserController(
     window as unknown as BrowserWindow,
-    initialState(),
+    state,
     statePath,
+    options,
   );
   result.setContentBounds({
     x: 200,
@@ -1028,6 +1048,105 @@ describe("sign-ins", () => {
         signIns: "separate",
       }),
     ).rejects.toThrow("Only personal spaces");
+  });
+});
+
+describe("frame preload", () => {
+  const framePreload = "/app/out/preload/forms.cjs";
+  const registration = {
+    type: "frame",
+    id: "kamapathy-forms",
+    filePath: framePreload,
+  };
+  const withPreload = (state?: ReturnType<typeof initialState>) =>
+    controller(undefined, state, { framePreload });
+  // Pages in the active personal tab and in a new isolated agent space, whose
+  // partition lives in memory. Returns that space's session.
+  async function openPages(browser: BrowserController) {
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: browser.state.activeTabId,
+      url: "https://a.example/",
+    });
+    const before = new Set(sessions.keys());
+    const space = browser.createAgentSpace("Clean", { isolated: true });
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: browser.state.tabs.find((tab) => tab.spaceId === space.id)!.id,
+      url: "https://b.example/",
+    });
+    const partition = [...sessions.keys()].find((key) => !before.has(key))!;
+    expect(partition).toMatch(/^agent-/);
+    return sessions.get(partition)!;
+  }
+
+  it("registers the form preload once on every page session, in-memory ones included", async () => {
+    const plain = await openPages(controller());
+    const shared = sessions.get("persist:space-personal")!;
+    expect(shared.registerPreloadScript).not.toHaveBeenCalled();
+    expect(plain.registerPreloadScript).not.toHaveBeenCalled();
+
+    // A restored web tab gets its view while the controller is made.
+    const restored = initialState();
+    restored.tabs[0].url = "https://a.example/";
+    const browser = withPreload(restored);
+    expect(shared.registerPreloadScript).toHaveBeenCalledExactlyOnceWith(
+      registration,
+    );
+    const memory = await openPages(browser);
+    expect(shared.registerPreloadScript).toHaveBeenCalledOnce();
+    expect(memory.registerPreloadScript).toHaveBeenCalledExactlyOnceWith(
+      registration,
+    );
+    await browser.dispatch({ type: "tab:create", url: "https://c.example/" });
+    expect(contents(browser, browser.state.activeTabId)).toBeDefined();
+    expect(shared.registerPreloadScript).toHaveBeenCalledOnce();
+
+    // A new window's controller gets the same sessions, which already hold
+    // the preload.
+    const second = withPreload();
+    const secondMemory = await openPages(second);
+    expect(shared.getPreloadScripts).toHaveBeenCalled();
+    expect(shared.registerPreloadScript).toHaveBeenCalledOnce();
+    expect(secondMemory.registerPreloadScript).toHaveBeenCalledExactlyOnceWith(
+      registration,
+    );
+    expect(plain.registerPreloadScript).not.toHaveBeenCalled();
+  });
+
+  it("tab views and popups run preloads in subframes, sandboxed", async () => {
+    const browser = withPreload();
+    const personal = browser.state.activeTabId;
+    const space = browser.createAgentSpace("Task");
+    const agent = browser.state.tabs.find((tab) => tab.spaceId === space.id)!;
+    const sandboxed = {
+      nodeIntegrationInSubFrames: true,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    };
+    for (const [id, url] of [
+      [personal, "https://example.org/"],
+      [agent.id, "https://example.com/"],
+    ]) {
+      await browser.dispatch({ type: "tab:navigate", id, url });
+      const page = contents(browser, id);
+      page.commit(url);
+      const view = preferencesOf(page);
+      expect(view).toMatchObject(sandboxed);
+      expect(view).not.toHaveProperty("preload");
+      const guest = new FakeContents();
+      const { decision } = popup(page, { url: `${url}popup` }, guest);
+      const override =
+        decision.action === "allow"
+          ? decision.overrideBrowserWindowOptions.webPreferences
+          : undefined;
+      expect(override).toMatchObject(sandboxed);
+      expect(override).not.toHaveProperty("preload");
+      // A view made around Chromium's contents replaces their preferences,
+      // so the popup's view is given the same ones.
+      expect(preferencesOf(guest)).toEqual(override);
+    }
   });
 });
 

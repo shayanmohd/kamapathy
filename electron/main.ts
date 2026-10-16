@@ -202,7 +202,9 @@ function createWindow(): void {
     },
   });
   const currentWindow = window;
-  controller = new BrowserController(currentWindow, state, statePath);
+  controller = new BrowserController(currentWindow, state, statePath, {
+    framePreload: join(moduleDirectory, "../preload/forms.cjs"),
+  });
   const currentController = controller;
   currentController.subscribe(() => {
     void syncAutomation();

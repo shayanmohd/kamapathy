@@ -135,6 +135,11 @@ function jpeg(image: NativeImage, width: number): string {
   return `data:image/jpeg;base64,${scaled.toJPEG(82).toString("base64")}`;
 }
 
+export interface ControllerOptions {
+  // Absolute path of out/preload/forms.cjs, the password form preload.
+  framePreload?: string;
+}
+
 export class BrowserController {
   readonly state: BrowserState;
   readonly registry = new TabRegistry(() => this.state);
@@ -170,6 +175,7 @@ export class BrowserController {
     readonly window: BrowserWindow,
     state: BrowserState,
     private statePath: string,
+    private options: ControllerOptions = {},
   ) {
     this.state = state;
     // Restored tabs are the person's.
@@ -558,6 +564,20 @@ export class BrowserController {
       this.emit();
     };
     browsingSession.on("will-download", onDownload);
+    // The form preload stays for the session's life. Another window's
+    // controller gets the same session, and Electron refuses an id twice.
+    const { framePreload } = this.options;
+    if (
+      framePreload &&
+      !browsingSession
+        .getPreloadScripts()
+        .some((script) => script.id === "kamapathy-forms")
+    )
+      browsingSession.registerPreloadScript({
+        type: "frame",
+        id: "kamapathy-forms",
+        filePath: framePreload,
+      });
     this.sessionCleanups.set(partition, () => {
       browsingSession.removeListener("will-download", onDownload);
       browsingSession.setPermissionCheckHandler(() => false);
@@ -695,6 +715,8 @@ export class BrowserController {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      // Runs the session's form preload in subframes too, still sandboxed.
+      nodeIntegrationInSubFrames: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
       navigateOnDragDrop: false,
@@ -716,11 +738,16 @@ export class BrowserController {
   }
 
   // A hidden view for the tab, wired before anything loads in it. A popup
-  // brings the contents Chromium made for it.
+  // brings the contents Chromium made for it. A view made around contents
+  // replaces their preferences with its own, so it is given the page ones
+  // again.
   private createView(tab: Tab, webContents?: WebContents): WebContentsView {
     const space = this.getSpace(tab.spaceId);
     const view = webContents
-      ? new WebContentsView({ webContents })
+      ? new WebContentsView({
+          webContents,
+          webPreferences: this.pageWebPreferences(space),
+        })
       : new WebContentsView({
           webPreferences: {
             session: this.sessionFor(this.partitionFor(space)),
