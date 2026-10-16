@@ -83,8 +83,83 @@ jobs:
       - name: Test a normal desktop launch on macOS and Windows
         if: runner.os != 'Linux'
         run: npm run test:native
+      - name: Decide signing
+        id: signing
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          MAC_SECRETS: ${{ secrets.CSC_LINK != '' && secrets.CSC_KEY_PASSWORD != '' && secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' }}
+          WINDOWS_SECRETS: ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' }}
+        run: |
+          # Only pushes and dispatches on main sign, and only with every secret
+          # the platform needs. Linux builds are never signed.
+          signed=false
+          if { [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; } && [ "$REF" = refs/heads/main ]; then
+            if [ "$PLATFORM" = mac ] && [ "$MAC_SECRETS" = true ]; then signed=true; fi
+            if [ "$PLATFORM" = win ] && [ "$WINDOWS_SECRETS" = true ]; then signed=true; fi
+          fi
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
       - name: Package native desktop app
-        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        shell: bash
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          CSC_LINK: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_API_KEY: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'mac' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_ID: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'mac' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'mac' && secrets.APPLE_API_ISSUER || '' }}
+          AZURE_TENANT_ID: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'win' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'win' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ steps.signing.outputs.signed == 'true' && matrix.platform == 'win' && secrets.AZURE_CLIENT_SECRET || '' }}
+        run: |
+          # Unsigned builds, pull requests included, stay ad hoc and get no
+          # signing variables at all.
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
+            [ -n "${!name}" ] || unset "$name"
+          done
+          set --
+          if [ "$SIGNED" = true ]; then
+            set -- --config electron-builder.signed.yml
+            export CSC_IDENTITY_AUTO_DISCOVERY=true
+            # Notarization reads the App Store Connect key from a file.
+            if [ -n "${APPLE_API_KEY:-}" ]; then
+              key="$RUNNER_TEMP/apple-api-key.p8"
+              (umask 077 && printf '%s\n' "$APPLE_API_KEY" > "$key")
+              export APPLE_API_KEY="$key"
+            fi
+          fi
+          npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never "$@"
+      - name: Verify signatures
+        if: steps.signing.outputs.signed == 'true'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            for app in release/mac*/Kamapathy.app; do
+              codesign --verify --deep --strict --verbose=2 "$app"
+              spctl --assess --type execute --verbose=2 "$app"
+            done
+            # The notarization ticket is stapled to the app each disk image holds.
+            for dmg in release/*.dmg; do
+              volume=$(mktemp -d)
+              hdiutil attach -nobrowse -readonly -mountpoint "$volume" "$dmg"
+              xcrun stapler validate "$volume/Kamapathy.app"
+              hdiutil detach "$volume"
+            done
+          else
+            script="$RUNNER_TEMP/verify-signatures.ps1"
+            cat > "$script" <<'EOF'
+          $files = @(Get-ChildItem release -File | Where-Object { $_.Name -like '*-setup.exe' -or $_.Name -like '*-portable.exe' })
+          if ($files.Count -ne 2) { throw "Expected two installers, found $($files.Count)." }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            if ($signature.Status -ne 'Valid') { throw "$($file.Name): $($signature.Status) $($signature.StatusMessage)" }
+            Write-Output "$($file.Name): $($signature.SignerCertificate.Subject)"
+          }
+          EOF
+            pwsh -NoProfile -NonInteractive -File "$script"
+          fi
       - name: Verify bundled skill
         run: node scripts/check-bundled-skill.mjs
       - name: Upload installable artifacts

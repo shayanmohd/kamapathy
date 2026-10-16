@@ -190,6 +190,21 @@ export const newTabCopy = {
   saved: "Shortcut saved.",
 } as const;
 
+// The Move to Applications offer at start on macOS.
+export const moveCopy = {
+  question: "Move Kamapathy to Applications?",
+  detail:
+    "From Applications it keeps working after you eject the disk image, and agents can start it.",
+  move: "Move to Applications",
+  notNow: "Not now",
+  replace: "Replace Kamapathy in Applications?",
+  replaceButton: "Replace",
+  cancel: "Cancel",
+  failed: "Kamapathy couldn't move itself.",
+  failedDetail:
+    "Drag Kamapathy into the Applications folder, then open it from there.",
+} as const;
+
 export const agentSetupCopy = {
   title: "Set up agents",
   intro:

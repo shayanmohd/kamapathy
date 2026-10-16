@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
+import { maybeMoveToApplications } from "./move-to-applications";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
@@ -508,7 +509,17 @@ else {
     if (!window) createWindow();
     else window.show();
   });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
+    if (
+      (await maybeMoveToApplications({
+        app,
+        dialog,
+        platform: process.platform,
+        execPath: process.execPath,
+        defaultApp: externalApplication,
+      })) === "moved"
+    )
+      return;
     if (existsSync(iconPath)) app.dock?.setIcon(iconPath);
     app.setAboutPanelOptions({
       applicationName: "Kamapathy",

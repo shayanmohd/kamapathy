@@ -97,6 +97,52 @@ describe("distribution files", () => {
     );
   });
 
+  it("the base mac.extendInfo has the camera and microphone strings", () => {
+    expect(yamlSection(read("electron-builder.yml"), "mac")).toContain(
+      [
+        "  extendInfo:",
+        "    NSCameraUsageDescription: Websites you allow can use the camera.",
+        "    NSMicrophoneUsageDescription: Websites you allow can use the microphone.",
+      ].join("\n"),
+    );
+  });
+
+  it("the signed overlay extends the base", () => {
+    const overlay = read("electron-builder.signed.yml");
+    expect(overlay).toMatch(/^extends: \.\/electron-builder\.yml$/m);
+    const mac = yamlSection(overlay, "mac").split("\n");
+    expect(mac).toEqual(
+      expect.arrayContaining([
+        "  hardenedRuntime: true",
+        "  notarize: true",
+        "  entitlements: build/entitlements.mac.plist",
+        "  entitlementsInherit: build/entitlements.mac.plist",
+      ]),
+    );
+    expect(mac.some((line) => /^ {2}identity: \S/.test(line))).toBe(true);
+    const win = yamlSection(overlay, "win");
+    expect(win).toMatch(/^ {2}azureSignOptions:$/m);
+    expect(
+      [...win.matchAll(/^ {4}(\w+): \S/gm)].map((match) => match[1]).sort(),
+    ).toEqual([
+      "certificateProfileName",
+      "codeSigningAccountName",
+      "endpoint",
+      "publisherName",
+    ]);
+    const plist = read("build/entitlements.mac.plist");
+    expect(
+      [...plist.matchAll(/<key>([^<]*)<\/key>\s*<true\/>/g)].map(
+        (match) => match[1],
+      ),
+    ).toEqual([
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.device.camera",
+      "com.apple.security.device.audio-input",
+    ]);
+    expect(plist.match(/<key>/g)).toHaveLength(3);
+  });
+
   it("check-bundled-skill finds a changed, missing or extra file", async () => {
     const folder = mkdtempSync(join(tmpdir(), "kamapathy-bundled-"));
     try {

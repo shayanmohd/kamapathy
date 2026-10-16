@@ -23,6 +23,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      KAMAPATHY_SIGNED_RELEASES: ${{ vars.KAMAPATHY_SIGNED_RELEASES }}
     steps:
       - name: Check out publishing tools
         uses: actions/checkout@v4

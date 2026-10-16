@@ -1,0 +1,16 @@
+# Signed builds. CI packages with this overlay only for pushes and dispatches
+# on main when the signing secrets exist. The identity, team and Azure values
+# are placeholders that the signing change replaces once the accounts exist.
+extends: ./electron-builder.yml
+mac:
+  identity: "Kamapathy contributors (TEAM_ID)"
+  hardenedRuntime: true
+  notarize: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+win:
+  azureSignOptions:
+    publisherName: Kamapathy contributors
+    endpoint: https://eus.codesigning.azure.net
+    codeSigningAccountName: kamapathy
+    certificateProfileName: kamapathy
