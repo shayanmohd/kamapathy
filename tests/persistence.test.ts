@@ -412,4 +412,39 @@ describe("desktop session persistence", () => {
       false,
     );
   });
+
+  it("both new extension settings validate", () => {
+    const path = statePath();
+    const original = initialState();
+    expect(original.settings.extensionUpdates).toBe(true);
+    expect(original.settings.extensionDeveloperMode).toBe(false);
+    const { extensionUpdates, extensionDeveloperMode, ...older } =
+      original.settings;
+    writeFileSync(path, JSON.stringify({ ...original, settings: older }));
+    expect(readState(path, "linux", "0.1.0").settings).toEqual(
+      original.settings,
+    );
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...original,
+        settings: {
+          ...original.settings,
+          extensionUpdates: "no",
+          extensionDeveloperMode: 1,
+        },
+      }),
+    );
+    expect(readState(path, "linux", "0.1.0").settings).toMatchObject({
+      extensionUpdates: true,
+      extensionDeveloperMode: false,
+    });
+    original.settings.extensionUpdates = false;
+    original.settings.extensionDeveloperMode = true;
+    writeState(path, original);
+    expect(readState(path, "linux", "0.1.0").settings).toMatchObject({
+      extensionUpdates: false,
+      extensionDeveloperMode: true,
+    });
+  });
 });

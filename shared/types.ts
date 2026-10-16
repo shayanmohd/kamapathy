@@ -97,6 +97,8 @@ export interface Settings {
   automationEnabled: boolean;
   isolateAgentSpaces: boolean;
   welcomed: boolean;
+  extensionUpdates: boolean;
+  extensionDeveloperMode: boolean;
 }
 export interface ImportProfile {
   id: string;

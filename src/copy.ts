@@ -173,3 +173,13 @@ export const newTabCopy = {
   save: "Save shortcut",
   saved: "Shortcut saved.",
 } as const;
+
+export const extensionRefusalCopy = {
+  version: "It was made for an older version of Chrome.",
+  themeOrApp: "Themes and apps aren't supported.",
+  chrome: "It needs a newer version of Chrome.",
+  component: "Its ID is already used by Kamapathy.",
+  limit: "Kamapathy supports up to 100 extensions.",
+  invalid: "Its manifest isn't valid.",
+  noManifest: "That folder has no manifest.json.",
+} as const;

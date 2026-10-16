@@ -114,6 +114,8 @@ export function initialState(
       automationEnabled: true,
       isolateAgentSpaces: false,
       welcomed: false,
+      extensionUpdates: true,
+      extensionDeveloperMode: false,
     },
     platform,
     version,

@@ -32,6 +32,14 @@ export function validSettings(value: unknown, base: Settings): Settings {
         : base.isolateAgentSpaces,
     welcomed:
       typeof settings.welcomed === "boolean" ? settings.welcomed : base.welcomed,
+    extensionUpdates:
+      typeof settings.extensionUpdates === "boolean"
+        ? settings.extensionUpdates
+        : base.extensionUpdates,
+    extensionDeveloperMode:
+      typeof settings.extensionDeveloperMode === "boolean"
+        ? settings.extensionDeveloperMode
+        : base.extensionDeveloperMode,
   };
 }
 
