@@ -144,7 +144,7 @@ function testProbe(sessions: TabSessions): TestProbe {
 // connection needs no token.
 export async function startAutomation(
   controller: AutomationController,
-  options: { socketPath: string },
+  options: { socketPath: string; skillPath?: string },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
   const authority = createAuthority(controller);
@@ -185,6 +185,8 @@ export async function startAutomation(
       v8: process.versions.v8,
     }).filter(([, value]) => value !== undefined),
   );
+  // The bundled skill's folder, reported as given; nothing is read from it.
+  const skill = options.skillPath ? { skill: { path: options.skillPath } } : {};
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Kamapathy-Instance", instance);
@@ -209,6 +211,7 @@ export async function startAutomation(
           version: controller.state.version,
           apiLevel: API_LEVEL,
           versions,
+          ...skill,
         });
       }
       if (authority.stopped)

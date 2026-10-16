@@ -325,4 +325,8 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
+  agentSetupStatus(options?: { probe?: boolean }): Promise<AgentSetupStatus>;
+  applyAgentSetup(request: AgentSetupRequest): Promise<AgentSetupStatus>;
+  removeAgentSetup(): Promise<AgentSetupStatus>;
+  copyText(text: string): Promise<void>;
 }

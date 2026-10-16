@@ -544,7 +544,7 @@ Show the commands, or help on one
 
 | Method | Route | Body | Description |
 | --- | --- | --- | --- |
-| GET | `/health` |  | Checks the connection. Returns `{ status: "ok", version, apiLevel, versions }`. |
+| GET | `/health` |  | Checks the connection. Returns `{ status: "ok", version, apiLevel, versions, skill? }`. |
 | GET | `/spaces` |  | Lists the spaces this API session can reach. Returns `{ spaces: SpaceView[] }`. |
 | POST | `/spaces` | `name`, `isolated?`, `pageBudget?`, `reuse?` | Creates an agent space whose first page is p1, or with reuse returns the listed space whose ID or name matches. Returns `201 { space: SpaceView, tab: TabView, created: true }; reused 200 { space: SpaceView, created: false }`. |
 | GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |

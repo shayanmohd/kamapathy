@@ -51,6 +51,7 @@ for (const name of targets.keys()) {
       ? "Test Kamapathy skill on Linux"
       : "Test Kamapathy skill on macOS and Windows",
     "Package native desktop app",
+    "Verify bundled skill",
     "Upload installable artifacts",
   ])
     assert.equal(

@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, session } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
@@ -8,6 +9,14 @@ import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
+import {
+  createAgentSetup,
+  parseAgentSetupRequest,
+  SetupError,
+  type AgentSetup,
+} from "./agent/setup/index";
+import type { SetupEnvironment } from "./agent/setup/paths";
+import { execRunner } from "./agent/setup/probe";
 import {
   agentPaths,
   chooseSocketPath,
@@ -59,6 +68,63 @@ const developmentUrl = externalApplication
   ? process.env.ELECTRON_RENDERER_URL
   : undefined;
 const rendererUrl = developmentUrl || pathToFileURL(rendererFile).href;
+// Set up agents and the skill it gives them, both built once the app is
+// ready.
+let agentSetup: AgentSetup | null = null;
+let bundledSkill: string | null = null;
+let skillRefreshed = false;
+
+function agentSetupEnvironment(): SetupEnvironment {
+  // Development reads the checkout's skill.
+  const skill = externalApplication
+    ? join(moduleDirectory, "../../skills/kamapathy")
+    : join(process.resourcesPath, "skills/kamapathy");
+  const home = homedir();
+  let accountHome = home;
+  let shell = process.env.SHELL || "/bin/sh";
+  // The account's own home ignores HOME, so a test profile changes agents
+  // only under a temporary HOME.
+  try {
+    const account = userInfo();
+    accountHome = account.homedir;
+    shell = account.shell || shell;
+  } catch {}
+  return {
+    platform: process.platform,
+    home,
+    accountHome,
+    env: process.env,
+    testProfile: Boolean(process.env.KAMAPATHY_USER_DATA),
+    bundledSkill: existsSync(join(skill, "SKILL.md")) ? skill : null,
+    version,
+    shell: process.platform === "win32" ? null : shell,
+    run: execRunner,
+  };
+}
+
+// Once per process, after the first window shows. It changes only a setup
+// the person chose.
+function refreshAgentSkill(): void {
+  if (skillRefreshed || !agentSetup) return;
+  skillRefreshed = true;
+  void agentSetup.refresh().catch((error) => {
+    controller?.addActivity(
+      undefined,
+      "Kamapathy could not update the agent skill. Open Set up agents to check it.",
+      "warning",
+    );
+    console.error(
+      "Agent skill refresh failed:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  });
+}
+
+// Electron passes a rejection on as "<name>: <message>" and the bridge removes
+// only "Error: ", so a setup failure travels as a plain Error.
+function plainError(error: unknown): never {
+  throw error instanceof SetupError ? new Error(error.message) : error;
+}
 
 function trustedUrl(url: string): boolean {
   try {
@@ -111,7 +177,10 @@ async function syncAutomation(): Promise<void> {
           prepareAgentDirectory(agent);
           socketPath = chooseSocketPath(app.getPath("userData"));
           removeStaleSocket(socketPath);
-          automation = await startAutomation(owner, { socketPath });
+          automation = await startAutomation(owner, {
+            socketPath,
+            skillPath: bundledSkill ?? undefined,
+          });
           if (owner === controller) {
             publishEndpoint(agent, automation.endpoint, automation.instance);
             owner.setAutomation(true);
@@ -217,7 +286,10 @@ function createWindow(): void {
   currentWindow.webContents.on("will-attach-webview", (event) =>
     event.preventDefault(),
   );
-  currentWindow.once("ready-to-show", () => currentWindow.show());
+  currentWindow.once("ready-to-show", () => {
+    currentWindow.show();
+    refreshAgentSkill();
+  });
   currentWindow.on("close", () => currentController.dispose());
   currentWindow.on("closed", () => {
     if (window === currentWindow) {
@@ -344,6 +416,28 @@ function registerIpc(): void {
       /* Ignore messages from untrusted frames. */
     }
   });
+  // Set up agents.
+  ipcMain.handle(
+    "kamapathy:agent-setup-status",
+    (event, options?: { probe?: unknown }) => {
+      validateSender(event);
+      return agentSetup!.status({ probe: options?.probe === true });
+    },
+  );
+  ipcMain.handle("kamapathy:agent-setup-apply", (event, request: unknown) => {
+    validateSender(event);
+    return agentSetup!.apply(parseAgentSetupRequest(request)).catch(plainError);
+  });
+  ipcMain.handle("kamapathy:agent-setup-remove", (event) => {
+    validateSender(event);
+    return agentSetup!.remove().catch(plainError);
+  });
+  ipcMain.handle("kamapathy:copy-text", (event, text: unknown) => {
+    validateSender(event);
+    if (typeof text !== "string" || text.length > 4096)
+      throw new Error("Invalid text.");
+    clipboard.writeText(text);
+  });
 }
 
 function installMenu(): void {
@@ -415,6 +509,9 @@ else {
         error instanceof Error ? error.message : "Unknown error",
       );
     }
+    const setupEnvironment = agentSetupEnvironment();
+    bundledSkill = setupEnvironment.bundledSkill;
+    agentSetup = createAgentSetup(setupEnvironment);
     registerIpc();
     installMenu();
     createWindow();

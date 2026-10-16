@@ -1693,20 +1693,30 @@ describe("local automation socket", () => {
     return { result, release: () => release!() };
   };
 
-  it("reports API level and engine versions from health before the queue", async () => {
-    const { tab } = await createPage();
-    controller.contents.result = new Promise(() => {});
-    const running = request(`/tabs/${tab.id}/snapshot`);
-    const response = await request("/health");
-    expect(response.status).toBe(200);
+  it("reports API level, engine versions and skill folder from health before the queue", async () => {
     // Electron's and Chromium's versions are present only in the app.
-    expect(await response.json()).toEqual({
+    const body = {
       status: "ok",
       version: controller.state.version,
       apiLevel: API_LEVEL,
       versions: { node: process.versions.node, v8: process.versions.v8 },
+    };
+    expect(await (await request("/health")).json()).toEqual(body);
+    await api.close();
+    api = await startAutomation(controller, {
+      socketPath: socket.path,
+      skillPath: "/x/skills/kamapathy",
     });
+    const { tab } = await createPage();
+    controller.contents.result = new Promise(() => {});
+    const running = request(`/tabs/${tab.id}/snapshot`);
     void running.catch(() => {});
+    const response = await request("/health");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ...body,
+      skill: { path: "/x/skills/kamapathy" },
+    });
   });
 
   it("rejects unknown fields on every route and batch action before any page step", async () => {
