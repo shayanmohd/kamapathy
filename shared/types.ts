@@ -136,6 +136,23 @@ export interface SpaceRequest {
   name?: string;
   at: number;
 }
+export type InstallKind =
+  | "mac-arm64"
+  | "mac-x64"
+  | "windows-setup"
+  | "windows-portable"
+  | "linux-appimage"
+  | "linux-deb"
+  | "source"
+  | "other";
+export interface UpdateRelease {
+  version: string;
+  publishedAt: number;
+  url: string;
+  installer: { name: string; size: number; url: string; sha256?: string };
+  // The release's SHA256SUMS.txt.
+  sums: string;
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
