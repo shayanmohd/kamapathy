@@ -245,8 +245,11 @@ export function cookieDetails(
   const sameSite = sameSiteOf(row.samesite);
   const secure = row.is_secure === 1 || sameSite === "no_restriction";
   const host = row.host_key.replace(/^\./, "");
+  const path = row.path || "/";
+  // Chromium gives a cookie set without a path the URL's folder, not its path.
   const details: CookiesSetDetails = {
-    url: `${secure ? "https" : "http"}://${host}${row.path || "/"}`,
+    url: `${secure ? "https" : "http"}://${host}${path}`,
+    path,
     name: row.name,
     value,
     secure,

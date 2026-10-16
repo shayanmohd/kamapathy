@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session, shell } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -13,7 +13,13 @@ import { chromeUserAgent } from "./identity";
 import { incomingItem, incomingItems, incomingLimiter } from "./incoming";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
-import { availableBrowsers, importFrom, type BrowserId } from "./import";
+import {
+  availableBrowsers,
+  exclusive,
+  ImportError,
+  parseImportRequest,
+  runImport,
+} from "./import";
 import { startAutomation } from "./agent/server";
 import {
   agentPaths,
@@ -34,7 +40,7 @@ import type {
   BrowserState,
   ContentBounds,
   ImportOutcome,
-  ImportRequest,
+  ImportReply,
 } from "../shared/types";
 import { surfaceColor } from "../shared/theme";
 
@@ -244,6 +250,21 @@ function createWindow(): void {
   void syncAutomation();
 }
 
+// One import at a time. Its failures resolve as values, since the bridge
+// would keep only an Error's message.
+async function importReply(
+  run: () => Promise<ImportOutcome>,
+): Promise<ImportReply> {
+  try {
+    return await exclusive(run);
+  } catch (error) {
+    if (!(error instanceof ImportError)) throw error;
+    return {
+      error: { code: error.code, message: error.message, ...error.fields },
+    };
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("kamapathy:state", (event) => validateSender(event).state);
   ipcMain.handle("kamapathy:dispatch", async (event, action: BrowserAction) => {
@@ -306,43 +327,32 @@ function registerIpc(): void {
     validateSender(event);
     return availableBrowsers();
   });
-  ipcMain.handle(
-    "kamapathy:import",
-    async (event, request: ImportRequest): Promise<ImportOutcome> => {
-      const owner = validateSender(event);
-      if (
-        !request ||
-        typeof request !== "object" ||
-        typeof request.source !== "string" ||
-        (request.profile !== undefined && typeof request.profile !== "string") ||
-        typeof request.bookmarks !== "boolean" ||
-        typeof request.history !== "boolean"
+  ipcMain.handle("kamapathy:import", (event, request: unknown) => {
+    const owner = validateSender(event);
+    return importReply(() => runImport(owner, parseImportRequest(request)));
+  });
+  // Opens the macOS privacy pane where the person lets Kamapathy read
+  // another browser's data.
+  ipcMain.on("kamapathy:open-import-permissions", (event, options: unknown) => {
+    try {
+      validateSender(event);
+    } catch {
+      return;
+    }
+    const pane = (options as { pane?: unknown } | null)?.pane;
+    const privacy =
+      pane === "full-disk"
+        ? "Privacy_AllFiles"
+        : pane === "files-folders"
+          ? "Privacy_FilesAndFolders"
+          : undefined;
+    if (process.platform !== "darwin" || !privacy) return;
+    void shell
+      .openExternal(
+        `x-apple.systempreferences:com.apple.preference.security?${privacy}`,
       )
-        throw new Error("Invalid import request.");
-      const source = availableBrowsers().find(
-        (item) => item.id === request.source,
-      );
-      if (!source) throw new Error("That browser was not found.");
-      const data = await importFrom(
-        source.id as BrowserId,
-        request.profile,
-        { bookmarks: request.bookmarks, history: request.history },
-      );
-      const bookmarksBefore = owner.state.bookmarks.length;
-      const known = new Set(owner.state.history.map((entry) => entry.url));
-      await owner.dispatch({
-        type: "import:apply",
-        bookmarks: data.bookmarks,
-        history: data.history,
-      });
-      return {
-        bookmarks: owner.state.bookmarks.length - bookmarksBefore,
-        history: owner.state.history.filter((entry) => !known.has(entry.url))
-          .length,
-        warnings: data.warnings,
-      };
-    },
-  );
+      .catch(() => undefined);
+  });
   ipcMain.handle("kamapathy:default-browser", (event) => {
     validateSender(event);
     return defaultBrowserStatus(electronDefaultBrowserEnv());

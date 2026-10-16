@@ -50,6 +50,7 @@ import type {
 } from "../shared/types";
 import { PDF_VIEWER_ID } from "./agent/session/frames";
 import { TabRegistry } from "./agent/tab-registry";
+import type { CookieOutcome, ProfileCookies } from "./import";
 import { validSettings, writeState } from "./persistence";
 
 // Local markup files run without scripts; everything else is a web view.
@@ -1475,6 +1476,84 @@ export class BrowserController {
     if (this.window.isMinimized()) this.window.restore();
     this.window.show();
     this.window.focus();
+  }
+
+  /** Writes imported sign-ins into the shared session, or into one new
+   *  personal space per profile with sign-ins of its own. */
+  async applyImportedCookies(
+    target: "shared" | "separate",
+    profiles: readonly ProfileCookies[],
+  ): Promise<CookieOutcome> {
+    const outcome: CookieOutcome = {
+      written: 0,
+      failed: 0,
+      spaces: [],
+      warnings: [],
+    };
+    const saved = (store: Session, details: Electron.CookiesSetDetails) =>
+      store.cookies.set(details).then(
+        () => true,
+        () => false,
+      );
+    const write = async (store: Session, cookies: ProfileCookies["cookies"]) => {
+      for (const details of cookies) {
+        // A refused cookie is tried once more without its SameSite value.
+        const { sameSite, ...rest } = details;
+        if (
+          (await saved(store, details)) ||
+          (sameSite !== undefined && (await saved(store, rest)))
+        )
+          outcome.written++;
+        else outcome.failed++;
+      }
+      await store.cookies.flushStore();
+    };
+    if (target === "shared")
+      await write(
+        this.sessionFor(SHARED_PARTITION),
+        profiles.flatMap((profile) => profile.cookies),
+      );
+    else {
+      const activeTabId = this.state.activeTabId;
+      const spaceColors: SpaceColor[] = ["blue", "orange", "purple", "green"];
+      try {
+        for (const [index, profile] of profiles
+          .filter((item) => item.cookies.length)
+          .entries()) {
+          if (this.state.spaces.length >= 30) {
+            outcome.warnings.push(
+              "Kamapathy holds at most 30 spaces, so some profiles were left out.",
+            );
+            break;
+          }
+          await this.dispatch({
+            type: "space:create",
+            name: `${profile.profile} from ${profile.browser}`.slice(0, 48),
+            color: spaceColors[index % spaceColors.length],
+            kind: "personal",
+            signIns: "separate",
+          });
+          const space = this.state.spaces[this.state.spaces.length - 1];
+          outcome.spaces.push({ id: space.id, name: space.name });
+          await write(
+            this.sessionFor(`persist:space-${space.id}`),
+            profile.cookies,
+          );
+        }
+      } finally {
+        // The new spaces wait in the sidebar; the person stays where they were.
+        const previous = this.state.tabs.find((tab) => tab.id === activeTabId);
+        if (previous) this.activate(previous);
+        this.emit();
+      }
+    }
+    if (outcome.failed)
+      outcome.warnings.push(
+        outcome.failed === 1
+          ? "1 sign-in could not be saved."
+          : `${outcome.failed} sign-ins could not be saved.`,
+      );
+    return outcome;
   }
 
   closeTab(

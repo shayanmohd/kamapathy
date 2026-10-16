@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createCipheriv } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -19,15 +20,23 @@ import {
   availableBrowsers,
   chromiumTime,
   defaultBrowser,
+  exclusive,
   firefoxTime,
+  ImportError,
   importFrom,
+  importSelections,
   parseChromiumBookmarks,
+  parseImportRequest,
   parsePlistXml,
   parseSafariBookmarks,
+  runImport,
   safariTime,
   type BrowserId,
   type ImportEnv,
+  type ImportTarget,
 } from "../electron/import";
+import { deriveKey } from "../electron/import-cookies";
+import type { BrowserAction } from "../shared/types";
 
 // One test makes the removal of the temporary copy fail.
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -61,10 +70,13 @@ const silent: ImportEnv["exec"] = () => "";
 const failing: ImportEnv["exec"] = () => {
   throw new Error("command failed");
 };
+// The applications folder is the fake home's own, so browsers installed on
+// this computer never change what a test sees.
 const mac = (home: string, exec: ImportEnv["exec"] = silent): ImportEnv => ({
   platform: "darwin",
   home,
   exec,
+  applications: join(home, "Applications"),
 });
 const support = (home: string) => join(home, "Library", "Application Support");
 const both = { bookmarks: true, history: true };
@@ -340,19 +352,32 @@ describe("browser detection", () => {
           { id: "Profile 1", name: "Work" },
           { id: "Default", name: "Person 1" },
         ],
+        signInsAvailable: true,
+        status: "ready",
       },
       {
         id: "edge",
         name: "Microsoft Edge",
         default: false,
         profiles: [{ id: "Default", name: "Default" }],
+        signInsAvailable: true,
+        status: "ready",
       },
-      { id: "brave", name: "Brave", default: false, profiles: [] },
+      {
+        id: "brave",
+        name: "Brave",
+        default: false,
+        profiles: [],
+        signInsAvailable: true,
+        status: "ready",
+      },
       {
         id: "opera",
         name: "Opera",
         default: false,
         profiles: [{ id: ".", name: "Default" }],
+        signInsAvailable: true,
+        status: "ready",
       },
       {
         id: "firefox",
@@ -362,12 +387,16 @@ describe("browser detection", () => {
           { id: "Profiles/k3p9x1zq.default-release", name: "default-release" },
           { id: "Profiles/a1b2c3d4.default", name: "default" },
         ],
+        signInsAvailable: false,
+        status: "ready",
       },
       {
         id: "safari",
         name: "Safari",
         default: false,
         profiles: [{ id: "default", name: "Default" }],
+        signInsAvailable: false,
+        status: "ready",
       },
     ]);
   });
@@ -411,10 +440,11 @@ describe("browser detection", () => {
       home,
       exec: (command) => (command === "xdg-settings" ? "brave-browser.desktop\n" : ""),
     };
+    const ready = { status: "ready" };
     expect(availableBrowsers(env)).toEqual([
-      { id: "chrome", name: "Google Chrome", default: false, profiles: [{ id: "Default", name: "Default" }] },
-      { id: "brave", name: "Brave", default: true, profiles: [{ id: "Default", name: "Default" }] },
-      { id: "firefox", name: "Firefox", default: false, profiles: [{ id: "abc.default", name: "default" }] },
+      { id: "chrome", name: "Google Chrome", default: false, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, ...ready },
+      { id: "brave", name: "Brave", default: true, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, ...ready },
+      { id: "firefox", name: "Firefox", default: false, profiles: [{ id: "abc.default", name: "default" }], signInsAvailable: false, ...ready },
     ]);
   });
   it("finds nothing in an empty home", () => {
@@ -686,7 +716,14 @@ describe("Firefox import", () => {
       `[Profile0]\nName=elsewhere\nIsRelative=0\nPath=${elsewhere}\n`,
     );
     expect(availableBrowsers(mac(home))).toEqual([
-      { id: "firefox", name: "Firefox", default: false, profiles: [{ id: elsewhere, name: "elsewhere" }] },
+      {
+        id: "firefox",
+        name: "Firefox",
+        default: false,
+        profiles: [{ id: elsewhere, name: "elsewhere" }],
+        signInsAvailable: false,
+        status: "ready",
+      },
     ]);
     const result = await importFrom("firefox", elsewhere, { bookmarks: false, history: true }, mac(home));
     expect(result.history).toHaveLength(5);
@@ -763,5 +800,438 @@ describe("Safari import", () => {
     const home = safariHome();
     const result = await importFrom("safari", undefined, { bookmarks: true, history: false }, mac(home, failing));
     expect(result).toEqual({ bookmarks: [], history: [], warnings: ["Could not read Safari bookmarks."] });
+  });
+});
+
+describe("several profiles, sign-ins and permissions", () => {
+  // The fixture's Local State names Default "Person 1" and Profile 1 "Work".
+  function chromeHome(): { home: string; chrome: string } {
+    const home = folder();
+    const chrome = join(support(home), "Google", "Chrome");
+    place("chromium/Local State", join(chrome, "Local State"));
+    mkdirSync(join(chrome, "Default"));
+    mkdirSync(join(chrome, "Profile 1"));
+    return { home, chrome };
+  }
+  const bookmarkFile = (path: string, items: [string, string][]) =>
+    write(
+      path,
+      JSON.stringify({
+        roots: {
+          bookmark_bar: {
+            type: "folder",
+            children: items.map(([name, url]) => ({ type: "url", name, url })),
+          },
+        },
+      }),
+    );
+  const at = (millis: number) => (millis + 11644473600000) * 1000;
+  const numbered = (prefix: string, count: number): [string, string][] =>
+    Array.from({ length: count }, (_, index) => [
+      `${prefix} ${index}`,
+      `https://${prefix.toLowerCase()}.example/${index}`,
+    ]);
+  const encrypt = (password: string, value: string) => {
+    const cipher = createCipheriv("aes-128-cbc", deriveKey(password, 1003), Buffer.alloc(16, 0x20));
+    return Buffer.concat([Buffer.from("v10"), cipher.update(value), cipher.final()]);
+  };
+  const garbage = (length: number) => Buffer.concat([Buffer.from("v10"), Buffer.alloc(length)]);
+  function cookieFile(path: string, rows: [string, string, Uint8Array][]) {
+    mkdirSync(dirname(path), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec(
+      "CREATE TABLE cookies(host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, path TEXT, expires_utc INTEGER, is_secure INTEGER, is_httponly INTEGER, samesite INTEGER, is_persistent INTEGER, top_frame_site_key TEXT)",
+    );
+    const insert = db.prepare("INSERT INTO cookies VALUES (?, ?, '', ?, '/', 0, 1, 1, 1, 0, '')");
+    for (const row of rows) insert.run(...row);
+    db.close();
+  }
+  function fakeTarget(state: ImportTarget["state"]) {
+    return {
+      state,
+      dispatch: vi.fn(async (action: BrowserAction) => {
+        if (action.type !== "import:apply") return;
+        for (const item of action.bookmarks)
+          if (!state.bookmarks.some((entry) => entry.url === item.url))
+            state.bookmarks.push({ id: item.url, createdAt: 0, ...item });
+        for (const item of action.history)
+          if (!state.history.some((entry) => entry.url === item.url))
+            state.history.push({ id: item.url, ...item });
+      }),
+      applyImportedCookies: vi.fn(async () => ({
+        written: 0,
+        failed: 0,
+        spaces: [] as { id: string; name: string }[],
+        warnings: [] as string[],
+      })),
+    };
+  }
+  const codeOf = (run: () => unknown): string | undefined => {
+    try {
+      run();
+    } catch (error) {
+      return error instanceof ImportError ? error.code : "not an ImportError";
+    }
+    return undefined;
+  };
+  const both = { bookmarks: true, history: true, signIns: false };
+  const blockable = process.platform !== "win32" && process.getuid?.() !== 0;
+
+  it("import: multiple profiles merge once", async () => {
+    const { home, chrome } = chromeHome();
+    const now = Date.now();
+    bookmarkFile(join(chrome, "Profile 1", "Bookmarks"), [
+      ["Work shared", "https://shared.example/"],
+      ...numbered("Work", 600),
+    ]);
+    bookmarkFile(join(chrome, "Default", "Bookmarks"), [
+      ["Person shared", "https://shared.example/"],
+      ...numbered("Person", 600),
+    ]);
+    chromiumHistory(join(chrome, "Profile 1", "History"), [
+      ["https://shared.example/", "Work shared", 2, at(now - 2000), 0],
+      ["https://work.example/page", "Work page", 1, at(now - 3000), 0],
+    ]).close();
+    chromiumHistory(join(chrome, "Default", "History"), [
+      ["https://shared.example/", "Person shared", 9, at(now - 1000), 0],
+      ["https://person.example/page", "Person page", 1, at(now - 4000), 0],
+    ]).close();
+    const selections = [
+      { source: "chrome", profile: "Profile 1" },
+      { source: "chrome", profile: "Default" },
+    ];
+
+    const data = await importSelections(selections, both, mac(home));
+
+    expect(data.bookmarks).toHaveLength(1000);
+    expect(data.bookmarks[0]).toEqual({ title: "Work shared", url: "https://shared.example/" });
+    expect(data.bookmarks.filter((item) => item.url === "https://shared.example/")).toHaveLength(1);
+    expect(data.bookmarks[600]).toEqual({ title: "Work 599", url: "https://work.example/599" });
+    expect(data.bookmarks[601]).toEqual({ title: "Person 0", url: "https://person.example/0" });
+    expect(data.bookmarks[999].url).toBe("https://person.example/398");
+    expect(data.history.map((visit) => [visit.url, visit.title, visit.visits])).toEqual([
+      ["https://shared.example/", "Work shared", 2],
+      ["https://work.example/page", "Work page", 1],
+      ["https://person.example/page", "Person page", 1],
+    ]);
+    expect(data.profiles).toEqual([]);
+    expect(data.warnings).toEqual([]);
+
+    const target = fakeTarget({
+      bookmarks: [{ id: "known", title: "Known", url: "https://shared.example/", createdAt: 1 }],
+      history: [{ id: "seen", title: "Seen", url: "https://work.example/page", visitedAt: 1 }],
+    });
+    const outcome = await runImport(
+      target,
+      { profiles: selections, bookmarks: true, history: true, signIns: "none" },
+      mac(home),
+    );
+    expect(target.dispatch).toHaveBeenCalledTimes(1);
+    expect(target.dispatch.mock.calls[0][0]).toMatchObject({ type: "import:apply" });
+    expect(target.applyImportedCookies).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ bookmarks: 999, history: 2, signIns: 0, spaces: [], warnings: [] });
+  });
+
+  it.skipIf(!blockable)("import-sources: installed-but-unreadable source is needs_permission", () => {
+    const { home, chrome } = chromeHome();
+    mkdirSync(join(support(home), "Microsoft Edge", "Default"), { recursive: true });
+    write(join(support(home), "Firefox", "profiles.ini"), "[Profile0]\nName=default\nIsRelative=1\nPath=abc\n");
+    mkdirSync(join(support(home), "Firefox", "abc"));
+    mkdirSync(join(home, "Library", "Safari"), { recursive: true });
+    chmodSync(chrome, 0o000);
+    try {
+      expect(
+        availableBrowsers(mac(home)).map((source) => [
+          source.id,
+          source.status,
+          source.profiles,
+          source.signInsAvailable,
+        ]),
+      ).toEqual([
+        ["chrome", "needs_permission", [], true],
+        ["edge", "ready", [{ id: "Default", name: "Default" }], true],
+        ["firefox", "ready", [{ id: "abc", name: "default" }], false],
+        ["safari", "ready", [{ id: "default", name: "Default" }], false],
+      ]);
+    } finally {
+      chmodSync(chrome, 0o700);
+    }
+  });
+
+  it("treats an installed browser whose data folder reads empty as blocked on macOS", () => {
+    const home = folder();
+    mkdirSync(join(support(home), "BraveSoftware", "Brave-Browser"), { recursive: true });
+    mkdirSync(join(support(home), "Vivaldi"), { recursive: true });
+    mkdirSync(join(home, "Applications", "Brave Browser.app"), { recursive: true });
+    mkdirSync(join(home, ".config", "BraveSoftware", "Brave-Browser"), { recursive: true });
+    const statuses = (env: ImportEnv) => availableBrowsers(env).map((source) => [source.id, source.status]);
+    expect(statuses(mac(home))).toEqual([
+      ["brave", "needs_permission"],
+      ["vivaldi", "ready"],
+    ]);
+    expect(statuses({ ...mac(home), platform: "linux" })).toEqual([["brave", "ready"]]);
+  });
+
+  it("rejects malformed requests", () => {
+    const valid = {
+      profiles: [{ source: "chrome", profile: "Default" }],
+      bookmarks: true,
+      history: false,
+      signIns: "none",
+    };
+    expect(parseImportRequest({ ...valid, extra: true })).toEqual(valid);
+    expect(
+      parseImportRequest({ ...valid, profiles: [{ source: "safari" }], bookmarks: false, signIns: "separate" }),
+    ).toEqual({ profiles: [{ source: "safari" }], bookmarks: false, history: false, signIns: "separate" });
+    expect(
+      parseImportRequest({
+        ...valid,
+        profiles: [
+          { source: "chrome", profile: "Default" },
+          { source: "firefox" },
+          { source: "chrome", profile: "Default", note: 1 },
+          { source: "firefox" },
+          { source: "chrome" },
+        ],
+      }).profiles,
+    ).toEqual([{ source: "chrome", profile: "Default" }, { source: "firefox" }, { source: "chrome" }]);
+    const many = Array.from({ length: 64 }, (_, index) => ({ source: "edge", profile: `Profile ${index}` }));
+    expect(parseImportRequest({ ...valid, profiles: many }).profiles).toHaveLength(64);
+    expect(parseImportRequest({ ...valid, profiles: [{ source: "edge", profile: "p".repeat(512) }] })).toBeTruthy();
+    const cyclic: Record<string, unknown> = { ...valid };
+    cyclic.self = cyclic;
+    const invalid: unknown[] = [
+      undefined,
+      null,
+      "chrome",
+      [valid],
+      cyclic,
+      { ...valid, padding: "x".repeat(65536) },
+      { ...valid, profiles: [] },
+      { ...valid, profiles: undefined },
+      { ...valid, profiles: { source: "chrome" } },
+      { ...valid, profiles: [...many, { source: "edge" }] },
+      { ...valid, profiles: [{ source: "netscape" }] },
+      { ...valid, profiles: [{ source: "toString" }] },
+      { ...valid, profiles: [{ profile: "Default" }] },
+      { ...valid, profiles: ["chrome"] },
+      { ...valid, profiles: [null] },
+      { ...valid, profiles: [{ source: "chrome", profile: 1 }] },
+      { ...valid, profiles: [{ source: "chrome", profile: null }] },
+      { ...valid, profiles: [{ source: "chrome", profile: "p".repeat(513) }] },
+      { ...valid, bookmarks: "yes" },
+      { ...valid, history: undefined },
+      { ...valid, signIns: "everywhere" },
+      { ...valid, signIns: undefined },
+      { ...valid, bookmarks: false, history: false, signIns: "none" },
+    ];
+    for (const value of invalid) {
+      expect(codeOf(() => parseImportRequest(value))).toBe("import_invalid_request");
+      expect(() => parseImportRequest(value)).toThrow("Something was wrong with that import. Try again.");
+    }
+    expect(
+      parseImportRequest({ ...valid, bookmarks: false, history: false, signIns: "shared" }).signIns,
+    ).toBe("shared");
+  });
+
+  it("runs one import at a time", async () => {
+    let finish!: (value: string) => void;
+    const first = exclusive(() => new Promise<string>((resolve) => (finish = resolve)));
+    const busy = exclusive(async () => "second");
+    await expect(busy).rejects.toBeInstanceOf(ImportError);
+    await expect(busy).rejects.toMatchObject({
+      code: "import_busy",
+      message: "An import is already running.",
+      fields: { retryable: true },
+    });
+    finish("first");
+    expect(await first).toBe("first");
+    expect(await exclusive(async () => "third")).toBe("third");
+    await expect(
+      exclusive(async () => {
+        throw new Error("broken");
+      }),
+    ).rejects.toThrow("broken");
+    await expect(
+      exclusive(() => {
+        throw new Error("thrown before a promise");
+      }),
+    ).rejects.toThrow("thrown before a promise");
+    expect(await exclusive(async () => "fourth")).toBe("fourth");
+  });
+
+  it("reads sign-ins from a Chrome profile", async () => {
+    const { home, chrome } = chromeHome();
+    place("chromium/Bookmarks", join(chrome, "Default", "Bookmarks"));
+    chromiumHistory(join(chrome, "Default", "History"), [
+      ["https://kamapathy.app/", "Kamapathy", 1, at(Date.now() - 1000), 0],
+    ]).close();
+    cookieFile(join(chrome, "Default", "Network", "Cookies"), [
+      [".example.com", "sid", encrypt("chrome-password", "secret-1")],
+      ["mail.example.com", "token", encrypt("chrome-password", "secret-2")],
+      ["broken.example", "bad", garbage(5)],
+    ]);
+    cookieFile(join(chrome, "Profile 1", "Network", "Cookies"), [["work.example", "lost", garbage(7)]]);
+    const command = vi.fn(async (name: string, args: string[]) => {
+      if (name === "security") return "chrome-password\n";
+      throw new Error(`unexpected ${name} ${args.join(" ")}`);
+    });
+    const selections = [
+      { source: "chrome", profile: "Default" },
+      { source: "chrome", profile: "Profile 1" },
+    ];
+    const options = { bookmarks: true, history: true, signIns: true };
+
+    const data = await importSelections(selections, options, { ...mac(home), command });
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command.mock.calls[0][1]).toEqual([
+      "find-generic-password",
+      "-w",
+      "-s",
+      "Chrome Safe Storage",
+      "-a",
+      "Chrome",
+    ]);
+    expect(data.bookmarks).toHaveLength(7);
+    expect(data.history.map((visit) => visit.url)).toEqual(["https://kamapathy.app/"]);
+    expect(data.profiles).toEqual([
+      {
+        source: "chrome",
+        browser: "Google Chrome",
+        profile: "Person 1",
+        cookies: [
+          expect.objectContaining({
+            url: "https://example.com/",
+            domain: ".example.com",
+            name: "sid",
+            value: "secret-1",
+            secure: true,
+            httpOnly: true,
+            sameSite: "lax",
+          }),
+          expect.objectContaining({ url: "https://mail.example.com/", name: "token", value: "secret-2" }),
+        ],
+      },
+    ]);
+    expect(data.profiles[0].cookies[1].domain).toBeUndefined();
+    expect(data.warnings).toEqual([
+      "Sign-ins from Google Chrome could not be imported on this system.",
+      "2 sign-ins could not be read and were left out.",
+    ]);
+
+    const denied = vi.fn(async () => {
+      throw new Error("User canceled the operation.");
+    });
+    const withoutKey = await importSelections(selections, options, { ...mac(home), command: denied });
+    expect(denied).toHaveBeenCalledTimes(1);
+    expect(withoutKey.bookmarks).toHaveLength(7);
+    expect(withoutKey.history).toHaveLength(1);
+    expect(withoutKey.profiles).toEqual([]);
+    expect(withoutKey.warnings).toEqual([
+      "Kamapathy could not get the sign-in key for Google Chrome from your keychain.",
+    ]);
+
+    // Sign-ins left off never reach the keychain.
+    const untouched = vi.fn(async () => "chrome-password");
+    const plain = await importSelections(selections, both, { ...mac(home), command: untouched });
+    expect(untouched).not.toHaveBeenCalled();
+    expect(plain.profiles).toEqual([]);
+    expect(plain.warnings).toEqual([]);
+  });
+
+  it("hands the sign-ins to their destination and reports what was written", async () => {
+    const { home, chrome } = chromeHome();
+    cookieFile(join(chrome, "Default", "Network", "Cookies"), [
+      ["example.com", "sid", encrypt("chrome-password", "secret")],
+      ["broken.example", "bad", garbage(5)],
+    ]);
+    const env = { ...mac(home), command: vi.fn(async () => "chrome-password") };
+    const target = fakeTarget({ bookmarks: [], history: [] });
+    target.applyImportedCookies.mockResolvedValueOnce({
+      written: 1,
+      failed: 1,
+      spaces: [{ id: "space-1", name: "Person 1 from Google Chrome" }],
+      warnings: ["1 sign-in could not be saved."],
+    });
+
+    const outcome = await runImport(
+      target,
+      { profiles: [{ source: "chrome", profile: "Default" }], bookmarks: false, history: false, signIns: "separate" },
+      env,
+    );
+
+    expect(target.dispatch).not.toHaveBeenCalled();
+    expect(target.applyImportedCookies).toHaveBeenCalledExactlyOnceWith("separate", [
+      expect.objectContaining({ source: "chrome", profile: "Person 1", cookies: [expect.objectContaining({ name: "sid" })] }),
+    ]);
+    expect(outcome).toEqual({
+      bookmarks: 0,
+      history: 0,
+      signIns: 1,
+      spaces: [{ id: "space-1", name: "Person 1 from Google Chrome" }],
+      warnings: ["1 sign-in could not be read and was left out.", "1 sign-in could not be saved."],
+    });
+
+    // Without any sign-in to write, the destination is never asked.
+    const empty = fakeTarget({ bookmarks: [], history: [] });
+    const nothing = await runImport(
+      empty,
+      { profiles: [{ source: "chrome", profile: "Profile 1" }], bookmarks: false, history: false, signIns: "shared" },
+      env,
+    );
+    expect(empty.applyImportedCookies).not.toHaveBeenCalled();
+    expect(nothing).toEqual({ bookmarks: 0, history: 0, signIns: 0, spaces: [], warnings: [] });
+  });
+
+  it("fails a selection whose browser or profile is gone before reading anything", async () => {
+    const { home, chrome } = chromeHome();
+    place("chromium/Bookmarks", join(chrome, "Default", "Bookmarks"));
+    const command = vi.fn(async () => "chrome-password");
+    const env = { ...mac(home), command };
+    const signIns = { ...both, signIns: true };
+    await expect(
+      importSelections([{ source: "chrome", profile: "Default" }, { source: "chrome", profile: "Profile 9" }], signIns, env),
+    ).rejects.toMatchObject({ code: "profile_not_found", message: "That profile was not found." });
+    expect(command).not.toHaveBeenCalled();
+    await expect(importSelections([{ source: "edge" }], both, env)).rejects.toMatchObject({
+      code: "source_not_found",
+      message: "That browser was not found on this computer.",
+    });
+    rmSync(chrome, { recursive: true });
+    const gone = importSelections([{ source: "chrome", profile: "Default" }], both, env);
+    await expect(gone).rejects.toBeInstanceOf(ImportError);
+    await expect(gone).rejects.toMatchObject({ code: "source_not_found" });
+  });
+
+  it.skipIf(!blockable)("goes on past a browser it may not read and fails when every one is blocked", async () => {
+    const { home, chrome } = chromeHome();
+    const bookmarks = join(chrome, "Default", "Bookmarks");
+    place("chromium/Bookmarks", bookmarks);
+    place("chromium/Bookmarks", join(support(home), "Microsoft Edge", "Default", "Bookmarks"));
+    const chromeDefault = { source: "chrome", profile: "Default" };
+    chmodSync(bookmarks, 0o000);
+    try {
+      const some = await importSelections([chromeDefault, { source: "edge" }], both, mac(home));
+      expect(some.bookmarks).toHaveLength(7);
+      expect(some.warnings).toEqual(["Kamapathy needs permission to read Google Chrome's data."]);
+      await expect(importSelections([chromeDefault], both, mac(home))).rejects.toMatchObject({
+        code: "read_blocked",
+        message: "Kamapathy needs permission to read this browser's data.",
+        fields: { sources: ["Google Chrome"] },
+      });
+      // A data folder that cannot be listed blocks its selections up front.
+      chmodSync(bookmarks, 0o600);
+      chmodSync(chrome, 0o000);
+      await expect(
+        importSelections([{ source: "chrome" }, chromeDefault], both, mac(home)),
+      ).rejects.toMatchObject({ code: "read_blocked", fields: { sources: ["Google Chrome"] } });
+      const edgeToo = await importSelections([chromeDefault, { source: "edge" }], both, mac(home));
+      expect(edgeToo.bookmarks).toHaveLength(7);
+      expect(edgeToo.warnings).toEqual(["Kamapathy needs permission to read Google Chrome's data."]);
+    } finally {
+      chmodSync(chrome, 0o700);
+      chmodSync(bookmarks, 0o600);
+    }
   });
 });

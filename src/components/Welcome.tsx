@@ -52,14 +52,16 @@ export function ImportPanel({
     setBusy(true);
     setError("");
     try {
-      setOutcome(
-        await bridge.importBrowserData({
-          source: chosen.id,
-          profile: profile || undefined,
-          bookmarks,
-          history,
-        }),
-      );
+      const reply = await bridge.importBrowserData({
+        profiles: [
+          profile ? { source: chosen.id, profile } : { source: chosen.id },
+        ],
+        bookmarks,
+        history,
+        signIns: "none",
+      });
+      if ("error" in reply) setError(reply.error.message);
+      else setOutcome(reply);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : importCopy.failed);
     } finally {

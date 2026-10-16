@@ -366,6 +366,7 @@ export function createPreviewBridge(): KamapathyBridge {
     importBrowserData: async () => {
       throw new Error("Install the desktop app to import from another browser.");
     },
+    openImportPermissions: () => {},
     defaultBrowser: async () => ({ state: "unavailable", reason: "web" }),
     makeDefaultBrowser: async () => {},
   };

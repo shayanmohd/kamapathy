@@ -51,6 +51,10 @@ class FakeSession extends EventEmitter {
   setPermissionRequestHandler = vi.fn();
   clearStorageData = vi.fn(async () => {});
   clearCache = vi.fn(async () => {});
+  cookies = {
+    set: vi.fn(async (_details: Electron.CookiesSetDetails) => {}),
+    flushStore: vi.fn(async () => {}),
+  };
 }
 interface FakeImage {
   isEmpty(): boolean;
@@ -1177,6 +1181,154 @@ describe("imported browsing data", () => {
     contents(browser, id).commit("https://example.com/");
     expect(browser.state.history).toHaveLength(1);
     expect(browser.state.history[0].visits).toBe(2);
+  });
+});
+
+describe("imported sign-ins", () => {
+  const cookie = (name: string): Electron.CookiesSetDetails => ({
+    url: `https://${name}.example/`,
+    name,
+    value: `${name}-value`,
+    secure: true,
+    httpOnly: false,
+    sameSite: "lax",
+  });
+  const chrome = (profile: string, ...names: string[]) => ({
+    source: "chrome" as const,
+    browser: "Google Chrome",
+    profile,
+    cookies: names.map(cookie),
+  });
+  const setCalls = (store: FakeSession) =>
+    store.cookies.set.mock.calls.map(([details]) => details);
+  it("import: separate destination creates one space per profile", async () => {
+    const browser = controller();
+    // The shared session exists, so a write to it would show.
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: browser.state.activeTabId,
+      url: "https://a.example/",
+    });
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    const activeTabId = browser.state.activeTabId;
+    const activity = browser.state.activity.length;
+    const person = chrome("Person 1", "a", "b");
+    const work = chrome("Work", "c");
+
+    const outcome = await browser.applyImportedCookies("separate", [
+      person,
+      { source: "edge", browser: "Microsoft Edge", profile: "Default", cookies: [] },
+      work,
+    ]);
+
+    const created = browser.state.spaces.slice(2);
+    expect(
+      created.map(({ name, color, kind, owner, signIns }) => ({
+        name,
+        color,
+        kind,
+        owner,
+        signIns,
+      })),
+    ).toEqual([
+      {
+        name: "Person 1 from Google Chrome",
+        color: "blue",
+        kind: "personal",
+        owner: "human",
+        signIns: "separate",
+      },
+      {
+        name: "Work from Google Chrome",
+        color: "orange",
+        kind: "personal",
+        owner: "human",
+        signIns: "separate",
+      },
+    ]);
+    expect(outcome).toEqual({
+      written: 3,
+      failed: 0,
+      spaces: created.map(({ id, name }) => ({ id, name })),
+      warnings: [],
+    });
+    const [first, second] = created.map(
+      (space) => sessions.get(`persist:space-${space.id}`)!,
+    );
+    expect(setCalls(first)).toEqual(person.cookies);
+    expect(setCalls(second)).toEqual(work.cookies);
+    expect(first.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(second.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(sessions.get("persist:space-personal")!.cookies.set).not.toHaveBeenCalled();
+    expect(browser.state.activeSpaceId).toBe("work");
+    expect(browser.state.activeTabId).toBe(activeTabId);
+    expect(browser.state.activity).toHaveLength(activity);
+  });
+  it("shared destination", async () => {
+    const browser = controller();
+    const shared = session.fromPartition(
+      "persist:space-personal",
+    ) as unknown as FakeSession;
+    shared.cookies.set.mockImplementation(async (details) => {
+      if (details.name === "c" || (details.name === "b" && details.sameSite))
+        throw new Error("Failed to set cookie");
+    });
+    const activity = browser.state.activity.length;
+
+    const outcome = await browser.applyImportedCookies("shared", [
+      chrome("Person 1", "a", "b"),
+      chrome("Work", "c"),
+    ]);
+
+    expect(
+      setCalls(shared).map((details) => [details.name, details.sameSite]),
+    ).toEqual([
+      ["a", "lax"],
+      ["b", "lax"],
+      ["b", undefined],
+      ["c", "lax"],
+      ["c", undefined],
+    ]);
+    const { sameSite: _, ...withoutSameSite } = cookie("b");
+    expect(setCalls(shared)[2]).toEqual(withoutSameSite);
+    expect(shared.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({
+      written: 2,
+      failed: 1,
+      spaces: [],
+      warnings: ["1 sign-in could not be saved."],
+    });
+    expect(browser.state.spaces).toHaveLength(2);
+    expect(browser.state.activity).toHaveLength(activity);
+    shared.cookies.set.mockRejectedValue(new Error("Failed to set cookie"));
+    expect(
+      (await browser.applyImportedCookies("shared", [chrome("Person 1", "a", "b")]))
+        .warnings,
+    ).toEqual(["2 sign-ins could not be saved."]);
+  });
+  it("stops at the 30-space limit and cuts long names", async () => {
+    const browser = controller();
+    for (let index = browser.state.spaces.length; index < 29; index++)
+      await browser.dispatch({
+        type: "space:create",
+        kind: "personal",
+        color: "green",
+        name: `Space ${index}`,
+      });
+    const activeTabId = browser.state.activeTabId;
+
+    const outcome = await browser.applyImportedCookies("separate", [
+      chrome("P".repeat(60), "a"),
+      chrome("Work", "b"),
+    ]);
+
+    expect(browser.state.spaces).toHaveLength(30);
+    expect(outcome.spaces.map((space) => space.name)).toEqual(["P".repeat(48)]);
+    expect(outcome.written).toBe(1);
+    expect(outcome.warnings).toEqual([
+      "Kamapathy holds at most 30 spaces, so some profiles were left out.",
+    ]);
+    expect(browser.state.activeTabId).toBe(activeTabId);
   });
 });
 

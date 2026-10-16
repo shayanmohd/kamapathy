@@ -177,6 +177,17 @@ describe("import-cookies", () => {
     expect(cookieDetails(baseRow, "v")?.domain).toBeUndefined();
   });
 
+  it("keeps each cookie's path, which Chromium does not take from the URL", () => {
+    expect(cookieDetails(baseRow, "v")).toMatchObject({
+      url: "http://example.com/app",
+      path: "/app",
+    });
+    expect(cookieDetails({ ...baseRow, path: "" }, "v")).toMatchObject({
+      url: "http://example.com/",
+      path: "/",
+    });
+  });
+
   it("undecryptable rows are skipped and counted", async () => {
     const key = deriveKey("dbpass", 1003);
     const profileDir = folder();
