@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { restoreState } from "../shared/restore";
 import type { BrowserState } from "../shared/types";
+import { isFileUrl } from "../shared/url";
 export { validSettings } from "../shared/restore";
 
 export function readState(
@@ -33,8 +34,9 @@ export function writeState(path: string, state: BrowserState): void {
       createdAt,
     }));
   const ids = new Set(spaces.map((space) => space.id));
+  // Files on this computer are never written down.
   const tabs = state.tabs
-    .filter((tab) => ids.has(tab.spaceId))
+    .filter((tab) => ids.has(tab.spaceId) && !isFileUrl(tab.url))
     .map(({ id, spaceId, title, url, pinned }) => ({
       id,
       spaceId,
