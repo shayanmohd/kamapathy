@@ -20,7 +20,11 @@ import {
   webOrigin,
   wwwTwin,
 } from "../electron/passwords/origin";
-import { memorySealer, type Sealer } from "../electron/passwords/seal";
+import {
+  memorySealer,
+  safeStorageSealer,
+  type Sealer,
+} from "../electron/passwords/seal";
 import {
   nodeVaultFiles,
   Vault,
@@ -978,6 +982,90 @@ describe("password vault", () => {
     tampered[tampered.length - 1] ^= 1;
     await expect(sealer.open(tampered)).rejects.toThrow();
     await expect(sealer.open(one.subarray(0, 20))).rejects.toThrow();
+  });
+
+  it("the safeStorage sealer reports unavailable and stale values", async () => {
+    type Backend = ReturnType<
+      Electron.SafeStorage["getSelectedStorageBackend"]
+    >;
+    const storage = {
+      available: true,
+      backend: "gnome_libsecret" as Backend,
+      stale: false,
+      calls: [] as string[],
+      // Resolves a turn later, as the real encryptor starts lazily.
+      async isAsyncEncryptionAvailable() {
+        await Promise.resolve();
+        storage.calls.push("available");
+        return storage.available;
+      },
+      getSelectedStorageBackend(): Backend {
+        storage.calls.push("backend");
+        return storage.backend;
+      },
+      async encryptStringAsync(text: string) {
+        return reverse(text);
+      },
+      async decryptStringAsync(sealed: Buffer) {
+        return {
+          result: Buffer.from(sealed).reverse().toString("utf8"),
+          shouldReEncrypt: storage.stale,
+        };
+      },
+    };
+    const unavailable = {
+      code: "vault_unavailable",
+      reason: "no_keyring",
+      message: "Kamapathy can't save passwords without a system keyring.",
+    };
+
+    // Only Linux has a backend to ask about.
+    const mac = safeStorageSealer(storage, "darwin");
+    await mac.check();
+    storage.available = false;
+    expect(await failure(mac.check())).toEqual(unavailable);
+    expect(await failure(safeStorageSealer(storage, "win32").check())).toEqual(
+      unavailable,
+    );
+    expect(storage.calls).toEqual(["available", "available", "available"]);
+
+    storage.calls = [];
+    const linux = safeStorageSealer(storage, "linux");
+    expect(await failure(linux.check())).toEqual(unavailable);
+    storage.available = true;
+    for (const backend of ["basic_text", "unknown"] as const) {
+      storage.backend = backend;
+      expect(await failure(linux.check())).toEqual(unavailable);
+    }
+    for (const backend of ["gnome_libsecret", "kwallet6"] as const) {
+      storage.backend = backend;
+      await linux.check();
+    }
+    // The backend is read once availability is known.
+    expect(storage.calls).toEqual([
+      "available",
+      ...Array(4).fill(["available", "backend"]).flat(),
+    ]);
+
+    const sealed = await linux.seal("hunter2");
+    expect(sealed).toEqual(reverse("hunter2"));
+    expect(await linux.open(sealed)).toEqual({ text: "hunter2", stale: false });
+    storage.stale = true;
+    expect(await linux.open(sealed)).toEqual({ text: "hunter2", stale: true });
+
+    // Methods are looked up on each call, so replacing one takes effect.
+    storage.encryptStringAsync = async () => Buffer.from("replaced");
+    expect(await linux.seal("hunter2")).toEqual(Buffer.from("replaced"));
+    storage.decryptStringAsync = async () => ({
+      result: "other",
+      shouldReEncrypt: false,
+    });
+    expect(await linux.open(sealed)).toEqual({ text: "other", stale: false });
+    storage.isAsyncEncryptionAvailable = async () => false;
+    expect(await failure(linux.check())).toEqual(unavailable);
+    storage.isAsyncEncryptionAvailable = async () => true;
+    storage.getSelectedStorageBackend = () => "basic_text";
+    expect(await failure(linux.check())).toEqual(unavailable);
   });
 
   it("password errors carry their class, fields and message", () => {

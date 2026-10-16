@@ -1335,6 +1335,51 @@ describe("freeze-frame", () => {
   });
 });
 
+describe("passwords", () => {
+  it("publishes password prompts and tells where a tab's view is", async () => {
+    const browser = controller();
+    const published: unknown[] = [];
+    browser.subscribe((state) => published.push(state.passwordPrompts));
+    const first = browser.state.activeTabId;
+    const prompt = {
+      id: "prompt-1",
+      tabId: first,
+      kind: "save",
+      host: "example.com",
+      username: "alice",
+    } as const;
+    browser.setPasswordPrompts([prompt]);
+    expect(browser.state.passwordPrompts).toEqual([prompt]);
+    expect(published).toEqual([[prompt]]);
+    expect(
+      (browser.window.webContents as unknown as FakeContents).send,
+    ).toHaveBeenLastCalledWith("kamapathy:state-changed", browser.state);
+    browser.setPasswordPrompts([]);
+    expect(published).toEqual([[prompt], []]);
+
+    // Home has no view.
+    expect(browser.viewPlacement(first)).toBeUndefined();
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: first,
+      url: "https://example.com/",
+    });
+    const bounds = { x: 200, y: 80, width: 1000, height: 700 };
+    expect(browser.viewPlacement(first)).toEqual({ bounds, visible: true });
+    browser.hidePages();
+    expect(browser.viewPlacement(first)).toEqual({ bounds, visible: false });
+    browser.unfreeze();
+    expect(browser.viewPlacement(first)).toEqual({ bounds, visible: true });
+    await browser.dispatch({ type: "tab:create", url: "https://example.org/" });
+    const second = browser.state.activeTabId;
+    expect(browser.viewPlacement(first)).toEqual({ bounds, visible: false });
+    expect(browser.viewPlacement(second)).toEqual({ bounds, visible: true });
+    expect(browser.viewPlacement("missing")).toBeUndefined();
+    contents(browser, first).destroyed = true;
+    expect(browser.viewPlacement(first)).toBeUndefined();
+  });
+});
+
 describe("space thumbnails", () => {
   it("keeps a small capture of a space the person leaves", async () => {
     const browser = controller();

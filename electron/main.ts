@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, safeStorage, session } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -8,6 +8,9 @@ import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
+import { connectForms, type FormBroker } from "./passwords/forms";
+import { safeStorageSealer } from "./passwords/seal";
+import { Vault } from "./passwords/vault";
 import {
   agentPaths,
   chooseSocketPath,
@@ -49,6 +52,10 @@ let automationSyncing = false;
 // never saved as their choice, which would also stop agents from starting Kamapathy.
 let automationFailed = false;
 let quitting = false;
+// Saved passwords serve every window; each window has its own form broker.
+let vault: Vault | null = null;
+let forms: FormBroker | null = null;
+let vaultOpenScheduled = false;
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -209,6 +216,12 @@ function createWindow(): void {
   currentController.subscribe(() => {
     void syncAutomation();
   });
+  const currentForms =
+    vault &&
+    connectForms(currentController, currentWindow, vault, {
+      openManager: () => shortcut("passwords"),
+    });
+  forms = currentForms;
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
@@ -220,11 +233,21 @@ function createWindow(): void {
     event.preventDefault(),
   );
   currentWindow.once("ready-to-show", () => currentWindow.show());
-  currentWindow.on("close", () => currentController.dispose());
+  // A saved vault opens soon after launch, so any keychain prompt comes then.
+  currentWindow.once("show", () => {
+    if (vaultOpenScheduled) return;
+    vaultOpenScheduled = true;
+    setTimeout(() => void vault?.open(), 2000);
+  });
+  currentWindow.on("close", () => {
+    currentForms?.dispose();
+    currentController.dispose();
+  });
   currentWindow.on("closed", () => {
     if (window === currentWindow) {
       window = null;
       controller = null;
+      forms = null;
     }
     void syncAutomation();
   });
@@ -378,6 +401,8 @@ else {
     } catch {}
     controller?.dispose();
     void syncAutomation();
+    // Times saved logins were last used are written in batches.
+    void vault?.flush();
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
@@ -417,6 +442,12 @@ else {
         error instanceof Error ? error.message : "Unknown error",
       );
     }
+    // safeStorage works once the app is ready. Nothing reads the keychain
+    // until a saved vault opens or the first password is saved.
+    vault = new Vault({
+      path: join(app.getPath("userData"), "passwords", "vault.bin"),
+      sealer: safeStorageSealer(safeStorage, process.platform),
+    });
     registerIpc();
     installMenu();
     createWindow();

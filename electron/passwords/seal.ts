@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { PasswordError } from "./errors";
 
 // Encrypts vault values. The app seals saved passwords with async
 // safeStorage; check() throws PasswordError vault_unavailable when sealing
@@ -38,6 +39,39 @@ export function memorySealer(): Sealer {
         decipher.final(),
       ]).toString("utf8");
       return { text, stale: false };
+    },
+  };
+}
+
+// Seals with the system keyring through async safeStorage. Its methods are
+// looked up on each call. A Linux backend that keeps the key in plain text,
+// or none at all, counts as no keyring.
+export function safeStorageSealer(
+  storage: Pick<
+    Electron.SafeStorage,
+    | "isAsyncEncryptionAvailable"
+    | "encryptStringAsync"
+    | "decryptStringAsync"
+    | "getSelectedStorageBackend"
+  >,
+  platform: NodeJS.Platform,
+): Sealer {
+  return {
+    async check() {
+      if (
+        !(await storage.isAsyncEncryptionAvailable()) ||
+        (platform === "linux" &&
+          ["basic_text", "unknown"].includes(
+            storage.getSelectedStorageBackend(),
+          ))
+      )
+        throw new PasswordError("vault_unavailable", { reason: "no_keyring" });
+    },
+    seal: (text) => storage.encryptStringAsync(text),
+    async open(sealed) {
+      const { result, shouldReEncrypt } =
+        await storage.decryptStringAsync(sealed);
+      return { text: result, stale: shouldReEncrypt };
     },
   };
 }

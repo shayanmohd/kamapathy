@@ -34,6 +34,7 @@ import type {
   HoldReason,
   ImportedBookmark,
   ImportedVisit,
+  PasswordPrompt,
   SignIns,
   Space,
   SpaceColor,
@@ -632,6 +633,21 @@ export class BrowserController {
   peekWebContents(tabId: string): WebContents | undefined {
     const contents = this.views.get(tabId)?.webContents;
     return contents && !contents.isDestroyed() ? contents : undefined;
+  }
+
+  // Offers to save or update a password, shown by the shell.
+  setPasswordPrompts(prompts: PasswordPrompt[]): void {
+    this.state.passwordPrompts = prompts;
+    this.emit();
+  }
+
+  // Where a tab's page sits in the window, if it has a live view.
+  viewPlacement(
+    tabId: string,
+  ): { bounds: Electron.Rectangle; visible: boolean } | undefined {
+    const view = this.views.get(tabId);
+    if (!view || view.webContents.isDestroyed()) return undefined;
+    return { bounds: view.getBounds(), visible: view.getVisible() };
   }
 
   canCapturePage(): boolean {
