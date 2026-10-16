@@ -54,7 +54,7 @@ nsis:
 portable:
   artifactName: Kamapathy-${version}-windows-${arch}-portable.${ext}
 linux:
-  executableName: kamapathy
+  executableName: kamapathy-browser
   syncDesktopName: true
   icon: build/icon.png
   category: Network

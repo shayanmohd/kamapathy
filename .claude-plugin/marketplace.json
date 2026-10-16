@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "kamapathy",
+  "owner": {
+    "name": "Kamapathy contributors",
+    "url": "https://github.com/shayanmohd/kamapathy"
+  },
+  "plugins": [
+    {
+      "name": "kamapathy",
+      "version": "0.2.0",
+      "source": "./",
+      "strict": false,
+      "skills": ["./skills/kamapathy"],
+      "category": "automation",
+      "homepage": "https://kamapathy.app",
+      "license": "MIT"
+    }
+  ]
+}

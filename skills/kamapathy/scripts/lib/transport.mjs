@@ -307,7 +307,18 @@ export async function launchKamapathy(paths, env = process.env, options = {}) {
       );
     return run(executable, [], env, false);
   }
-  return run("kamapathy", [], env, false);
+  // The deb puts kamapathy-browser on PATH; the install script puts the
+  // AppImage in ~/Applications.
+  try {
+    return await run("kamapathy-browser", [], env, false);
+  } catch (error) {
+    if (error.reason !== "not_installed") throw error;
+    const appImage = await trustedProgram(
+      join(env.HOME || homedir(), "Applications", "Kamapathy.AppImage"),
+    ).catch(() => null);
+    if (!appImage) throw error;
+    return run(appImage, [], env, false);
+  }
 }
 
 const OFF =

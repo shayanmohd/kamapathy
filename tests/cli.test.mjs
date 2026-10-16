@@ -270,8 +270,48 @@ describe("automatic connection", () => {
     const { paths, userData } = await profile();
     // The installed launcher receives KAMAPATHY_USER_DATA; here it is not installed.
     await expect(
-      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData, PATH: "" }, { platform: "linux" }),
+      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData, PATH: "", HOME: userData }, { platform: "linux" }),
     ).rejects.toThrow("Could not start Kamapathy");
+  });
+
+  it.skipIf(!posix)("Linux start tries kamapathy-browser, then the AppImage", async () => {
+    const { paths, userData } = await profile();
+    const bin = join(userData, "bin");
+    const home = join(userData, "home");
+    const appImage = join(home, "Applications", "Kamapathy.AppImage");
+    await mkdir(bin);
+    await mkdir(join(home, "Applications"), { recursive: true });
+    const marker = join(userData, "started");
+    // Shell builtins only, since PATH holds nothing but the stubs.
+    const stub = async (program, name) => {
+      await writeFile(program, `#!/bin/sh\nprintf '%s %s' ${name} "$KAMAPATHY_USER_DATA" > ${JSON.stringify(marker)}\n`);
+      await chmod(program, 0o755);
+    };
+    await stub(join(bin, "kamapathy-browser"), "browser");
+    await stub(appImage, "appimage");
+    const start = (PATH) =>
+      launchKamapathy(paths, { PATH, HOME: home, KAMAPATHY_USER_DATA: userData }, { platform: "linux" });
+    const started = async (name) => {
+      await expect.poll(() => readFile(marker, "utf8").catch(() => "")).toBe(`${name} ${userData}`);
+      await rm(marker);
+    };
+    await start(bin);
+    await started("browser");
+    await start("");
+    await started("appimage");
+    const refusal = (promise) =>
+      promise.then(
+        () => "started",
+        (error) => [error.reason, error.message],
+      );
+    const notInstalled = ["not_installed", "Could not start Kamapathy (ENOENT). Open Kamapathy, then retry."];
+    // An AppImage another account could replace is never run.
+    await chmod(appImage, 0o777);
+    expect(await refusal(start(""))).toEqual(notInstalled);
+    await new Promise((done) => setTimeout(done, 200));
+    expect(existsSync(marker)).toBe(false);
+    await rm(appImage);
+    expect(await refusal(start(""))).toEqual(notInstalled);
   });
 
   it.skipIf(!posix)("starts the checked program itself, not a link that could be swapped", async () => {
@@ -347,7 +387,7 @@ describe("automatic connection", () => {
       );
     const missing = await profile();
     for (const options of [
-      { platform: "linux", env: { PATH: "" } },
+      { platform: "linux", env: { PATH: "", HOME: missing.userData } },
       { platform: "win32", env: { USERPROFILE: missing.userData, LOCALAPPDATA: missing.userData } },
     ])
       expect(
@@ -458,6 +498,20 @@ describe("standalone skill client", () => {
     expect(await runCli(["help"], { env: {}, fetch, stdout })).toBe(0);
     expect(fetch).not.toHaveBeenCalled();
     expect(stdout.text()).toContain("batch");
+  });
+  it("runs through a linked skill folder", async () => {
+    // Agents' skills folders hold a link to the skill, a junction on Windows.
+    const directory = await mkdtemp(join(tmpdir(), "kamapathy-cli-link-"));
+    directories.push(directory);
+    const link = join(directory, "kamapathy");
+    await symlink(join(process.cwd(), "skills", "kamapathy"), link, posix ? "dir" : "junction");
+    const child = spawn(process.execPath, [join(link, "scripts", "kamapathy.mjs"), "help"], {
+      env: { ...process.env, ...env },
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    const status = await new Promise((done) => child.once("close", done));
+    expect([status, stdout.split("\n")[0]]).toEqual([0, "Kamapathy browser client"]);
   });
   it("preserves exact stdin values and sends one request", async () => {
     const value = 'Quoted "value" with a newline\n';

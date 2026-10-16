@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatResult, line, printable } from "./lib/format.mjs";
 import {
@@ -650,10 +651,17 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   return 1;
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
+// Node loads this module from its real path, also when it was started through
+// a linked skill folder.
+function startedDirectly() {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (startedDirectly()) {
   process.exitCode = 1;
   // A script whose work never settles keeps the failing code set above.
   main().then((code) => {
