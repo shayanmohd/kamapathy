@@ -238,6 +238,20 @@ describe("interactive preview state invariants", () => {
   it("has no thumbnails in the web preview", async () => {
     expect(await create().thumbnails()).toEqual({});
   });
+  it("has no default browser in the web preview", async () => {
+    const bridge = create();
+    const before = structuredClone(await bridge.getState());
+    expect(await bridge.defaultBrowser()).toEqual({
+      state: "unavailable",
+      reason: "web",
+    });
+    await expect(bridge.makeDefaultBrowser()).resolves.toBeUndefined();
+    expect(await bridge.getState()).toEqual(before);
+    expect(await bridge.defaultBrowser()).toEqual({
+      state: "unavailable",
+      reason: "web",
+    });
+  });
   it("recolours a space in the web preview", async () => {
     const bridge = create();
     const state = await bridge.dispatch({

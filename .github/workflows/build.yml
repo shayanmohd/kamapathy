@@ -85,6 +85,8 @@ jobs:
         run: npm run test:native
       - name: Package native desktop app
         run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - name: Verify packaged registrations
+        run: node scripts/test-branding.mjs --packaged
       - name: Upload installable artifacts
         uses: actions/upload-artifact@v4
         with:

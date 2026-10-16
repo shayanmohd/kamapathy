@@ -227,6 +227,12 @@ export interface FrozenFrame {
   height: number;
   image: string;
 }
+export type DefaultBrowserStatus =
+  | { state: "default" | "available" }
+  | {
+      state: "unavailable";
+      reason: "development" | "disk-image" | "portable" | "not-installed" | "web";
+    };
 export interface KamapathyBridge {
   getState(): Promise<BrowserState>;
   dispatch(action: BrowserAction): Promise<BrowserState>;
@@ -240,4 +246,6 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
+  defaultBrowser(): Promise<DefaultBrowserStatus>;
+  makeDefaultBrowser(): Promise<void>;
 }

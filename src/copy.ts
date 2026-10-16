@@ -178,3 +178,18 @@ export const fileCopy = {
   icon: "File on this computer",
   scriptsOff: "Scripts are off for files on this computer.",
 } as const;
+
+export const defaultBrowserCopy = {
+  label: "Default browser",
+  isDefault: "Kamapathy is your default browser.",
+  available: "Open links from other apps in Kamapathy.",
+  make: "Make default",
+  development: "Available in the installed app.",
+  diskImage: "Move Kamapathy to Applications first.",
+  portable: "Available when Kamapathy is installed.",
+  linuxNotInstalled: "Install the .deb package to use this.",
+  windowsNotInstalled: "Reinstall Kamapathy to use this.",
+  choice: "Make Kamapathy your default browser",
+  macConfirm: "macOS asks you to confirm.",
+  windowsSettings: "Windows opens Settings so you can choose Kamapathy.",
+} as const;

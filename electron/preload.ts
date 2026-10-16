@@ -43,6 +43,8 @@ const bridge: KamapathyBridge = {
   windowControl: (action) => ipcRenderer.send("kamapathy:window", action),
   importSources: () => invoke("kamapathy:import-sources"),
   importBrowserData: (request) => invoke("kamapathy:import", request),
+  defaultBrowser: () => invoke("kamapathy:default-browser"),
+  makeDefaultBrowser: () => invoke("kamapathy:make-default-browser"),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

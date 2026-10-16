@@ -385,7 +385,7 @@ export function availableBrowsers(env: ImportEnv = defaultEnv()): ImportSource[]
   return found;
 }
 
-function handlerName(env: ImportEnv): string | undefined {
+export function handlerName(env: ImportEnv): string | undefined {
   const exec = env.exec ?? run;
   if (env.platform === "darwin") {
     const plist = join(

@@ -5,12 +5,38 @@ import {
   Sun,
   TreeEvergreen,
 } from "@phosphor-icons/react";
-import type { BrowserAction, BrowserState, Theme } from "../../shared/types";
+import type {
+  BrowserAction,
+  BrowserState,
+  DefaultBrowserStatus,
+  Theme,
+} from "../../shared/types";
 import { Modal } from "./ui";
 import { isDesktop } from "../lib/bridge";
-import { settingsCopy } from "../copy";
+import { defaultBrowserCopy, settingsCopy } from "../copy";
 import { activityTime } from "../lib/spaces";
+import { useDefaultBrowser } from "../lib/useDefaultBrowser";
 import "./Spaces.css";
+
+function defaultBrowserNote(
+  status: DefaultBrowserStatus,
+  platform: BrowserState["platform"],
+): string {
+  if (status.state !== "unavailable")
+    return status.state === "default"
+      ? defaultBrowserCopy.isDefault
+      : defaultBrowserCopy.available;
+  return {
+    development: defaultBrowserCopy.development,
+    "disk-image": defaultBrowserCopy.diskImage,
+    portable: defaultBrowserCopy.portable,
+    "not-installed":
+      platform === "win32"
+        ? defaultBrowserCopy.windowsNotInstalled
+        : defaultBrowserCopy.linuxNotInstalled,
+    web: "",
+  }[status.reason];
+}
 
 export function Settings({
   open,
@@ -28,6 +54,7 @@ export function Settings({
   onImport: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
+  const defaultBrowser = useDefaultBrowser(open);
   const warning =
     state.settings.automationEnabled && !state.automation.running
       ? state.activity.find((item) => !item.spaceId && item.kind === "warning")
@@ -104,6 +131,27 @@ export function Settings({
             <option value="bing">Bing</option>
           </select>
         </div>
+        {state.platform !== "web" && (
+          <div className="setting-row">
+            <div>
+              <strong>{defaultBrowserCopy.label}</strong>
+              {defaultBrowser.status && (
+                <p>
+                  {defaultBrowserNote(defaultBrowser.status, state.platform)}
+                </p>
+              )}
+            </div>
+            {defaultBrowser.status?.state === "available" && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void defaultBrowser.makeDefault()}
+              >
+                {defaultBrowserCopy.make}
+              </button>
+            )}
+          </div>
+        )}
         <div className="setting-row">
           <div>
             <strong>Restore tabs on startup</strong>

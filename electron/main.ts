@@ -4,6 +4,11 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
+import {
+  defaultBrowserStatus,
+  electronDefaultBrowserEnv,
+  makeDefaultBrowser,
+} from "./default-browser";
 import { chromeUserAgent } from "./identity";
 import { incomingItem, incomingItems, incomingLimiter } from "./incoming";
 import { menuTemplate } from "./menu";
@@ -338,6 +343,15 @@ function registerIpc(): void {
       };
     },
   );
+  ipcMain.handle("kamapathy:default-browser", (event) => {
+    validateSender(event);
+    return defaultBrowserStatus(electronDefaultBrowserEnv());
+  });
+  // Runs only while Kamapathy can become the default browser.
+  ipcMain.handle("kamapathy:make-default-browser", async (event) => {
+    validateSender(event);
+    await makeDefaultBrowser(electronDefaultBrowserEnv());
+  });
   ipcMain.on("kamapathy:window", (event, action: string) => {
     try {
       const current = validateSender(event).window;
