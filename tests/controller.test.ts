@@ -2222,3 +2222,60 @@ describe("popups", () => {
     expect(browser.state.activeTabId).toBe(id);
   });
 });
+
+describe("incoming space", () => {
+  const tabsIn = (browser: BrowserController, spaceId: string) =>
+    browser.state.tabs.filter((tab) => tab.spaceId === spaceId);
+
+  it("help links open in the active personal space, else the one used last, else a new Personal space", async () => {
+    const browser = controller();
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    expect(browser.incomingSpace().id).toBe("work");
+    // A granted personal space is passed over for the one used before it.
+    await browser.dispatch({ type: "space:activate", id: "personal" });
+    browser.grantAccess("personal");
+    expect(browser.incomingSpace().id).toBe("work");
+    // With every personal space granted, a new one takes the link, and
+    // nothing changes the space in front.
+    browser.grantAccess("work");
+    const spaces = browser.state.spaces.length;
+    const created = browser.incomingSpace();
+    expect(created).toMatchObject({
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdBy: "person",
+    });
+    expect(created).not.toHaveProperty("access");
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(tabsIn(browser, created.id)).toEqual([
+      expect.objectContaining({
+        url: HOME_URL,
+        openedBy: "person",
+        managed: false,
+      }),
+    ]);
+    expect(browser.state.activeSpaceId).toBe("personal");
+    // It is used again rather than making another.
+    expect(browser.incomingSpace()).toBe(created);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    // A 31st space is refused with the usual message.
+    browser.grantAccess(created.id);
+    while (browser.state.spaces.length < 30) browser.createAgentSpace("Task");
+    expect(() => browser.incomingSpace()).toThrow(
+      "The maximum of 30 spaces has been reached.",
+    );
+  });
+
+  it("a personal space not used since start comes before a new one", () => {
+    const browser = controller();
+    browser.grantAccess("personal");
+    expect(browser.incomingSpace().id).toBe("work");
+    expect(browser.state.spaces).toHaveLength(2);
+  });
+});

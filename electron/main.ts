@@ -438,6 +438,35 @@ function registerIpc(): void {
       throw new Error("Invalid text.");
     clipboard.writeText(text);
   });
+  // Only the main process knows which space was used last.
+  ipcMain.handle(
+    "kamapathy:help-space",
+    (event) => validateSender(event).incomingSpace().id,
+  );
+}
+
+// Help pages open as the person's tab in a personal space no agent can
+// reach. A closed window comes back and shows once it is ready.
+async function openLink(url: string): Promise<void> {
+  try {
+    if (!window) createWindow();
+    else {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    }
+    const owner = controller!;
+    await owner.dispatch({
+      type: "tab:create",
+      url,
+      spaceId: owner.incomingSpace().id,
+    });
+  } catch (error) {
+    console.error(
+      "Help page could not open:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  }
 }
 
 function installMenu(): void {
@@ -448,6 +477,7 @@ function installMenu(): void {
         appName: app.getName(),
         shell: () => window,
         send: shortcut,
+        open: (url) => void openLink(url),
       }),
     ),
   );

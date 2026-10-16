@@ -390,6 +390,7 @@ export function createPreviewBridge(): KamapathyBridge {
     copyText: async (text) => {
       await navigator.clipboard?.writeText(text);
     },
+    helpSpaceId: async () => state.activeSpaceId,
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

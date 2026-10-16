@@ -8,6 +8,8 @@ import {
   GearSix,
   MagnifyingGlass,
   Plus,
+  Question,
+  Robot,
   Stack,
 } from "@phosphor-icons/react";
 import {
@@ -29,6 +31,8 @@ const icons: Record<ToolsMenuAction, ReactNode> = {
   split: <Columns size={16} />,
   find: <MagnifyingGlass size={16} />,
   settings: <GearSix size={16} />,
+  "agent-setup": <Robot size={16} />,
+  help: <Question size={16} />,
 };
 const keys: Partial<Record<ToolsMenuAction, string>> = {
   "new-tab": "mod+t",

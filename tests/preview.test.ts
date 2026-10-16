@@ -270,6 +270,12 @@ describe("interactive preview state invariants", () => {
         "Agent setup is available in the desktop app.",
       );
   });
+  it("opens help in the active space in the web preview", async () => {
+    const bridge = create();
+    expect(await bridge.helpSpaceId()).toBe("personal");
+    await bridge.dispatch({ type: "space:activate", id: "work" });
+    expect(await bridge.helpSpaceId()).toBe("work");
+  });
   it("recolours a space in the web preview", async () => {
     const bridge = create();
     const state = await bridge.dispatch({

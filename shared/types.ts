@@ -329,4 +329,5 @@ export interface KamapathyBridge {
   applyAgentSetup(request: AgentSetupRequest): Promise<AgentSetupStatus>;
   removeAgentSetup(): Promise<AgentSetupStatus>;
   copyText(text: string): Promise<void>;
+  helpSpaceId(): Promise<string>;
 }

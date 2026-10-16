@@ -165,6 +165,8 @@ export class BrowserController {
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  // Space ids, most recently active first.
+  private recentSpaces: string[];
 
   constructor(
     readonly window: BrowserWindow,
@@ -172,6 +174,7 @@ export class BrowserController {
     private statePath: string,
   ) {
     this.state = state;
+    this.recentSpaces = [state.activeSpaceId];
     // Restored tabs are the person's.
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
@@ -1094,6 +1097,10 @@ export class BrowserController {
       this.splitLeadingTabId = tab.id;
     this.state.activeSpaceId = tab.spaceId;
     this.state.activeTabId = tab.id;
+    this.recentSpaces = [
+      tab.spaceId,
+      ...this.recentSpaces.filter((id) => id !== tab.spaceId),
+    ].slice(0, 30);
   }
 
   private destroyTab(id: string): void {
@@ -1180,6 +1187,39 @@ export class BrowserController {
     if (isWebUrl(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
+  }
+
+  /** The personal space no agent can reach, where help links open. */
+  incomingSpace(): Space {
+    const reachable = (space: Space | undefined): space is Space =>
+      space?.kind === "personal" && space.access !== "granted";
+    // The active space, else the one used last, else any the person has
+    // not used since Kamapathy started.
+    const known =
+      [this.state.activeSpaceId, ...this.recentSpaces]
+        .map((id) => this.state.spaces.find((space) => space.id === id))
+        .find(reachable) ?? this.state.spaces.find(reachable);
+    if (known) return known;
+    if (this.state.spaces.length >= 30)
+      throw new Error("The maximum of 30 spaces has been reached.");
+    if (this.state.tabs.length >= 200)
+      throw new Error("The maximum of 200 tabs has been reached.");
+    const space: Space = {
+      id: randomUUID(),
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdAt: Date.now(),
+      createdBy: "person",
+    };
+    this.state.spaces.push(space);
+    const tab = newTab(space.id);
+    this.registry.register(tab, { openedBy: "person", managed: false });
+    this.state.tabs.push(tab);
+    this.emit();
+    return space;
   }
 
   closeTab(

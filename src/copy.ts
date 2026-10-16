@@ -10,7 +10,23 @@ export const toolsMenuCopy = {
   split: "Split view",
   find: "Find",
   settings: "Settings",
+  "agent-setup": "Set up agents",
+  help: "Help",
 } as const;
+
+// Command palette entries for setup and help.
+export const helpCopy: Record<
+  "agent-setup" | "help" | "report-issue" | "privacy",
+  { title: string; hint: string }
+> = {
+  "agent-setup": {
+    title: "Set up agents",
+    hint: "Give your agents Kamapathy's skill",
+  },
+  help: { title: "Help", hint: "Answers to common questions" },
+  "report-issue": { title: "Report an issue", hint: "Tell us what went wrong" },
+  privacy: { title: "Privacy", hint: "How Kamapathy handles your data" },
+};
 
 export const tabStripCopy = {
   search: "Search tabs",

@@ -58,6 +58,7 @@ import { useAgentClock } from "./lib/useAgentClock";
 import { spaceTabs } from "./lib/tabs";
 import { type ActionName, isActionName } from "./lib/actions";
 import { keyAction } from "./lib/keys";
+import { HELP_LINKS } from "../shared/links";
 
 type Overlay =
   | "command"
@@ -335,6 +336,23 @@ export default function App() {
     },
     [show],
   );
+  // Help pages open in a personal space no agent can reach, which only the
+  // main process can pick.
+  const openLink = useCallback(
+    async (url: string) => {
+      try {
+        const spaceId = await bridge.helpSpaceId();
+        await dispatch({ type: "tab:create", url, spaceId });
+      } catch (error) {
+        notify(
+          error instanceof Error
+            ? error.message
+            : "Something went wrong. Please try again.",
+        );
+      }
+    },
+    [dispatch, notify],
+  );
   const action = useCallback(
     (name: ActionName) => {
       // Anything a shortcut does replaces the open popover or dialog.
@@ -412,13 +430,21 @@ export default function App() {
           // close() above already closed the grid if it was open.
           if (current !== "spaces-grid") void show("spaces-grid");
           break;
+        case "agent-setup":
+          void show("agent-setup");
+          break;
+        case "help":
+        case "report-issue":
+        case "privacy":
+          void openLink(HELP_LINKS[name]);
+          break;
         default: {
           const unhandled: never = name;
           return unhandled;
         }
       }
     },
-    [dispatch, active, isHome, openSpace, openBookmark, state, show, close, openSettings],
+    [dispatch, active, isHome, openSpace, openBookmark, state, show, close, openSettings, openLink],
   );
   useEffect(
     () =>
