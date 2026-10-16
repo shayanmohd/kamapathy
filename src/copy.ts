@@ -173,3 +173,60 @@ export const newTabCopy = {
   save: "Save shortcut",
   saved: "Shortcut saved.",
 } as const;
+
+export const agentSetupCopy = {
+  title: "Set up agents",
+  intro:
+    "Add Kamapathy's skill to the agents on this computer. Nothing changes until you choose Set up.",
+  checking: "Looking for agents...",
+  agentsHeading: "Agents on this computer",
+  noAgents: "No agents were found on this computer.",
+  ownCopy: "Has its own copy",
+  useOurs: "Use Kamapathy's copy",
+  command: "Add the kamapathy command",
+  pathIn: (file: string) => `Add ~/.local/bin to your PATH in ${file}`,
+  pathWindows: "Add it to your PATH",
+  pathManual: "Add this line to your shell's startup file:",
+  codexRule: "Let Codex run kamapathy without asking",
+  codexWarning:
+    "Codex will use Kamapathy, including your sign-ins and files it uploads, without asking you first.",
+  nodeMissing:
+    "The kamapathy command needs Node.js 22.13 or later from nodejs.org.",
+  nodeTooOld: (version: string) =>
+    `This computer has Node.js ${version}. The kamapathy command needs 22.13 or later.`,
+  setUp: "Set up",
+  working: "Working...",
+  remove: "Remove setup",
+  close: "Close",
+  done: "Restart your agents to load the skill. Open a new terminal window for the kamapathy command.",
+  tryIt: "Try it",
+  firstPrompt:
+    "Use Kamapathy to check this weekend's weather in Lisbon and tell me which site you used.",
+  copy: "Copy",
+  copied: "Copied",
+  copyPath: "Copy path",
+  skillFolder: "Skill folder",
+  hints: {
+    "claude-code": "In Claude Code, type /kamapathy, then your task.",
+    codex: "In Codex, type $kamapathy, then your task.",
+  },
+  genericHint: "Ask your agent to use Kamapathy, then give it your task.",
+  reasons: {
+    command_taken: "Another program already uses ~/.local/bin/kamapathy.",
+    shadowed: "Another kamapathy command comes first on your PATH.",
+    profile_changed:
+      "The PATH lines in your startup file were edited, so Kamapathy left them.",
+    probe_failed: "Kamapathy couldn't read your shell's PATH.",
+    not_writable: "Kamapathy couldn't write there.",
+  } as Record<string, string>,
+  settingsRow: "Agent setup",
+  settingsButton: "Set up...",
+  // Lists the agents set up, or names the command when no agent is.
+  summary: (names: string[], command: boolean) =>
+    !names.length && command
+      ? "Set up for the kamapathy command"
+      : `Set up for ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0]}`,
+  notSetUp: "Not set up yet",
+  desktopOnly: "Available in the desktop app.",
+  testProfile: "Agent setup is off for test profiles.",
+} as const;

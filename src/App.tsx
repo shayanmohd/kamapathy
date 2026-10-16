@@ -52,6 +52,7 @@ import { ActivityDialog } from "./components/ActivityDialog";
 import { SpacesOverview } from "./components/SpacesOverview";
 import { FindPill } from "./components/FindPill";
 import { ImportPanel, Welcome } from "./components/Welcome";
+import { AgentSetupDialog } from "./components/AgentSetup";
 import { importCopy, newTabCopy, signInsCopy, spacesCopy } from "./copy";
 import { useAgentClock } from "./lib/useAgentClock";
 import { spaceTabs } from "./lib/tabs";
@@ -75,6 +76,7 @@ type Overlay =
   | "spaces-grid"
   | "welcome"
   | "import"
+  | "agent-setup"
   | "space-request";
 export default function App() {
   const [state, setState] = useState<BrowserState>(() => initialState());
@@ -650,6 +652,7 @@ export default function App() {
         dispatch={dispatch}
         focus={settingsFocus}
         onImport={() => void show("import")}
+        onAgentSetup={() => void show("agent-setup")}
       />
       <Welcome
         open={overlay === "welcome"}
@@ -667,6 +670,11 @@ export default function App() {
       >
         {overlay === "import" && <ImportPanel onDone={close} />}
       </Modal>
+      <AgentSetupDialog
+        open={overlay === "agent-setup"}
+        onClose={close}
+        platform={state.platform}
+      />
       <LibraryDialog
         kind={
           overlay === "bookmarks" ||

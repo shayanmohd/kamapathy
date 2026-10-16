@@ -1,15 +1,21 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Monitor,
   Moon,
   Sun,
   TreeEvergreen,
 } from "@phosphor-icons/react";
-import type { BrowserAction, BrowserState, Theme } from "../../shared/types";
+import type {
+  AgentSetupStatus,
+  BrowserAction,
+  BrowserState,
+  Theme,
+} from "../../shared/types";
 import { Modal } from "./ui";
-import { isDesktop } from "../lib/bridge";
-import { settingsCopy } from "../copy";
+import { bridge, isDesktop } from "../lib/bridge";
+import { agentSetupCopy, settingsCopy } from "../copy";
 import { activityTime } from "../lib/spaces";
+import { setupSummary } from "../lib/setupView";
 import "./Spaces.css";
 
 export function Settings({
@@ -19,6 +25,7 @@ export function Settings({
   dispatch,
   focus,
   onImport,
+  onAgentSetup,
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,8 +33,24 @@ export function Settings({
   dispatch: (action: BrowserAction) => void;
   focus?: "agents";
   onImport: () => void;
+  onAgentSetup: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
+  // Read again at each opening, without the slower shell probe.
+  const [setup, setSetup] = useState<AgentSetupStatus | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    bridge.agentSetupStatus().then(
+      (next) => {
+        if (alive) setSetup(next);
+      },
+      () => {},
+    );
+    return () => {
+      alive = false;
+    };
+  }, [open]);
   const warning =
     state.settings.automationEnabled && !state.automation.running
       ? state.activity.find((item) => !item.spaceId && item.kind === "warning")
@@ -210,6 +233,20 @@ export function Settings({
             }
           >
             <span />
+          </button>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>{agentSetupCopy.settingsRow}</strong>
+            <p>{setupSummary(setup)}</p>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!isDesktop}
+            onClick={onAgentSetup}
+          >
+            {agentSetupCopy.settingsButton}
           </button>
         </div>
         <p className="agent-connection">
