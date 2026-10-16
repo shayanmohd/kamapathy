@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
+import { chromeUserAgent } from "./identity";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
@@ -38,6 +39,12 @@ if (process.env.KAMAPATHY_USER_DATA)
 app.setName("Kamapathy");
 if (process.platform === "win32") app.setAppUserModelId("app.kamapathy.browser");
 if (process.platform === "linux") app.setDesktopName("app.kamapathy.browser.desktop");
+// Every session, worker and service worker presents Chrome's reduced user agent.
+app.userAgentFallback = chromeUserAgent(
+  app.userAgentFallback,
+  process.versions.chrome,
+  (message) => console.warn(message),
+);
 // Agents on this computer find Kamapathy through this profile's agent folder.
 const agent = agentPaths(app.getPath("userData"));
 

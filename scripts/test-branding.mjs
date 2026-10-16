@@ -144,8 +144,9 @@ try {
   const capabilities = await observed;
   assert.equal(capabilities.webdriver, false);
   assert.equal(capabilities.cookies, true);
-  assert.match(capabilities.userAgent, /Kamapathy\//);
-  console.log("PASS normal Kamapathy source startup identifies itself and does not enable WebDriver");
+  assert.doesNotMatch(capabilities.userAgent, /Kamapathy|Electron/i);
+  assert.match(capabilities.userAgent, /Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/);
+  console.log("PASS normal Kamapathy source startup presents a Chrome-compatible user agent and does not enable WebDriver");
 } finally {
   clearTimeout(timer);
   fixture.close();
