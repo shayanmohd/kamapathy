@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isWebUrl } from "../shared/url";
+import type { RunCommand } from "./import-cookies";
 
 export type BrowserId =
   | "chrome"
@@ -49,6 +50,8 @@ export interface ImportEnv {
   appData?: string;
   localAppData?: string;
   exec?: (command: string, args: string[]) => string;
+  // Async commands that may wait for the person, such as the keychain prompt.
+  command?: RunCommand;
 }
 
 const LIMIT = 1000;
@@ -569,7 +572,7 @@ async function withCopy<T>(
   }
 }
 
-function withDatabase<T>(
+export function withDatabase<T>(
   file: string,
   read: (db: DatabaseSync) => T,
 ): Promise<T> {
