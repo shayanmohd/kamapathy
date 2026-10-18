@@ -8,6 +8,7 @@ import {
   NO_EXTENSIONS,
   restoredPartitions,
 } from "./controller";
+import { ExtensionChannel } from "./extensions/channel";
 import { ExtensionHost } from "./extensions/host";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
@@ -52,6 +53,9 @@ let controller: BrowserController | null = null;
 // until extensions.json is read.
 let extensionHost: ExtensionHost | null = null;
 let extensionsReady: Promise<void> = Promise.resolve();
+// The path between extension contexts and the main process. It exists before
+// any session attaches, so the preloads are registered before loads.
+let extensionChannel: ExtensionChannel | null = null;
 // A window waiting for its extensions; later calls share it.
 let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
@@ -467,6 +471,17 @@ else {
         "Extensions could not be prepared:",
         error instanceof Error ? error.message : "Unknown error",
       );
+    });
+    extensionChannel = new ExtensionChannel({
+      host: extensionHost,
+      preloads: {
+        page: join(moduleDirectory, "../preload/extension-page.cjs"),
+        worker: join(moduleDirectory, "../preload/extension-worker.cjs"),
+      },
+      surfaceOf: (contents) =>
+        controller?.tabOfContents(contents)
+          ? "tab"
+          : extensionHost?.surfaceOf(contents)?.kind,
     });
     registerIpc();
     installMenu();

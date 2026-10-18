@@ -21,7 +21,20 @@ import { initialState } from "../shared/state";
 import { BrowserController } from "../electron/controller";
 import type { CheckedManifest } from "../electron/extensions/manifest";
 import { ExtensionHost, type HostEvent } from "../electron/extensions/host";
-import { extensionRefusalCopy } from "../src/copy";
+import {
+  EXTENSION_CALL,
+  EXTENSION_EVENT,
+  EXTENSION_LISTEN,
+  EXTENSION_READY,
+  PAGE_PRELOAD_ID,
+  WORKER_PRELOAD_ID,
+} from "../electron/extensions/chrome-api";
+import {
+  ExtensionChannel,
+  type Caller,
+  type ChannelDeps,
+} from "../electron/extensions/channel";
+import { extensionBridgeCopy, extensionRefusalCopy } from "../src/copy";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
@@ -32,6 +45,12 @@ vi.mock("electron", () => ({
   },
   dialog: {},
   shell: {},
+  ipcMain: {
+    handle: vi.fn(),
+    removeHandler: vi.fn(),
+    on: vi.fn(),
+    removeListener: vi.fn(),
+  },
 }));
 vi.mock("../electron/persistence", async (original) => ({
   ...(await original<typeof import("../electron/persistence")>()),
@@ -59,6 +78,73 @@ function extensionObject(id: string, path: string) {
     manifest: {},
   };
 }
+// A service worker of a session: what the channel wires and talks to.
+class FakeWorkerIpc {
+  handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  listeners = new Map<string, (event: unknown, ...args: unknown[]) => void>();
+  handle = vi.fn(
+    (
+      channel: string,
+      listener: (event: unknown, ...args: unknown[]) => unknown,
+    ) => {
+      this.handlers.set(channel, listener);
+    },
+  );
+  on = vi.fn(
+    (
+      channel: string,
+      listener: (event: unknown, ...args: unknown[]) => void,
+    ) => {
+      this.listeners.set(channel, listener);
+      return this;
+    },
+  );
+}
+class FakeWorker {
+  ipc = new FakeWorkerIpc();
+  send = vi.fn();
+  destroyed = false;
+  constructor(
+    readonly scope: string,
+    readonly versionId: number,
+  ) {}
+  isDestroyed() {
+    return this.destroyed;
+  }
+  call(payload: unknown): unknown {
+    return this.ipc.handlers.get(EXTENSION_CALL)?.({}, payload);
+  }
+  listen(names: string[]): void {
+    this.ipc.listeners.get(EXTENSION_LISTEN)?.({}, names);
+  }
+  ready(): void {
+    this.ipc.listeners.get(EXTENSION_READY)?.({});
+  }
+}
+class FakeWorkers extends EventEmitter {
+  running = new Map<number, FakeWorker>();
+  getAllRunning = vi.fn(() =>
+    Object.fromEntries([...this.running.keys()].map((id) => [id, {}])),
+  );
+  getWorkerFromVersionID = vi.fn((versionId: number) =>
+    this.running.get(versionId),
+  );
+  startWorkerForScope = vi.fn(async (_scope: string) => undefined);
+  start(worker: FakeWorker): void {
+    this.running.set(worker.versionId, worker);
+    this.emit("running-status-changed", {
+      versionId: worker.versionId,
+      runningStatus: "starting",
+    });
+  }
+  stop(worker: FakeWorker): void {
+    this.running.delete(worker.versionId);
+    this.emit("running-status-changed", {
+      versionId: worker.versionId,
+      runningStatus: "stopped",
+    });
+  }
+}
 class FakeSession extends EventEmitter {
   // What Electron has loaded, by id. Kamapathy's own PDF viewer is there
   // from the start.
@@ -78,9 +164,11 @@ class FakeSession extends EventEmitter {
       [...this.loaded].map(([id, path]) => extensionObject(id, path)),
     ),
   };
-  registerPreloadScript = vi.fn(() => "preload");
-  unregisterPreloadScript = vi.fn();
-  serviceWorkers = new EventEmitter();
+  registerPreloadScript = vi.fn(
+    (_script: Electron.PreloadScriptRegistration) => "preload",
+  );
+  unregisterPreloadScript = vi.fn((_id: string) => {});
+  serviceWorkers = new FakeWorkers();
   clearStorageData = vi.fn(async () => {});
   clearCache = vi.fn(async () => {});
   setPermissionCheckHandler = vi.fn();
@@ -857,5 +945,313 @@ describe("extension pages", () => {
     expect(host.isExtensionSurface(asContents(popup))).toBe(false);
     expect(host.surfacesOf(B)).toEqual([]);
     expect(host.surfacesOf(A)).toEqual([window]);
+  });
+});
+
+const PERSONAL = "persist:space-personal";
+const SECOND = "persist:space-two";
+const PAGE_PRELOAD = "/app/out/preload/extension-page.cjs";
+const WORKER_PRELOAD = "/app/out/preload/extension-worker.cjs";
+type PageSurface = "tab" | "popup" | "window";
+
+class FakeIpc {
+  handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  channels = new Map<
+    string,
+    Set<(event: unknown, ...args: unknown[]) => void>
+  >();
+  handle = vi.fn(
+    (
+      channel: string,
+      listener: (event: unknown, ...args: unknown[]) => unknown,
+    ) => {
+      this.handlers.set(channel, listener);
+    },
+  );
+  removeHandler = vi.fn((channel: string) => {
+    this.handlers.delete(channel);
+  });
+  on = vi.fn(
+    (
+      channel: string,
+      listener: (event: unknown, ...args: unknown[]) => void,
+    ) => {
+      const set = this.channels.get(channel) ?? new Set();
+      set.add(listener);
+      this.channels.set(channel, set);
+      return this;
+    },
+  );
+  removeListener = vi.fn(
+    (
+      channel: string,
+      listener: (event: unknown, ...args: unknown[]) => void,
+    ) => {
+      this.channels.get(channel)?.delete(listener);
+      return this;
+    },
+  );
+  call(event: unknown, payload: unknown): Promise<unknown> {
+    return Promise.resolve(this.handlers.get(EXTENSION_CALL)?.(event, payload));
+  }
+  listen(event: unknown, names: string[]): void {
+    for (const listener of this.channels.get(EXTENSION_LISTEN) ?? [])
+      listener(event, names);
+  }
+}
+
+// A page of a session: the main frame unless it asks for a subframe.
+function fakePage(
+  url: string,
+  partition: string,
+  options: { sub?: boolean } = {},
+) {
+  const emitter = new EventEmitter();
+  const mainFrame = { url };
+  const contents = Object.assign(emitter, {
+    session: asSession(sessionOf(partition)),
+    mainFrame,
+    isDestroyed: () => false,
+    send: vi.fn(),
+  });
+  const sender = contents as unknown as WebContents;
+  return {
+    contents: sender,
+    send: contents.send,
+    emitter,
+    event: { sender, senderFrame: options.sub ? { url } : mainFrame },
+  };
+}
+
+async function channelFor(
+  entries: ExtensionEntry[],
+  manifests: Record<string, Record<string, unknown>> = {},
+) {
+  const host = await hostFor(profile(entries, [], manifests));
+  const ipc = new FakeIpc();
+  const surfaces = new Map<WebContents, PageSurface | undefined>();
+  const channel = new ExtensionChannel({
+    host,
+    preloads: { page: PAGE_PRELOAD, worker: WORKER_PRELOAD },
+    surfaceOf: (contents) =>
+      surfaces.has(contents) ? surfaces.get(contents) : "tab",
+    ipc: ipc as unknown as ChannelDeps["ipc"],
+  });
+  return { host, ipc, channel, surfaces };
+}
+const workerManifest = (name: string) => ({
+  manifest_version: 3,
+  name,
+  version: "1.0.0",
+  background: { service_worker: "worker.js" },
+});
+
+describe("the extension bridge channel", () => {
+  it("registers both preloads on each session before its extensions load", async () => {
+    const { host, channel } = await channelFor([storeEntry(A)]);
+    const ses = sessionOf(PERSONAL);
+    await host.attach(PERSONAL, asSession(ses));
+    expect(
+      ses.registerPreloadScript.mock.calls.map(([script]) => script),
+    ).toEqual([
+      { id: PAGE_PRELOAD_ID, type: "frame", filePath: PAGE_PRELOAD },
+      {
+        id: WORKER_PRELOAD_ID,
+        type: "service-worker",
+        filePath: WORKER_PRELOAD,
+      },
+    ]);
+    expect(ses.registerPreloadScript.mock.invocationCallOrder[1]).toBeLessThan(
+      ses.extensions.loadExtension.mock.invocationCallOrder[0],
+    );
+    channel.dispose();
+    expect(ses.unregisterPreloadScript.mock.calls.map(([id]) => id)).toEqual([
+      PAGE_PRELOAD_ID,
+      WORKER_PRELOAD_ID,
+    ]);
+  });
+
+  it("counts a call only from a main frame of an extension loaded in the sender's session", async () => {
+    const { host, ipc, channel } = await channelFor([storeEntry(A)]);
+    const callers: Caller[] = [];
+    channel.register("tabs", (caller, method, args) => {
+      callers.push(caller);
+      return { method, args };
+    });
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    const second = sessionOf(SECOND);
+    second.extensions.loadExtension.mockRejectedValueOnce(
+      new Error("Not here"),
+    );
+    await host.attach(SECOND, asSession(second));
+    const query = { api: "tabs", method: "query", args: [{ active: true }] };
+    const page = fakePage(`chrome-extension://${A}/popup.html`, PERSONAL);
+    await expect(ipc.call(page.event, query)).resolves.toEqual({
+      method: "query",
+      args: [{ active: true }],
+    });
+    expect(callers).toEqual([
+      {
+        extensionId: A,
+        partition: PERSONAL,
+        surface: "tab",
+        contents: page.contents,
+      },
+    ]);
+    expect(channel.callers(PERSONAL, A)).toEqual(callers);
+    const refused = [
+      fakePage(`chrome-extension://${A}/frame.html`, PERSONAL, { sub: true }),
+      fakePage("https://example.com/", PERSONAL),
+      fakePage(`chrome-extension://${A}/popup.html`, SECOND),
+    ];
+    for (const other of refused)
+      await expect(ipc.call(other.event, query)).rejects.toThrow(
+        extensionBridgeCopy.notSupported,
+      );
+    host.unloadEverywhere(A);
+    await expect(ipc.call(page.event, query)).rejects.toThrow(
+      extensionBridgeCopy.notSupported,
+    );
+    expect(callers.length).toBe(1);
+  });
+
+  it("never bridges component extensions or pages that are not tabs, popups or extension windows", async () => {
+    const { host, ipc, channel, surfaces } = await channelFor([storeEntry(A)]);
+    channel.register("tabs", () => "answered");
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    const query = { api: "tabs", method: "query", args: [] };
+    const viewer = fakePage(
+      `chrome-extension://${PDF_VIEWER_EXTENSION_ID}/index.html`,
+      PERSONAL,
+    );
+    await expect(ipc.call(viewer.event, query)).rejects.toThrow(
+      extensionBridgeCopy.notSupported,
+    );
+    const page = fakePage(`chrome-extension://${A}/popup.html`, PERSONAL);
+    surfaces.set(page.contents, undefined);
+    await expect(ipc.call(page.event, query)).rejects.toThrow(
+      extensionBridgeCopy.notSupported,
+    );
+    surfaces.set(page.contents, "popup");
+    await expect(ipc.call(page.event, query)).resolves.toBe("answered");
+    expect(channel.callers(PERSONAL, A)[0].surface).toBe("popup");
+  });
+
+  it("refuses unknown APIs and calls over 64 KiB", async () => {
+    const { host, ipc, channel } = await channelFor([storeEntry(A)]);
+    channel.register("tabs", () => "answered");
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    const page = fakePage(`chrome-extension://${A}/popup.html`, PERSONAL);
+    await expect(
+      ipc.call(page.event, { api: "storage", method: "get", args: [] }),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    await expect(ipc.call(page.event, { api: "tabs" })).rejects.toThrow(
+      extensionBridgeCopy.notSupported,
+    );
+    await expect(
+      ipc.call(page.event, {
+        api: "tabs",
+        method: "create",
+        args: [{ url: "x".repeat(70000) }],
+      }),
+    ).rejects.toThrow(extensionBridgeCopy.tooLarge);
+  });
+
+  it("wires a worker whose scope is a loaded extension and sends it only events it listens to", async () => {
+    const { host, channel } = await channelFor([storeEntry(A), storeEntry(B)], {
+      [A]: workerManifest("Marker"),
+    });
+    const callers: Caller[] = [];
+    channel.register("tabs", (caller) => {
+      callers.push(caller);
+      return "answered";
+    });
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    const workers = sessionOf(PERSONAL).serviceWorkers;
+    const worker = new FakeWorker(`chrome-extension://${A}/`, 11);
+    workers.start(worker);
+    expect(worker.ipc.handle).toHaveBeenCalledWith(
+      EXTENSION_CALL,
+      expect.any(Function),
+    );
+    await expect(
+      worker.call({ api: "tabs", method: "query", args: [] }),
+    ).resolves.toBe("answered");
+    expect(callers).toEqual([
+      { extensionId: A, partition: PERSONAL, surface: "worker", worker },
+    ]);
+    worker.listen(["tabs.onUpdated", "not.an.event"]);
+    worker.ready();
+    expect(channel.listening(PERSONAL, A, "tabs.onUpdated")).toBe(true);
+    expect(channel.listening(PERSONAL, A, "tabs.onRemoved")).toBe(false);
+    channel.emit(PERSONAL, A, "tabs.onUpdated", [1]);
+    expect(worker.send).toHaveBeenCalledWith(
+      EXTENSION_EVENT,
+      "tabs.onUpdated",
+      [1],
+    );
+    channel.emit(PERSONAL, A, "tabs.onRemoved", [1]);
+    channel.emit(PERSONAL, B, "tabs.onUpdated", [2]);
+    expect(worker.send).toHaveBeenCalledTimes(1);
+    for (const scope of [
+      "https://example.com/",
+      `chrome-extension://${PDF_VIEWER_EXTENSION_ID}/`,
+      `chrome-extension://${C}/`,
+    ]) {
+      const other = new FakeWorker(scope, 12 + scope.length);
+      workers.start(other);
+      expect(other.ipc.handle).not.toHaveBeenCalled();
+    }
+  });
+
+  it("wakes a stopped worker for events it listened to before, and starts each worker once after loading", async () => {
+    const { host, channel } = await channelFor([storeEntry(A)], {
+      [A]: workerManifest("Marker"),
+    });
+    const scope = `chrome-extension://${A}/`;
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    await host.attach(SECOND, asSession(sessionOf(SECOND)));
+    const workers = sessionOf(PERSONAL).serviceWorkers;
+    expect(workers.startWorkerForScope.mock.calls).toEqual([[scope]]);
+    expect(
+      sessionOf(SECOND).serviceWorkers.startWorkerForScope.mock.calls,
+    ).toEqual([[scope]]);
+    const worker = new FakeWorker(scope, 21);
+    workers.start(worker);
+    worker.listen(["tabs.onUpdated"]);
+    worker.ready();
+    workers.stop(worker);
+    channel.emit(PERSONAL, A, "tabs.onUpdated", [5]);
+    channel.emit(PERSONAL, A, "tabs.onRemoved", [6]);
+    expect(worker.send).not.toHaveBeenCalled();
+    expect(workers.startWorkerForScope.mock.calls).toEqual([[scope], [scope]]);
+    const woken = new FakeWorker(scope, 22);
+    workers.start(woken);
+    woken.listen(["tabs.onUpdated"]);
+    expect(woken.send).not.toHaveBeenCalled();
+    woken.ready();
+    expect(woken.send.mock.calls).toEqual([
+      [EXTENSION_EVENT, "tabs.onUpdated", [5]],
+    ]);
+  });
+
+  it("sends events to listening pages and forgets them when they navigate or close", async () => {
+    const { host, ipc, channel } = await channelFor([storeEntry(A)]);
+    await host.attach(PERSONAL, asSession(sessionOf(PERSONAL)));
+    const page = fakePage(`chrome-extension://${A}/popup.html`, PERSONAL);
+    ipc.listen(page.event, ["tabs.onUpdated"]);
+    expect(channel.listening(PERSONAL, A, "tabs.onUpdated")).toBe(true);
+    channel.emit(PERSONAL, A, "tabs.onUpdated", [3]);
+    channel.emit(PERSONAL, A, "tabs.onRemoved", [3]);
+    expect(page.send.mock.calls).toEqual([
+      [EXTENSION_EVENT, "tabs.onUpdated", [3]],
+    ]);
+    page.emitter.emit("did-navigate");
+    expect(channel.listening(PERSONAL, A, "tabs.onUpdated")).toBe(false);
+    channel.emit(PERSONAL, A, "tabs.onUpdated", [4]);
+    expect(page.send).toHaveBeenCalledTimes(1);
+    ipc.listen(page.event, ["tabs.onUpdated"]);
+    page.emitter.emit("destroyed");
+    expect(channel.callers(PERSONAL, A)).toEqual([]);
   });
 });

@@ -224,13 +224,20 @@ export function runsExtensions(
 }
 
 // Permissions that work natively in Electron or through Kamapathy's bridges.
+// The native ones are what Chromium 152's extension bindings answer in an
+// extension page and in a service worker.
 export const SUPPORTED_PERMISSIONS: ReadonlySet<string> = new Set([
   "activeTab",
+  "alarms",
   "clipboardRead",
   "clipboardWrite",
   "geolocation",
+  "idle",
+  "offscreen",
+  "power",
   "scripting",
   "storage",
+  "system.cpu",
   "tabs",
   "unlimitedStorage",
   "webRequest",
@@ -243,7 +250,6 @@ export const PERMISSION_LINES: Readonly<Record<string, string>> = {
   geolocation: "Know your physical location",
 };
 export const WONT_WORK_PERMISSIONS: Readonly<Record<string, string>> = {
-  alarms: "Scheduled tasks",
   bookmarks: "Your bookmarks",
   browsingData: "Clearing browsing data",
   contentSettings: "Site settings",
@@ -265,13 +271,10 @@ export const WONT_WORK_PERMISSIONS: Readonly<Record<string, string>> = {
   history: "Your browsing history",
   identity: "Signing in with Google",
   "identity.email": "Signing in with Google",
-  idle: "Knowing when you're away",
   management: "Managing other extensions",
   nativeMessaging: "Talking to apps on your computer",
   notifications: "Notifications",
-  offscreen: "Background documents",
   pageCapture: "Saving pages",
-  power: "Keeping the computer awake",
   printerProvider: "Printers",
   privacy: "Privacy settings",
   proxy: "Proxy settings",
@@ -279,7 +282,6 @@ export const WONT_WORK_PERMISSIONS: Readonly<Record<string, string>> = {
   search: "Search",
   sessions: "Recently closed tabs",
   sidePanel: "The side panel",
-  "system.cpu": "System information",
   "system.display": "System information",
   "system.memory": "System information",
   "system.storage": "System information",

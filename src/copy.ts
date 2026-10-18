@@ -184,3 +184,10 @@ export const extensionRefusalCopy = {
   noManifest: "That folder has no manifest.json.",
   loadFailed: "Couldn't load it.",
 } as const;
+
+export const extensionBridgeCopy = {
+  notSupported: "Not supported in Kamapathy.",
+  tooLarge: "This request is too large.",
+  invalid: (name: string) => `The arguments for ${name} aren't valid.`,
+  failed: "Kamapathy couldn't do that. Try again.",
+} as const;
