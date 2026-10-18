@@ -105,6 +105,8 @@ function importedPages(value: unknown, now: number): ImportedVisit[] {
 }
 
 const CAPTURE_TIMEOUT = 300;
+// How long a reveal waits for the revealed page to draw.
+const REVEAL_FRAME_TIMEOUT = 500;
 // Keeps frames sharp on 2x displays without sending larger captures.
 const FRAME_SCALE = 2;
 const THUMBNAIL_WIDTH = 480;
@@ -287,6 +289,22 @@ export class BrowserController {
     this.layout();
   }
 
+  // The area the shell left for the pages, clamped to the window.
+  private contentArea(): ContentBounds {
+    const [windowWidth, windowHeight] = this.window.getContentSize();
+    return {
+      ...this.bounds,
+      width: Math.max(
+        0,
+        Math.min(this.bounds.width, windowWidth - this.bounds.x),
+      ),
+      height: Math.max(
+        0,
+        Math.min(this.bounds.height, windowHeight - this.bounds.y),
+      ),
+    };
+  }
+
   private layout(): void {
     if (this.destroyed || this.window.isDestroyed()) return;
     const active = this.state.tabs.find(
@@ -313,18 +331,7 @@ export class BrowserController {
     }
     const { activeTabId, splitTabId } = this.state;
     const ids = [activeTabId, splitTabId].filter((id): id is string => !!id);
-    const [windowWidth, windowHeight] = this.window.getContentSize();
-    const area = {
-      ...this.bounds,
-      width: Math.max(
-        0,
-        Math.min(this.bounds.width, windowWidth - this.bounds.x),
-      ),
-      height: Math.max(
-        0,
-        Math.min(this.bounds.height, windowHeight - this.bounds.y),
-      ),
-    };
+    const area = this.contentArea();
     for (const id of ids) {
       const tab = this.state.tabs.find((item) => item.id === id);
       if (tab && isWebUrl(tab.url)) this.ensureView(tab);
@@ -720,6 +727,71 @@ export class BrowserController {
     return openingTab(this.state, spaceId, this.lastActive.get(spaceId));
   }
 
+  // Makes the tab's own space show it, then waits for its next rendered
+  // frame. The active space, the window and keyboard focus never change, so
+  // this is not activate(): a space the person is not looking at only
+  // changes the tab it opens on.
+  async showAgentTab(tabId: string): Promise<void> {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const space = this.state.spaces.find((item) => item.id === tab.spaceId);
+    // A space no agent may use now is never revealed.
+    if (!space || !agentRules(space) || space.access === "ended") return;
+    if (tab.spaceId !== this.state.activeSpaceId) {
+      if (this.lastActive.get(tab.spaceId) === tab.id) return;
+      this.lastActive.set(tab.spaceId, tab.id);
+      this.emit();
+      return;
+    }
+    if (tab.id === this.state.activeTabId || tab.id === this.state.splitTabId)
+      return;
+    // As in activate(), the leading pane follows the tab that was active;
+    // the other pane stays where the person put it.
+    if (this.splitLeadingTabId === this.state.activeTabId)
+      this.splitLeadingTabId = tab.id;
+    this.state.activeTabId = tab.id;
+    this.lastActive.set(tab.spaceId, tab.id);
+    this.emit();
+    await this.nextFrame(tab.id);
+  }
+
+  // The page the person now looks at gets to draw before the agent's next
+  // step. A window that cannot composite reports no frames at all, as a
+  // probe confirmed, so a hidden window and a page that is not showing wait
+  // for nothing.
+  private nextFrame(tabId: string): Promise<void> {
+    const view = this.views.get(tabId);
+    const contents = view?.webContents;
+    if (
+      !view ||
+      !contents ||
+      contents.isDestroyed() ||
+      !view.getVisible() ||
+      !this.canCapturePage()
+    )
+      return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          contents.endFrameSubscription();
+        } catch {
+          // A page that went away needs no unsubscribing.
+        }
+        resolve();
+      };
+      const timer = setTimeout(finish, REVEAL_FRAME_TIMEOUT);
+      try {
+        contents.beginFrameSubscription(false, () => finish());
+      } catch {
+        finish();
+      }
+    });
+  }
+
   // Tabs and the popups their pages open share these. A popup's session is
   // its opener's, so the session is given apart from them.
   private pageWebPreferences(space: Space): Electron.WebPreferences {
@@ -761,7 +833,16 @@ export class BrowserController {
         });
     this.views.set(tab.id, view);
     this.window.contentView.addChildView(view);
-    view.setBounds({ x: 0, y: 0, width: 1200, height: 800 });
+    // An agent page is made at the size the content area has now, so a page
+    // the person is not looking at reports the viewport it will have when
+    // they are, and a first reveal does not reflow it. Without an area to
+    // copy, pages keep the size they have always had.
+    const { x, y, width, height, hidden } = this.contentArea();
+    view.setBounds(
+      agentRules(space) && !hidden && width > 0 && height > 0
+        ? { x, y, width, height }
+        : { x: 0, y: 0, width: 1200, height: 800 },
+    );
     view.setVisible(false);
     view.setBorderRadius(10);
     this.wireView(tab, view);

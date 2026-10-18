@@ -2126,4 +2126,86 @@ describe("local automation socket", () => {
       });
     }
   });
+
+  it("follow routes reveal their tab before the handler runs and observation routes do not", async () => {
+    const space = await createSpace();
+    // A reveal takes a turn of its own here, so a handler that did not wait
+    // for it would be recorded first.
+    controller.frames = 1;
+    const order: string[] = [];
+    const reveal = controller.showAgentTab.bind(controller);
+    // Recorded once the reveal is done, so a route that did not wait for it
+    // puts its own work first.
+    controller.showAgentTab = async (tabId: string) => {
+      await reveal(tabId);
+      order.push(`show ${tabId}`);
+    };
+    const dispatch = controller.dispatch.bind(controller);
+    controller.dispatch = async (action: BrowserAction) => {
+      order.push(action.type);
+      return dispatch(action);
+    };
+    const addActivity = controller.addActivity.bind(controller);
+    controller.addActivity = (spaceId, message, kind, agentText) => {
+      order.push(message);
+      addActivity(spaceId, message, kind, agentText);
+    };
+    // A new page is revealed once it exists, before the route logs or
+    // answers it.
+    const opened = await request(`/spaces/${space.id}/tabs`, "POST", {
+      url: "https://example.com/",
+    });
+    expect(opened.status).toBe(201);
+    const tab = (await opened.json()).tab as BrowserState["tabs"][number];
+    expect(controller.shown).toEqual([tab.id]);
+    expect(order).toEqual([`show ${tab.id}`, "Agent opened example.com"]);
+    const page = controller.contents;
+    page.result = () => {
+      order.push("page");
+      return {
+        url: "https://example.com/",
+        title: "Example",
+        text: "Hello from the agent page",
+        interactables: [],
+        truncated: false,
+      };
+    };
+    // Each route that reads or acts on the page reveals it first.
+    for (const [path, method, body] of [
+      [`/tabs/${tab.id}/snapshot`, "GET", undefined],
+      [`/tabs/${tab.id}/snapshot`, "POST", { mode: "full" }],
+    ] as const) {
+      order.length = 0;
+      expect((await request(path, method, body)).status, path).toBe(200);
+      expect(order[0], path).toBe(`show ${tab.id}`);
+      expect(order, path).toContain("page");
+    }
+    order.length = 0;
+    expect(
+      (
+        await request(`/tabs/${tab.id}/navigate`, "POST", {
+          url: "https://example.com/next",
+        })
+      ).status,
+    ).toBe(200);
+    expect(order).toEqual([
+      `show ${tab.id}`,
+      "tab:navigate",
+      "Agent navigated to example.com",
+    ]);
+    // Routes that only read, or hand control over, reveal nothing.
+    const revealed = controller.shown.length;
+    for (const [path, method, body] of [
+      ["/spaces", "GET", undefined],
+      [`/spaces/${space.id}`, "GET", undefined],
+      [`/spaces/${space.id}/tabs`, "GET", undefined],
+      [`/spaces/${space.id}/status`, "POST", { text: "Reading" }],
+      [`/spaces/${space.id}/handoff`, "POST", {}],
+      [`/spaces/${space.id}/resume`, "POST", {}],
+    ] as const) {
+      expect((await request(path, method, body)).status, path).toBe(200);
+      expect(controller.shown.length, path).toBe(revealed);
+    }
+    expect(controller.shown).toEqual([tab.id, tab.id, tab.id, tab.id]);
+  });
 });

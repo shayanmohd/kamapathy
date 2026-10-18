@@ -223,7 +223,24 @@ export class FakeController implements AutomationController {
   shownTab(spaceId: string): Tab | undefined {
     if (spaceId === this.state.activeSpaceId)
       return this.state.tabs.find((tab) => tab.id === this.state.activeTabId);
-    return openingTab(this.state, spaceId);
+    return openingTab(this.state, spaceId, this.lastShown.get(spaceId));
+  }
+  // The tab ids showAgentTab was called with, in order, and how many turns
+  // the fake takes over a reveal, so tests can order it without timers.
+  shown: string[] = [];
+  frames = 0;
+  private lastShown = new Map<string, string>();
+  async showAgentTab(tabId: string) {
+    this.shown.push(tabId);
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (tab) {
+      if (tab.spaceId === this.state.activeSpaceId)
+        this.state.activeTabId = tab.id;
+      else this.lastShown.set(tab.spaceId, tab.id);
+      this.emit();
+    }
+    for (let frame = 0; frame < this.frames; frame += 1)
+      await new Promise((resolve) => setImmediate(resolve));
   }
   // Also recorded in calls, as the tab:create it replaces.
   openAgentTab(spaceId: string, url?: string): Tab {

@@ -377,6 +377,9 @@ export function spaceRoutes({
           return fail("tab_creation_failed", "Could not create an agent tab.");
         }
         authorizeSpace(space!.id);
+        // The router cannot follow this route: its page does not exist
+        // until here.
+        await presence.follow(tab.id, run);
         controller.addActivity(
           space!.id,
           url

@@ -70,6 +70,11 @@ export interface AutomationController {
   ): () => void;
   /** The tab the space shows, or would show when the person opens it. */
   shownTab(spaceId: string): Tab | undefined;
+  /**
+   * Makes the tab's own space show it, then waits for its next frame. The
+   * active space, the window and keyboard focus never change.
+   */
+  showAgentTab(tabId: string): Promise<void>;
   /** A managed agent tab in the background; a blank page without url. */
   openAgentTab(spaceId: string, url?: string): Tab;
   /** Retires the tab's label; a space left empty gets a blank tab. */
@@ -310,11 +315,19 @@ export async function startAutomation(
             ? { kind: "space", spaceId: spaceId! }
             : { kind: route.lane };
         const deadline = await ticket.start(lane);
+        const current = authorize();
+        // A route that reads or acts on a page makes it the one its space
+        // shows, after authorization and before the handler's first step.
+        if (route.schema.follow && current.tab)
+          await presence.follow(current.tab.id, {
+            deadline,
+            signal: abort.signal,
+          });
         await route.handler({
           request,
           response,
           body,
-          ...authorize(),
+          ...current,
           resumeFromHuman,
           run: {
             deadline,

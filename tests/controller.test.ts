@@ -83,6 +83,19 @@ class FakeContents extends EventEmitter {
         this.pending.push({ url, reject });
       }),
   );
+  frames?: (image: unknown) => void;
+  beginFrameSubscription = vi.fn(
+    (_onlyDirty: boolean, callback: (image: unknown) => void) => {
+      this.frames = callback;
+    },
+  );
+  endFrameSubscription = vi.fn(() => {
+    this.frames = undefined;
+  });
+  // One rendered frame, as Chromium reports it to a subscriber.
+  frame() {
+    this.frames?.({});
+  }
   close() {
     // Chromium can finish stopping a navigation while a view is being closed.
     this.emit("did-stop-loading");
@@ -2418,5 +2431,111 @@ describe("agent task state", () => {
       "Trip planning",
     );
     expect(browser.createAgentSpace("\u202a\u200f").name).toBe("Agent space");
+  });
+
+  it("showAgentTab reveals a tab in place and waits at most 500 ms for a frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = controller();
+      const space = browser.createAgentSpace("Task");
+      const first = browser.openAgentTab(space.id, "https://example.com/one");
+      const second = browser.openAgentTab(space.id, "https://example.com/two");
+      await browser.dispatch({ type: "tab:activate", id: first.id });
+      const page = contents(browser, second.id);
+      // The reveal makes the tab the shown one at once and then waits for
+      // the frame the view draws in its place.
+      let revealed = false;
+      const reveal = browser
+        .showAgentTab(second.id)
+        .then(() => (revealed = true));
+      expect(browser.state.activeTabId).toBe(second.id);
+      expect(browser.state.activeSpaceId).toBe(space.id);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(revealed).toBe(false);
+      page.frame();
+      await reveal;
+      expect(revealed).toBe(true);
+      expect(page.endFrameSubscription).toHaveBeenCalledTimes(1);
+      // A page that never draws lets the reveal through at the cap.
+      let capped = false;
+      const next = browser.showAgentTab(first.id).then(() => (capped = true));
+      await vi.advanceTimersByTimeAsync(499);
+      expect(capped).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await next;
+      expect(capped).toBe(true);
+      // A tab the window is not showing has no frame to wait for: another
+      // space's page, and any page while the content area is hidden.
+      const other = browser.createAgentSpace("Other");
+      const elsewhere = browser.openAgentTab(
+        other.id,
+        "https://example.com/three",
+      );
+      const background = contents(browser, elsewhere.id);
+      await browser.showAgentTab(elsewhere.id);
+      expect(browser.state.activeSpaceId).toBe(space.id);
+      expect(background.beginFrameSubscription).not.toHaveBeenCalled();
+      browser.setContentBounds({
+        x: 200,
+        y: 80,
+        width: 1000,
+        height: 700,
+        hidden: true,
+      });
+      vi.mocked(page.beginFrameSubscription).mockClear();
+      await browser.showAgentTab(second.id);
+      expect(browser.state.activeTabId).toBe(second.id);
+      expect(page.beginFrameSubscription).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("agent views are created at the content area size and other views keep 1200 by 800", async () => {
+    const browser = controller();
+    const area = { x: 200, y: 80, width: 1000, height: 700 };
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    expect(viewFor(contents(browser, agentTab.id)).getBounds()).toEqual(area);
+    // The person's own page keeps the size it has always had.
+    const own = browser.state.tabs.find((tab) => tab.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    expect(viewFor(contents(browser, own.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
+    // A granted space follows agent rules, so its next page does too.
+    browser.grantAccess("work");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: "work",
+      url: "https://example.net/",
+      background: true,
+    });
+    const granted = browser.state.tabs.at(-1)!;
+    expect(viewFor(contents(browser, granted.id)).getBounds()).toEqual(area);
+    // Without a content area to copy, agent pages keep today's size.
+    browser.setContentBounds({ ...area, hidden: true });
+    const hidden = browser.openAgentTab(space.id, "https://example.com/two");
+    expect(viewFor(contents(browser, hidden.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
+    browser.setContentBounds({ ...area, width: 0, hidden: false });
+    const zero = browser.openAgentTab(space.id, "https://example.com/three");
+    expect(viewFor(contents(browser, zero.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
   });
 });

@@ -7,12 +7,17 @@ import { createPresence, type AgentPresence } from "../electron/agent/presence";
 import { agentTextField } from "../electron/agent/validate";
 import { spaceView } from "../electron/agent/views";
 import { BrowserController } from "../electron/controller";
+import { ROUTES, routeKey } from "../skills/kamapathy/scripts/schema/index.mjs";
 import { initialState } from "../shared/state";
 import type { Space } from "../shared/types";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
-  WebContentsView: vi.fn(),
+  WebContentsView: vi.fn(function () {
+    const view = new FakePageView();
+    pages.push(view.webContents);
+    return view;
+  }),
   nativeTheme: { themeSource: "system" },
   session: { fromPartition: vi.fn(() => new FakeSession()) },
   dialog: { showMessageBox: vi.fn(), showSaveDialog: vi.fn() },
@@ -27,11 +32,52 @@ class FakeSession extends EventEmitter {
   setPermissionCheckHandler = vi.fn();
   setPermissionRequestHandler = vi.fn();
 }
+// A page and its view, with the frame subscription a reveal waits on.
+class FakePage extends EventEmitter {
+  focus = vi.fn();
+  send = vi.fn();
+  setWindowOpenHandler = vi.fn();
+  setBackgroundThrottling = vi.fn();
+  setZoomLevel = vi.fn();
+  reload = vi.fn();
+  close = vi.fn();
+  loadURL = vi.fn(async () => {});
+  capturePage = vi.fn(async () => ({ isEmpty: () => true }));
+  navigationHistory = { canGoBack: () => false, canGoForward: () => false };
+  isDestroyed = () => false;
+  getURL = () => "";
+  getZoomLevel = () => 0;
+  private drawn?: () => void;
+  beginFrameSubscription = vi.fn(
+    (_onlyDirty: boolean, callback: () => void) => {
+      this.drawn = callback;
+    },
+  );
+  endFrameSubscription = vi.fn(() => {
+    this.drawn = undefined;
+  });
+  frame() {
+    this.drawn?.();
+  }
+}
+class FakePageView {
+  webContents = new FakePage();
+  private shown = false;
+  setVisible = (value: boolean) => {
+    this.shown = value;
+  };
+  getVisible = () => this.shown;
+  setBounds = vi.fn();
+  getBounds = () => ({ x: 0, y: 0, width: 1000, height: 700 });
+  setBorderRadius = vi.fn();
+}
+const pages: FakePage[] = [];
 
 describe("agent presence", () => {
   let controller: BrowserController;
   let authority: ReturnType<typeof createAuthority>;
   let presence: AgentPresence;
+  let window: EventEmitter & Record<string, any>;
   // Characters by code point, so this file holds none of the invisible ones
   // the cleaning is about.
   const chars = (...codes: number[]) => String.fromCodePoint(...codes);
@@ -70,9 +116,17 @@ describe("agent presence", () => {
     }
     return undefined;
   };
+  // The router's follow hook: the step, then the frame the revealed view
+  // draws, as Chromium reports it.
+  const follow = (tabId: string) => {
+    const done = presence.follow(tabId, { deadline: Date.now() + 5000 });
+    for (const page of pages) page.frame();
+    return done;
+  };
   beforeEach(() => {
     vi.clearAllMocks();
-    const window = new EventEmitter() as EventEmitter & Record<string, unknown>;
+    pages.length = 0;
+    window = new EventEmitter() as EventEmitter & Record<string, any>;
     window.webContents = Object.assign(new EventEmitter(), {
       send: vi.fn(),
       focus: vi.fn(),
@@ -83,11 +137,20 @@ describe("agent presence", () => {
     window.getContentSize = () => [1400, 900];
     window.isVisible = () => true;
     window.isMinimized = () => false;
+    window.show = vi.fn();
+    window.focus = vi.fn();
     controller = new BrowserController(
       window as unknown as BrowserWindow,
       initialState(),
       "unused-test-state.json",
     );
+    controller.setContentBounds({
+      x: 248,
+      y: 82,
+      width: 1000,
+      height: 700,
+      hidden: false,
+    });
     authority = createAuthority(controller);
     presence = createPresence({ controller, authority });
   });
@@ -320,5 +383,105 @@ describe("agent presence", () => {
     expect(controller.state.spaces.some((item) => item.id === space.id)).toBe(
       false,
     );
+  });
+
+  it("follow activates its tab only in the active space, keeps the split pane, never changes the active space or focus, and observation routes never follow", async () => {
+    const space = agentSpace();
+    const first = controller.openAgentTab(space.id, "https://example.com/one");
+    const second = controller.openAgentTab(space.id, "https://example.com/two");
+    const third = controller.openAgentTab(
+      space.id,
+      "https://example.com/three",
+    );
+    await controller.dispatch({ type: "tab:activate", id: first.id });
+    await controller.dispatch({ type: "tab:split", id: second.id });
+    expect(controller.state.activeSpaceId).toBe(space.id);
+    expect(controller.state.splitTabId).toBe(second.id);
+    // A background page of the space the person is looking at becomes the
+    // one it shows, and the pane beside it stays where the person put it.
+    await follow(third.id);
+    expect(controller.state.activeTabId).toBe(third.id);
+    expect(controller.state.splitTabId).toBe(second.id);
+    expect(controller.state.activeSpaceId).toBe(space.id);
+    // The page already in the split pane needs no reveal.
+    await follow(second.id);
+    expect(controller.state.activeTabId).toBe(third.id);
+    expect(controller.state.splitTabId).toBe(second.id);
+    // Following never brings the window or a page forward.
+    expect(window.show).not.toHaveBeenCalled();
+    expect(window.focus).not.toHaveBeenCalled();
+    expect(window.webContents.focus).not.toHaveBeenCalled();
+    for (const page of pages) expect(page.focus).not.toHaveBeenCalled();
+    // Which routes follow is the schema's to say: the ones that read or act
+    // on a page, and no other.
+    const follows = Object.fromEntries(
+      ROUTES.map((route) => [routeKey(route), route.follow]),
+    );
+    expect(follows).toMatchObject({
+      "POST /spaces/:id/tabs": true,
+      "POST /tabs/:id/navigate": true,
+      "GET /tabs/:id/snapshot": true,
+      "POST /tabs/:id/snapshot": true,
+      "GET /tabs/:id/screenshot": true,
+      "POST /tabs/:id/click": true,
+      "POST /tabs/:id/actions": true,
+      "POST /tabs/:id/upload": true,
+      "GET /spaces": false,
+      "GET /spaces/:id": false,
+      "GET /spaces/:id/tabs": false,
+      "DELETE /tabs/:id": false,
+      "POST /tabs/:id/adopt": false,
+      "POST /tabs/:id/release": false,
+      "POST /spaces/:id/handoff": false,
+      "POST /spaces/:id/resume": false,
+      "POST /spaces/:id/status": false,
+      "POST /spaces/:id/fail": false,
+    });
+  });
+
+  it("following another space sets the tab it opens on", async () => {
+    const space = agentSpace();
+    const first = controller.openAgentTab(space.id, "https://example.com/one");
+    const second = controller.openAgentTab(space.id, "https://example.com/two");
+    const { activeSpaceId, activeTabId } = controller.state;
+    expect(activeSpaceId).not.toBe(space.id);
+    // The space opens on its latest page until a follow names another.
+    expect(controller.shownTab(space.id)?.id).toBe(second.id);
+    await follow(first.id);
+    expect(controller.shownTab(space.id)?.id).toBe(first.id);
+    expect(controller.state.activeSpaceId).toBe(activeSpaceId);
+    expect(controller.state.activeTabId).toBe(activeTabId);
+    await follow(second.id);
+    expect(controller.shownTab(space.id)?.id).toBe(second.id);
+    expect(controller.state.activeTabId).toBe(activeTabId);
+  });
+
+  it("follow is skipped for a tab whose space an agent may not use, and never throws", async () => {
+    // The person's own space, which nobody granted.
+    const own = controller.state.spaces.find(
+      (space) => space.kind === "personal" && space.id !== "personal",
+    )!;
+    const theirs = controller.state.tabs.find((tab) => tab.spaceId === own.id)!;
+    const added = await controller.dispatch({
+      type: "tab:create",
+      spaceId: own.id,
+      url: "https://example.org/",
+      background: true,
+    });
+    const other = added.tabs.at(-1)!;
+    await expect(follow(other.id)).resolves.toBeUndefined();
+    expect(controller.shownTab(own.id)?.id).toBe(theirs.id);
+    // A space whose access ended is no longer the agent's to reveal.
+    const ended = agentSpace("Booking");
+    const page = controller.openAgentTab(ended.id, "https://example.com/one");
+    controller.openAgentTab(ended.id, "https://example.com/two");
+    controller.endAccess(ended.id, { by: "person", reason: "stopped" });
+    await expect(follow(page.id)).resolves.toBeUndefined();
+    expect(controller.shownTab(ended.id)?.id).not.toBe(page.id);
+    // A page that closed while the request waited leaves nothing to follow.
+    const space = agentSpace("Research");
+    const closed = controller.openAgentTab(space.id, "https://example.com/");
+    controller.closeTab(closed.id, "agent");
+    await expect(follow(closed.id)).resolves.toBeUndefined();
   });
 });

@@ -21,8 +21,16 @@ export interface AgentPresence {
   ): number;
   /** Clears needs-you only while changedAt still matches. */
   clearNeedsYou(spaceId: string, changedAt: number): void;
+  /** Reveals the route's page before its first page step. Never throws. */
+  follow(
+    tabId: string,
+    step: { deadline: number; signal?: AbortSignal },
+  ): Promise<void>;
   close(): void;
 }
+// The controller's own cap for a reveal, so a step with more time left than
+// this waits no longer than the reveal does.
+const FRAME_WAIT = 500;
 
 export function createPresence({
   controller,
@@ -134,6 +142,27 @@ export function createPresence({
       const task = spaceOf(spaceId)?.task;
       if (task?.state !== "needs-you" || task.changedAt !== changedAt) return;
       write(spaceId, { state: undefined, reason: undefined });
+    },
+    async follow(tabId, step) {
+      // A request whose client is gone reveals nothing.
+      if (step.signal?.aborted) return;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        // Following the agent never costs an action its result, so neither
+        // a reveal that fails nor one that runs long reaches the route.
+        const revealed = controller.showAgentTab(tabId).catch(() => {});
+        const left = Math.min(FRAME_WAIT, step.deadline - now());
+        await Promise.race([
+          revealed,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, Math.max(0, left));
+          }),
+        ]);
+      } catch {
+        // A browser that is closing shows nothing.
+      } finally {
+        clearTimeout(timer);
+      }
     },
     close: unsubscribe,
   };
