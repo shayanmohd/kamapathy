@@ -190,4 +190,8 @@ export const extensionBridgeCopy = {
   tooLarge: "This request is too large.",
   invalid: (name: string) => `The arguments for ${name} aren't valid.`,
   failed: "Kamapathy couldn't do that. Try again.",
+  noTab: (id: number) => `No tab with id: ${id}.`,
+  noWindow: (id: number) => `No window with id: ${id}.`,
+  cantCapture: "This extension can't capture this tab.",
+  notShown: "Only the shown space can be captured.",
 } as const;

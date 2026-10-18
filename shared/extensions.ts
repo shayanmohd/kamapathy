@@ -636,3 +636,553 @@ export interface ExtensionImportRequest {
 export interface ExtensionImportResult {
   results: ExtensionImportProgress[];
 }
+
+// What an extension in a session sees: its spaces as windows and their tabs
+// as tabs. The mappers below turn Kamapathy's model into Chrome's objects,
+// hiding what the extension may not read.
+export const PLACEHOLDER_BASE = 2 ** 30;
+export const NEW_TAB_URL = "chrome://newtab/";
+export const WINDOW_ID_NONE = -1;
+export const WINDOW_ID_CURRENT = -2;
+
+export interface TabModel {
+  // webContents.id, or a placeholder for a tab without a view.
+  id: number;
+  tabId: string;
+  windowId: number;
+  index: number;
+  url: string;
+  title: string;
+  favIconUrl?: string;
+  status: "loading" | "complete" | "unloaded";
+  active: boolean;
+  pinned: boolean;
+  discarded: boolean;
+  audible: boolean;
+  muted: boolean;
+  zoomFactor: number;
+  agentHeld: boolean;
+  file: boolean;
+  newTab: boolean;
+}
+export interface WindowModel {
+  id: number;
+  spaceId: string;
+  focused: boolean;
+  agentHeld: boolean;
+  personal: boolean;
+  state: "normal" | "minimized" | "maximized" | "fullscreen";
+  bounds: { left: number; top: number; width: number; height: number };
+  tabs: TabModel[];
+}
+export interface SessionModel {
+  partition: string;
+  windows: WindowModel[];
+}
+// What one extension may read in one session.
+export interface Access {
+  tabs: boolean;
+  hosts: readonly string[];
+  activeTabs: ReadonlySet<number>;
+}
+export interface BridgeTab {
+  id: number;
+  index: number;
+  windowId: number;
+  active: boolean;
+  highlighted: boolean;
+  selected: boolean;
+  pinned: boolean;
+  audible: boolean;
+  discarded: boolean;
+  autoDiscardable: true;
+  frozen: false;
+  mutedInfo: { muted: boolean };
+  status: "loading" | "complete" | "unloaded";
+  incognito: false;
+  groupId: -1;
+  url?: string;
+  pendingUrl?: string;
+  title?: string;
+  favIconUrl?: string;
+  width?: number;
+  height?: number;
+}
+export interface BridgeWindow {
+  id: number;
+  focused: boolean;
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  incognito: false;
+  type: "normal" | "popup";
+  state: WindowModel["state"];
+  alwaysOnTop: false;
+  tabs?: BridgeTab[];
+}
+export interface TabQuery {
+  active?: boolean;
+  pinned?: boolean;
+  audible?: boolean;
+  muted?: boolean;
+  highlighted?: boolean;
+  discarded?: boolean;
+  autoDiscardable?: boolean;
+  currentWindow?: boolean;
+  lastFocusedWindow?: boolean;
+  status?: string;
+  title?: string;
+  url?: string | string[];
+  windowId?: number;
+  windowType?: string;
+  index?: number;
+  groupId?: number;
+  frozen?: boolean;
+}
+export type TabField =
+  | "url"
+  | "title"
+  | "favIconUrl"
+  | "status"
+  | "pinned"
+  | "discarded"
+  | "audible"
+  | "muted";
+export type ModelChange =
+  | { type: "tab-created"; tab: TabModel }
+  | { type: "tab-updated"; tab: TabModel; changed: TabField[] }
+  | { type: "tab-activated"; tabId: number; windowId: number }
+  | {
+      type: "tab-removed";
+      tabId: number;
+      windowId: number;
+      windowClosing: boolean;
+    }
+  | { type: "tab-replaced"; added: number; removed: number }
+  | {
+      type: "tab-moved";
+      tabId: number;
+      windowId: number;
+      from: number;
+      to: number;
+    }
+  | { type: "tab-attached"; tabId: number; windowId: number; position: number }
+  | { type: "tab-detached"; tabId: number; windowId: number; position: number }
+  | { type: "tab-zoomed"; tabId: number; from: number; to: number }
+  | { type: "window-created"; window: WindowModel }
+  | { type: "window-removed"; windowId: number }
+  | { type: "focus-changed"; windowId: number }
+  | { type: "bounds-changed"; window: WindowModel };
+
+// Files on this computer stay invisible, whatever an extension holds.
+export function canSeeTab(tab: TabModel, access: Access): boolean {
+  if (tab.file) return false;
+  return (
+    access.tabs ||
+    access.activeTabs.has(tab.id) ||
+    access.hosts.some((pattern) => matchesPattern(pattern, tab.url))
+  );
+}
+export function tabObject(tab: TabModel, access: Access): BridgeTab {
+  const seen = canSeeTab(tab, access);
+  return {
+    id: tab.id,
+    index: tab.index,
+    windowId: tab.windowId,
+    active: tab.active,
+    highlighted: tab.active,
+    selected: tab.active,
+    pinned: tab.pinned,
+    audible: tab.audible,
+    discarded: tab.discarded,
+    autoDiscardable: true,
+    frozen: false,
+    mutedInfo: { muted: tab.muted },
+    status: tab.status,
+    incognito: false,
+    groupId: -1,
+    ...(seen
+      ? {
+          url: tab.url,
+          title: tab.title,
+          ...(tab.status === "loading" ? { pendingUrl: tab.url } : {}),
+          ...(tab.favIconUrl ? { favIconUrl: tab.favIconUrl } : {}),
+        }
+      : {}),
+  };
+}
+export function windowObject(
+  window: WindowModel,
+  access: Access,
+  populate: boolean,
+): BridgeWindow {
+  return {
+    id: window.id,
+    focused: window.focused,
+    top: window.bounds.top,
+    left: window.bounds.left,
+    width: window.bounds.width,
+    height: window.bounds.height,
+    incognito: false,
+    type: "normal",
+    state: window.state,
+    alwaysOnTop: false,
+    tabs: populate
+      ? window.tabs.map((tab) => tabObject(tab, access))
+      : undefined,
+  };
+}
+export function queryTabs(
+  model: SessionModel,
+  query: TabQuery,
+  context: { currentWindowId: number; lastFocusedWindowId: number },
+  access: Access,
+): TabModel[] {
+  const wanted =
+    query.windowId === WINDOW_ID_CURRENT
+      ? context.currentWindowId
+      : query.windowId;
+  const patterns =
+    query.url === undefined
+      ? undefined
+      : Array.isArray(query.url)
+        ? query.url
+        : [query.url];
+  return model.windows.flatMap((window) =>
+    window.tabs.filter((tab) => {
+      const seen = canSeeTab(tab, access);
+      return (
+        (wanted === undefined || window.id === wanted) &&
+        (query.currentWindow === undefined ||
+          (window.id === context.currentWindowId) === query.currentWindow) &&
+        (query.lastFocusedWindow === undefined ||
+          (window.id === context.lastFocusedWindowId) ===
+            query.lastFocusedWindow) &&
+        (query.windowType === undefined || query.windowType === "normal") &&
+        (query.active === undefined || tab.active === query.active) &&
+        (query.highlighted === undefined || tab.active === query.highlighted) &&
+        (query.pinned === undefined || tab.pinned === query.pinned) &&
+        (query.audible === undefined || tab.audible === query.audible) &&
+        (query.muted === undefined || tab.muted === query.muted) &&
+        (query.discarded === undefined || tab.discarded === query.discarded) &&
+        (query.autoDiscardable === undefined || query.autoDiscardable) &&
+        (query.frozen === undefined || !query.frozen) &&
+        (query.groupId === undefined || query.groupId === -1) &&
+        (query.index === undefined || tab.index === query.index) &&
+        (query.status === undefined || tab.status === query.status) &&
+        // Tabs whose fields are hidden match no URL and no title.
+        (query.title === undefined ||
+          (seen && globMatch(query.title, tab.title))) &&
+        (patterns === undefined ||
+          (seen &&
+            patterns.some((pattern) => matchesPattern(pattern, tab.url))))
+      );
+    }),
+  );
+}
+
+const FIELDS: TabField[] = [
+  "url",
+  "title",
+  "favIconUrl",
+  "status",
+  "pinned",
+  "discarded",
+  "audible",
+  "muted",
+];
+function changedFields(before: TabModel, after: TabModel): TabField[] {
+  return FIELDS.filter((field) => before[field] !== after[field]);
+}
+// The tabs that have to move for the strip to read as it does now, each with
+// the places it moved between, as Chrome reports them one at a time.
+function moves(
+  before: readonly TabModel[],
+  after: readonly TabModel[],
+): { tab: TabModel; from: number; to: number }[] {
+  const kept = after.filter((tab) =>
+    before.some((item) => item.tabId === tab.tabId),
+  );
+  const order = before
+    .filter((tab) => kept.some((item) => item.tabId === tab.tabId))
+    .map((tab) => tab.tabId);
+  const changes: { tab: TabModel; from: number; to: number }[] = [];
+  for (const [to, tab] of kept.entries()) {
+    if (order[to] === tab.tabId) continue;
+    const from = order.indexOf(tab.tabId);
+    order.splice(from, 1);
+    order.splice(to, 0, tab.tabId);
+    changes.push({ tab, from, to });
+  }
+  return changes;
+}
+interface Placed {
+  window: WindowModel;
+  tab: TabModel;
+  index: number;
+}
+function placedTabs(windows: readonly WindowModel[]): Map<string, Placed> {
+  const placed = new Map<string, Placed>();
+  for (const window of windows)
+    for (const [index, tab] of window.tabs.entries())
+      placed.set(tab.tabId, { window, tab, index });
+  return placed;
+}
+const sameBounds = (a: WindowModel["bounds"], b: WindowModel["bounds"]) =>
+  a.left === b.left &&
+  a.top === b.top &&
+  a.width === b.width &&
+  a.height === b.height;
+
+// What changed between two takes of one session.
+export function diffModels(
+  previous: SessionModel | undefined,
+  next: SessionModel,
+): ModelChange[] {
+  const before = previous?.windows ?? [];
+  const was = new Map(before.map((window) => [window.id, window]));
+  const now = new Map(next.windows.map((window) => [window.id, window]));
+  const oldTabs = placedTabs(before);
+  const newTabs = placedTabs(next.windows);
+  const changes: ModelChange[] = [];
+  // A window that closed takes its remaining tabs with it.
+  for (const window of before)
+    if (!now.has(window.id)) {
+      for (const tab of window.tabs)
+        if (!newTabs.has(tab.tabId))
+          changes.push({
+            type: "tab-removed",
+            tabId: tab.id,
+            windowId: window.id,
+            windowClosing: true,
+          });
+      changes.push({ type: "window-removed", windowId: window.id });
+    }
+  for (const window of next.windows)
+    if (!was.has(window.id)) {
+      changes.push({ type: "window-created", window });
+      for (const tab of window.tabs)
+        if (!oldTabs.has(tab.tabId)) changes.push({ type: "tab-created", tab });
+    }
+  for (const window of next.windows) {
+    const fresh = !was.has(window.id);
+    for (const tab of window.tabs) {
+      const old = oldTabs.get(tab.tabId);
+      if (!old) {
+        if (!fresh) changes.push({ type: "tab-created", tab });
+        continue;
+      }
+      if (old.window.id !== window.id) {
+        changes.push({
+          type: "tab-detached",
+          tabId: tab.id,
+          windowId: old.window.id,
+          position: old.index,
+        });
+        changes.push({
+          type: "tab-attached",
+          tabId: tab.id,
+          windowId: window.id,
+          position: tab.index,
+        });
+      }
+      // The view appeared or went away, so the tab answers to another id.
+      if (old.tab.id !== tab.id)
+        changes.push({
+          type: "tab-replaced",
+          added: tab.id,
+          removed: old.tab.id,
+        });
+      const changed = changedFields(old.tab, tab);
+      if (changed.length) changes.push({ type: "tab-updated", tab, changed });
+      if (old.tab.zoomFactor !== tab.zoomFactor)
+        changes.push({
+          type: "tab-zoomed",
+          tabId: tab.id,
+          from: old.tab.zoomFactor,
+          to: tab.zoomFactor,
+        });
+    }
+  }
+  for (const [tabId, old] of oldTabs)
+    if (!newTabs.has(tabId) && now.has(old.window.id))
+      changes.push({
+        type: "tab-removed",
+        tabId: old.tab.id,
+        windowId: old.window.id,
+        windowClosing: false,
+      });
+  for (const window of next.windows) {
+    const old = was.get(window.id);
+    if (!old) continue;
+    for (const move of moves(old.tabs, window.tabs))
+      changes.push({
+        type: "tab-moved",
+        tabId: move.tab.id,
+        windowId: window.id,
+        from: move.from,
+        to: move.to,
+      });
+  }
+  for (const window of next.windows) {
+    const active = window.tabs.find((tab) => tab.active);
+    const old = was.get(window.id);
+    const before = old?.tabs.find((tab) => tab.active);
+    if (active && before?.tabId !== active.tabId)
+      changes.push({
+        type: "tab-activated",
+        tabId: active.id,
+        windowId: window.id,
+      });
+  }
+  for (const window of next.windows) {
+    const old = was.get(window.id);
+    if (
+      old &&
+      (old.state !== window.state || !sameBounds(old.bounds, window.bounds))
+    )
+      changes.push({ type: "bounds-changed", window });
+  }
+  const focused = next.windows.find((window) => window.focused)?.id;
+  const focusedBefore = before.find((window) => window.focused)?.id;
+  if ((focused ?? WINDOW_ID_NONE) !== (focusedBefore ?? WINDOW_ID_NONE))
+    changes.push({
+      type: "focus-changed",
+      windowId: focused ?? WINDOW_ID_NONE,
+    });
+  return changes;
+}
+
+const ZOOM_SETTINGS = { mode: "automatic", scope: "per-origin" } as const;
+
+// The Chrome events a change comes out as, with the fields this extension
+// may read. Nothing comes out when nothing visible is left to send.
+export function eventFor(
+  change: ModelChange,
+  access: Access,
+): { event: string; args: unknown[] }[] {
+  switch (change.type) {
+    case "tab-created":
+      return [
+        { event: "tabs.onCreated", args: [tabObject(change.tab, access)] },
+      ];
+    case "tab-updated": {
+      const tab = change.tab;
+      const seen = canSeeTab(tab, access);
+      const info: Record<string, unknown> = {};
+      for (const field of change.changed) {
+        if (field === "muted") info.mutedInfo = { muted: tab.muted };
+        else if (
+          field === "url" ||
+          field === "title" ||
+          field === "favIconUrl"
+        ) {
+          if (seen) info[field] = tab[field];
+        } else info[field] = tab[field];
+      }
+      return Object.keys(info).length
+        ? [
+            {
+              event: "tabs.onUpdated",
+              args: [tab.id, info, tabObject(tab, access)],
+            },
+          ]
+        : [];
+    }
+    case "tab-activated":
+      return [
+        {
+          event: "tabs.onActivated",
+          args: [{ tabId: change.tabId, windowId: change.windowId }],
+        },
+        {
+          event: "tabs.onHighlighted",
+          args: [{ windowId: change.windowId, tabIds: [change.tabId] }],
+        },
+      ];
+    case "tab-removed":
+      return [
+        {
+          event: "tabs.onRemoved",
+          args: [
+            change.tabId,
+            {
+              windowId: change.windowId,
+              isWindowClosing: change.windowClosing,
+            },
+          ],
+        },
+      ];
+    case "tab-replaced":
+      return [
+        { event: "tabs.onReplaced", args: [change.added, change.removed] },
+      ];
+    case "tab-moved":
+      return [
+        {
+          event: "tabs.onMoved",
+          args: [
+            change.tabId,
+            {
+              windowId: change.windowId,
+              fromIndex: change.from,
+              toIndex: change.to,
+            },
+          ],
+        },
+      ];
+    case "tab-attached":
+      return [
+        {
+          event: "tabs.onAttached",
+          args: [
+            change.tabId,
+            { newWindowId: change.windowId, newPosition: change.position },
+          ],
+        },
+      ];
+    case "tab-detached":
+      return [
+        {
+          event: "tabs.onDetached",
+          args: [
+            change.tabId,
+            { oldWindowId: change.windowId, oldPosition: change.position },
+          ],
+        },
+      ];
+    case "tab-zoomed":
+      return [
+        {
+          event: "tabs.onZoomChange",
+          args: [
+            {
+              tabId: change.tabId,
+              oldZoomFactor: change.from,
+              newZoomFactor: change.to,
+              zoomSettings: { ...ZOOM_SETTINGS },
+            },
+          ],
+        },
+      ];
+    case "window-created":
+      return [
+        {
+          event: "windows.onCreated",
+          args: [windowObject(change.window, access, false)],
+        },
+      ];
+    case "window-removed":
+      return [{ event: "windows.onRemoved", args: [change.windowId] }];
+    case "focus-changed":
+      return [{ event: "windows.onFocusChanged", args: [change.windowId] }];
+    case "bounds-changed":
+      return [
+        {
+          event: "windows.onBoundsChanged",
+          args: [windowObject(change.window, access, false)],
+        },
+      ];
+  }
+}

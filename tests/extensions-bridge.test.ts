@@ -1,0 +1,1113 @@
+import { EventEmitter } from "node:events";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { BrowserWindow, WebContents } from "electron";
+import {
+  NEW_TAB_URL,
+  PLACEHOLDER_BASE,
+  WINDOW_ID_CURRENT,
+  WINDOW_ID_NONE,
+  tabObject,
+  type ExtensionEntry,
+  type TabModel,
+} from "../shared/extensions";
+import { HOME_URL, initialState, newTab } from "../shared/state";
+import type { BrowserState, Space, Tab } from "../shared/types";
+import {
+  ExtensionBridge,
+  type BridgeController,
+} from "../electron/extensions/bridge";
+import type { ExtensionHost, SurfaceInfo } from "../electron/extensions/host";
+import type {
+  ApiHandler,
+  Caller,
+  ExtensionChannel,
+} from "../electron/extensions/channel";
+import { extensionBridgeCopy } from "../src/copy";
+
+vi.mock("electron", () => ({
+  ipcMain: {
+    handle: vi.fn(),
+    removeHandler: vi.fn(),
+    on: vi.fn(),
+    removeListener: vi.fn(),
+  },
+}));
+
+// A distinct valid id per number: its hex digits as the letters a to p.
+function idAt(index: number): string {
+  return Array.from(index.toString(16).padStart(32, "0"), (digit) =>
+    String.fromCharCode(97 + parseInt(digit, 16)),
+  ).join("");
+}
+// ALL sees every tab, HOSTS one site, NONE nothing, EVERY every site.
+const [ALL, HOSTS, NONE, EVERY] = [1, 2, 3, 4].map(idAt);
+const PERSONAL = "persist:space-personal";
+const WORK = "persist:space-work";
+
+function entryFor(
+  id: string,
+  permissions: string[],
+  hosts: string[],
+): ExtensionEntry {
+  return {
+    id,
+    source: "unpacked",
+    version: "1.0.0",
+    path: "/tmp/extension",
+    enabled: true,
+    pinned: false,
+    installedAt: 1,
+    grantedPermissions: permissions,
+    grantedHosts: hosts,
+  };
+}
+
+class FakeImage {
+  toPNG = vi.fn(() => Buffer.from("png-bytes"));
+  toJPEG = vi.fn((quality: number) => Buffer.from(`jpeg-${quality}`));
+}
+class FakeContents extends EventEmitter {
+  zoom = 1;
+  audible = false;
+  muted = false;
+  destroyed = false;
+  capturePage = vi.fn(async () => new FakeImage());
+  constructor(readonly id: number) {
+    super();
+  }
+  isDestroyed(): boolean {
+    return this.destroyed;
+  }
+  getZoomFactor(): number {
+    return this.zoom;
+  }
+  isCurrentlyAudible(): boolean {
+    return this.audible;
+  }
+  isAudioMuted(): boolean {
+    return this.muted;
+  }
+}
+class FakeWindow extends EventEmitter {
+  focused = true;
+  bounds = { x: 120, y: 60, width: 1440, height: 960 };
+  maximized = false;
+  minimized = false;
+  fullScreen = false;
+  isFocused(): boolean {
+    return this.focused;
+  }
+  getBounds() {
+    return this.bounds;
+  }
+  isMaximized(): boolean {
+    return this.maximized;
+  }
+  isMinimized(): boolean {
+    return this.minimized;
+  }
+  isFullScreen(): boolean {
+    return this.fullScreen;
+  }
+  isDestroyed(): boolean {
+    return false;
+  }
+}
+
+function spaceAt(id: string, extra: Partial<Space> = {}): Space {
+  return {
+    id,
+    name: id,
+    color: "green",
+    kind: "personal",
+    owner: "human",
+    signIns: "shared",
+    createdAt: 1,
+    ...extra,
+  };
+}
+function tabAt(spaceId: string, url: string, extra: Partial<Tab> = {}): Tab {
+  return { ...newTab(spaceId, url), id: `tab-${++tabCount}`, ...extra };
+}
+let tabCount = 0;
+
+// The controller members the bridge reads, over a plain state.
+class FakeController implements BridgeController {
+  readonly window = new FakeWindow() as unknown as BrowserWindow;
+  readonly state: BrowserState;
+  readonly views = new Map<string, FakeContents>();
+  private readonly listeners = new Set<(state: BrowserState) => void>();
+  private shown = new Map<string, string>();
+  private nextContentsId = 10;
+  openExtensionTab = vi.fn();
+  moveTab = vi.fn();
+  closeTab = vi.fn();
+  dispatch = vi.fn();
+
+  constructor(spaces: Space[], tabs: Tab[]) {
+    this.state = {
+      ...initialState("darwin"),
+      spaces,
+      tabs,
+      activeSpaceId: spaces[0].id,
+      activeTabId: tabs.find((tab) => tab.spaceId === spaces[0].id)?.id ?? "",
+    };
+  }
+
+  get fakeWindow(): FakeWindow {
+    return this.window as unknown as FakeWindow;
+  }
+
+  subscribe(listener: (state: BrowserState) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  emit(): void {
+    for (const listener of [...this.listeners]) listener(this.state);
+  }
+
+  partitionOf(spaceId: string): string {
+    const space = this.state.spaces.find((item) => item.id === spaceId);
+    if (!space) throw new Error("Space was not found.");
+    if (space.signIns === "shared") return PERSONAL;
+    return space.kind === "agent"
+      ? `agent-run-${space.id}`
+      : `persist:space-${space.id}`;
+  }
+
+  peekWebContents(tabId: string): WebContents | undefined {
+    return this.views.get(tabId) as unknown as WebContents | undefined;
+  }
+
+  shownTab(spaceId: string): Tab | undefined {
+    const tabs = this.state.tabs.filter((tab) => tab.spaceId === spaceId);
+    if (spaceId === this.state.activeSpaceId)
+      return tabs.find((tab) => tab.id === this.state.activeTabId) ?? tabs[0];
+    const last = this.shown.get(spaceId);
+    return tabs.find((tab) => tab.id === last) ?? tabs[0];
+  }
+
+  tabOfContents(contents: WebContents): Tab | undefined {
+    for (const [tabId, view] of this.views)
+      if ((view as unknown as WebContents) === contents)
+        return this.state.tabs.find((tab) => tab.id === tabId);
+    return undefined;
+  }
+
+  // Gives a tab a view, as the controller does when it loads.
+  load(tabId: string): FakeContents {
+    const contents = new FakeContents(this.nextContentsId++);
+    this.views.set(tabId, contents);
+    return contents;
+  }
+
+  show(spaceId: string, tabId?: string): void {
+    this.state.activeSpaceId = spaceId;
+    const tabs = this.state.tabs.filter((tab) => tab.spaceId === spaceId);
+    const next = tabId ?? tabs[0]?.id ?? "";
+    this.state.activeTabId = next;
+    this.shown.set(spaceId, next);
+  }
+}
+
+type Emitted = {
+  partition: string;
+  extensionId: string;
+  event: string;
+  args: unknown[];
+};
+// What the bridge registers, emits and asks about listeners.
+class FakeChannel {
+  readonly handlers = new Map<string, ApiHandler>();
+  readonly events: Emitted[] = [];
+  private readonly listeners = new Set<string>();
+  register = vi.fn((api: string, handler: ApiHandler) => {
+    this.handlers.set(api, handler);
+  });
+  emit = vi.fn(
+    (
+      partition: string,
+      extensionId: string,
+      event: string,
+      args: unknown[],
+    ) => {
+      this.events.push({ partition, extensionId, event, args });
+    },
+  );
+  listening = vi.fn((partition: string, extensionId: string, event: string) =>
+    this.listeners.has(`${partition}|${extensionId}|${event}`),
+  );
+  listen(partition: string, extensionId: string, ...events: string[]): void {
+    for (const event of events)
+      this.listeners.add(`${partition}|${extensionId}|${event}`);
+  }
+  call(api: string, caller: Caller, method: string, args: unknown[] = []) {
+    const handler = this.handlers.get(api);
+    if (!handler) throw new Error(`No handler for ${api}`);
+    return handler(caller, method, args);
+  }
+  take(extensionId?: string): Emitted[] {
+    const taken = this.events.splice(0);
+    return extensionId
+      ? taken.filter((item) => item.extensionId === extensionId)
+      : taken;
+  }
+}
+// The host members the bridge reads.
+class FakeHost {
+  readonly records: ExtensionEntry[] = [];
+  readonly loaded = new Map<string, Set<string>>();
+  readonly surfaces = new Map<WebContents, SurfaceInfo>();
+  private readonly listeners = new Set<(event: unknown) => void>();
+  entries(): readonly ExtensionEntry[] {
+    return this.records;
+  }
+  entry(id: string): ExtensionEntry | undefined {
+    return this.records.find((item) => item.id === id);
+  }
+  isLoaded(partition: string, id: string): boolean {
+    return this.loaded.get(partition)?.has(id) ?? false;
+  }
+  loadedIds(partition: string): ReadonlySet<string> {
+    return this.loaded.get(partition) ?? new Set();
+  }
+  partitions(): string[] {
+    return [...this.loaded.keys()];
+  }
+  surfaceOf(contents: WebContents): SurfaceInfo | undefined {
+    return this.surfaces.get(contents);
+  }
+  onEvent(listener: (event: unknown) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  send(event: unknown): void {
+    for (const listener of [...this.listeners]) listener(event);
+  }
+  load(partition: string, entry: ExtensionEntry): void {
+    if (!this.entry(entry.id)) this.records.push(entry);
+    const ids = this.loaded.get(partition) ?? new Set<string>();
+    ids.add(entry.id);
+    this.loaded.set(partition, ids);
+  }
+}
+
+interface Setup {
+  bridge: ExtensionBridge;
+  controller: FakeController;
+  channel: FakeChannel;
+  host: FakeHost;
+  unbind: () => void;
+}
+function setUp(spaces: Space[], tabs: Tab[]): Setup {
+  const host = new FakeHost();
+  const channel = new FakeChannel();
+  host.load(PERSONAL, entryFor(ALL, ["tabs"], []));
+  host.load(PERSONAL, entryFor(HOSTS, [], ["https://example.com/*"]));
+  host.load(PERSONAL, entryFor(NONE, [], []));
+  host.load(PERSONAL, entryFor(EVERY, [], ["<all_urls>"]));
+  host.load(WORK, entryFor(ALL, ["tabs"], []));
+  const controller = new FakeController(spaces, tabs);
+  const bridge = new ExtensionBridge({
+    host: host as unknown as ExtensionHost,
+    channel: channel as unknown as ExtensionChannel,
+  });
+  const unbind = bridge.bind(controller);
+  return { bridge, controller, channel, host, unbind };
+}
+function callerFor(
+  extensionId: string,
+  partition: string,
+  surface: Caller["surface"],
+  contents?: FakeContents,
+): Caller {
+  return {
+    extensionId,
+    partition,
+    surface,
+    contents: contents as unknown as WebContents,
+  };
+}
+const tabsOf = (bridge: ExtensionBridge, partition: string): TabModel[] =>
+  bridge.model(partition).windows.flatMap((window) => window.tabs);
+
+beforeEach(() => {
+  tabCount = 0;
+  vi.clearAllMocks();
+});
+
+describe("extension tab objects", () => {
+  it("tab objects for new, unloaded and loaded tabs", () => {
+    const pinned = tabAt("personal", "https://news.example/", {
+      pinned: true,
+      title: "News",
+    });
+    const blank = tabAt("personal", HOME_URL);
+    const restored = tabAt("personal", "https://example.com/saved", {
+      title: "Saved",
+    });
+    const live = tabAt("personal", "https://example.com/page", {
+      title: "Page",
+      loading: true,
+      favicon: "https://example.com/icon.png",
+    });
+    const other = tabAt("work", "https://example.com/work");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal"), spaceAt("work", { signIns: "separate" })],
+      [blank, restored, live, pinned, other],
+    );
+    const contents = controller.load(live.id);
+    controller.show("personal", live.id);
+
+    const model = bridge.model(PERSONAL);
+    expect(model.windows).toHaveLength(1);
+    const window = model.windows[0];
+    // Pinned tabs come first, as in the tab strip.
+    expect(window.tabs.map((tab) => tab.tabId)).toEqual([
+      pinned.id,
+      blank.id,
+      restored.id,
+      live.id,
+    ]);
+    expect(window.tabs.map((tab) => tab.index)).toEqual([0, 1, 2, 3]);
+    const [first, second, third, fourth] = window.tabs;
+
+    expect(first.id).toBeGreaterThanOrEqual(PLACEHOLDER_BASE);
+    expect(second).toMatchObject({
+      url: NEW_TAB_URL,
+      title: "New tab",
+      status: "complete",
+      newTab: true,
+      discarded: false,
+    });
+    expect(second.id).toBeGreaterThanOrEqual(PLACEHOLDER_BASE);
+    expect(second.id).not.toBe(first.id);
+    expect(third).toMatchObject({ status: "unloaded", discarded: true });
+    expect(third.id).toBeGreaterThanOrEqual(PLACEHOLDER_BASE);
+    expect(fourth).toMatchObject({
+      id: contents.id,
+      status: "loading",
+      discarded: false,
+      active: true,
+      zoomFactor: 1,
+      audible: false,
+      muted: false,
+      windowId: bridge.windowIdOf("personal"),
+    });
+    expect(fourth.id).toBeLessThan(PLACEHOLDER_BASE);
+    // Every tab of the session answers to its numeric id.
+    expect(bridge.numericId(live.id)).toBe(contents.id);
+    expect(bridge.tabIdOf(contents.id)).toBe(live.id);
+    expect(bridge.tabIdOf(second.id)).toBe(blank.id);
+    // The placeholder stays the same for the tab's life.
+    expect(bridge.model(PERSONAL).windows[0].tabs[2].id).toBe(third.id);
+
+    live.loading = false;
+    contents.zoom = 1.25;
+    contents.audible = true;
+    contents.muted = true;
+    expect(tabsOf(bridge, PERSONAL).at(-1)).toMatchObject({
+      status: "complete",
+      zoomFactor: 1.25,
+      audible: true,
+      muted: true,
+    });
+
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+    expect(channel.call("tabs", caller, "get", [contents.id])).toMatchObject({
+      id: contents.id,
+      index: 3,
+      windowId: bridge.windowIdOf("personal"),
+      active: true,
+      highlighted: true,
+      selected: true,
+      pinned: false,
+      incognito: false,
+      groupId: -1,
+      autoDiscardable: true,
+      frozen: false,
+      mutedInfo: { muted: true },
+      status: "complete",
+      url: "https://example.com/page",
+      title: "Page",
+      favIconUrl: "https://example.com/icon.png",
+    });
+    expect(channel.call("tabs", caller, "getCurrent", [])).toMatchObject({
+      id: contents.id,
+    });
+    expect(
+      channel.call(
+        "tabs",
+        callerFor(ALL, PERSONAL, "worker"),
+        "getCurrent",
+        [],
+      ),
+    ).toBeUndefined();
+    expect(channel.call("tabs", caller, "getZoom", [])).toBe(1.25);
+    expect(channel.call("tabs", caller, "getZoomSettings", [])).toEqual({
+      mode: "automatic",
+      scope: "per-origin",
+      defaultZoomFactor: 1,
+    });
+    // Tabs of another session, unknown ids and bad arguments are refused.
+    const stranger = tabsOf(bridge, WORK)[0];
+    expect(() => channel.call("tabs", caller, "get", [stranger.id])).toThrow(
+      extensionBridgeCopy.noTab(stranger.id),
+    );
+    expect(() => channel.call("tabs", caller, "get", ["7"])).toThrow(
+      extensionBridgeCopy.invalid("tabs.get"),
+    );
+    expect(() => channel.call("tabs", caller, "detectLanguage", [])).toThrow(
+      extensionBridgeCopy.notSupported,
+    );
+  });
+
+  it("field hiding and activeTab grants", () => {
+    const shop = tabAt("personal", "https://example.com/shop", {
+      title: "Shop",
+      favicon: "https://example.com/icon.png",
+    });
+    const news = tabAt("personal", "https://news.example/today", {
+      title: "News",
+    });
+    const file = tabAt("personal", "file:///Users/sherry/notes.pdf", {
+      title: "notes.pdf",
+    });
+    const { bridge, controller } = setUp(
+      [spaceAt("personal")],
+      [shop, news, file],
+    );
+    const shopContents = controller.load(shop.id);
+    controller.load(news.id);
+    controller.load(file.id);
+    const [shopTab, newsTab, fileTab] = tabsOf(bridge, PERSONAL);
+    expect(fileTab.file).toBe(true);
+
+    const seen = (id: string, tab: TabModel) => {
+      const object = tabObject(tab, bridge.access(PERSONAL, id));
+      return [object.url, object.title, object.favIconUrl, object.pendingUrl];
+    };
+    // The tabs permission shows every tab but a file tab.
+    expect(seen(ALL, shopTab)).toEqual([
+      "https://example.com/shop",
+      "Shop",
+      "https://example.com/icon.png",
+      undefined,
+    ]);
+    expect(seen(ALL, newsTab)).toEqual([
+      "https://news.example/today",
+      "News",
+      undefined,
+      undefined,
+    ]);
+    expect(seen(ALL, fileTab)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    // A host permission shows only the sites it matches.
+    expect(seen(HOSTS, shopTab)[0]).toBe("https://example.com/shop");
+    expect(seen(HOSTS, newsTab)[0]).toBeUndefined();
+    expect(seen(NONE, shopTab)[0]).toBeUndefined();
+
+    // The person's click on the toolbar grants that one tab.
+    bridge.grantActiveTab(PERSONAL, NONE, newsTab.id);
+    expect([...bridge.access(PERSONAL, NONE).activeTabs]).toEqual([newsTab.id]);
+    expect(seen(NONE, newsTab)[0]).toBe("https://news.example/today");
+    expect(seen(NONE, shopTab)[0]).toBeUndefined();
+    // A file tab stays hidden even with a grant.
+    bridge.grantActiveTab(PERSONAL, ALL, fileTab.id);
+    expect(seen(ALL, fileTab)[0]).toBeUndefined();
+    // Another session's extension keeps its own grants.
+    expect([...bridge.access(WORK, NONE).activeTabs]).toEqual([]);
+
+    // The grant ends when that tab's main frame loads another document.
+    bridge.grantActiveTab(PERSONAL, NONE, shopTab.id);
+    expect([...bridge.access(PERSONAL, NONE).activeTabs]).toContain(shopTab.id);
+    shopContents.emit("did-navigate", {}, "https://example.com/other");
+    expect([...bridge.access(PERSONAL, NONE).activeTabs]).not.toContain(
+      shopTab.id,
+    );
+    expect(seen(NONE, shopTab)[0]).toBeUndefined();
+    // A loading tab also reports its pending URL.
+    news.loading = true;
+    expect(seen(NONE, tabsOf(bridge, PERSONAL)[1])).toEqual([
+      "https://news.example/today",
+      "News",
+      undefined,
+      "https://news.example/today",
+    ]);
+  });
+
+  it("query patterns and currentWindow", () => {
+    const shop = tabAt("personal", "https://example.com/shop", {
+      title: "Example shop",
+      pinned: true,
+    });
+    const news = tabAt("personal", "https://news.example/today", {
+      title: "Today",
+    });
+    const agentTab = tabAt("shared-agent", "https://example.com/agent", {
+      title: "Agent page",
+    });
+    const workTab = tabAt("work", "https://example.com/work", {
+      title: "Work page",
+    });
+    const { bridge, controller, channel, host } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("shared-agent", { kind: "agent", owner: "agent" }),
+        spaceAt("work", { signIns: "separate" }),
+      ],
+      [shop, news, agentTab, workTab],
+    );
+    const shopContents = controller.load(shop.id);
+    controller.load(news.id);
+    controller.load(agentTab.id);
+    controller.show("personal", news.id);
+    const personalWindow = bridge.windowIdOf("personal");
+    const agentWindow = bridge.windowIdOf("shared-agent");
+    const caller = callerFor(ALL, PERSONAL, "tab", shopContents);
+    const query = (queryInfo: unknown, from: Caller = caller) =>
+      (
+        channel.call("tabs", from, "query", [queryInfo]) as {
+          id: number;
+          windowId: number;
+        }[]
+      ).map((tab) => `${tab.windowId}:${tab.id}`);
+    const idOf = (tab: Tab) => bridge.numericId(tab.id);
+
+    expect(query({})).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+      `${personalWindow}:${idOf(news)}`,
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+    expect(query({ url: "https://example.com/*" })).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+    expect(
+      query({ url: ["https://news.example/*", "https://example.com/shop"] }),
+    ).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+      `${personalWindow}:${idOf(news)}`,
+    ]);
+    expect(query({ title: "Example*" })).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+    ]);
+    // Each window reports its own active tab.
+    expect(query({ active: true })).toEqual([
+      `${personalWindow}:${idOf(news)}`,
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+    expect(query({ pinned: true })).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+    ]);
+    expect(query({ status: "complete" })).toHaveLength(3);
+    expect(query({ status: "loading" })).toEqual([]);
+    expect(query({ windowId: WINDOW_ID_CURRENT })).toEqual([
+      `${personalWindow}:${idOf(shop)}`,
+      `${personalWindow}:${idOf(news)}`,
+    ]);
+    expect(query({ windowId: agentWindow })).toEqual([
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+    expect(query({ currentWindow: true })).toHaveLength(2);
+    expect(query({ lastFocusedWindow: true })).toHaveLength(2);
+    expect(query({ windowType: "popup" })).toEqual([]);
+    // Tabs whose fields are hidden never match a URL or a title.
+    expect(
+      query(
+        { url: "https://example.com/*" },
+        callerFor(NONE, PERSONAL, "worker"),
+      ),
+    ).toEqual([]);
+    expect(
+      query({ title: "Today" }, callerFor(NONE, PERSONAL, "worker")),
+    ).toEqual([]);
+    expect(query({}, callerFor(NONE, PERSONAL, "worker"))).toHaveLength(3);
+    expect(() => channel.call("tabs", caller, "query", [{ url: 7 }])).toThrow(
+      extensionBridgeCopy.invalid("tabs.query"),
+    );
+
+    // A popup's current window is the space it belongs to.
+    const popupContents = new FakeContents(99);
+    host.surfaces.set(popupContents as unknown as WebContents, {
+      kind: "popup",
+      extensionId: ALL,
+      partition: PERSONAL,
+      spaceId: "shared-agent",
+    });
+    const popup = callerFor(ALL, PERSONAL, "popup", popupContents);
+    expect(bridge.callerWindowId(popup)).toBe(agentWindow);
+    expect(query({ currentWindow: true }, popup)).toEqual([
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+    // A worker has no window of its own, so it gets the space shown last on
+    // its session. Another session's spaces never count.
+    const worker = callerFor(ALL, PERSONAL, "worker");
+    expect(bridge.callerWindowId(worker)).toBeUndefined();
+    expect(bridge.currentWindowId(worker)).toBe(personalWindow);
+    controller.show("work", workTab.id);
+    controller.emit();
+    expect(bridge.currentWindowId(worker)).toBe(personalWindow);
+    controller.show("shared-agent", agentTab.id);
+    controller.emit();
+    expect(bridge.currentWindowId(worker)).toBe(agentWindow);
+    expect(query({ currentWindow: true }, worker)).toEqual([
+      `${agentWindow}:${idOf(agentTab)}`,
+    ]);
+  });
+
+  it("onReplaced", () => {
+    const blank = tabAt("personal", "https://example.com/slow", {
+      title: "Slow",
+    });
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal")],
+      [blank],
+    );
+    channel.listen(
+      PERSONAL,
+      ALL,
+      "tabs.onReplaced",
+      "tabs.onUpdated",
+      "tabs.onActivated",
+      "tabs.onHighlighted",
+    );
+    controller.emit();
+    const placeholder = tabsOf(bridge, PERSONAL)[0].id;
+    expect(placeholder).toBeGreaterThanOrEqual(PLACEHOLDER_BASE);
+    channel.take();
+
+    // The view appears: the tab keeps its place and takes its contents id.
+    const contents = controller.load(blank.id);
+    blank.loading = true;
+    controller.emit();
+    const events = channel.take(ALL);
+    expect(events.map((item) => item.event)).toEqual([
+      "tabs.onReplaced",
+      "tabs.onUpdated",
+    ]);
+    expect(events[0].args).toEqual([contents.id, placeholder]);
+    expect(events[1].args[0]).toBe(contents.id);
+    expect(events[1].args[1]).toEqual({
+      status: "loading",
+      discarded: false,
+    });
+    // Later calls and events use the new id.
+    const caller = callerFor(ALL, PERSONAL, "worker");
+    expect(channel.call("tabs", caller, "get", [contents.id])).toMatchObject({
+      id: contents.id,
+      status: "loading",
+    });
+    expect(() => channel.call("tabs", caller, "get", [placeholder])).toThrow(
+      extensionBridgeCopy.noTab(placeholder),
+    );
+    expect(bridge.numericId(blank.id)).toBe(contents.id);
+    expect(bridge.tabIdOf(placeholder)).toBeUndefined();
+    blank.loading = false;
+    controller.emit();
+    expect(channel.take(ALL)).toEqual([
+      {
+        partition: PERSONAL,
+        extensionId: ALL,
+        event: "tabs.onUpdated",
+        args: [
+          contents.id,
+          { status: "complete" },
+          expect.objectContaining({ id: contents.id, status: "complete" }),
+        ],
+      },
+    ]);
+  });
+
+  it("windows are this session's spaces with the main window's state and bounds, focused only while shown and the window has focus", () => {
+    const personalTab = tabAt("personal", "https://example.com/");
+    const agentTab = tabAt("shared-agent", "https://example.com/agent");
+    const isolatedTab = tabAt("isolated", "https://example.com/isolated");
+    const workTab = tabAt("work", "https://example.com/work");
+    const { bridge, controller, channel } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("shared-agent", { kind: "agent", owner: "agent" }),
+        spaceAt("isolated", {
+          kind: "agent",
+          owner: "agent",
+          signIns: "separate",
+        }),
+        spaceAt("work", { signIns: "separate" }),
+      ],
+      [personalTab, agentTab, isolatedTab, workTab],
+    );
+    const model = bridge.model(PERSONAL);
+    // Agent spaces that share sign-ins are windows too; isolated ones and
+    // other sessions' spaces are not.
+    expect(model.windows.map((window) => window.spaceId)).toEqual([
+      "personal",
+      "shared-agent",
+    ]);
+    expect(model.partition).toBe(PERSONAL);
+    expect(model.windows.map((window) => window.id)).toEqual([
+      bridge.windowIdOf("personal"),
+      bridge.windowIdOf("shared-agent"),
+    ]);
+    expect(model.windows[0]).toMatchObject({
+      focused: true,
+      agentHeld: false,
+      personal: true,
+      state: "normal",
+      bounds: { left: 120, top: 60, width: 1440, height: 960 },
+    });
+    expect(model.windows[1]).toMatchObject({
+      focused: false,
+      agentHeld: true,
+      personal: false,
+    });
+    expect(bridge.model(WORK).windows.map((window) => window.spaceId)).toEqual([
+      "work",
+    ]);
+    expect(bridge.model("agent-run-isolated").windows).toEqual([]);
+
+    const caller = callerFor(ALL, PERSONAL, "worker");
+    const all = channel.call("windows", caller, "getAll", [
+      { populate: true },
+    ]) as { id: number; tabs?: unknown[] }[];
+    expect(all.map((window) => window.id)).toEqual([
+      bridge.windowIdOf("personal"),
+      bridge.windowIdOf("shared-agent"),
+    ]);
+    expect(all[0].tabs).toHaveLength(1);
+    expect(
+      channel.call("windows", caller, "getAll", [{ windowTypes: ["popup"] }]),
+    ).toEqual([]);
+    expect(
+      channel.call("windows", caller, "get", [bridge.windowIdOf("personal")]),
+    ).toMatchObject({
+      id: bridge.windowIdOf("personal"),
+      focused: true,
+      top: 60,
+      left: 120,
+      width: 1440,
+      height: 960,
+      incognito: false,
+      type: "normal",
+      state: "normal",
+      alwaysOnTop: false,
+      tabs: undefined,
+    });
+    expect(
+      channel.call("windows", caller, "getCurrent", [{ populate: true }]),
+    ).toMatchObject({ id: bridge.windowIdOf("personal") });
+    expect(channel.call("windows", caller, "getLastFocused", [])).toMatchObject(
+      { id: bridge.windowIdOf("personal") },
+    );
+    expect(() => channel.call("windows", caller, "get", [404])).toThrow(
+      extensionBridgeCopy.noWindow(404),
+    );
+    expect(() => channel.call("windows", caller, "get", ["x"])).toThrow(
+      extensionBridgeCopy.invalid("windows.get"),
+    );
+
+    // Focus follows the shown space and the main window together.
+    controller.show("shared-agent", agentTab.id);
+    expect(
+      bridge.model(PERSONAL).windows.map((window) => window.focused),
+    ).toEqual([false, true]);
+    controller.fakeWindow.focused = false;
+    expect(
+      bridge.model(PERSONAL).windows.map((window) => window.focused),
+    ).toEqual([false, false]);
+    controller.fakeWindow.focused = true;
+    // State comes from the main window.
+    controller.fakeWindow.maximized = true;
+    expect(bridge.model(PERSONAL).windows[0].state).toBe("maximized");
+    controller.fakeWindow.minimized = true;
+    expect(bridge.model(PERSONAL).windows[0].state).toBe("minimized");
+    controller.fakeWindow.fullScreen = true;
+    expect(bridge.model(PERSONAL).windows[0].state).toBe("fullscreen");
+  });
+
+  it("events reach only extensions listening in that session, with the fields each may see", () => {
+    const home = tabAt("personal", "https://example.com/", { title: "Home" });
+    const agentTab = tabAt("shared-agent", "https://example.com/agent");
+    const workTab = tabAt("work", "https://example.com/work");
+    const { bridge, controller, channel } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("shared-agent", { kind: "agent", owner: "agent" }),
+        spaceAt("work", { signIns: "separate" }),
+      ],
+      [home, agentTab, workTab],
+    );
+    const events = [
+      "tabs.onCreated",
+      "tabs.onUpdated",
+      "tabs.onActivated",
+      "tabs.onHighlighted",
+      "tabs.onRemoved",
+      "tabs.onMoved",
+      "tabs.onAttached",
+      "tabs.onDetached",
+      "tabs.onZoomChange",
+      "windows.onCreated",
+      "windows.onRemoved",
+      "windows.onFocusChanged",
+      "windows.onBoundsChanged",
+    ];
+    channel.listen(PERSONAL, ALL, ...events);
+    channel.listen(PERSONAL, NONE, ...events);
+    channel.listen(WORK, ALL, ...events);
+    const homeContents = controller.load(home.id);
+    controller.load(agentTab.id);
+    controller.emit();
+    channel.take();
+    const personalWindow = bridge.windowIdOf("personal");
+    const agentWindow = bridge.windowIdOf("shared-agent");
+    // Everything sent since the last step, by extension and in order.
+    const step = () => {
+      const sent = channel.take();
+      return (extensionId: string) =>
+        sent.filter((item) => item.extensionId === extensionId);
+    };
+
+    // A new tab in a space of this session.
+    const added = tabAt("personal", "https://news.example/", {
+      title: "News",
+    });
+    controller.state.tabs.push(added);
+    controller.show("personal", added.id);
+    controller.emit();
+    let sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual([
+      "tabs.onCreated",
+      "tabs.onActivated",
+      "tabs.onHighlighted",
+    ]);
+    expect(sent(ALL)[0].args[0]).toMatchObject({
+      id: bridge.numericId(added.id),
+      index: 1,
+      windowId: personalWindow,
+      url: "https://news.example/",
+      title: "News",
+    });
+    // An extension without access sees the tab, not its URL or title.
+    const hidden = sent(NONE)[0].args[0] as Record<string, unknown>;
+    expect(hidden.id).toBe(bridge.numericId(added.id));
+    expect(hidden.url).toBeUndefined();
+    expect(hidden.title).toBeUndefined();
+    expect(sent(ALL)[1].args).toEqual([
+      { tabId: bridge.numericId(added.id), windowId: personalWindow },
+    ]);
+    expect(sent(ALL)[2].args).toEqual([
+      { windowId: personalWindow, tabIds: [bridge.numericId(added.id)] },
+    ]);
+    // Another session's extension hears nothing about this one.
+    expect(sent(ALL).every((item) => item.partition === PERSONAL)).toBe(true);
+
+    // A title change only reaches extensions that may read titles.
+    added.title = "Later";
+    controller.emit();
+    sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual(["tabs.onUpdated"]);
+    expect(sent(ALL)[0].args[1]).toEqual({ title: "Later" });
+    expect(sent(NONE)).toEqual([]);
+
+    // Pinning moves a tab to the front of the strip; zoom and audio change
+    // the tab that stays.
+    added.pinned = true;
+    homeContents.zoom = 1.5;
+    homeContents.audible = true;
+    controller.emit();
+    sent = step();
+    expect(sent(NONE).map((item) => item.event)).toEqual([
+      "tabs.onUpdated",
+      "tabs.onUpdated",
+      "tabs.onZoomChange",
+      "tabs.onMoved",
+    ]);
+    expect(sent(NONE)[0].args[1]).toEqual({ pinned: true });
+    expect(sent(NONE)[3].args).toEqual([
+      bridge.numericId(added.id),
+      { windowId: personalWindow, fromIndex: 1, toIndex: 0 },
+    ]);
+    expect(sent(NONE)[1].args[1]).toEqual({ audible: true });
+    expect(sent(NONE)[2].args).toEqual([
+      {
+        tabId: homeContents.id,
+        oldZoomFactor: 1,
+        newZoomFactor: 1.5,
+        zoomSettings: { mode: "automatic", scope: "per-origin" },
+      },
+    ]);
+
+    // A tab moving to another space of the same session.
+    const moved = bridge.numericId(added.id);
+    added.spaceId = "shared-agent";
+    added.pinned = false;
+    controller.emit();
+    sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual([
+      "tabs.onDetached",
+      "tabs.onAttached",
+      "tabs.onUpdated",
+      "tabs.onActivated",
+      "tabs.onHighlighted",
+    ]);
+    expect(sent(ALL)[0].args).toEqual([
+      moved,
+      { oldWindowId: personalWindow, oldPosition: 0 },
+    ]);
+    expect(sent(ALL)[1].args).toEqual([
+      moved,
+      { newWindowId: agentWindow, newPosition: 1 },
+    ]);
+    // The space it left shows another tab now.
+    expect(sent(ALL)[3].args).toEqual([
+      { tabId: homeContents.id, windowId: personalWindow },
+    ]);
+
+    // Closing a tab, and closing a space with its tabs.
+    controller.state.tabs = controller.state.tabs.filter(
+      (tab) => tab.id !== added.id,
+    );
+    controller.emit();
+    sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual(["tabs.onRemoved"]);
+    expect(sent(ALL)[0].args).toEqual([
+      moved,
+      { windowId: agentWindow, isWindowClosing: false },
+    ]);
+    const agentNumeric = bridge.numericId(agentTab.id);
+    controller.state.spaces = controller.state.spaces.filter(
+      (space) => space.id !== "shared-agent",
+    );
+    controller.state.tabs = controller.state.tabs.filter(
+      (tab) => tab.spaceId !== "shared-agent",
+    );
+    controller.emit();
+    sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual([
+      "tabs.onRemoved",
+      "windows.onRemoved",
+    ]);
+    expect(sent(ALL)[0].args).toEqual([
+      agentNumeric,
+      { windowId: agentWindow, isWindowClosing: true },
+    ]);
+    expect(sent(ALL)[1].args).toEqual([agentWindow]);
+
+    // A new space of this session is a new window.
+    controller.state.spaces.push(spaceAt("second"));
+    const secondTab = tabAt("second", "https://example.com/second");
+    controller.state.tabs.push(secondTab);
+    controller.emit();
+    sent = step();
+    const secondWindow = bridge.windowIdOf("second");
+    expect(sent(ALL).map((item) => item.event)).toEqual([
+      "windows.onCreated",
+      "tabs.onCreated",
+      "tabs.onActivated",
+      "tabs.onHighlighted",
+    ]);
+    expect(sent(ALL)[0].args[0]).toMatchObject({
+      id: secondWindow,
+      type: "normal",
+      focused: false,
+      tabs: undefined,
+    });
+    expect(sent(ALL)[1].args[0]).toMatchObject({ windowId: secondWindow });
+
+    // The main window's focus and bounds.
+    controller.fakeWindow.focused = false;
+    controller.fakeWindow.emit("blur");
+    sent = step();
+    expect(sent(ALL).map((item) => item.event)).toEqual([
+      "windows.onFocusChanged",
+    ]);
+    expect(sent(ALL)[0].args).toEqual([WINDOW_ID_NONE]);
+    controller.fakeWindow.focused = true;
+    controller.fakeWindow.emit("focus");
+    sent = step();
+    expect(sent(ALL)[0].args).toEqual([personalWindow]);
+    controller.fakeWindow.bounds = { x: 0, y: 0, width: 1200, height: 800 };
+    controller.fakeWindow.emit("resize");
+    sent = step();
+    // Every window of every session this extension listens in moved.
+    expect(sent(ALL).map((item) => [item.partition, item.event])).toEqual([
+      [PERSONAL, "windows.onBoundsChanged"],
+      [PERSONAL, "windows.onBoundsChanged"],
+      [WORK, "windows.onBoundsChanged"],
+    ]);
+    expect(sent(ALL).map((item) => item.args[0])).toEqual([
+      expect.objectContaining({ id: personalWindow, width: 1200, left: 0 }),
+      expect.objectContaining({ id: secondWindow, width: 1200, left: 0 }),
+      expect.objectContaining({
+        id: bridge.windowIdOf("work"),
+        width: 1200,
+        left: 0,
+      }),
+    ]);
+    // Nothing is sent while nothing changed.
+    controller.emit();
+    expect(channel.events).toEqual([]);
+  });
+
+  it("captureVisibleTab serves only the shown space and needs <all_urls> or the grant", async () => {
+    const shown = tabAt("personal", "https://example.com/", { title: "Home" });
+    const other = tabAt("second", "https://example.com/second");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal"), spaceAt("second")],
+      [shown, other],
+    );
+    const contents = controller.load(shown.id);
+    controller.show("personal", shown.id);
+    const personalWindow = bridge.windowIdOf("personal");
+    const capture = (extensionId: string, args: unknown[]) =>
+      channel.call(
+        "tabs",
+        callerFor(extensionId, PERSONAL, "worker"),
+        "captureVisibleTab",
+        args,
+      );
+
+    await expect(capture(EVERY, [])).resolves.toBe(
+      `data:image/png;base64,${Buffer.from("png-bytes").toString("base64")}`,
+    );
+    await expect(
+      capture(EVERY, [personalWindow, { format: "jpeg" }]),
+    ).resolves.toBe(
+      `data:image/jpeg;base64,${Buffer.from("jpeg-92").toString("base64")}`,
+    );
+    await expect(
+      capture(EVERY, [{ format: "jpeg", quality: 40 }]),
+    ).resolves.toBe(
+      `data:image/jpeg;base64,${Buffer.from("jpeg-40").toString("base64")}`,
+    );
+    // Only the shown space can be captured.
+    await expect(capture(EVERY, [bridge.windowIdOf("second")])).rejects.toThrow(
+      extensionBridgeCopy.notShown,
+    );
+    await expect(capture(EVERY, [404])).rejects.toThrow(
+      extensionBridgeCopy.noWindow(404),
+    );
+    // Host access to every site, or the grant on the shown tab.
+    await expect(capture(NONE, [])).rejects.toThrow(
+      extensionBridgeCopy.cantCapture,
+    );
+    await expect(capture(HOSTS, [])).rejects.toThrow(
+      extensionBridgeCopy.cantCapture,
+    );
+    bridge.grantActiveTab(PERSONAL, NONE, contents.id);
+    await expect(capture(NONE, [])).resolves.toContain(
+      "data:image/png;base64,",
+    );
+    // A shown tab without a view has nothing to capture.
+    controller.views.delete(shown.id);
+    await expect(capture(EVERY, [])).rejects.toThrow(
+      extensionBridgeCopy.cantCapture,
+    );
+  });
+});

@@ -8,6 +8,7 @@ import {
   NO_EXTENSIONS,
   restoredPartitions,
 } from "./controller";
+import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
 import { ExtensionHost } from "./extensions/host";
 import { menuTemplate } from "./menu";
@@ -56,6 +57,9 @@ let extensionsReady: Promise<void> = Promise.resolve();
 // The path between extension contexts and the main process. It exists before
 // any session attaches, so the preloads are registered before loads.
 let extensionChannel: ExtensionChannel | null = null;
+// The spaces and tabs extensions see as windows and tabs. It binds to each
+// window's controller.
+let extensionBridge: ExtensionBridge | null = null;
 // A window waiting for its extensions; later calls share it.
 let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
@@ -250,6 +254,7 @@ async function openWindow(): Promise<void> {
     host ?? NO_EXTENSIONS,
   );
   const currentController = controller;
+  const unbindBridge = extensionBridge?.bind(currentController);
   currentController.subscribe(() => {
     void syncAutomation();
   });
@@ -266,6 +271,7 @@ async function openWindow(): Promise<void> {
   currentWindow.once("ready-to-show", () => currentWindow.show());
   currentWindow.on("close", () => currentController.dispose());
   currentWindow.on("closed", () => {
+    unbindBridge?.();
     if (window === currentWindow) {
       window = null;
       controller = null;
@@ -482,6 +488,10 @@ else {
         controller?.tabOfContents(contents)
           ? "tab"
           : extensionHost?.surfaceOf(contents)?.kind,
+    });
+    extensionBridge = new ExtensionBridge({
+      host: extensionHost,
+      channel: extensionChannel,
     });
     registerIpc();
     installMenu();
