@@ -4,6 +4,7 @@ import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
+import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import { allocateRefs } from "./refs";
 import type { AutomationController } from "./server";
 import {
@@ -83,6 +84,8 @@ export interface Actions {
     action: ToolAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
+  /** The tab's one input dispatcher; every route sends input through it. */
+  dispatcher(id: string, session: TabSession): InputDispatcher;
 }
 
 export function createActions(deps: {
@@ -90,8 +93,10 @@ export function createActions(deps: {
   authority: Authority;
   sessions: TabSessions;
   referenceSession: string;
+  dispatchers: InputDispatchers;
 }): Actions {
-  const { controller, authority, sessions, referenceSession } = deps;
+  const { controller, authority, sessions, referenceSession, dispatchers } =
+    deps;
   const { authorizeTab } = authority;
   // Each page of a tab the agent controls has a debugger session from the
   // moment its view exists.
@@ -718,5 +723,10 @@ export function createActions(deps: {
     controller.addActivity(tab.spaceId, descriptions[action.type], "info");
     return result;
   };
-  return { readyContents, evaluatePage, executeToolAction };
+  return {
+    readyContents,
+    evaluatePage,
+    executeToolAction,
+    dispatcher: (_id, session) => dispatchers.for(session),
+  };
 }

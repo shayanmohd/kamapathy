@@ -2301,7 +2301,7 @@ describe("scripted sessions", () => {
       return stdout.text();
     };
     const running = await profile();
-    const health = { status: "ok", version: "0.2.0", apiLevel: 2, versions: { electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0", v8: "x" } };
+    const health = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL, versions: { electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0", v8: "x" } };
     await fakeKamapathy(running.paths, {
       handler: (_request, response) => {
         response.writeHead(200, { "Content-Type": "application/json" });
@@ -2310,12 +2310,12 @@ describe("scripted sessions", () => {
     });
     const runningEnv = { KAMAPATHY_USER_DATA: running.userData };
     expect(await version(["--version"], runningEnv)).toBe(
-      `${client}Kamapathy 0.2.0, API level 2, Electron 44.2.0, Chromium 152.0.7977.76, Node 24.20.0\n`,
+      `${client}Kamapathy 0.2.0, API level ${schema.API_LEVEL}, Electron 44.2.0, Chromium 152.0.7977.76, Node 24.20.0\n`,
     );
     expect(await version(["-v"], runningEnv)).toBe(await version(["--version"], runningEnv));
     expect(JSON.parse(await version(["--version", "--json"], runningEnv))).toEqual({
       client: { version: schema.CLIENT_VERSION, apiLevel: schema.API_LEVEL, node: process.versions.node, skill: skillFolder },
-      app: { version: "0.2.0", apiLevel: 2, electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0" },
+      app: { version: "0.2.0", apiLevel: schema.API_LEVEL, electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0" },
       appStatus: "running",
     });
     const idle = await profile();

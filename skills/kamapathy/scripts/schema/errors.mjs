@@ -34,7 +34,12 @@ export const ERRORS = {
     false,
     "The ref is not one a snapshot gives, such as @e1.",
   ),
-  invalid_key: code(400, false, "The key is not one press supports."),
+  invalid_key: code(
+    400,
+    false,
+    "The key is not a name, character or chord Kamapathy accepts.",
+    ["suggestion", "forms"],
+  ),
   invalid_action: code(
     400,
     false,
@@ -76,6 +81,13 @@ export const ERRORS = {
     "The person did not let an agent use a space.",
     [],
     2,
+  ),
+  clipboard_blocked: code(
+    403,
+    false,
+    "A copy, cut or paste chord, or a Linux middle press on an editable, is refused.",
+    [],
+    4,
   ),
   route_not_found: code(404, false, "This Kamapathy has no such route.", [
     "method",

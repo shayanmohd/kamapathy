@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
-import { dialog, session, shell, WebContentsView } from "electron";
+import { dialog, Menu, session, shell, WebContentsView } from "electron";
 import { BrowserController } from "../electron/controller";
+import { inputMarker } from "../electron/agent/input/marker";
 import {
   agentRules,
   HOME_URL,
@@ -17,6 +18,7 @@ import type { ControllerOptions } from "../electron/controller";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
+  Menu: { buildFromTemplate: vi.fn(() => ({ popup: vi.fn() })) },
   WebContentsView: vi.fn(function (options?: { webContents?: FakeContents }) {
     return new FakeView(options?.webContents);
   }),
@@ -2384,5 +2386,135 @@ describe("popups", () => {
     otherPage.emit("destroyed");
     expect(browser.state.tabs).toEqual(remaining);
     expect(browser.state.activeTabId).toBe(id);
+  });
+});
+
+// Section 5: input an agent sent reaches the page and nothing else.
+describe("agent input and the shell", () => {
+  const primary =
+    process.platform === "darwin" ? { meta: true } : { control: true };
+  type Key = {
+    key: string;
+    code: string;
+    alt?: boolean;
+    control?: boolean;
+    meta?: boolean;
+    shift?: boolean;
+  };
+  const maskOf = (key: Key) =>
+    (key.alt ? 1 : 0) |
+    (key.control ? 2 : 0) |
+    (key.meta ? 4 : 0) |
+    (key.shift ? 8 : 0);
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  async function agentTab() {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: space.id,
+      url: "https://example.com/",
+      background: true,
+    });
+    const tab = browser.state.tabs.at(-1)!;
+    return { browser, page: contents(browser, tab.id) };
+  }
+  function sendKey(browser: BrowserController, page: FakeContents, key: Key) {
+    const shell = browser.window.webContents as unknown as FakeContents;
+    shell.send.mockClear();
+    const event = { preventDefault: vi.fn() };
+    page.emit("before-input-event", event, {
+      type: "keyDown",
+      meta: false,
+      control: false,
+      alt: false,
+      shift: false,
+      ...key,
+    });
+    return {
+      shortcut: shell.send.mock.calls.find(
+        ([channel]) => channel === "kamapathy:shortcut",
+      )?.[1],
+      prevented: event.preventDefault.mock.calls.length > 0,
+    };
+  }
+  const menu = (page: FakeContents) =>
+    page.emit(
+      "context-menu",
+      {},
+      { x: 10, y: 20, linkURL: "", isEditable: false, selectionText: "" },
+    );
+
+  it("keeps agent keys out of the window's shortcuts while the person's keys still work", async () => {
+    const { browser, page } = await agentTab();
+    const keys: Key[] = [
+      { ...primary, key: "w", code: "KeyW" },
+      { key: "F12", code: "F12" },
+      { alt: true, key: "ArrowLeft", code: "ArrowLeft" },
+    ];
+    for (const key of keys) {
+      inputMarker.markKey(page, {
+        key: key.key,
+        code: key.code,
+        type: "rawKeyDown",
+        mask: maskOf(key),
+      });
+      expect(sendKey(browser, page, key)).toEqual({
+        shortcut: undefined,
+        prevented: false,
+      });
+    }
+    // The same keys from the person keep today's behavior: each of these
+    // prevents the page default and acts.
+    expect(sendKey(browser, page, keys[0]).shortcut).toBe("close-tab");
+    expect(sendKey(browser, page, keys[1]).prevented).toBe(true);
+    expect(sendKey(browser, page, keys[2]).prevented).toBe(true);
+    // A key of the person's ends the guard an agent's input leaves behind.
+    inputMarker.markPointer(page);
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+    sendKey(browser, page, { key: "a", code: "KeyA" });
+    expect(inputMarker.pointerRecent(page)).toBe(false);
+  });
+
+  it("opens no native menu for an agent right click", async () => {
+    const { page } = await agentTab();
+    vi.mocked(Menu.buildFromTemplate).mockClear();
+    inputMarker.markPointer(page);
+    menu(page);
+    await flush();
+    expect(Menu.buildFromTemplate).not.toHaveBeenCalled();
+    // The person's own click ends the guard at once.
+    page.emit("before-mouse-event", {}, { type: "mouseDown" });
+    menu(page);
+    await flush();
+    expect(Menu.buildFromTemplate).toHaveBeenCalledOnce();
+  });
+
+  it("activates no split pane from agent input", async () => {
+    const browser = controller();
+    const first = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: first,
+      url: "https://example.com/",
+    });
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.org/",
+      background: true,
+    });
+    const second = browser.state.tabs.find(
+      (tab) => tab.url === "https://example.org/",
+    )!.id;
+    await browser.dispatch({ type: "tab:split", id: second });
+    const left = contents(browser, first);
+    contents(browser, second).focus();
+    expect(browser.state.activeTabId).toBe(second);
+    const end = inputMarker.begin(left);
+    left.emit("before-mouse-event", {}, { type: "mouseDown" });
+    expect(browser.state.activeTabId).toBe(second);
+    end();
+    left.emit("before-mouse-event", {}, { type: "mouseDown" });
+    expect(browser.state.activeTabId).toBe(first);
   });
 });

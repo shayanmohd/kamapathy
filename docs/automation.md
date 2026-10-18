@@ -326,7 +326,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_field` | 400 | not retryable | `field`, `expected`, `index` | A field has the wrong kind or is out of range. |
 | `invalid_target` | 400 | not retryable |  | The action needs exactly one of ref or selector, or cannot use the target it got. |
 | `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
-| `invalid_key` | 400 | not retryable |  | The key is not one press supports. |
+| `invalid_key` | 400 | not retryable | `suggestion`, `forms` | The key is not a name, character or chord Kamapathy accepts. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
 | `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
@@ -335,6 +335,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
+| `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
@@ -397,7 +398,7 @@ Every code, its status, whether it can be retried, and its fields:
 
 ## Versions and API levels
 
-`GET /health` answers `{ "status": "ok", version, apiLevel, versions }` outside every queue, where `versions` holds the Electron, Chromium, Node and V8 versions Kamapathy runs on. The API level is an integer that rises when a release adds or changes a call, option, field, action or error code. This version is level 2, and a Kamapathy that answers without `apiLevel` is level 1. `help` and the [API reference](../skills/kamapathy/references/api.md) give the level each call and command needs.
+`GET /health` answers `{ "status": "ok", version, apiLevel, versions }` outside every queue, where `versions` holds the Electron, Chromium, Node and V8 versions Kamapathy runs on. The API level is an integer that rises when a release adds or changes a call, option, field, action or error code. This version is level 4, and a Kamapathy that answers without `apiLevel` is level 1. `help` and the [API reference](../skills/kamapathy/references/api.md) give the level each call and command needs.
 
 The client compares levels after its health check. A call, option or command the running Kamapathy predates fails before anything is sent, with `app_outdated` and the message `<call> needs Kamapathy API level <n>, and Kamapathy <version> has level <m>. Ask the person to update Kamapathy, then read the skill again.` A Kamapathy newer than the client still runs every call, and the client prints the skill notice `notice: Update this skill copy, then read its SKILL.md again.` once. `node scripts/kamapathy.mjs --version` prints the client's version and API level with its Node.js and skill folder, then Kamapathy's version, API level and engine versions, and a line about any level mismatch. It never starts Kamapathy, and `--json` prints the same as JSON.
 

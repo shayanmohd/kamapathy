@@ -6,6 +6,7 @@ import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageOperation } from "../electron/automation-dom";
 import { errorBody, toApiError } from "../electron/agent/errors";
+import { createDispatchers } from "../electron/agent/input/dispatch";
 import type { AutomationController } from "../electron/agent/server";
 import {
   CdpTimeoutError,
@@ -3827,5 +3828,55 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     expect(buffers.totalBytes).toBe(0);
     mark(8);
     expect(next.events.drain(10).events).toEqual([]);
+  });
+});
+
+// Section 5's focus emulation, which the tab's input dispatcher registers.
+describe("the input dispatcher's setup hook", () => {
+  it("sends focus emulation at attach, on each child before it resumes and again after a re-attach", async () => {
+    const { session, cdp } = open();
+    const dispatchers = createDispatchers({ guard: () => {} });
+    dispatchers.for(session);
+    session.attach();
+    expect(cdp.sent).toEqual([...SETUP, FOCUS, FRAME_TREE]);
+    await settle();
+    expect(session.state).toBe("ready");
+    const script = await session.addInitScript("window.__probe = 1;", {
+      world: "main",
+    });
+    expect(script).toBeTruthy();
+    const SCRIPT = {
+      method: "Page.addScriptToEvaluateOnNewDocument",
+      params: {
+        source: expect.stringContaining("window.__probe = 1;"),
+        runImmediately: true,
+      },
+    };
+    // A later frame gets the hook before its init scripts and its resume.
+    attachedTarget(cdp, {
+      sessionId: "child-1",
+      targetId: "frame-oop",
+      url: "https://frame.example/",
+      waitingForDebugger: true,
+    });
+    await settle();
+    expect(
+      cdp.sent.filter((command) => command.sessionId === "child-1"),
+    ).toEqual(
+      [
+        ...SETUP,
+        FOCUS,
+        SCRIPT,
+        { method: "Runtime.runIfWaitingForDebugger", params: {} },
+        FRAME_TREE,
+      ].map((command) => ({ ...command, sessionId: "child-1" })),
+    );
+    // A re-attach runs the hook again, in the same place.
+    const sent = cdp.sent.length;
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(cdp.sent.slice(sent)).toEqual([...SETUP, FOCUS, SCRIPT, FRAME_TREE]);
+    dispatchers.dispose();
   });
 });
