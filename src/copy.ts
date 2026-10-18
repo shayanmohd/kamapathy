@@ -83,9 +83,13 @@ export const agentBarCopy = {
     paused: "Agent access is off",
     "in-control": "You're in control",
     "needs-you": "You're in control",
-    finished: "Agent finished",
+    done: "Agent is done",
     stopped: "You stopped the agent",
+    failed: "Agent could not finish",
+    error: "A page stopped working",
   },
+  // What the bar says for needs-you while the agent still has the space.
+  agentNeedsYou: "Agent needs you",
   takeOver: "Take over",
   letContinue: "Let agent continue",
   stop: "Stop",
@@ -145,8 +149,10 @@ export const statusCopy = {
   "needs-you": "Needs you",
   "in-control": "You're in control",
   paused: "Agent access is off",
-  finished: "Agent finished",
+  done: "Done",
   stopped: "You stopped the agent",
+  failed: "Failed",
+  error: "Page stopped",
 } as const;
 
 export const overviewCopy = {

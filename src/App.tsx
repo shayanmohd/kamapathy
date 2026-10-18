@@ -44,7 +44,7 @@ import { ToolsMenu } from "./components/ToolsMenu";
 import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
 import { AgentBar } from "./components/AgentBar";
-import { acknowledgeHandoff, agentStatus } from "./lib/spaces";
+import { acknowledgeTask, agentStatus } from "./lib/spaces";
 import { SpaceButton } from "./components/SpaceButton";
 import { SpacePopover } from "./components/SpacePopover";
 import { SpaceRequestDialog } from "./components/SpaceRequestDialog";
@@ -102,16 +102,12 @@ export default function App() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
-  const now = useAgentClock(state.activity);
-  const [seenHandoffs, setSeenHandoffs] = useState<ReadonlySet<string>>(
+  const now = useAgentClock(state.activity, state.spaces);
+  const [seenTasks, setSeenTasks] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   // The open space counts as seen in this very render, so no mark flashes.
-  const seen = acknowledgeHandoff(
-    seenHandoffs,
-    state.activity,
-    state.activeSpaceId,
-  );
+  const seen = acknowledgeTask(seenTasks, state.spaces, state.activeSpaceId);
   const [activitySpaceId, setActivitySpaceId] = useState("");
   const spaceTrigger = useRef<HTMLButtonElement>(null);
   const active =
@@ -291,8 +287,8 @@ export default function App() {
     };
   }, [overlay]);
   useEffect(() => {
-    if (seen !== seenHandoffs) setSeenHandoffs(seen);
-  }, [seen, seenHandoffs]);
+    if (seen !== seenTasks) setSeenTasks(seen);
+  }, [seen, seenTasks]);
   useEffect(() => {
     if (
       overlay === "activity" &&
