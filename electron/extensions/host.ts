@@ -28,7 +28,7 @@ import {
 
 export const EXTENSIONS_FILE = "extensions.json";
 export const STORE_FOLDER = "Extensions";
-const STAGING_FOLDER = ".staging";
+export const STAGING_FOLDER = ".staging";
 const SETTINGS_FOLDERS = [
   "Local Extension Settings",
   "Sync Extension Settings",

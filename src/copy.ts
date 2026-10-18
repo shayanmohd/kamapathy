@@ -185,6 +185,22 @@ export const extensionRefusalCopy = {
   loadFailed: "Couldn't load it.",
 } as const;
 
+export const extensionInstallCopy = {
+  consentTitle: (name: string) => `Add "${name}"?`,
+  agentSpaces: "It also runs in agent spaces that share your sign-ins.",
+  wontWork: (names: readonly string[]) =>
+    `Won't work in Kamapathy: ${names.join(", ")}.`,
+  cancel: "Cancel",
+  add: "Add extension",
+  notInStore: "It isn't in the Chrome Web Store.",
+  failedChecks: "The download didn't pass Kamapathy's checks.",
+  downloadFailed: "Kamapathy couldn't download it. Try again.",
+  alreadyAdded: "It's already added.",
+  couldNotAdd: (name: string, message: string) =>
+    `Couldn't add ${name}. ${message}`,
+  invalidInput: "Paste a Chrome Web Store link or a 32-letter ID.",
+} as const;
+
 export const extensionBridgeCopy = {
   notSupported: "Not supported in Kamapathy.",
   tooLarge: "This request is too large.",

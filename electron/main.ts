@@ -10,7 +10,14 @@ import {
 } from "./controller";
 import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
+import { confirmAdd } from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
+import { ExtensionInstaller } from "./extensions/install";
+import {
+  STORE_PARTITION,
+  sessionFetcher,
+  storeEnv,
+} from "./extensions/webstore";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
@@ -60,6 +67,8 @@ let extensionChannel: ExtensionChannel | null = null;
 // The spaces and tabs extensions see as windows and tabs. It binds to each
 // window's controller.
 let extensionBridge: ExtensionBridge | null = null;
+// Adds extensions the person asked for, one install at a time.
+let extensionInstaller: ExtensionInstaller | null = null;
 // A window waiting for its extensions; later calls share it.
 let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
@@ -492,6 +501,14 @@ else {
     extensionBridge = new ExtensionBridge({
       host: extensionHost,
       channel: extensionChannel,
+    });
+    extensionInstaller = new ExtensionInstaller({
+      host: extensionHost,
+      // An in-memory session with no cookies, used by no tab.
+      fetcher: sessionFetcher(session.fromPartition(STORE_PARTITION)),
+      env: storeEnv(),
+      locale: app.getLocale(),
+      confirm: confirmAdd(() => window),
     });
     registerIpc();
     installMenu();
