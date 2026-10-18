@@ -28,9 +28,7 @@ import {
   parseChromiumBookmarks,
   parseImportRequest,
   parsePlistXml,
-  parseSafariBookmarks,
   runImport,
-  safariTime,
   type BrowserId,
   type ImportEnv,
   type ImportTarget,
@@ -160,39 +158,10 @@ function firefoxPlaces(path: string): void {
   db.close();
 }
 
-function safariHistory(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec(
-    "CREATE TABLE history_items (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL UNIQUE, domain_expansion TEXT NULL, visit_count INTEGER NOT NULL, daily_visit_counts BLOB NOT NULL, weekly_visit_counts BLOB NULL, autocomplete_triggers BLOB NULL, should_recompute_derived_visit_counts INTEGER NOT NULL, visit_count_score INTEGER NOT NULL, status_code INTEGER NOT NULL DEFAULT 0)",
-  );
-  db.exec(
-    "CREATE TABLE history_visits (id INTEGER PRIMARY KEY AUTOINCREMENT, history_item INTEGER NOT NULL REFERENCES history_items(id) ON DELETE CASCADE, visit_time REAL NOT NULL, title TEXT NULL, load_successful BOOLEAN NOT NULL DEFAULT 1, http_non_get BOOLEAN NOT NULL DEFAULT 0, synthesized BOOLEAN NOT NULL DEFAULT 0, redirect_source INTEGER NULL UNIQUE REFERENCES history_visits(id) ON DELETE CASCADE, redirect_destination INTEGER NULL UNIQUE REFERENCES history_visits(id) ON DELETE CASCADE, origin INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, attributes INTEGER NOT NULL DEFAULT 0, score INTEGER NOT NULL DEFAULT 0)",
-  );
-  const item = db.prepare(
-    "INSERT INTO history_items (id, url, visit_count, daily_visit_counts, should_recompute_derived_visit_counts, visit_count_score) VALUES (?, ?, ?, X'', 0, 0)",
-  );
-  item.run(1, "https://kamapathy.app/", 3);
-  item.run(2, "https://example.com/redirect", 1);
-  item.run(3, "https://example.com/lonely", 0);
-  item.run(4, "http://localhost:3000/", 2);
-  item.run(5, "file:///Users/me/a.html", 1);
-  const visit = db.prepare(
-    "INSERT INTO history_visits (history_item, visit_time, title) VALUES (?, ?, ?)",
-  );
-  visit.run(1, 760000000.5, "Kamapathy");
-  visit.run(1, 770000000.25, null);
-  visit.run(2, 750000000, "Redirect");
-  visit.run(4, 740000000, null);
-  visit.run(5, 745000000, "File");
-  db.close();
-}
-
 describe("timestamps", () => {
   it("converts each browser's clock to milliseconds since the epoch", () => {
     expect(chromiumTime(13400000000000000)).toBe(1755526400000);
     expect(firefoxTime(1750000000000000)).toBe(1750000000000);
-    expect(safariTime(770000000.25)).toBe(1748307200250);
     expect(chromiumTime(NaN)).toBeNaN();
   });
 });
@@ -221,16 +190,6 @@ describe("bookmark parsers", () => {
     expect(new Set(parsed.map((item) => item.url)).size).toBe(1000);
     expect(parseChromiumBookmarks(null)).toEqual([]);
     expect(parseChromiumBookmarks("text")).toEqual([]);
-  });
-  it("reads Safari's bookmark bar first, then the other lists", () => {
-    expect(parseSafariBookmarks(fixtureJson("safari/Bookmarks.json"))).toEqual([
-      { title: "Kamapathy", url: "https://kamapathy.app/" },
-      { title: "Nested", url: "https://example.com/nested" },
-      { title: "https://example.com/untitled", url: "https://example.com/untitled" },
-      { title: "Menu page", url: "https://example.com/menu" },
-      { title: "Saved article", url: "https://example.com/article" },
-    ]);
-    expect(parseSafariBookmarks({})).toEqual([]);
   });
 });
 
@@ -311,15 +270,6 @@ describe("plist reader", () => {
       neverFetchMetadata: false,
       siteName: "Example",
     });
-    expect(parseSafariBookmarks(plist)).toEqual([
-      { title: "Kamapathy", url: "https://kamapathy.app/" },
-      { title: "Nested", url: "https://example.com/nested" },
-      { title: "Deeper", url: "https://example.com/deeper" },
-      { title: 'Fish & Chips <fresh> "daily"', url: "https://example.com/search?q=fish&chips" },
-      { title: "https://example.com/untitled", url: "https://example.com/untitled" },
-      { title: "Menu page", url: "https://example.com/menu" },
-      { title: "Saved article", url: "https://example.com/article" },
-    ]);
   });
 });
 
@@ -740,66 +690,44 @@ describe("Firefox import", () => {
   });
 });
 
-describe("Safari import", () => {
-  const blocked =
-    "macOS blocked access to Safari's history. Give Kamapathy Full Disk Access in System Settings > Privacy & Security, then try again.";
-  function safariHome(): string {
+describe("Safari", () => {
+  it("is offered on macOS without reading its folder, and never elsewhere", () => {
     const home = folder();
-    write(join(home, "Library", "Safari", "Bookmarks.plist"), "bplist00");
-    safariHistory(join(home, "Library", "Safari", "History.db"));
-    return home;
-  }
-  it("converts the bookmark plist through plutil and reads the latest visits", async () => {
-    const home = safariHome();
-    const calls: [string, string[]][] = [];
-    const env = mac(home, (command, args) => {
-      calls.push([command, args]);
-      return readFileSync(join(fixtures, "safari/Bookmarks.plist"), "utf8");
-    });
-
-    const result = await importFrom("safari", undefined, both, env);
-
-    expect(result.warnings).toEqual([]);
-    expect(result.bookmarks).toHaveLength(7);
-    expect(result.bookmarks[0]).toEqual({ title: "Kamapathy", url: "https://kamapathy.app/" });
-    expect(result.bookmarks[6]).toEqual({ title: "Saved article", url: "https://example.com/article" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0][0]).toBe("plutil");
-    expect(calls[0][1].slice(0, 4)).toEqual(["-convert", "xml1", "-o", "-"]);
-    expect(calls[0][1][4]).toMatch(/Bookmarks\.plist$/);
-    expect(calls[0][1][4]).not.toBe(join(home, "Library", "Safari", "Bookmarks.plist"));
-    expect(result.history).toEqual([
-      { title: "Kamapathy", url: "https://kamapathy.app/", visitedAt: 1748307200250, visits: 3 },
-      { title: "Redirect", url: "https://example.com/redirect", visitedAt: 1728307200000, visits: 1 },
-      { title: "http://localhost:3000/", url: "http://localhost:3000/", visitedAt: 1718307200000, visits: 2 },
-    ]);
-  });
-  it("is not offered away from macOS", () => {
-    const home = safariHome();
+    const safari = join(home, "Library", "Safari");
+    mkdirSync(safari, { recursive: true });
+    write(join(safari, "Bookmarks.plist"), "bplist00");
+    chmodSync(safari, 0o000);
+    try {
+      expect(availableBrowsers(mac(home))).toEqual([
+        {
+          id: "safari",
+          name: "Safari",
+          default: false,
+          profiles: [{ id: "default", name: "Default" }],
+          signInsAvailable: false,
+          status: "ready",
+        },
+      ]);
+    } finally {
+      chmodSync(safari, 0o700);
+    }
     expect(availableBrowsers({ platform: "linux", home, exec: silent })).toEqual([]);
+    expect(availableBrowsers({ platform: "win32", home, exec: silent })).toEqual([]);
   });
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "explains the Full Disk Access requirement instead of failing",
-    async () => {
-      const home = safariHome();
-      const env = mac(home, () => readFileSync(join(fixtures, "safari/Bookmarks.plist"), "utf8"));
-      chmodSync(join(home, "Library", "Safari", "History.db"), 0o000);
-      const partial = await importFrom("safari", undefined, both, env);
-      expect(partial.warnings).toEqual([blocked]);
-      expect(partial.bookmarks).toHaveLength(7);
-      expect(partial.history).toEqual([]);
-
-      chmodSync(join(home, "Library", "Safari", "Bookmarks.plist"), 0o000);
-      const nothing = await importFrom("safari", undefined, both, env);
-      expect(nothing).toEqual({ bookmarks: [], history: [], warnings: [blocked] });
-      chmodSync(join(home, "Library", "Safari", "History.db"), 0o600);
-      chmodSync(join(home, "Library", "Safari", "Bookmarks.plist"), 0o600);
-    },
-  );
-  it("reports a plist that plutil cannot convert", async () => {
-    const home = safariHome();
-    const result = await importFrom("safari", undefined, { bookmarks: true, history: false }, mac(home, failing));
-    expect(result).toEqual({ bookmarks: [], history: [], warnings: ["Could not read Safari bookmarks."] });
+  it("cannot be asked for as a selection", () => {
+    const request = { bookmarks: true, history: true, signIns: "none" };
+    const refused = (profiles: unknown[]) => {
+      let code = "no error";
+      try {
+        parseImportRequest({ ...request, profiles });
+      } catch (error) {
+        code = error instanceof ImportError ? error.code : "not an ImportError";
+      }
+      return code;
+    };
+    expect(refused([{ source: "safari" }])).toBe("import_invalid_request");
+    expect(refused([{ source: "chrome" }, { source: "safari" }])).toBe("import_invalid_request");
+    expect(refused([{ source: "chrome" }])).toBe("no error");
   });
 });
 
@@ -981,8 +909,8 @@ describe("several profiles, sign-ins and permissions", () => {
     };
     expect(parseImportRequest({ ...valid, extra: true })).toEqual(valid);
     expect(
-      parseImportRequest({ ...valid, profiles: [{ source: "safari" }], bookmarks: false, signIns: "separate" }),
-    ).toEqual({ profiles: [{ source: "safari" }], bookmarks: false, history: false, signIns: "separate" });
+      parseImportRequest({ ...valid, profiles: [{ source: "firefox" }], bookmarks: false, signIns: "separate" }),
+    ).toEqual({ profiles: [{ source: "firefox" }], bookmarks: false, history: false, signIns: "separate" });
     expect(
       parseImportRequest({
         ...valid,

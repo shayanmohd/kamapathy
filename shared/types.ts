@@ -277,6 +277,11 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportReply>;
+  // Safari comes in through the file its own export writes.
+  importSafariArchive(
+    bytes: Uint8Array,
+    request: Omit<ImportRequest, "profiles" | "signIns">,
+  ): Promise<ImportReply>;
   openImportPermissions(pane: "full-disk" | "files-folders"): void;
   defaultBrowser(): Promise<DefaultBrowserStatus>;
   makeDefaultBrowser(): Promise<void>;

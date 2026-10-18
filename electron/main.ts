@@ -20,6 +20,7 @@ import {
   parseImportRequest,
   runImport,
 } from "./import";
+import { runSafariImport } from "./import-safari";
 import { startAutomation } from "./agent/server";
 import {
   agentPaths,
@@ -331,6 +332,14 @@ function registerIpc(): void {
     const owner = validateSender(event);
     return importReply(() => runImport(owner, parseImportRequest(request)));
   });
+  // The export file the person chose, up to SAFARI_ARCHIVE_LIMIT.
+  ipcMain.handle(
+    "kamapathy:import-safari",
+    (event, bytes: unknown, options: unknown) => {
+      const owner = validateSender(event);
+      return importReply(() => runSafariImport(owner, bytes, options));
+    },
+  );
   // Opens the macOS privacy pane where the person lets Kamapathy read
   // another browser's data.
   ipcMain.on("kamapathy:open-import-permissions", (event, options: unknown) => {
