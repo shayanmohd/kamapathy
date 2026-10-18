@@ -1763,7 +1763,7 @@ describe("local automation socket", () => {
       field: "button",
       index: 1,
       action: "click",
-      allowed: ["type", "ref", "selector"],
+      allowed: ["type", "ref", "selector", "label"],
       route: "POST /tabs/:id/actions",
     });
     expect(controller.contents.scripts).toEqual([]);
@@ -2207,5 +2207,170 @@ describe("local automation socket", () => {
       expect(controller.shown.length, path).toBe(revealed);
     }
     expect(controller.shown).toEqual([tab.id, tab.id, tab.id, tab.id]);
+  });
+
+  it("a labeled click and a labeled batch step show their label while they run and for five seconds after", async () => {
+    const { space, tab } = await createPage();
+    const labelOf = () =>
+      controller.state.spaces.find((item) => item.id === space.id)?.task?.label;
+    // What the person would see at each page operation of the action.
+    const during: string[] = [];
+    const watch = (code: string) => {
+      const label = labelOf();
+      const shown = label
+        ? `${label.text} ${label.active ? "running" : "ended"}`
+        : "none";
+      if (during.at(-1) !== shown) during.push(shown);
+      return code.includes(')("drag",')
+        ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
+        : { ok: true, x: 25, y: 45 };
+    };
+    controller.contents.result = watch;
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+      label: "Open the first\u0000 result ",
+    });
+    expect(clicked.status).toBe(200);
+    // The label is the agent's cleaned words while its action runs, and it
+    // stays afterwards for the interface to count its five seconds.
+    expect(during).toEqual(["Open the first result running"]);
+    expect(labelOf()).toEqual({
+      text: "Open the first result",
+      active: false,
+      at: expect.any(Number),
+    });
+    // An action without a label clears the last one instead of keeping it.
+    during.length = 0;
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(during).toEqual(["none"]);
+    expect(labelOf()).toBeUndefined();
+    // A failed action still leaves its own label for the person to read.
+    controller.contents.result = (code: string) => {
+      watch(code);
+      return {
+        ok: false,
+        code: "stale_ref",
+        error: "Element reference is stale.",
+      };
+    };
+    during.length = 0;
+    expect(
+      (
+        await request(`/tabs/${tab.id}/fill`, "POST", {
+          ref: "@e1",
+          value: "Ada",
+          label: "Fill the delivery address",
+        })
+      ).status,
+    ).toBe(409);
+    expect(during).toEqual(["Fill the delivery address running"]);
+    expect(labelOf()).toMatchObject({
+      text: "Fill the delivery address",
+      active: false,
+    });
+    // Each batch step owns the label while it runs, in order.
+    during.length = 0;
+    controller.contents.result = watch;
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "fill", ref: "@e1", value: "Ada", label: "Fill the name" },
+        { type: "fill", ref: "@e2", value: "Lovelace" },
+        { type: "click", ref: "@e3", label: "Open the first result" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(during).toEqual([
+      "Fill the name running",
+      "none",
+      "Open the first result running",
+    ]);
+    expect(labelOf()).toMatchObject({
+      text: "Open the first result",
+      active: false,
+    });
+  });
+
+  it("label is accepted only where the schema declares it", async () => {
+    const { space, tab } = await createPage();
+    const labelOf = () =>
+      controller.state.spaces.find((item) => item.id === space.id)?.task?.label;
+    controller.contents.result = (code: string) =>
+      code.includes(')("snapshot",')
+        ? {
+            url: "https://example.com/",
+            title: "Example",
+            text: "Hello from the agent page",
+            interactables: [],
+            truncated: false,
+          }
+        : code.includes(')("drag",')
+          ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
+          : { ok: true, x: 25, y: 45 };
+    for (const [type, body] of [
+      ["click", { ref: "@e1" }],
+      ["fill", { ref: "@e1", value: "Ada" }],
+      ["press", { key: "Enter" }],
+      ["scroll", { direction: "down" }],
+      ["drag", { source: { ref: "@e1" }, target: { selector: "#zone" } }],
+    ] as const) {
+      const response = await request(`/tabs/${tab.id}/${type}`, "POST", {
+        ...body,
+        label: `Step ${type}`,
+      });
+      expect(response.status, type).toBe(200);
+      expect(labelOf(), type).toMatchObject({
+        text: `Step ${type}`,
+        active: false,
+      });
+    }
+    // Every other route refuses a label, naming the field, what it does
+    // take, and the route and level the client checks against.
+    for (const [path, body] of [
+      [`/tabs/${tab.id}/snapshot`, {}],
+      [`/tabs/${tab.id}/navigate`, { url: "https://example.com/next" }],
+      [`/tabs/${tab.id}/wait`, { text: "Done" }],
+      [`/tabs/${tab.id}/actions`, { actions: [{ type: "click", ref: "@e1" }] }],
+      [`/spaces/${space.id}/tabs`, { url: "https://example.com/" }],
+      [`/spaces/${space.id}/status`, { text: "Reading" }],
+      [`/spaces/${space.id}/handoff`, {}],
+    ] as const) {
+      const response = await request(path, "POST", {
+        ...body,
+        label: "Reading the page",
+      });
+      expect(response.status, path).toBe(400);
+      expect((await response.json()).error, path).toMatchObject({
+        code: "unknown_field",
+        field: "label",
+        allowed: expect.not.arrayContaining(["label"]),
+        apiLevel: API_LEVEL,
+        route: expect.stringContaining(path.split("/")[1]),
+      });
+    }
+    // A batch step that declares no label refuses one before any step runs.
+    const step = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "click", ref: "@e1", label: "Open the first result" },
+        { type: "wait", text: "Done", label: "Wait for the page" },
+      ],
+    });
+    expect(step.status).toBe(400);
+    expect((await step.json()).error).toMatchObject({
+      code: "unknown_field",
+      field: "label",
+      action: "wait",
+      index: 1,
+      allowed: ["type", "selector", "text", "timeoutMs"],
+      route: "POST /tabs/:id/actions",
+    });
+    // A GET carries no body, so a label sent to one is never read, and the
+    // label the last action left stands.
+    const read = await request(`/tabs/${tab.id}/snapshot`, "GET", {
+      label: "Reading the page",
+    });
+    expect(read.status).toBe(200);
+    expect(labelOf()).toMatchObject({ text: "Step drag", active: false });
   });
 });

@@ -19,6 +19,14 @@ const url = {
   required: true,
   description: "A complete http or https URL.",
 };
+const label = {
+  kind: "string",
+  min: 1,
+  max: 60,
+  since: 3,
+  description:
+    "A few words naming this step, shown by the cursor and in the agent bar.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -46,7 +54,7 @@ const FIELDS = {
       description: "Read only the element this CSS selector matches.",
     },
   },
-  click: { ...target },
+  click: { ...target, label },
   fill: {
     ...target,
     value: {
@@ -56,6 +64,7 @@ const FIELDS = {
       required: true,
       description: "The field's new value, exactly.",
     },
+    label,
   },
   press: {
     key: {
@@ -66,6 +75,7 @@ const FIELDS = {
         "Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown or Space.",
     },
     ...target,
+    label,
   },
   scroll: {
     direction: {
@@ -82,6 +92,7 @@ const FIELDS = {
       description: "How far to scroll.",
     },
     ...target,
+    label,
   },
   drag: {
     source: {
@@ -96,6 +107,7 @@ const FIELDS = {
       required: true,
       description: "The element to drop on: a ref or selector.",
     },
+    label,
   },
   wait: {
     selector: {
@@ -126,13 +138,16 @@ const route = (method, path, summary, response, body, options = {}) => ({
   budget: options.budget ?? 10000,
   lane: options.lane ?? "space",
   follow: options.follow ?? false,
-  label: false,
+  label: options.label ?? false,
   since: options.since ?? 1,
 });
+// An action route takes a label exactly when its fields declare one, so the
+// flag and the field can never disagree.
 const action = (type, summary, response) =>
   route("POST", `/tabs/:id/${type}`, summary, response, FIELDS[type], {
     budget: 30000,
     follow: true,
+    label: Object.hasOwn(FIELDS[type], "label"),
   });
 
 export const ROUTES = [

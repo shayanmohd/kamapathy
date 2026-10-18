@@ -639,6 +639,52 @@ describe("API schema", () => {
     }
   });
 
+  it("the input routes and their batch steps declare label at level 3", () => {
+    const inputs = ["click", "fill", "press", "scroll", "drag"];
+    for (const type of inputs) {
+      const key = `POST /tabs/:id/${type}`;
+      const item = route(key);
+      expect(item.label, key).toBe(true);
+      expect(item.body.label, key).toMatchObject({
+        kind: "string",
+        min: 1,
+        max: 60,
+        since: 3,
+      });
+      expect(item.body.label.required, key).toBeUndefined();
+      expect(typeof item.body.label.description, key).toBe("string");
+      const step = ACTIONS.find((action) => action.type === type);
+      expect(step.fields.label, type).toBe(item.body.label);
+    }
+    // Only the routes that take one declare the flag, and the flag and the
+    // field never disagree.
+    for (const item of ROUTES)
+      expect(item.label, routeKey(item)).toBe(item.body?.label !== undefined);
+    expect(
+      ROUTES.filter((item) => item.label).map(routeKey),
+      "routes that take a label",
+    ).toEqual(inputs.map((type) => `POST /tabs/:id/${type}`));
+    // Every other batch step keeps refusing one.
+    for (const action of ACTIONS)
+      if (!inputs.includes(action.type))
+        expect(action.fields.label, action.type).toBeUndefined();
+    // The generated reference and the documented table show the field.
+    for (const text of [
+      read("skills/kamapathy/references/api.md"),
+      read("docs/automation.md"),
+    ])
+      for (const type of inputs) {
+        const row = text
+          .split("\n")
+          .find(
+            (line) =>
+              line.startsWith("| POST") &&
+              line.includes(`\`/tabs/:id/${type}\``),
+          );
+        expect(row, type).toContain("`label?`");
+      }
+  });
+
   it("resolves help names in every accepted form", () => {
     const names = (query) => resolveNames(query).map((entry) => entry.name);
     expect(names("Page.wait")).toEqual(["Page.wait"]);

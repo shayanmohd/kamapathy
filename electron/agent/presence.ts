@@ -21,6 +21,10 @@ export interface AgentPresence {
   ): number;
   /** Clears needs-you only while changedAt still matches. */
   clearNeedsYou(spaceId: string, changedAt: number): void;
+  /** An input route or batch step started: its label, or none to clear. */
+  labelStart(spaceId: string, label?: string): void;
+  /** It ended: the label stays visible for five seconds. */
+  labelEnd(spaceId: string): void;
   /** Reveals the route's page before its first page step. Never throws. */
   follow(
     tabId: string,
@@ -35,7 +39,7 @@ const FRAME_WAIT = 500;
 export function createPresence({
   controller,
   authority,
-  now = Date.now,
+  now = () => Date.now(),
 }: {
   controller: AutomationController;
   authority: Authority;
@@ -142,6 +146,23 @@ export function createPresence({
       const task = spaceOf(spaceId)?.task;
       if (task?.state !== "needs-you" || task.changedAt !== changedAt) return;
       write(spaceId, { state: undefined, reason: undefined });
+    },
+    labelStart(spaceId, label) {
+      const space = spaceOf(spaceId);
+      if (!space) return;
+      // An action with no label of its own leaves none behind.
+      if (!label) {
+        if (space.task?.label) write(spaceId, { label: undefined });
+        return;
+      }
+      write(spaceId, { label: { text: label, active: true, at: now() } });
+    },
+    labelEnd(spaceId) {
+      const label = spaceOf(spaceId)?.task?.label;
+      // The five seconds count from the end, and only the action that is
+      // running ends its own label.
+      if (!label?.active) return;
+      write(spaceId, { label: { text: label.text, active: false, at: now() } });
     },
     async follow(tabId, step) {
       // A request whose client is gone reveals nothing.

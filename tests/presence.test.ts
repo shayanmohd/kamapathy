@@ -3,11 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
 import { createAuthority } from "../electron/agent/authority";
 import { ApiError } from "../electron/agent/errors";
+import type { Route } from "../electron/agent/http";
 import { createPresence, type AgentPresence } from "../electron/agent/presence";
-import { agentTextField } from "../electron/agent/validate";
+import {
+  agentTextField,
+  bodyLabel,
+  checkAgentText,
+} from "../electron/agent/validate";
 import { spaceView } from "../electron/agent/views";
 import { BrowserController } from "../electron/controller";
-import { ROUTES, routeKey } from "../skills/kamapathy/scripts/schema/index.mjs";
+import {
+  checkBody,
+  ROUTES,
+  routeKey,
+} from "../skills/kamapathy/scripts/schema/index.mjs";
 import { initialState } from "../shared/state";
 import type { Space } from "../shared/types";
 
@@ -87,6 +96,14 @@ describe("agent presence", () => {
     agentTextField({ text }, "text", "status", { allowEmpty: true });
   const failMessage = (message: string) =>
     agentTextField({ message }, "message", "message");
+  const labelText = (label: string) =>
+    agentTextField({ label }, "label", "label");
+  // The router's view of a route: the label hooks and the checks read its
+  // schema entry and nothing else.
+  const routeFor = (key: string) =>
+    ({
+      schema: ROUTES.find((item) => routeKey(item) === key)!,
+    }) as Route;
   const taskOf = (spaceId: string) =>
     controller.state.spaces.find((space) => space.id === spaceId)?.task;
   const entries = (spaceId: string) =>
@@ -383,6 +400,158 @@ describe("agent presence", () => {
     expect(controller.state.spaces.some((item) => item.id === space.id)).toBe(
       false,
     );
+  });
+
+  it("labels track their action and unlabeled actions clear them", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const space = agentSpace();
+      presence.labelStart(
+        space.id,
+        labelText(`Open the${chars(0x202b)} first result  `),
+      );
+      expect(taskOf(space.id)).toEqual({
+        label: { text: "Open the first result", active: true, at: 1000 },
+        changedAt: 1000,
+      });
+      // The action ended, and its label now counts its five seconds from
+      // there instead of from the start.
+      vi.setSystemTime(2500);
+      presence.labelEnd(space.id);
+      expect(taskOf(space.id)).toEqual({
+        label: { text: "Open the first result", active: false, at: 2500 },
+        changedAt: 1000,
+      });
+      // An end with nothing running leaves the label where it was, so a
+      // later step cannot extend it.
+      vi.setSystemTime(3000);
+      presence.labelEnd(space.id);
+      expect(taskOf(space.id)?.label).toEqual({
+        text: "Open the first result",
+        active: false,
+        at: 2500,
+      });
+      // The next action's label replaces it, and an action without one
+      // clears it rather than keeping the last.
+      presence.labelStart(space.id, labelText("Fill the delivery address"));
+      expect(taskOf(space.id)?.label).toEqual({
+        text: "Fill the delivery address",
+        active: true,
+        at: 3000,
+      });
+      presence.labelStart(space.id, undefined);
+      expect(taskOf(space.id)).not.toHaveProperty("label");
+      // An unlabeled action in a space with no task writes none.
+      const other = agentSpace("Booking");
+      presence.labelStart(other.id, undefined);
+      presence.labelEnd(other.id);
+      expect(
+        controller.state.spaces.find((item) => item.id === other.id),
+      ).not.toHaveProperty("task");
+      // The person taking over hides the label with the rest of the run.
+      presence.labelStart(space.id, labelText("Open the basket"));
+      await controller.dispatch({
+        type: "space:ownership",
+        id: space.id,
+        owner: "human",
+      });
+      expect(taskOf(space.id)).not.toHaveProperty("label");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a label on an observation route is unknown_field, and an over-long or blank label anywhere in a batch is invalid_field with field, expected and index before any step runs", () => {
+    const space = agentSpace();
+    // Section 11's body check refuses a label where no field declares one,
+    // naming what the route or the step does take.
+    expect(
+      checkBody(routeFor("POST /tabs/:id/snapshot").schema, {
+        label: "Reading the page",
+      }),
+    ).toMatchObject({
+      code: "unknown_field",
+      fields: {
+        field: "label",
+        allowed: ["mode", "maxChars", "maxControls", "selector"],
+      },
+    });
+    expect(
+      checkBody(routeFor("POST /tabs/:id/actions").schema, {
+        actions: [{ type: "wait", text: "Done", label: "Waiting" }],
+      }),
+    ).toMatchObject({
+      code: "unknown_field",
+      fields: {
+        field: "label",
+        action: "wait",
+        index: 0,
+        allowed: ["type", "selector", "text", "timeoutMs"],
+      },
+    });
+    // The cleaning rule is the server's own, and a batch answers for the
+    // step it refused before any step has run.
+    const refuse = (
+      key: string,
+      body: Record<string, unknown>,
+    ): ApiError | undefined => {
+      try {
+        checkAgentText(routeFor(key), body);
+      } catch (error) {
+        return error as ApiError;
+      }
+      return undefined;
+    };
+    const batch = (label: string) =>
+      refuse("POST /tabs/:id/actions", {
+        actions: [
+          { type: "click", ref: "@e1", label: "Open the first result" },
+          { type: "fill", ref: "@e2", value: "Ada" },
+          { type: "click", ref: "@e3", label },
+        ],
+      });
+    const long = batch("x".repeat(61))!;
+    expect(long.status).toBe(400);
+    expect(long.code).toBe("invalid_field");
+    expect(long.fields).toMatchObject({
+      field: "label",
+      expected: "at most 60 characters",
+      index: 2,
+    });
+    expect(batch(chars(0x200e, 0x07))!.fields).toMatchObject({
+      field: "label",
+      expected: "text that is not empty after cleaning",
+      index: 2,
+    });
+    expect(batch("Add it to the basket")).toBeUndefined();
+    // One route's own label follows the same rule, without an index.
+    const click = refuse("POST /tabs/:id/click", {
+      ref: "@e1",
+      label: chars(0x07),
+    })!;
+    expect(click.code).toBe("invalid_field");
+    expect(click.fields).toEqual({
+      field: "label",
+      expected: "text that is not empty after cleaning",
+    });
+    expect(
+      bodyLabel(routeFor("POST /tabs/:id/click"), {
+        ref: "@e1",
+        label: `Open the${chars(0x202e)} first result `,
+      }),
+    ).toBe("Open the first result");
+    expect(
+      bodyLabel(routeFor("POST /tabs/:id/click"), { ref: "@e1" }),
+    ).toBeUndefined();
+    expect(
+      bodyLabel(routeFor("POST /tabs/:id/snapshot"), { label: "Reading" }),
+    ).toBeUndefined();
+    // Nothing was started, shown or written while the checks refused.
+    expect(
+      controller.state.spaces.find((item) => item.id === space.id),
+    ).not.toHaveProperty("task");
+    expect(pages).toHaveLength(0);
   });
 
   it("follow activates its tab only in the active space, keeps the split pane, never changes the active space or focus, and observation routes never follow", async () => {

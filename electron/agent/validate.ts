@@ -36,6 +36,8 @@ export const PRESS_KEYS: Record<
 export type ToolAction = {
   type: "snapshot" | "click" | "fill" | "press" | "scroll" | "drag" | "wait";
   payload: Record<string, unknown>;
+  // The step's cleaned label; only the batch loop reads it.
+  label?: string;
 };
 
 export function integerField(
@@ -81,10 +83,7 @@ export function targetFields(
   }
   return { selector: stringField(body, "selector", 2048) };
 }
-export function parseToolAction(
-  type: string,
-  body: Record<string, unknown>,
-): ToolAction {
+function parseAction(type: string, body: Record<string, unknown>): ToolAction {
   if (type === "snapshot") {
     const mode = body.mode ?? "compact";
     if (mode !== "compact" && mode !== "full")
@@ -181,6 +180,17 @@ export function parseToolAction(
   );
 }
 
+// A step, with the label its own route or batch entry may carry.
+export function parseToolAction(
+  type: string,
+  body: Record<string, unknown>,
+): ToolAction {
+  const action = parseAction(type, body);
+  return body.label === undefined
+    ? action
+    : { ...action, label: agentTextField(body, "label", "label") };
+}
+
 // Rejects a body with a field its route does not declare, or a declared
 // field of the wrong kind, before the request waits for its lane.
 export function validateBody(
@@ -196,6 +206,35 @@ export function validateBody(
         ? { ...problem.fields, route: route.key, apiLevel: API_LEVEL }
         : problem.fields,
     );
+}
+
+// Checks every agent label a body carries, including each batch step's,
+// before the request waits for its lane. The schema has already refused a
+// label where no field declares one, so only the cleaning rule is left.
+export function checkAgentText(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): void {
+  if (!body) return;
+  if (route.schema.label && body.label !== undefined)
+    agentTextField(body, "label", "label");
+  const steps =
+    route.schema.body?.actions?.of === "action" ? body.actions : undefined;
+  if (!Array.isArray(steps)) return;
+  for (const [index, step] of steps.entries()) {
+    const fields = (step ?? {}) as Record<string, unknown>;
+    if (fields.label !== undefined)
+      agentTextField(fields, "label", "label", { index });
+  }
+}
+
+// The cleaned label of a single input route's body, or undefined.
+export function bodyLabel(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!route.schema.label || body?.label === undefined) return undefined;
+  return agentTextField(body, "label", "label");
 }
 
 // The segment after /spaces or /tabs is shown as :id.

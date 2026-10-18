@@ -33,7 +33,12 @@ import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
 import type { TabRegistry } from "./tab-registry";
-import { routeNotFound, validateBody } from "./validate";
+import {
+  bodyLabel,
+  checkAgentText,
+  routeNotFound,
+  validateBody,
+} from "./validate";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -308,8 +313,10 @@ export async function startAutomation(
           method === "POST"
             ? await readBody(request, route.bodyLimit)
             : undefined;
-        // A malformed body never waits behind page work.
+        // A malformed body, or a label the person could not be shown,
+        // never waits behind page work.
         validateBody(route, body);
+        checkAgentText(route, body);
         const lane: Lane =
           route.lane === "space"
             ? { kind: "space", spaceId: spaceId! }
@@ -323,26 +330,36 @@ export async function startAutomation(
             deadline,
             signal: abort.signal,
           });
-        await route.handler({
-          request,
-          response,
-          body,
-          ...current,
-          resumeFromHuman,
-          run: {
-            deadline,
-            signal: abort.signal,
-            dispatch,
-            park: async (wait) => {
-              try {
-                return await ticket.park(wait);
-              } finally {
-                authorize();
-              }
+        // An input route's label shows while the action runs and for five
+        // seconds after, so even a failed action leaves its own behind.
+        const labelSpace = route.schema.label
+          ? (current.space?.id ?? current.tab?.spaceId)
+          : undefined;
+        if (labelSpace) presence.labelStart(labelSpace, bodyLabel(route, body));
+        try {
+          await route.handler({
+            request,
+            response,
+            body,
+            ...current,
+            resumeFromHuman,
+            run: {
+              deadline,
+              signal: abort.signal,
+              dispatch,
+              park: async (wait) => {
+                try {
+                  return await ticket.park(wait);
+                } finally {
+                  authorize();
+                }
+              },
             },
-          },
-          prepared: before?.prepared,
-        });
+            prepared: before?.prepared,
+          });
+        } finally {
+          if (labelSpace) presence.labelEnd(labelSpace);
+        }
       } finally {
         ticket.finish();
         before?.release?.();
