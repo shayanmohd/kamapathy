@@ -40,6 +40,7 @@ import type {
   SpaceRequest,
   Tab,
 } from "../shared/types";
+import { inputMarker } from "./agent/input/marker";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
 
@@ -812,7 +813,10 @@ export class BrowserController {
     contents.on("focus", activateFocusedPane);
     contents.on("before-mouse-event", (_event, input) => {
       // A background page may already own Chromium focus when it becomes a
-      // split pane. A physical click must still update the browser controls.
+      // split pane. A physical click must still update the browser controls,
+      // while a click an agent sent changes no pane.
+      if (inputMarker.busy(contents)) return;
+      inputMarker.humanInput(contents);
       if (input.type === "mouseDown" && space.owner === "human")
         activateFocusedPane();
     });
@@ -947,6 +951,9 @@ export class BrowserController {
       this.emit();
     });
     contents.on("context-menu", (_event, params) => {
+      // No native menu follows a right click an agent sent, until the
+      // person's own input arrives.
+      if (inputMarker.pointerRecent(contents)) return;
       import("electron")
         .then(({ Menu }) => {
           if (!isCurrentView() || this.window.isDestroyed()) return;
@@ -1853,6 +1860,10 @@ export class BrowserController {
 
   private bindShortcuts(contents: WebContents): void {
     contents.on("before-input-event", (event, input) => {
+      // A key an agent sent reaches the page and nothing else: no shortcut
+      // of the person's, and no menu role.
+      if (inputMarker.keyInFlight(contents, input)) return;
+      inputMarker.humanInput(contents);
       if (input.type !== "keyDown") return;
       const key = input.key.toLowerCase();
       const primary =

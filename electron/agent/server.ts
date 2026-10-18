@@ -22,6 +22,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { createDispatchers } from "./input/dispatch";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -159,11 +160,18 @@ export async function startAutomation(
     buffers: new EventBufferPool(),
   });
   const referenceSession = randomBytes(12).toString("hex");
+  // One input dispatcher per tab session, each authorizing its commands.
+  const dispatchers = createDispatchers({
+    guard: (tabId) => {
+      authority.authorizeTab(tabId);
+    },
+  });
   const actions = createActions({
     controller,
     authority,
     sessions,
     referenceSession,
+    dispatchers,
   });
   const deps: RouteDeps = { controller, authority, actions, sessions };
   const grantSpace = (id: string) => {
@@ -359,10 +367,14 @@ export async function startAutomation(
         authority.stop();
         requests.close();
         scheduler.close();
+        // The dispatchers go last, so each session's release still lets go
+        // of the keys it holds.
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();
-        }).then(() => sessions.close());
+        })
+          .then(() => sessions.close())
+          .finally(() => dispatchers.dispose());
       }
       return closing;
     },
