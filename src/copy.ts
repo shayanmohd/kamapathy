@@ -194,4 +194,10 @@ export const extensionBridgeCopy = {
   noWindow: (id: number) => `No window with id: ${id}.`,
   cantCapture: "This extension can't capture this tab.",
   notShown: "Only the shown space can be captured.",
+  cantOpen: "Extensions can't open this URL.",
+  noSpace: "Open a space that runs this extension first.",
+  agentTab: "An agent is using this tab.",
+  cantClose: "This window can't be closed by an extension.",
+  tooManyWindows: "This extension already has 4 windows open.",
+  noOptions: "This extension has no options page.",
 } as const;

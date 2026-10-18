@@ -7,15 +7,26 @@ import {
   WINDOW_ID_CURRENT,
   WINDOW_ID_NONE,
   tabObject,
+  type BridgeTab,
+  type BridgeWindow,
   type ExtensionEntry,
   type TabModel,
 } from "../shared/extensions";
 import { HOME_URL, initialState, newTab } from "../shared/state";
-import type { BrowserState, Space, Tab } from "../shared/types";
+import type {
+  BrowserAction,
+  BrowserState,
+  ClosedBy,
+  Space,
+  Tab,
+} from "../shared/types";
 import {
   ExtensionBridge,
   type BridgeController,
+  type ExtensionWindowInfo,
+  type ExtensionWindowOpener,
 } from "../electron/extensions/bridge";
+import type { ExtensionTabOptions } from "../electron/controller";
 import type { ExtensionHost, SurfaceInfo } from "../electron/extensions/host";
 import type {
   ApiHandler,
@@ -72,6 +83,20 @@ class FakeContents extends EventEmitter {
   muted = false;
   destroyed = false;
   capturePage = vi.fn(async () => new FakeImage());
+  reload = vi.fn();
+  reloadIgnoringCache = vi.fn();
+  setAudioMuted = vi.fn((value: boolean) => {
+    this.muted = value;
+  });
+  setZoomFactor = vi.fn((value: number) => {
+    this.zoom = value;
+  });
+  navigationHistory = {
+    canGoBack: vi.fn(() => true),
+    canGoForward: vi.fn(() => true),
+    goBack: vi.fn(),
+    goForward: vi.fn(),
+  };
   constructor(readonly id: number) {
     super();
   }
@@ -139,10 +164,52 @@ class FakeController implements BridgeController {
   private readonly listeners = new Set<(state: BrowserState) => void>();
   private shown = new Map<string, string>();
   private nextContentsId = 10;
-  openExtensionTab = vi.fn();
-  moveTab = vi.fn();
-  closeTab = vi.fn();
-  dispatch = vi.fn();
+  readonly reloaded: string[] = [];
+  openExtensionTab = vi.fn(
+    (spaceId: string, url: string, options: ExtensionTabOptions = {}): Tab => {
+      const space = this.state.spaces.find((item) => item.id === spaceId);
+      if (!space || space.kind !== "personal" || space.access === "granted")
+        throw new Error("Extensions open tabs only in your personal spaces.");
+      const tab = tabAt(spaceId, url === "" ? HOME_URL : url, {
+        pinned: !!options.pinned,
+      });
+      this.place(tab, options.index);
+      if (options.active !== false) this.show(spaceId, tab.id);
+      this.emit();
+      return tab;
+    },
+  );
+  moveTab = vi.fn((tabId: string, index: number): Tab => {
+    const tab = this.tabOr(tabId);
+    this.place(tab, index);
+    this.emit();
+    return tab;
+  });
+  closeTab = vi.fn(
+    (tabId: string, by: ClosedBy): { closed?: string; replacement?: Tab } => {
+      expect(by).toBe("person");
+      const tab = this.tabOr(tabId);
+      this.state.tabs.splice(this.state.tabs.indexOf(tab), 1);
+      this.views.delete(tabId);
+      const rest = this.state.tabs.filter(
+        (item) => item.spaceId === tab.spaceId,
+      );
+      // A space keeps a tab, so Kamapathy's window stays open.
+      const replacement = rest.length
+        ? undefined
+        : tabAt(tab.spaceId, HOME_URL);
+      if (replacement) this.state.tabs.push(replacement);
+      if (this.state.activeTabId === tabId)
+        this.show(tab.spaceId, replacement?.id ?? rest[0]?.id);
+      this.emit();
+      return { closed: tabId, replacement };
+    },
+  );
+  dispatch = vi.fn(async (action: BrowserAction): Promise<BrowserState> => {
+    this.apply(action);
+    this.emit();
+    return this.state;
+  });
 
   constructor(spaces: Space[], tabs: Tab[]) {
     this.state = {
@@ -209,6 +276,57 @@ class FakeController implements BridgeController {
     this.state.activeTabId = next;
     this.shown.set(spaceId, next);
   }
+
+  private tabOr(tabId: string): Tab {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab) throw new Error("Tab was not found.");
+    return tab;
+  }
+
+  // Puts a tab at an index of its space's strip. Pin groups don't matter
+  // here, so the tests that move tabs keep them unpinned.
+  private place(tab: Tab, index?: number): void {
+    const at = this.state.tabs.indexOf(tab);
+    if (at >= 0) this.state.tabs.splice(at, 1);
+    const strip = this.state.tabs.filter(
+      (item) => item.spaceId === tab.spaceId,
+    );
+    const rank =
+      index === undefined || index < 0
+        ? strip.length
+        : Math.min(index, strip.length);
+    const before = strip[rank];
+    if (before) this.state.tabs.splice(this.state.tabs.indexOf(before), 0, tab);
+    else this.state.tabs.push(tab);
+  }
+
+  // The few actions the bridges dispatch, as the controller applies them.
+  private apply(action: BrowserAction): void {
+    if (action.type === "space:activate") {
+      this.show(action.id);
+      return;
+    }
+    if (action.type === "tab:activate") {
+      const tab = this.tabOr(action.id);
+      this.show(tab.spaceId, tab.id);
+      return;
+    }
+    if (action.type === "tab:navigate") {
+      const tab = this.tabOr(action.id);
+      tab.url = action.url;
+      tab.title = action.url === HOME_URL ? "New tab" : action.url;
+      return;
+    }
+    if (action.type === "tab:pin") {
+      this.tabOr(action.id).pinned = !this.tabOr(action.id).pinned;
+      return;
+    }
+    if (action.type === "tab:reload") {
+      this.reloaded.push(action.id);
+      return;
+    }
+    throw new Error(`Unexpected action: ${action.type}`);
+  }
 }
 
 type Emitted = {
@@ -247,6 +365,15 @@ class FakeChannel {
     if (!handler) throw new Error(`No handler for ${api}`);
     return handler(caller, method, args);
   }
+  // Change calls answer later; a refusal thrown at once rejects the same way.
+  async run(
+    api: string,
+    caller: Caller,
+    method: string,
+    args: unknown[] = [],
+  ): Promise<unknown> {
+    return await this.call(api, caller, method, args);
+  }
   take(extensionId?: string): Emitted[] {
     const taken = this.events.splice(0);
     return extensionId
@@ -278,6 +405,10 @@ class FakeHost {
   surfaceOf(contents: WebContents): SurfaceInfo | undefined {
     return this.surfaces.get(contents);
   }
+  readonly options = new Map<string, string>();
+  manifestOf(id: string): { options?: string } {
+    return { options: this.options.get(id) };
+  }
   onEvent(listener: (event: unknown) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -291,6 +422,77 @@ class FakeHost {
     ids.add(entry.id);
     this.loaded.set(partition, ids);
   }
+}
+
+class FakeOpener implements ExtensionWindowOpener {
+  readonly windows: ExtensionWindowInfo[] = [];
+  private nextTabId = 900;
+  openWindow = vi.fn(
+    (request: {
+      windowId: number;
+      extensionId: string;
+      partition: string;
+      url: string;
+      left?: number;
+      top?: number;
+      width?: number;
+      height?: number;
+      focused: boolean;
+    }): ExtensionWindowInfo => {
+      const info: ExtensionWindowInfo = {
+        windowId: request.windowId,
+        tabId: this.nextTabId++,
+        extensionId: request.extensionId,
+        partition: request.partition,
+        url: request.url,
+        focused: request.focused,
+        bounds: {
+          left: request.left ?? 0,
+          top: request.top ?? 0,
+          width: request.width ?? 400,
+          height: request.height ?? 300,
+        },
+      };
+      this.windows.push(info);
+      return info;
+    },
+  );
+  updateWindow = vi.fn(
+    (
+      windowId: number,
+      changes: {
+        left?: number;
+        top?: number;
+        width?: number;
+        height?: number;
+        focused?: boolean;
+      },
+    ): ExtensionWindowInfo => {
+      const info = this.windows.find((item) => item.windowId === windowId);
+      if (!info) throw new Error("Window was not found.");
+      info.bounds = {
+        left: changes.left ?? info.bounds.left,
+        top: changes.top ?? info.bounds.top,
+        width: changes.width ?? info.bounds.width,
+        height: changes.height ?? info.bounds.height,
+      };
+      if (changes.focused !== undefined) info.focused = changes.focused;
+      return info;
+    },
+  );
+  closeWindow = vi.fn((windowId: number): boolean => {
+    const at = this.windows.findIndex((item) => item.windowId === windowId);
+    if (at < 0) return false;
+    this.windows.splice(at, 1);
+    return true;
+  });
+  windowsOf = vi.fn(
+    (extensionId: string, partition: string): ExtensionWindowInfo[] =>
+      this.windows.filter(
+        (item) =>
+          item.extensionId === extensionId && item.partition === partition,
+      ),
+  );
 }
 
 interface Setup {
@@ -1109,5 +1311,457 @@ describe("extension tab objects", () => {
     await expect(capture(EVERY, [])).rejects.toThrow(
       extensionBridgeCopy.cantCapture,
     );
+  });
+});
+
+describe("extension tab and window changes", () => {
+  it("agent-held refusals and URL rules", async () => {
+    const mine = tabAt("personal", "https://example.com/");
+    const agent = tabAt("robot", "https://example.com/agent");
+    const granted = tabAt("granted", "https://example.com/granted");
+    const { bridge, controller, channel } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("robot", { kind: "agent", owner: "agent" }),
+        spaceAt("granted", { access: "granted" }),
+      ],
+      [mine, agent, granted],
+    );
+    const contents = controller.load(mine.id);
+    controller.show("personal", mine.id);
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+    const held = [bridge.numericId(agent.id)!, bridge.numericId(granted.id)!];
+
+    for (const id of held) {
+      const changes: [string, unknown[]][] = [
+        ["update", [id, { url: "https://example.com/other" }]],
+        ["remove", [id]],
+        ["reload", [id]],
+        ["move", [id, { index: 0 }]],
+        ["goBack", [id]],
+        ["goForward", [id]],
+        ["setZoom", [id, 1.5]],
+        ["duplicate", [id]],
+      ];
+      for (const [method, args] of changes)
+        await expect(channel.run("tabs", caller, method, args)).rejects.toThrow(
+          extensionBridgeCopy.agentTab,
+        );
+    }
+    // Nothing changed before the refusal.
+    expect(controller.closeTab).not.toHaveBeenCalled();
+    expect(controller.moveTab).not.toHaveBeenCalled();
+    expect(controller.dispatch).not.toHaveBeenCalled();
+    expect(controller.openExtensionTab).not.toHaveBeenCalled();
+
+    for (const url of [
+      "javascript:alert(1)",
+      "file:///etc/hosts",
+      "chrome://settings",
+      "data:text/html,<p>hi</p>",
+      `chrome-extension://${HOSTS}/page.html`,
+      "https://someone:secret@example.com/",
+    ]) {
+      await expect(
+        channel.run("tabs", caller, "create", [{ url }]),
+      ).rejects.toThrow(extensionBridgeCopy.cantOpen);
+      await expect(
+        channel.run("tabs", caller, "update", [
+          bridge.numericId(mine.id),
+          { url },
+        ]),
+      ).rejects.toThrow(extensionBridgeCopy.cantOpen);
+    }
+
+    // A relative URL is one of the extension's own pages.
+    const own = (await channel.run("tabs", caller, "create", [
+      { url: "options.html" },
+    ])) as BridgeTab;
+    expect(own.url).toBe(`chrome-extension://${ALL}/options.html`);
+    // about:blank opens the new tab page.
+    const blank = (await channel.run("tabs", caller, "create", [
+      { url: "about:blank" },
+    ])) as BridgeTab;
+    expect(blank).toMatchObject({ url: NEW_TAB_URL, title: "New tab" });
+    const sent = (await channel.run("tabs", caller, "update", [
+      bridge.numericId(mine.id),
+      { url: "about:blank" },
+    ])) as BridgeTab;
+    expect(sent.url).toBe(NEW_TAB_URL);
+  });
+
+  it("no tabs ever go to agent spaces", async () => {
+    const mine = tabAt("personal", "https://example.com/");
+    const agent = tabAt("robot", "https://example.com/agent");
+    const { bridge, controller, channel, host } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("robot", { kind: "agent", owner: "agent" }),
+      ],
+      [mine, agent],
+    );
+    host.options.set(ALL, "options.html");
+    controller.show("personal", mine.id);
+    controller.emit();
+    const worker = callerFor(ALL, PERSONAL, "worker");
+    const spaceOf = (id: number) =>
+      controller.state.tabs.find((tab) => bridge.numericId(tab.id) === id)
+        ?.spaceId;
+
+    const aimed = (await channel.run("tabs", worker, "create", [
+      { windowId: bridge.windowIdOf("robot"), url: "https://example.com/a" },
+    ])) as BridgeTab;
+    expect(spaceOf(aimed.id)).toBe("personal");
+    // The agent space is shown, so the personal space shown last takes it.
+    controller.show("robot", agent.id);
+    controller.emit();
+    const next = (await channel.run("tabs", worker, "create", [
+      { url: "https://example.com/b" },
+    ])) as BridgeTab;
+    expect(spaceOf(next.id)).toBe("personal");
+    const window = (await channel.run("windows", worker, "create", [
+      { url: "https://example.com/c" },
+    ])) as BridgeWindow;
+    expect(window.id).toBe(bridge.windowIdOf("personal"));
+    expect(
+      window.tabs?.some((tab) => tab.url === "https://example.com/c"),
+    ).toBe(true);
+    await channel.run("runtime", worker, "openOptionsPage");
+    expect(
+      controller.state.tabs.find(
+        (tab) => tab.url === `chrome-extension://${ALL}/options.html`,
+      )?.spaceId,
+    ).toBe("personal");
+    expect(controller.state.activeSpaceId).toBe("robot");
+
+    // A session whose only spaces an agent holds has nowhere to put a tab.
+    const held = setUp(
+      [
+        spaceAt("robot", { kind: "agent", owner: "agent" }),
+        spaceAt("granted", { access: "granted" }),
+      ],
+      [tabAt("robot", "https://example.com/")],
+    );
+    held.host.options.set(ALL, "options.html");
+    const calls: [string, string, unknown[]][] = [
+      ["tabs", "create", [{ url: "https://example.com/" }]],
+      ["windows", "create", [{ url: "https://example.com/" }]],
+      ["runtime", "openOptionsPage", []],
+    ];
+    for (const [api, method, args] of calls)
+      await expect(
+        held.channel.run(api, callerFor(ALL, PERSONAL, "worker"), method, args),
+      ).rejects.toThrow(extensionBridgeCopy.noSpace);
+    expect(held.controller.openExtensionTab).not.toHaveBeenCalled();
+  });
+
+  it("the windows.create choice between an extension window and tabs", async () => {
+    const mine = tabAt("personal", "https://example.com/");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal")],
+      [mine],
+    );
+    const contents = controller.load(mine.id);
+    controller.show("personal", mine.id);
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+
+    // Until the popups are built there are no extension windows.
+    await expect(
+      channel.run("windows", caller, "create", [
+        { type: "popup", url: "page.html" },
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    const opener = new FakeOpener();
+    bridge.setWindowOpener(opener);
+
+    const popup = (await channel.run("windows", caller, "create", [
+      {
+        type: "popup",
+        url: `chrome-extension://${ALL}/page.html`,
+        left: 20,
+        top: 30,
+        width: 500,
+        height: 400,
+      },
+    ])) as BridgeWindow;
+    expect(opener.openWindow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extensionId: ALL,
+        partition: PERSONAL,
+        url: `chrome-extension://${ALL}/page.html`,
+        left: 20,
+        top: 30,
+        width: 500,
+        height: 400,
+        focused: true,
+      }),
+    );
+    expect(popup).toMatchObject({
+      id: opener.windows[0].windowId,
+      type: "popup",
+      left: 20,
+      top: 30,
+      width: 500,
+      height: 400,
+    });
+    expect(popup.id).not.toBe(bridge.windowIdOf("personal"));
+    // A panel holding one of its own pages is an extension window too.
+    await channel.run("windows", caller, "create", [
+      { type: "panel", url: ["panel.html"] },
+    ]);
+    expect(opener.windows[1].url).toBe(`chrome-extension://${ALL}/panel.html`);
+
+    // A normal window, another URL or no URL opens tabs instead.
+    const before = controller.state.tabs.length;
+    for (const options of [
+      { type: "normal", url: `chrome-extension://${ALL}/page.html` },
+      { type: "popup", url: "https://example.com/site" },
+      { type: "popup" },
+    ]) {
+      const made = (await channel.run("windows", caller, "create", [
+        options,
+      ])) as BridgeWindow;
+      expect(made.id).toBe(bridge.windowIdOf("personal"));
+      expect(made.tabs).toBeDefined();
+    }
+    expect(opener.openWindow).toHaveBeenCalledTimes(2);
+    expect(controller.state.tabs.length).toBe(before + 3);
+    expect(controller.state.tabs.at(-1)!.url).toBe(HOME_URL);
+
+    // At most four windows per extension.
+    await channel.run("windows", caller, "create", [
+      { type: "popup", url: "three.html" },
+    ]);
+    await channel.run("windows", caller, "create", [
+      { type: "popup", url: "four.html" },
+    ]);
+    await expect(
+      channel.run("windows", caller, "create", [
+        { type: "popup", url: "five.html" },
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.tooManyWindows);
+    expect(opener.windows).toHaveLength(4);
+
+    // Kamapathy has no incognito windows and moves no tab into a window.
+    await expect(
+      channel.run("windows", caller, "create", [{ incognito: true }]),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    await expect(
+      channel.run("windows", caller, "create", [
+        { tabId: bridge.numericId(mine.id) },
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+  });
+
+  it("only popups, extension windows and extension tabs switch the shown space", async () => {
+    const mine = tabAt("personal", "https://example.com/");
+    const there = tabAt("second", "https://example.com/second");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal"), spaceAt("second")],
+      [mine, there],
+    );
+    controller.show("personal", mine.id);
+    controller.emit();
+    const second = bridge.windowIdOf("second")!;
+    const worker = callerFor(ALL, PERSONAL, "worker");
+
+    const made = (await channel.run("tabs", worker, "create", [
+      { windowId: second, url: "https://example.com/new", active: true },
+    ])) as BridgeTab;
+    expect(made.active).toBe(false);
+    expect(controller.state.activeSpaceId).toBe("personal");
+    await channel.run("tabs", worker, "update", [
+      bridge.numericId(there.id),
+      { active: true },
+    ]);
+    expect(controller.state.activeSpaceId).toBe("personal");
+    await channel.run("windows", worker, "update", [second, { focused: true }]);
+    expect(controller.state.activeSpaceId).toBe("personal");
+    expect(controller.dispatch).not.toHaveBeenCalled();
+    // In the shown space a worker's tab still becomes the shown tab.
+    const here = (await channel.run("tabs", worker, "create", [
+      { url: "https://example.com/here" },
+    ])) as BridgeTab;
+    expect(here.active).toBe(true);
+    expect(controller.state.activeSpaceId).toBe("personal");
+
+    // A popup, an extension window or an extension tab may switch.
+    const popup = callerFor(ALL, PERSONAL, "popup");
+    const shown = (await channel.run("tabs", popup, "create", [
+      { windowId: second, url: "https://example.com/popup", active: true },
+    ])) as BridgeTab;
+    expect(shown.active).toBe(true);
+    expect(controller.state.activeSpaceId).toBe("second");
+    controller.show("personal", mine.id);
+    controller.emit();
+    await channel.run("windows", popup, "update", [second, { focused: true }]);
+    expect(controller.state.activeSpaceId).toBe("second");
+  });
+
+  it("move stays within a window, and remove closes tabs without closing Kamapathy's window", async () => {
+    const first = tabAt("personal", "https://example.com/one");
+    const second = tabAt("personal", "https://example.com/two");
+    const only = tabAt("second", "https://example.com/only");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal"), spaceAt("second")],
+      [first, second, only],
+    );
+    const contents = controller.load(first.id);
+    controller.show("personal", first.id);
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+    const moving = bridge.numericId(second.id)!;
+    const closing = bridge.numericId(only.id)!;
+
+    await expect(
+      channel.run("tabs", caller, "move", [
+        [moving],
+        { windowId: bridge.windowIdOf("second"), index: 0 },
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    expect(controller.moveTab).not.toHaveBeenCalled();
+
+    const moved = (await channel.run("tabs", caller, "move", [
+      moving,
+      { index: 0 },
+    ])) as BridgeTab;
+    expect(moved.index).toBe(0);
+    expect(controller.moveTab).toHaveBeenCalledWith(second.id, 0);
+    expect(
+      bridge
+        .model(PERSONAL)
+        .windows.find((window) => window.spaceId === "personal")!
+        .tabs.map((tab) => tab.tabId),
+    ).toEqual([second.id, first.id]);
+
+    // The last tab of a space closes as the person's would, so the space
+    // keeps a blank tab and Kamapathy's window stays open.
+    await channel.run("tabs", caller, "remove", [closing]);
+    expect(controller.closeTab).toHaveBeenCalledWith(only.id, "person");
+    expect(controller.dispatch).not.toHaveBeenCalled();
+    const left = controller.state.tabs.filter(
+      (tab) => tab.spaceId === "second",
+    );
+    expect(left).toHaveLength(1);
+    expect(left[0].url).toBe(HOME_URL);
+  });
+
+  it("the rest of the change side reaches the tab, its view and its strip", async () => {
+    const first = tabAt("personal", "https://example.com/one", {
+      title: "One",
+    });
+    const resting = tabAt("personal", "https://example.com/two");
+    const { bridge, controller, channel, host } = setUp(
+      [spaceAt("personal")],
+      [first, resting],
+    );
+    const contents = controller.load(first.id);
+    controller.show("personal", first.id);
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+    const id = bridge.numericId(first.id)!;
+    const pins = () =>
+      controller.dispatch.mock.calls.filter(
+        ([action]) => action.type === "tab:pin",
+      ).length;
+
+    const copy = (await channel.run("tabs", caller, "duplicate", [
+      id,
+    ])) as BridgeTab;
+    expect(copy).toMatchObject({
+      url: "https://example.com/one",
+      index: 1,
+      active: true,
+    });
+    await channel.run("tabs", caller, "update", [
+      id,
+      { pinned: true, muted: true },
+    ]);
+    expect(
+      controller.state.tabs.find((tab) => tab.id === first.id)!.pinned,
+    ).toBe(true);
+    expect(contents.setAudioMuted).toHaveBeenCalledWith(true);
+    // Pinning what is pinned changes nothing.
+    await channel.run("tabs", caller, "update", [id, { pinned: true }]);
+    expect(pins()).toBe(1);
+
+    await channel.run("tabs", caller, "setZoom", [id, 1.5]);
+    expect(contents.setZoomFactor).toHaveBeenCalledWith(1.5);
+    await channel.run("tabs", caller, "setZoom", [id, 0]);
+    expect(contents.setZoomFactor).toHaveBeenLastCalledWith(1);
+    await expect(
+      channel.run("tabs", caller, "setZoom", [id, 9]),
+    ).rejects.toThrow(extensionBridgeCopy.invalid("tabs.setZoom"));
+    // Only the zoom settings Kamapathy has.
+    await expect(
+      channel.run("tabs", caller, "setZoomSettings", [id, { mode: "manual" }]),
+    ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    await expect(
+      channel.run("tabs", caller, "setZoomSettings", [
+        id,
+        { scope: "per-origin" },
+      ]),
+    ).resolves.toBeUndefined();
+
+    await channel.run("tabs", caller, "reload", [id, { bypassCache: true }]);
+    expect(contents.reloadIgnoringCache).toHaveBeenCalled();
+    controller.show("personal", first.id);
+    await channel.run("tabs", caller, "reload");
+    expect(contents.reload).toHaveBeenCalled();
+    // A tab without a view reloads through the window.
+    await channel.run("tabs", caller, "reload", [bridge.numericId(resting.id)]);
+    expect(controller.reloaded).toEqual([resting.id]);
+    await channel.run("tabs", caller, "goBack", [id]);
+    expect(contents.navigationHistory.goBack).toHaveBeenCalled();
+    await channel.run("tabs", caller, "goForward", [id]);
+    expect(contents.navigationHistory.goForward).toHaveBeenCalled();
+
+    // highlight activates the first listed index.
+    const window = (await channel.run("tabs", caller, "highlight", [
+      { tabs: [2] },
+    ])) as BridgeWindow;
+    expect(window.tabs?.find((tab) => tab.active)?.index).toBe(2);
+
+    // The Extensions modal opens an options page the same way.
+    host.options.set(ALL, "options.html");
+    const options = bridge.openOptionsPage(ALL, PERSONAL, true);
+    expect(options.spaceId).toBe("personal");
+    expect(options.url).toBe(`chrome-extension://${ALL}/options.html`);
+    expect(() => bridge.openOptionsPage(NONE, PERSONAL, true)).toThrow(
+      extensionBridgeCopy.noOptions,
+    );
+  });
+
+  it("windows.remove closes only extension windows", async () => {
+    const mine = tabAt("personal", "https://example.com/");
+    const { bridge, controller, channel } = setUp(
+      [spaceAt("personal")],
+      [mine],
+    );
+    const contents = controller.load(mine.id);
+    controller.show("personal", mine.id);
+    const caller = callerFor(ALL, PERSONAL, "tab", contents);
+    const opener = new FakeOpener();
+    bridge.setWindowOpener(opener);
+
+    await expect(
+      channel.run("windows", caller, "remove", [bridge.windowIdOf("personal")]),
+    ).rejects.toThrow(extensionBridgeCopy.cantClose);
+    const own = (await channel.run("windows", caller, "create", [
+      { type: "popup", url: "page.html" },
+    ])) as BridgeWindow;
+    const theirs = (await channel.run(
+      "windows",
+      callerFor(EVERY, PERSONAL, "tab", contents),
+      "create",
+      [{ type: "popup", url: `chrome-extension://${EVERY}/page.html` }],
+    )) as BridgeWindow;
+
+    // Only its own windows, and never another extension's.
+    await expect(
+      channel.run("windows", caller, "remove", [theirs.id]),
+    ).rejects.toThrow(extensionBridgeCopy.cantClose);
+    expect(opener.closeWindow).not.toHaveBeenCalled();
+    await channel.run("windows", caller, "remove", [own.id]);
+    expect(opener.closeWindow).toHaveBeenCalledWith(own.id);
+    expect(opener.windows.map((item) => item.windowId)).toEqual([theirs.id]);
   });
 });
