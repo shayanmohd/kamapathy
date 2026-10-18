@@ -3,7 +3,8 @@
 // beside them, the text, href, XPath and filter forms with content a page
 // hides from text matching, lookalike controls at every level, four rows of
 // the same button, a control under a sticky header, a control behind a modal
-// backdrop, and nodes a role resolution may pick.
+// backdrop, nodes a role resolution may pick, the role words Chromium
+// reports its own way, and three buttons of one accessible name.
 export const selectorPages = {
   "/selectors/shadow": `<!doctype html><meta charset="utf-8"><title>Shadow items</title>
 <style>body{font:14px sans-serif;margin:16px}iframe{display:block;border:1px solid #666;width:280px;height:70px}</style>
@@ -141,4 +142,42 @@ customElements.define("x-locked", XLocked);
   "/selectors/frame-save": `<!doctype html><meta charset="utf-8"><title>Framed save</title>
 <style>body{font:14px sans-serif;margin:8px}</style>
 <button id="frameSave" type="button">Save</button>`,
+  "/selectors/roles": `<!doctype html><meta charset="utf-8"><title>Role words</title>
+<style>body{font:14px sans-serif;margin:16px}#notes{border:1px solid #999;padding:4px;width:200px}#logo{width:40px;height:40px;background:#dde}iframe{display:block;border:1px solid #666;width:280px;height:70px}</style>
+<button id="save" type="button">Save</button>
+<button id="saveLower" type="button">save</button>
+<button id="saveAll" type="button">Save all</button>
+<button id="keep" type="button" aria-label="Keep&nbsp;draft">Keep draft</button>
+<x-open id="openHost"></x-open>
+<x-closed id="closedHost"></x-closed>
+<details id="more"><summary id="summary">More</summary><p>Details body</p></details>
+<table id="layout"><tr><td id="cell">Cell one</td></tr></table>
+<div id="notes" contenteditable="true" aria-label="Notes">Note text</div>
+<img id="logo" alt="Logo" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+<input id="field" aria-label="Field">
+<select id="colors" multiple size="2"><option id="red">Red</option><option id="green">Green</option></select>
+<input id="when" type="date" aria-label="When">
+<iframe id="roleFrame" title="Framed save" src="/selectors/frame-role"></iframe>
+<script>
+class XOpen extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: "open" }).innerHTML = '<button id="shadowSave" type="button">Shadow save</button>';
+  }
+}
+customElements.define("x-open", XOpen);
+class XClosed extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: "closed" }).innerHTML = '<button id="closedSave" type="button">Sealed save</button>';
+  }
+}
+customElements.define("x-closed", XClosed);
+</script>`,
+  "/selectors/frame-role": `<!doctype html><meta charset="utf-8"><title>Framed role</title>
+<style>body{font:14px sans-serif;margin:8px}</style>
+<button id="frameSave" type="button">Frame save</button>`,
+  "/selectors/role-twins": `<!doctype html><meta charset="utf-8"><title>Three saves</title>
+<style>body{font:14px sans-serif;margin:16px}</style>
+<button id="hiddenSave" type="button" aria-label="Save" style="opacity:0">Hidden copy</button>
+<button id="firstSave" type="button" aria-label="Save">First copy</button>
+<button id="secondSave" type="button" aria-label="Save">Second copy</button>`,
 };

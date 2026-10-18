@@ -25,6 +25,7 @@ import type {
   CdpEvent,
   DialogInfo,
   FrameInfo,
+  KnownFrame,
   SendStep,
   SessionHost,
   SessionState,
@@ -79,9 +80,11 @@ const contextOf = (params: object): number | undefined => {
 };
 const DISPATCHES =
   /^(Input\.|Page\.(navigate|reload|navigateToHistoryEntry)$|DOM\.setFileInputFiles$)/;
-// An open JavaScript dialog holds these until it closes.
+// An open JavaScript dialog holds these until it closes: the renderer is
+// stopped inside the dialog, so none of them answers. Page.getFrameTree
+// stays out, because setup sends it through the same pending set.
 const DIALOG_HOLDS =
-  /^(Input\.|Runtime\.|DOM\.setFileInputFiles$|Page\.(navigate|reload)$)/;
+  /^(Input\.|Runtime\.|DOM\.|Accessibility\.|Page\.(navigate|reload|captureScreenshot|getLayoutMetrics)$)/;
 // Kamapathy's own sessions record only page and network events.
 const RECORDED = /^(Page|Network)\./;
 // Dialog text keeps tab and newline, and loses other control characters and
@@ -132,7 +135,11 @@ const commitOf = ({ method, params }: CdpEvent): Commit | undefined => {
 // before the call ran, or one destroyed while it ran.
 const lostContext = (error: unknown) => {
   const message = error instanceof Error ? error.message : "";
-  if (/Cannot find context with specified id/.test(message))
+  if (
+    /Cannot find context with specified id|Node with given id does not belong to the document/.test(
+      message,
+    )
+  )
     return new ContextLostError(false);
   if (
     /Execution context was destroyed|Inspected target navigated or closed/.test(
@@ -407,6 +414,23 @@ export class TabSession {
     const reply = await this.send<FrameTree>("Page.getFrameTree", {}, step);
     this.registry.seed(reply.frameTree);
     return reply.frameTree.frame.id;
+  }
+
+  // The tab's frames as the registry holds them, main frame first and
+  // parents before their children, without the page work a path needs.
+  async knownFrames(step: Step): Promise<KnownFrame[]> {
+    await this.mainFrameId(step);
+    return this.registry.list().map((frame) => ({
+      frameId: frame.frameId,
+      ...(frame.parentFrameId === undefined
+        ? {}
+        : { parentFrameId: frame.parentFrameId }),
+      origin: frame.origin,
+      ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
+      crossOrigin: this.registry.crossOrigin(frame.frameId),
+      blocked: frame.blocked,
+      unavailable: frame.unavailable,
+    }));
   }
 
   // The tab's frames with the index paths snapshots print. A frame whose

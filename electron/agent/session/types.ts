@@ -50,6 +50,17 @@ export interface FrameInfo {
   unavailable?: true;
   blocked?: true;
 }
+// A frame as the registry holds it, for callers that read each frame
+// themselves instead of the index paths frames() works out.
+export interface KnownFrame {
+  frameId: string;
+  parentFrameId?: string;
+  origin: string;
+  sessionId?: string;
+  crossOrigin: boolean;
+  blocked: boolean;
+  unavailable: boolean;
+}
 export interface DialogInfo {
   type: "alert" | "confirm" | "prompt" | "beforeunload";
   message: string;

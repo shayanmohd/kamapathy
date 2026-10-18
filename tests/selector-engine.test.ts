@@ -5,11 +5,39 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Query } from "../electron/agent/dom/select";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  axSources,
+  matchRole,
+  readAx,
+  resetAccessibility,
+} from "../electron/agent/accessibility";
+import type { Query, WaitState } from "../electron/agent/dom/select";
+import { RefBook } from "../electron/agent/refs";
+import {
+  createResolver,
+  waitMode,
+  type Resolver,
+} from "../electron/agent/resolve";
 import { parseSelector } from "../electron/agent/selectors";
+import { EventBufferPool } from "../electron/agent/session/event-buffer";
 import { PAGE_SOURCE } from "../electron/agent/session/operations";
+import { TabSession } from "../electron/agent/session/tab-session";
 import type { PageOperation } from "../electron/automation-dom";
+import {
+  chromiumAvailable,
+  launchChromium,
+  type ChromiumBrowser,
+  type ChromiumPage,
+} from "./cdp-socket";
 import { selectorPages } from "./fixtures/selector-pages.mjs";
 
 const executable = chromium.executablePath();
@@ -606,3 +634,238 @@ describe.skipIf(!browserAvailable)("selector engine in Chromium", () => {
     });
   }, 30000);
 });
+
+// role= is resolved in the main process, so these run the resolver and the
+// accessibility filter against a real tab session over a raw DevTools
+// socket, where shadow roots, frames and Chromium's own roles are real.
+describe.skipIf(!chromiumAvailable)(
+  "role selectors through a tab session",
+  () => {
+    let site: Server;
+    let origin: string;
+    let browser: ChromiumBrowser;
+    let tab: ChromiumPage | undefined;
+    let session: TabSession | undefined;
+    let refs: RefBook;
+    let resolver: Resolver;
+    beforeAll(async () => {
+      site = createServer((request, response) => {
+        const html =
+          selectorPages[new URL(request.url || "/", "http://x").pathname];
+        response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
+        response.end(html || "");
+      });
+      await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+      origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+      browser = await launchChromium();
+    }, 60000);
+    afterEach(async () => {
+      await session?.release();
+      await tab?.close();
+      session = undefined;
+      tab = undefined;
+    });
+    afterAll(async () => {
+      await browser?.close();
+      site?.close();
+    });
+    const step = () => ({ deadline: Date.now() + 15000 });
+    // A session on the page with the resolver the routes use, once every
+    // frame has loaded.
+    const load = async (path: string, frames = 1) => {
+      tab = await browser.newPage();
+      refs = new RefBook();
+      resolver = createResolver({ refs });
+      const opened = new TabSession(tab.host, {
+        tabId: "tab-1",
+        waitForSpaceIdle: async () => {},
+        buffer: new EventBufferPool().create("tab-1"),
+      });
+      session = opened;
+      opened.attach();
+      await opened.send("Page.navigate", { url: origin + path }, step());
+      await vi.waitFor(
+        async () => {
+          const main = await opened.mainFrameId(step());
+          expect(
+            await opened.evaluateInFrame(
+              main,
+              "ready",
+              {},
+              { ...step(), namespace: "internal" },
+            ),
+          ).toEqual({ ok: true, readyState: "complete" });
+          expect(await opened.frames(step())).toHaveLength(frames);
+        },
+        { timeout: 15000, interval: 100 },
+      );
+      return opened;
+    };
+    const astOf = (selector: string) => {
+      const parsed = parseSelector(selector);
+      if (!parsed.ok) throw new Error(`${selector}: ${parsed.problem.message}`);
+      if (parsed.ast.kind === "ref") throw new Error(`${selector} is a ref`);
+      return parsed.ast;
+    };
+    // A target the way the server sends one, with the mode and level the
+    // resolver fills in unless the caller is a wait.
+    const run = (
+      operation: PageOperation,
+      selector: string,
+      extra: Partial<Omit<Query, "ast">> = {},
+      payload: Record<string, unknown> = {},
+    ) =>
+      resolver.run(
+        "tab-1",
+        session!,
+        operation,
+        { ...payload, selector, query: { ast: astOf(selector), ...extra } },
+        { deadline: Date.now() + 15000, namespace: "roles" },
+      );
+    const waiting = (selector: string, state: WaitState) => ({
+      ...waitMode(astOf(selector), state),
+      state,
+    });
+    const read = async (expression: string) => {
+      const main = await session!.mainFrameId(step());
+      const { sessionId, contextId } = await session!.world(main, step());
+      const reply = await session!.send<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression, contextId, returnByValue: true },
+        { sessionId, deadline: Date.now() + 10000 },
+      );
+      return reply.result?.value;
+    };
+    // Which element holds focus, named from its own tree.
+    const focused = () =>
+      read(
+        `(() => { const top = document.activeElement; if (!top) return ""; if (top.shadowRoot) return "shadow:" + (top.shadowRoot.activeElement || {}).id; if (top.localName === "iframe") return "frame:" + ((top.contentDocument || {}).activeElement || {}).id; return top.id })()`,
+      );
+
+    it("matches role names exactly and by part", async () => {
+      const opened = await load("/selectors/roles", 2);
+      // An exact name is Chromium's computed name, case and all.
+      expect(await run("focus", 'role=button[name="Save"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("save");
+      expect(await run("focus", 'role=button[name="save"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("saveLower");
+      expect(await run("focus", 'role=button[name="SAVE"]')).toMatchObject({
+        ok: false,
+        code: "no_match",
+      });
+      // A computed name holding U+00A0 needs it written; a part is normalized.
+      expect(
+        await run("focus", 'role=button[name="Keep draft"]'),
+      ).toMatchObject({
+        ok: false,
+        code: "no_match",
+      });
+      expect(
+        await run("focus", 'role=button[name="Keep draft"]'),
+      ).toMatchObject({ ok: true });
+      expect(await focused()).toBe("keep");
+      expect(
+        await run("focus", 'role=button[name*="keep draft"]'),
+      ).toMatchObject({ ok: true });
+      expect(await focused()).toBe("keep");
+      // Open shadow content and a same-origin frame are found and act.
+      expect(
+        await run("focus", 'role=button[name*="shadow sav"]'),
+      ).toMatchObject({ ok: true });
+      expect(await focused()).toBe("shadow:shadowSave");
+      expect(
+        await run("focus", 'role=button[name="Frame save"]'),
+      ).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("frame:frameSave");
+      // Without a name every button counts, through the aliases.
+      expect(await run("focus", "role=button")).toMatchObject({
+        ok: false,
+        code: "ambiguous_match",
+        fields: { count: 7, visible: 7, hidden: 0 },
+      });
+      expect(await run("focus", 'role=button[name="More"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("summary");
+      expect(
+        await run("check", "role=cell", waiting("role=cell", "visible"), {
+          text: "Cell one",
+        }),
+      ).toEqual({ ok: true, matched: true });
+      expect(await run("focus", 'role=textbox[name="Notes"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("notes");
+      expect(await run("target", 'role=img[name="Logo"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await run("focus", 'role=textfield[name="Field"]')).toMatchObject({
+        ok: true,
+      });
+      expect(await focused()).toBe("field");
+      // The alias reaches both options of the list, and the name one.
+      const option = 'role=ListBoxOption[name="Red"]';
+      expect(await run("check", option, waiting(option, "visible"))).toEqual({
+        ok: true,
+        matched: true,
+      });
+      const options = "role=listboxoption";
+      expect(
+        await run("check", options, waiting(options, "visible")),
+      ).toMatchObject({
+        ok: false,
+        code: "ambiguous_match",
+        fields: { count: 2 },
+      });
+      // The closed shadow button and the date input's own parts are in the
+      // tree and resolve into the world, and the page drops both.
+      const sources = axSources(
+        await opened.knownFrames(step()),
+        await opened.mainFrameId(step()),
+      );
+      const entries = await readAx(opened, sources, step());
+      await resetAccessibility(opened, [undefined]);
+      expect(
+        matchRole(entries, "button", { value: "Sealed save", match: "exact" }),
+      ).toHaveLength(1);
+      expect(matchRole(entries, "spinbutton").length).toBeGreaterThan(0);
+      expect(
+        await run("focus", 'role=button[name="Sealed save"]'),
+      ).toMatchObject({ ok: false, code: "no_match" });
+      expect(await run("focus", "role=spinbutton")).toMatchObject({
+        ok: false,
+        code: "no_match",
+      });
+      // Nothing read a user agent shadow root's mode: the renderer answers.
+      expect(await read("1 + 1")).toBe(2);
+    }, 60000);
+
+    it("fails an ambiguous role= wait at once while raw CSS takes the first match", async () => {
+      await load("/selectors/role-twins");
+      const name = 'role=button[name="Save"]';
+      const ambiguous = await run("check", name, waiting(name, "visible"));
+      expect(ambiguous).toMatchObject({
+        ok: false,
+        code: "ambiguous_match",
+        fields: { count: 3, visible: 2, hidden: 1 },
+      });
+      // The candidates carry refs the book counts as this tab's.
+      const candidates = (ambiguous.fields as { candidates: { ref: string }[] })
+        .candidates;
+      expect(candidates).toHaveLength(3);
+      for (const candidate of candidates)
+        expect(refs.classify("tab-1", candidate.ref)).toBe("live");
+      expect(
+        await run("check", "button", waiting("button", "visible"), {
+          text: "First copy",
+        }),
+      ).toEqual({ ok: true, matched: true });
+    }, 60000);
+  },
+);

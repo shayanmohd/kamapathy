@@ -3144,6 +3144,58 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     expect(opened.session.state).toBe("ready");
     return opened;
   }
+  it("knownFrames lists the registry's frames with crossOrigin, blocked and unavailable, main frame first", async () => {
+    const { session, cdp } = await framed();
+    expect(await session.knownFrames(soon())).toEqual([
+      {
+        frameId: "main",
+        origin: "https://example.com",
+        crossOrigin: false,
+        blocked: false,
+        unavailable: false,
+      },
+      {
+        frameId: "frame-in",
+        parentFrameId: "main",
+        origin: "https://example.com",
+        crossOrigin: false,
+        blocked: false,
+        unavailable: false,
+      },
+      {
+        frameId: "frame-ext",
+        parentFrameId: "main",
+        origin: `chrome-extension://${PDF_VIEWER_ID}`,
+        crossOrigin: true,
+        blocked: true,
+        unavailable: false,
+      },
+      {
+        frameId: "frame-oop",
+        parentFrameId: "main",
+        origin: "https://frame.example",
+        sessionId: "child-1",
+        crossOrigin: true,
+        blocked: false,
+        unavailable: false,
+      },
+    ]);
+    // A frame whose session ended has no session and is unavailable.
+    cdp.event("Target.detachedFromTarget", {
+      sessionId: "child-1",
+      targetId: "frame-oop",
+    });
+    await settle();
+    expect((await session.knownFrames(soon())).at(-1)).toEqual({
+      frameId: "frame-oop",
+      parentFrameId: "main",
+      origin: "https://frame.example",
+      crossOrigin: true,
+      blocked: false,
+      unavailable: true,
+    });
+  });
+
   const opening = (
     type: string,
     message: string,
@@ -3158,7 +3210,7 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     defaultPrompt,
   });
 
-  it("refuses Input, Runtime, DOM.setFileInputFiles, Page.navigate and Page.reload with started false while a dialog is open, rejects in-flight ones with started true, and always allows handleDialog on the reporting session", async () => {
+  it("refuses Input, Runtime, DOM, Accessibility, Page.navigate, Page.reload, Page.captureScreenshot and Page.getLayoutMetrics with started false while a dialog is open, rejects in-flight ones with started true, and always allows handleDialog on the reporting session", async () => {
     const { session, cdp } = await framed();
     cdp.holdReplies = true;
     // An alert opened by a click handler holds that click's reply.
@@ -3172,6 +3224,8 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     const read = track(
       session.send("Runtime.evaluate", { expression: "1" }, soon("child-1")),
     );
+    const roles = track(session.send("Accessibility.getFullAXTree", {}, soon()));
+    const shot = track(session.send("Page.captureScreenshot", {}, soon()));
     const tree = track(session.send("Page.getFrameTree", {}, soon()));
     cdp.event(
       "Page.javascriptDialogOpening",
@@ -3186,7 +3240,7 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       sessionId: "child-1",
     };
     expect(session.dialog()).toEqual(dialog);
-    for (const inFlight of [click, read]) {
+    for (const inFlight of [click, read, roles, shot]) {
       expect(inFlight.error).toBeInstanceOf(DialogOpenError);
       expect(inFlight.error).toMatchObject({ dialog, started: true });
     }
@@ -3202,8 +3256,15 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       ["Runtime.evaluate", "child-1"],
       ["Runtime.callFunctionOn", undefined],
       ["DOM.setFileInputFiles", undefined],
+      ["DOM.resolveNode", undefined],
+      ["DOM.getFrameOwner", undefined],
+      ["Accessibility.getFullAXTree", "child-1"],
+      ["Accessibility.enable", undefined],
+      ["Accessibility.disable", undefined],
       ["Page.navigate", undefined],
       ["Page.reload", undefined],
+      ["Page.captureScreenshot", undefined],
+      ["Page.getLayoutMetrics", undefined],
     ] as const) {
       const dispatch = { dispatched: false };
       const refused = session.send(method, {}, { ...soon(sessionId), dispatch });
