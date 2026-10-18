@@ -211,16 +211,19 @@
         <span class="step-number" aria-hidden="true">1</span>
         <div>
           <h3>Download and open</h3>
-          <p>Get the build for your computer. The first launch offers to import your bookmarks and history, then helps you sign in once.</p>
+          <p>Get the build for your computer, or install it with one command. The first launch offers to import your bookmarks and history, then helps you sign in once.</p>
+          <div class="code-line"><code>curl -fsSL https://kamapathy.app/install.sh | sh</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
+          <div class="code-line"><code>powershell -NoProfile -Command "irm https://kamapathy.app/install.ps1 | iex"</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
+          <p class="hint">The first command is for macOS and Linux, the second for Windows. Each takes the newest release, checks it against that release's SHA-256 sums and opens Kamapathy.</p>
         </div>
       </li>
       <li class="step">
         <span class="step-number" aria-hidden="true">2</span>
         <div>
-          <h3>Add the skill</h3>
-          <p>One command teaches your agent how to use Kamapathy.</p>
+          <h3>Set up your agents</h3>
+          <p>In Kamapathy, open <b>Set up agents</b> from Settings or the menu. It gives the agents on this computer the skill that matches your browser, and an optional <code>kamapathy</code> command. Nothing changes until you choose Set up.</p>
           <div class="code-line"><code>npx skills add shayanmohd/kamapathy</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
-          <p class="hint">Or run <code>npm run skill:install</code> from a checkout. Every release also carries the skill as a ZIP.</p>
+          <p class="hint">That command adds the skill yourself instead. In Claude Code you can also run <code>/plugin marketplace add shayanmohd/kamapathy</code> and then <code>/plugin install kamapathy@kamapathy</code>, or run <code>npm run skill:install</code> from a checkout. Every release also carries the skill as a ZIP.</p>
         </div>
       </li>
       <li class="step">
@@ -352,7 +355,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
     <ul class="compare-notes">
       <li><b>Automation libraries</b> are tools you drive from code, such as Playwright based tools. They launch a browser of their own, so your daily browsing and sign-ins stay elsewhere unless you wire them in.</li>
       <li><b>AI browsers with a built in assistant</b> ship one agent as part of the product. Bringing your own agents, or several at once, depends on what each one allows.</li>
-      <li>Every row describes Kamapathy as it is today. Not there yet: browser extensions, a password manager, sync, an ad blocker, DRM playback, signed installers, automatic updates and an independent security audit.</li>
+      <li>Every row describes Kamapathy as it is today. Not there yet: browser extensions, a password manager, sync, an ad blocker, DRM playback, signed installers, self-installing updates and an independent security audit.</li>
     </ul>
   </section>
 
@@ -460,6 +463,10 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
         <p>No. Kamapathy is the browser your agent uses. Add the skill with <code>npx skills add shayanmohd/kamapathy</code>, or call the Node.js client from any agent that can run a command. There's no subscription and nothing to sign up for.</p>
       </details>
       <details>
+        <summary>What does Set up agents change on my computer?</summary>
+        <p>Only what you tick. It keeps Kamapathy's own copy of the skill in a private folder and links that folder into the skills folder of each agent you chose, so the skill always matches your browser. It can also add a <code>kamapathy</code> command to your PATH, and a separate, unticked option lets Codex run that command without asking you first. Nothing happens until you choose <b>Set up</b>, and <b>Remove setup</b> takes every change back.</p>
+      </details>
+      <details>
         <summary>Can an agent see my own tabs or accounts?</summary>
         <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
       </details>
@@ -479,9 +486,9 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
         <summary>Why does my computer warn me when I open it?</summary>
         <p>The preview builds aren't signed with a paid Apple or Microsoft certificate yet, so macOS and Windows ask you to confirm the first launch. The <a href="#install">steps above</a> take a few seconds, and every release lists SHA-256 checksums you can check the download against.</p>
       </details>
-      <details>
+      <details id="privacy">
         <summary>Does Kamapathy collect any data?</summary>
-        <p>No. There's no account, no analytics and no telemetry. Your history, bookmarks and spaces stay on your computer.</p>
+        <p>No. There's no account, no analytics and no telemetry. Your history, bookmarks and spaces stay on your computer. Once a day it asks GitHub whether a newer version exists, which you can turn off in Settings.</p>
       </details>
     </div>
   </section>

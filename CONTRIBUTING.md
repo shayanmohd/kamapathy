@@ -9,6 +9,8 @@ Kamapathy is a small desktop browser with a shared React interface and an Electr
 3. Run `npm run dev` for the desktop application or `npm run dev:web` for interface work.
 4. Read the [architecture](docs/architecture.md) before changing IPC, sessions, persistence, or automation.
 
+The repository commits two links, `.claude/skills/kamapathy` and `.agents/skills/kamapathy`, so an agent working here finds Kamapathy's skill. Git writes them as real links on Windows only with `core.symlinks` enabled: clone with `git clone -c core.symlinks=true`, or run `git config core.symlinks true` and check those two paths out again. Without it each one arrives as a text file and no agent loads the skill.
+
 The native app uses a local browser profile. Use test accounts while changing session or storage behavior. Desktop smoke tests use their own temporary profile.
 
 ## Make a focused change

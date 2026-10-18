@@ -9,9 +9,9 @@ Use the bundled Node.js client to operate Kamapathy on macOS, Windows, or Linux.
 
 ## Connect and inspect
 
-Resolve `scripts/kamapathy.mjs` relative to this skill directory. Examples below run from that directory; use the helper's absolute path when working elsewhere. Where Kamapathy's messages say `kamapathy <command>`, run `node scripts/kamapathy.mjs <command>`.
+Run `kamapathy <command>` when the `kamapathy` command is on PATH; Kamapathy's Set up agents adds it. Otherwise resolve `scripts/kamapathy.mjs` relative to this skill directory and run `node scripts/kamapathy.mjs <command>`. Examples below run from that directory; use the helper's absolute path when working elsewhere.
 
-Run `node scripts/kamapathy.mjs health`. The client connects automatically: it finds Kamapathy on this computer and starts it when agent access was left on. There is no token or setup step. To use a different Kamapathy profile, set `KAMAPATHY_USER_DATA` to that profile's folder. If the client reports that agent access is off, ask the person to turn it on in Kamapathy's Settings, under Agents; never try to work around it. Read [connection.md](references/connection.md) for failures. Do not enable browser-wide debugging. `node scripts/kamapathy.mjs help <command>` explains a command, and `--version` shows the client's, the skill's and Kamapathy's versions.
+Run `node scripts/kamapathy.mjs health`. The client connects automatically: it finds Kamapathy on this computer and starts it when agent access was left on. There is no token or setup step. To use a different Kamapathy profile, set `KAMAPATHY_USER_DATA` to that profile's folder. If the client reports that agent access is off, ask the person to turn it on in Kamapathy's Settings, under Agents; never try to work around it. If it reports that Kamapathy is not installed, read [install.md](references/install.md) and ask the person before installing anything. Read [connection.md](references/connection.md) for failures. Do not enable browser-wide debugging. `node scripts/kamapathy.mjs help <command>` explains a command, and `--version` shows the client's, the skill's and Kamapathy's versions.
 
 Open a task space and use its first page:
 
@@ -56,3 +56,7 @@ Snapshots read through open shadow roots and same-origin iframes; a frame from a
 ## When something fails
 
 Retry a failed command or call only when its error has `retryable: true`; the CLI then prints `Kamapathy: Nothing reached the page, so the same command can be retried.` When it has `dispatched: true`, the action reached the page before it failed, so inspect the page first. On `app_outdated`, ask the person to update Kamapathy and never work around it. After a skill notice, a `notice:` line that names a SKILL.md to read, read that SKILL.md before going on.
+
+## Updates
+
+After a `notice: update_available` line, finish the task and tell the person. Run `kamapathy upgrade` (`node scripts/kamapathy.mjs upgrade`) only with their approval. It only downloads the installer, because installing quits Kamapathy and closes agent spaces. After a `notice: update_ready` line, tell the person they can install it from Settings, under Updates. Read this skill again after an update.

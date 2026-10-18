@@ -164,6 +164,20 @@ Download the latest build from **[kamapathy.app](https://kamapathy.app)**, which
 
 Every release also carries the agent skill as a ZIP and a `SHA256SUMS.txt` file for checking downloads.
 
+One command installs it instead. It takes the newest release, checks the download against that release's `SHA256SUMS.txt` and opens Kamapathy, without sudo on macOS. On macOS and Linux:
+
+```sh
+curl -fsSL https://kamapathy.app/install.sh | sh
+```
+
+On Windows:
+
+```powershell
+powershell -NoProfile -Command "irm https://kamapathy.app/install.ps1 | iex"
+```
+
+Both take `--dir <folder>` and `--no-open`, the Linux script takes `--deb` for the Debian package, and the Windows script takes `-NoRun` to verify the installer without running it.
+
 <details>
 <summary><strong>Opening it the first time</strong>: this preview isn't signed with a paid certificate yet</summary>
 <br />
@@ -177,6 +191,8 @@ Every release also carries the agent skill as a ZIP and a `SHA256SUMS.txt` file 
 </details>
 
 On first launch Kamapathy offers to bring over your bookmarks and history from another browser on this computer, then shows your top sites so you can sign in once. Both are optional, and the import is always there later under **Settings > Browsing**.
+
+Once a day Kamapathy asks GitHub Releases for a newer version, sending no ID or usage data, and can download its installer for you to open. Turn this off in Settings, under Updates.
 
 ## Bring your own agent
 
@@ -200,7 +216,9 @@ sequenceDiagram
     Note over Y,K: Take over or Stop at any time
 ```
 
-Install the skill in whichever way suits you:
+The quickest way is **Set up agents**, in Settings under Agents, in the ⋯ menu or in the Help menu. It finds the agents on this computer, gives the ones you tick Kamapathy's own copy of the skill, which every start keeps in step with the browser, and can add a `kamapathy` command to your PATH so `kamapathy health` works in any terminal. Nothing changes until you choose **Set up**, and **Remove setup** takes it all back.
+
+Or install the skill yourself:
 
 ```sh
 npx skills add shayanmohd/kamapathy
@@ -212,6 +230,13 @@ Or download `Kamapathy-skill-<version>.zip` from the [latest release](https://gi
 npm ci
 npm run skill:install                                          # Codex
 npm run skill:install -- --destination ~/.claude/skills/kamapathy   # Claude Code
+```
+
+In Claude Code it is also a plugin:
+
+```text
+/plugin marketplace add shayanmohd/kamapathy
+/plugin install kamapathy@kamapathy
 ```
 
 Then ask your agent to use Kamapathy. It connects on its own, with no token to copy, and starts Kamapathy if it isn't running. For a task with many steps, the agent writes one script instead of one command per step:
@@ -263,6 +288,7 @@ Controls:
 - Snapshots are compact: visible text plus controls with short refs such as `@e12`, their state and current values. Password, one-time code and card fields read as `(value hidden)`. Snapshots read open shadow roots and same-origin frames, nested ones included, and list cross-origin frames without reading them.
 - Agents can click, fill, select files, press keys, drag, scroll, wait for changes and run several steps in one batch or one script.
 - Cross-origin frames, canvas editors and JavaScript dialogs still need a handoff: the agent asks you to continue there.
+- Agents can download an update with `upgrade`; only you install it.
 - The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. **Stop** in the agent bar ends the agent's access to that one space, and turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
 
 The [agent guide](docs/automation.md) covers every command and its limits, and the [security model](docs/SECURITY.md) explains the trust boundary.
@@ -291,6 +317,15 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - A failed run prints where in the script it failed, a caret under a syntax error, whether the call can be retried and up to two hints.
 - `run` and `repl` load the workspace's `.env` and each `--env-file`, never changing a variable that is already set.
 - `<command> --help` and `-h` print that command's help and run nothing, and `--` ends option parsing.
+- Running the client through a linked skill folder now runs the command. Links made by `npx skills add` or by Set up agents used to exit 0 without doing anything.
+- Linux packages name the browser executable `kamapathy-browser`, so the `kamapathy` name belongs to the agent command. The client's Linux start runs `kamapathy-browser` from PATH, then `~/Applications/Kamapathy.AppImage`.
+- `/health` adds `skill: { path }` for the skill folder the app ships and, while an update waits, `update: { version, state }`. The API level is 3.
+- `health`, `run` and the REPL can print one `notice: update_available: ...` or `notice: update_ready: ...` line on stderr. Output and exit statuses are unchanged.
+- `upgrade` checks for a newer Kamapathy and downloads its installer, with `--check`, `--timeout <ms>` and `--json`. It never installs: only the person does that.
+- Kamapathy makes one new outbound request: once a day it asks GitHub Releases for a newer version, with no ID or usage data. It is on by default and switchable in Settings, under Updates.
+- Help usage and examples say `kamapathy` when you run the command Set up agents adds, and `node scripts/kamapathy.mjs` otherwise.
+- The ⋯ menu gains **Set up agents** and **Help** after Settings, and **Update Kamapathy** at the top while an update waits. The command menu gains Set up agents, Help, Privacy and Report an issue, and every platform now has a Help menu.
+- A packaged macOS build started from a disk image offers to move itself to Applications before the window opens.
 
 </details>
 
@@ -375,7 +410,7 @@ Kamapathy's trust boundary is your operating system account. Web pages run sandb
 
 ## What's not here yet
 
-Kamapathy is an early preview. Browser extensions, a password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed and don't update themselves, and Kamapathy hasn't had an independent security audit. If Google rejects a sign-in, Kamapathy offers to continue in your default browser instead.
+Kamapathy is an early preview. Browser extensions, a password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed yet, so Kamapathy can download updates but never installs them itself, and Kamapathy hasn't had an independent security audit. If Google rejects a sign-in, Kamapathy offers to continue in your default browser instead.
 
 ## Contributing
 

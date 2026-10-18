@@ -33,6 +33,8 @@ The agent server lives in `electron/agent/`. `server.ts` listens on the private 
 
 `authority.ts` decides for every request whether the agent may use a space and a page: agent access must be on, the space must be one this server created or the person granted and whose access has not ended, the agent must have control for most routes, and page routes need a page the agent manages. `tab-registry.ts`, held by the controller, gives tabs their labels, origins and managed flags, counts each space's page budget, keeps the last 100 closed labels and records what changed while the person had control. `validate.ts` checks each body against the schema in `skills/kamapathy/scripts/schema/`, which electron-vite bundles into the main process, before the request waits for its lane. The routes in `routes/spaces.ts`, `routes/tabs.ts` and `routes/space-requests.ts` run on that scheduler, except waits for control and requests for a space, which wait outside the lanes. A personal space is granted only from the person's own click in the shell, through validated IPC, never from the API.
 
+`electron/agent/setup/` sits beside the server and touches no browser state. It copies the skill that ships in the app's resources into a private tools folder, keyed by version and a digest of the skill's files, points a stable `skill` folder at that copy, writes the optional `kamapathy` launcher and links the stable folder into the skills folders of the agents the person ticked. Every piece takes an injected environment and runner, so tests drive it with temporary homes. `electron/updates.ts` holds the updater: the daily release check, the verified download and the person's install, with `electron/update-release.ts` as its pure logic for install kinds, installer names, release picking and checksum parsing. The updater keeps the installer on disk and leaves opening it to the person.
+
 ## State and sessions
 
 `shared/types.ts` defines the browser state, spaces, tabs, settings, actions, and bridge contract. `shared/url.ts` normalizes addresses and search text while rejecting unsupported schemes and URL credentials. Native navigation also validates destinations.
@@ -41,7 +43,7 @@ Spaces share one persistent Electron session partition by default, `persist:spac
 
 Agent state lives only while Kamapathy runs. Labels, origins, page budgets, grants, ended states and requests for a space are runtime fields, and `electron/persistence.ts` writes only the saved fields of personal spaces and their tabs, so a grant never outlives the run. An agent space the person keeps after its agent finished or was stopped becomes a personal space and is saved and restored like any other; one with separate sign-ins moves from its temporary partition to `persist:space-<id>`, and its pages reload there.
 
-The application persists personal spaces and tabs, bookmarks, personal browsing history, and settings in `browser-state.json` in its Electron user data directory. `KAMAPATHY_USER_DATA` can override that directory for testing. Writes use a temporary file and rename. Restored state is validated before use. Downloads and the live activity feed are runtime state. Agent visits are excluded from the saved history. Bookmarks and history imported from another browser go through `electron/import.ts`, a Node module that reads Chromium, Firefox, and Safari files, and merge into the same state deduplicated by URL and capped at 1000 each; `shared/topsites.ts` ranks that history for the welcome dialog. Chromium maintains page storage separately from the JSON application state. See [Electron's session documentation](https://www.electronjs.org/docs/latest/api/session) for partition behavior.
+The application persists personal spaces and tabs, bookmarks, personal browsing history, and settings in `browser-state.json` in its Electron user data directory. `KAMAPATHY_USER_DATA` can override that directory for testing. The file also records the daily update check's result and the version the person last saw, so a profile saved before updates existed shows What's new once. Writes use a temporary file and rename. Restored state is validated before use. Downloads and the live activity feed are runtime state. Agent visits are excluded from the saved history. Bookmarks and history imported from another browser go through `electron/import.ts`, a Node module that reads Chromium, Firefox, and Safari files, and merge into the same state deduplicated by URL and capped at 1000 each; `shared/topsites.ts` ranks that history for the welcome dialog. Chromium maintains page storage separately from the JSON application state. See [Electron's session documentation](https://www.electronjs.org/docs/latest/api/session) for partition behavior.
 
 Agent spaces start on the shared session unless isolated, so an agent can use the sites the person has signed in to, in a space the person can see. API operations are restricted to spaces created through the current server instance or explicitly granted by the user in Kamapathy, including personal spaces, which follow agent rules while granted. Ownership controls whether the automation API may operate a space. Taking control changes ownership to the human and prevents subsequent agent reads and actions on that space until the human returns control or the agent takes it back through the API's resume route. The person's Stop ends the agent's access to one space, and turning agent access off stops all automation. The [automation reference](automation.md) documents the API boundary in detail.
 
@@ -59,20 +61,27 @@ The GitHub workflow uses four native runners: macOS ARM64, macOS x64, Windows x6
 
 The Debian packager needs project homepage metadata and a maintainer. The config declares Kamapathy contributors as maintainer, and `package.json` declares the repository homepage. Update that field when packaging a fork. Keeping the value in package metadata also avoids shell-specific parsing of dotted command-line overrides.
 
-Signing and publishing are disabled in the development configuration. macOS also disables hardened runtime for these unsigned development bundles. Before a production release, configure a valid signing identity, enable hardened runtime with appropriate entitlements, add notarization, and validate the resulting artifact. See the [macOS signing settings](https://www.electron.build/v26/docs/mac/). Windows signing and a maintained update mechanism are also future release work.
+`extraResources` copies `skills/kamapathy` into the packaged app, so the browser can give agents a copy of the skill that matches it. Linux packages name the browser executable `kamapathy-browser`, leaving the `kamapathy` name to the agent command.
+
+Signing and publishing are disabled in the development configuration. macOS also disables hardened runtime for these unsigned development bundles. `electron-builder.signed.yml` extends the base configuration with a Developer ID identity, hardened runtime, notarization and entitlements on macOS and Azure Trusted Signing on Windows; CI packages with it only when the signing secrets exist, and then verifies the signatures. See the [macOS signing settings](https://www.electron.build/v26/docs/mac/). Windows signing is also future release work.
 
 ## Project map
 
 | Path                                 | Responsibility                                                           |
 | ------------------------------------ | ------------------------------------------------------------------------ |
 | `src/`                               | Shared browser UI, dialogs, command palette, styling, web preview bridge |
+| `src/whats-new.ts`                   | Bundled release notes shown after an update                              |
 | `shared/`                            | Data contracts, initial state, address handling                          |
 | `shared/topsites.ts`                 | Ranks history and bookmarks into the welcome dialog's top sites          |
 | `electron/`                          | Native browser, preload, persistence                                     |
 | `electron/agent/`                    | Agent socket server, per-space lanes, routes and tab sessions            |
+| `electron/agent/setup/`              | Skill copies, agent links, the kamapathy command                         |
+| `electron/updates.ts`                | Daily release check, verified download, the person's install             |
+| `electron/update-release.ts`         | Install kinds, installer names, release picking, checksums               |
 | `electron/import.ts`                 | Reads bookmarks and history from other browsers, without Electron        |
 | `skills/kamapathy/`                  | Agent skill: CLI, scripting client, run and repl                         |
 | `skills/kamapathy/scripts/schema/`   | One schema for client checks, server checks, help and the API reference  |
+| `skills/kamapathy/scripts/install.sh` | Installs the newest release for this account, with install.ps1           |
 | `scripts/`                           | Native smoke test, copy validation, development helpers                  |
 | `scripts/generate-api-reference.mjs` | Writes the API reference and the automation guide's generated tables     |
 | `tests/`                             | Behavior and boundary tests                                              |
@@ -84,4 +93,4 @@ Signing and publishing are disabled in the development configuration. macOS also
 
 Electron makes one maintainable browser implementation possible across three desktop platforms, with the distribution size of an embedded Chromium runtime. Kamapathy does not claim lower memory use or faster browsing than established browsers.
 
-This version focuses on one browser window and a coherent human and agent workflow. It has no extension marketplace, sync service, password vault, built in model, or automatic updater. The visible interface and security boundaries are intended to be inspectable and testable, while a full production browser security review remains future work.
+This version focuses on one browser window and a coherent human and agent workflow. It has no extension marketplace, sync service, password vault, built in model, or self-installing updater. The visible interface and security boundaries are intended to be inspectable and testable, while a full production browser security review remains future work.

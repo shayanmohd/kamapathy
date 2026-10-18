@@ -2,6 +2,8 @@
 
 The desktop build workflow tests and packages four native targets. Publishing is a separate manual operation so a source push does not publish installers.
 
+Before building the version you plan to publish, add its entry to `src/whats-new.ts`. The What's new dialog reads those notes from the app, not from the release, so a version without an entry shows nothing after an update.
+
 1. Review a successful **Build desktop apps** run from this repository's `main` or `master` branch. Record its numeric run ID and full commit SHA.
 2. Create a draft release named `vVERSION`, matching that commit's `package.json`. Set the draft target to the full reviewed commit SHA and write the release notes. The draft must contain only the expected Kamapathy installer files, skill ZIP, or checksums.
 3. Run **Actions > Publish reviewed draft > Run workflow**, providing that native build run ID.
@@ -11,6 +13,14 @@ The publishing job checks the build's repository, workflow, branch, event, commi
 It uploads files to the matching unpublished draft and verifies GitHub's asset sizes and SHA-256 digests before publishing it as a prerelease. It can replace expected files in that draft, which makes a failed upload recoverable. It refuses to modify an already published release, publish incomplete artifacts, or reuse a tag pointing at another commit. Unrelated draft assets cause a failure instead of deletion.
 
 This workflow transfers installers within GitHub's infrastructure, avoiding dependence on a developer device uploading large binaries. It uses a temporary Actions token with repository content write and Actions read access. It does not execute the downloaded installers or request any personal credentials.
+
+## Updates and signing
+
+The installer names `scripts/publish-release.mjs` enforces are an update contract. Kamapathy's updater asks GitHub for the newest release, picks the asset whose name matches this computer's install kind and the release's version, and checks it against that release's `SHA256SUMS.txt` and GitHub's digest. Renaming an asset hides the update from copies already installed, so keep the names as they are.
+
+Every release this workflow publishes reaches everyone. Copies with update checks on find it within a day and offer to download it, there is no staged rollout, and a published release cannot be recalled, so publish only a build that has been run on each platform.
+
+Signing is configured and dormant. `electron-builder.signed.yml` holds the macOS identity, notarization and entitlements and the Windows Azure Trusted Signing profile. The build workflow decides to sign when the secrets exist, `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` for macOS or `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` for Windows, and then runs **Verify signatures**. Set the repository variable `KAMAPATHY_SIGNED_RELEASES` to `true` once signing is in place: publishing then requires that step on the macOS and Windows jobs, beside **Test install scripts** and **Verify bundled skill**, which every job must pass.
 
 ## The website
 

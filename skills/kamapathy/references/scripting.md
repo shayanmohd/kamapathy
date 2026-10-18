@@ -47,7 +47,12 @@ Calls on different spaces run at the same time. Calls on one space run one at a 
 | `kamapathy.requestSpace({ reason, name?, timeout? })` | `Space` | `POST /space-requests`; asks the person for one of their spaces and waits up to `timeout` (5000 to 600000 ms, default 600000); `request_declined`, `request_timeout`, or `busy` with `retryAfterMs` |
 | `kamapathy.space(id)` | `Space` | `GET /spaces/:id`, also while the person has control (`GET /spaces` on an older Kamapathy); throws `space_not_found` when this API session cannot reach it |
 | `kamapathy.spaces()` | `Space[]` | `GET /spaces` |
-| `kamapathy.app` | `{ version?, apiLevel, electron?, chromium?, node? }` or `null` | None: the running Kamapathy, once the client has found it |
+| `kamapathy.app` | `{ version?, apiLevel, electron?, chromium?, node?, update? }` or `null` | None: the running Kamapathy, once the client has found it; `update` is `{ version, state }` while a newer version waits |
+| `kamapathy.updateStatus()` | `UpdateStatus` | `GET /update`; the install kind, the state, the newest release and any verified installer or error |
+| `kamapathy.checkForUpdates()` | `UpdateStatus` | `POST /update/check`; asks GitHub Releases, or returns the result of a check under 60 s old |
+| `kamapathy.downloadUpdate({ timeout?, interval? })` | `UpdateStatus` | `POST /update/download`, then `GET /update` until the download is ready or the copy is current; `timeout` 0 to 1800000 ms (default 600000, 0 returns once it starts), `interval` 250 to 10000 ms (default 1000) |
+
+A `run` prints one notice on stderr while a newer Kamapathy waits, `notice: update_available: ...` or `notice: update_ready: ...`, built from `kamapathy.app.update`. Finish the task first, then tell the person. `downloadUpdate` needs their approval and never installs; it throws the status's own error, such as `update_download_failed` or `update_verify_failed`, when the download stopped, and `timeout` when its wait ends while the download continues in Kamapathy.
 
 `pageBudget`, 1 to 20, is how many pages the agent may manage in the space at once, and `KAMAPATHY_PAGE_BUDGET` stands in for it when set. Without either, a new space gets 20 and a reused one keeps its budget.
 
