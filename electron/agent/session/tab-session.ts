@@ -283,6 +283,11 @@ export class TabSession {
   get attachCount(): number {
     return this.attaches;
   }
+  // The main frame the registry knows, undefined until a setup seeds it. A
+  // CDP listener is synchronous and cannot await mainFrameId.
+  get mainFrame(): string | undefined {
+    return this.registry.mainFrameId;
+  }
 
   attach(): void {
     if (
