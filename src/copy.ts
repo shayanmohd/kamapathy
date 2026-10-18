@@ -12,6 +12,7 @@ export const toolsMenuCopy = {
   settings: "Settings",
   "agent-setup": "Set up agents",
   help: "Help",
+  update: "Update Kamapathy",
 } as const;
 
 // Command palette entries for setup and help.
@@ -260,4 +261,53 @@ export const agentSetupCopy = {
   notSetUp: "Not set up yet",
   desktopOnly: "Available in the desktop app.",
   testProfile: "Agent setup is off for test profiles.",
+} as const;
+
+export const updatesCopy = {
+  heading: "Updates",
+  switch: "Check for updates",
+  switchNote:
+    "Once a day, Kamapathy asks GitHub for the newest release. It sends no ID or usage data.",
+  unchecked: "Not checked yet.",
+  current: (time: string) => `Kamapathy is up to date. Checked ${time}.`,
+  available: (version: string) => `Kamapathy ${version} is available.`,
+  downloading: (version: string, percent: number) =>
+    `Downloading Kamapathy ${version}... ${percent}%`,
+  ready: (version: string) => `Kamapathy ${version} is ready to install.`,
+  checkFailed: "Couldn't reach GitHub. Try again later.",
+  downloadStopped: "The download stopped. Try again.",
+  verifyFailed: "The download didn't match its checksum, so it was deleted.",
+  cancelled: "Download cancelled.",
+  source: "This copy runs from source. Pull the latest code to update it.",
+  noInstaller: "No installer is published for this computer yet.",
+  checkNow: "Check now",
+  download: "Download",
+  cancel: "Cancel",
+  install: "Install...",
+  releaseNotes: "Release notes",
+  whatsNew: "What's new",
+  installTitle: (version: string) => `Install Kamapathy ${version}`,
+  quitAndOpen: "Quit and open installer",
+  showInFolder: "Show in folder",
+  copyCommand: "Copy command",
+  notNow: "Not now",
+  agentSpaces: (count: number) =>
+    count === 1
+      ? "1 agent space is open. It closes when Kamapathy quits."
+      : `${count} agent spaces are open. They close when Kamapathy quits.`,
+  steps: {
+    portable: "Quit Kamapathy, replace your copy with this file, then open it.",
+    debian: "Quit Kamapathy, then run:",
+    mac: "Drag Kamapathy into Applications and replace the old copy, then open it. If macOS says it can't verify the app, click Open Anyway in System Settings > Privacy & Security.",
+    windows:
+      "Follow the setup, then open Kamapathy. If SmartScreen appears, click More info, then Run anyway.",
+  },
+} as const;
+
+export const whatsNewCopy = {
+  title: (version: string) => `What's new in Kamapathy ${version}`,
+  agents: "For your agents",
+  steps: "After updating",
+  gotIt: "Got it",
+  releaseNotes: "Release notes",
 } as const;

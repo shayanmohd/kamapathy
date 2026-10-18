@@ -12,6 +12,7 @@ import type {
   Theme,
 } from "../../shared/types";
 import { Modal } from "./ui";
+import { UpdatesSection } from "./Updates";
 import { bridge, isDesktop } from "../lib/bridge";
 import { agentSetupCopy, settingsCopy } from "../copy";
 import { activityTime } from "../lib/spaces";
@@ -26,16 +27,21 @@ export function Settings({
   focus,
   onImport,
   onAgentSetup,
+  onInstall,
+  onWhatsNew,
 }: {
   open: boolean;
   onClose: () => void;
   state: BrowserState;
   dispatch: (action: BrowserAction) => void;
-  focus?: "agents";
+  focus?: "agents" | "updates";
   onImport: () => void;
   onAgentSetup: () => void;
+  onInstall: () => void;
+  onWhatsNew: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
+  const updateSwitch = useRef<HTMLButtonElement>(null);
   // Read again at each opening, without the slower shell probe.
   const [setup, setSetup] = useState<AgentSetupStatus | null>(null);
   useEffect(() => {
@@ -64,7 +70,13 @@ export function Settings({
       onClose={onClose}
       title="Make Kamapathy yours"
       className="settings-modal"
-      initialFocus={focus === "agents" ? agentSwitch : undefined}
+      initialFocus={
+        focus === "agents"
+          ? agentSwitch
+          : focus === "updates"
+            ? updateSwitch
+            : undefined
+      }
     >
       <section className="settings-section">
         <h3>Appearance</h3>
@@ -277,6 +289,15 @@ export function Settings({
           <p className="setting-note">{settingsCopy.noActivity}</p>
         )}
       </section>
+      {isDesktop && (
+        <UpdatesSection
+          state={state}
+          dispatch={dispatch}
+          onInstall={onInstall}
+          onWhatsNew={onWhatsNew}
+          switchRef={updateSwitch}
+        />
+      )}
       <div className="settings-about">
         <span className="brand-mark">
           <TreeEvergreen size={23} weight="fill" />

@@ -11,6 +11,10 @@
   height: 32px;
   border-radius: 999px;
 }
+/* Holds the update reminder dot, which Updates.css draws. */
+.toolbar > .icon-button.has-update {
+  position: relative;
+}
 .omnibox {
   display: flex;
   align-items: center;

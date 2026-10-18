@@ -100,6 +100,7 @@ export function menuTemplate({
       role: "help",
       submenu: [
         link("Kamapathy Help", HELP_URL),
+        command("What's New", "whats-new"),
         { type: "separator" },
         command("Set Up Agents…", "agent-setup"),
         link("Agent Guide", AGENT_GUIDE_URL),

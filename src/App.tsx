@@ -31,7 +31,13 @@ import type {
   SignIns,
   SpaceColor,
 } from "../shared/types";
-import { agentRules, HOME_URL, initialState } from "../shared/state";
+import {
+  agentRules,
+  HOME_URL,
+  initialState,
+  updateReminder,
+} from "../shared/state";
+import { compareVersions } from "../shared/version";
 import { hostname, isGoogleSignInRejectedUrl } from "../shared/url";
 import { bridge, isDesktop } from "./lib/bridge";
 import { decodeFrames, Freezer, nextPaint } from "./lib/freeze";
@@ -53,6 +59,9 @@ import { SpacesOverview } from "./components/SpacesOverview";
 import { FindPill } from "./components/FindPill";
 import { ImportPanel, Welcome } from "./components/Welcome";
 import { AgentSetupDialog } from "./components/AgentSetup";
+import { InstallDialog } from "./components/Updates";
+import { WhatsNewDialog } from "./components/WhatsNew";
+import { notesSince, recentNotes, type ReleaseNote } from "./whats-new";
 import { importCopy, newTabCopy, signInsCopy, spacesCopy } from "./copy";
 import { useAgentClock } from "./lib/useAgentClock";
 import { spaceTabs } from "./lib/tabs";
@@ -78,6 +87,8 @@ type Overlay =
   | "welcome"
   | "import"
   | "agent-setup"
+  | "whats-new"
+  | "install-update"
   | "space-request";
 export default function App() {
   const [state, setState] = useState<BrowserState>(() => initialState());
@@ -259,9 +270,9 @@ export default function App() {
     setOverlay(null);
     freezer.close(() => setFrames([]));
   }, [freezer]);
-  const [settingsFocus, setSettingsFocus] = useState<"agents">();
+  const [settingsFocus, setSettingsFocus] = useState<"agents" | "updates">();
   const openSettings = useCallback(
-    (focus?: "agents") => {
+    (focus?: "agents" | "updates") => {
       setSettingsFocus(focus);
       void show("settings");
     },
@@ -279,6 +290,50 @@ export default function App() {
     close();
     void dispatch({ type: "settings:update", settings: { welcomed: true } });
   }, [close, dispatch]);
+  // What's new follows a version change, once per window, never on a fresh
+  // profile: restore saves the running version there until Welcome is done.
+  const [notes, setNotes] = useState<readonly ReleaseNote[]>([]);
+  const checkedNotes = useRef(false);
+  const { seenVersion } = state.settings;
+  useEffect(() => {
+    if (
+      !ready ||
+      !isDesktop ||
+      !state.settings.welcomed ||
+      checkedNotes.current
+    )
+      return;
+    checkedNotes.current = true;
+    if (compareVersions(seenVersion, state.version) >= 0) return;
+    const since = notesSince(seenVersion, state.version);
+    if (!since.length) {
+      void dispatch({
+        type: "settings:update",
+        settings: { seenVersion: state.version },
+      });
+      return;
+    }
+    setNotes(since);
+    void show("whats-new");
+  }, [
+    ready,
+    state.settings.welcomed,
+    seenVersion,
+    state.version,
+    dispatch,
+    show,
+  ]);
+  const openWhatsNew = useCallback(() => {
+    setNotes(recentNotes(state.version));
+    void show("whats-new");
+  }, [state.version, show]);
+  const closeWhatsNew = useCallback(() => {
+    close();
+    void dispatch({
+      type: "settings:update",
+      settings: { seenVersion: state.version },
+    });
+  }, [close, dispatch, state.version]);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   useEffect(() => {
     if (overlay !== "spaces-grid") return;
@@ -433,6 +488,9 @@ export default function App() {
         case "agent-setup":
           void show("agent-setup");
           break;
+        case "whats-new":
+          openWhatsNew();
+          break;
         case "help":
         case "report-issue":
         case "privacy":
@@ -444,7 +502,19 @@ export default function App() {
         }
       }
     },
-    [dispatch, active, isHome, openSpace, openBookmark, state, show, close, openSettings, openLink],
+    [
+      dispatch,
+      active,
+      isHome,
+      openSpace,
+      openBookmark,
+      state,
+      show,
+      close,
+      openSettings,
+      openLink,
+      openWhatsNew,
+    ],
   );
   useEffect(
     () =>
@@ -470,6 +540,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", keydown);
   }, [action, dispatch, mac]);
   const menuTab = state.tabs.find((tab) => tab.id === selectedTab);
+  const reminder = updateReminder(state.update, state.settings.updateChecks);
 
   return (
     <div className={`browser-app platform-${state.platform}`}>
@@ -519,6 +590,7 @@ export default function App() {
         }}
         menuRef={menuButton}
         menuOpen={overlay === "menu"}
+        menuDot={!!reminder}
         onMenu={() => (overlay === "menu" ? close() : void show("menu"))}
       />
       {state.settings.showBookmarksBar && (
@@ -679,6 +751,8 @@ export default function App() {
         focus={settingsFocus}
         onImport={() => void show("import")}
         onAgentSetup={() => void show("agent-setup")}
+        onInstall={() => void show("install-update")}
+        onWhatsNew={openWhatsNew}
       />
       <Welcome
         open={overlay === "welcome"}
@@ -700,6 +774,17 @@ export default function App() {
         open={overlay === "agent-setup"}
         onClose={close}
         platform={state.platform}
+      />
+      <WhatsNewDialog
+        open={overlay === "whats-new"}
+        notes={notes}
+        version={state.version}
+        onClose={closeWhatsNew}
+      />
+      <InstallDialog
+        open={overlay === "install-update"}
+        onClose={close}
+        state={state}
       />
       <LibraryDialog
         kind={
@@ -1047,6 +1132,8 @@ export default function App() {
         mac={mac}
         isHome={isHome}
         onAction={action}
+        update={!!reminder}
+        onUpdate={() => openSettings("updates")}
       />
       <SpacePopover
         open={overlay === "space-popover"}

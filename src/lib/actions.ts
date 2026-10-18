@@ -25,6 +25,7 @@ export const actionNames = [
   "help",
   "report-issue",
   "privacy",
+  "whats-new",
 ] as const;
 export type ActionName = (typeof actionNames)[number];
 

@@ -1,5 +1,6 @@
 import type { ReactNode, RefObject } from "react";
 import {
+  ArrowCircleUp,
   BookmarkSimple,
   ClockCounterClockwise,
   Columns,
@@ -51,6 +52,8 @@ export function ToolsMenu({
   mac,
   isHome,
   onAction,
+  update,
+  onUpdate,
 }: {
   open: boolean;
   onClose: () => void;
@@ -58,6 +61,8 @@ export function ToolsMenu({
   mac: boolean;
   isHome: boolean;
   onAction: (name: ActionName) => void;
+  update: boolean;
+  onUpdate: () => void;
 }) {
   return (
     <Popover
@@ -68,6 +73,22 @@ export function ToolsMenu({
       align="end"
       className="tools-menu"
     >
+      {update && (
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onUpdate();
+            }}
+          >
+            <ArrowCircleUp size={16} />
+            <span>{toolsMenuCopy.update}</span>
+          </button>
+          <hr />
+        </>
+      )}
       {toolsMenuLayout.map((id, index) => {
         if (id === null) return <hr key={`divider-${index}`} />;
         const combo = id === "history" && !mac ? "mod+h" : keys[id];

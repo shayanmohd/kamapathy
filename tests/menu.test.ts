@@ -109,6 +109,7 @@ describe("application menu", () => {
       expect(menu[menu.length - 2].role).toBe("windowMenu");
       expect(items.map((item) => item.label)).toEqual([
         "Kamapathy Help",
+        "What's New",
         "Set Up Agents…",
         "Agent Guide",
         "Privacy",
@@ -121,7 +122,7 @@ describe("application menu", () => {
         [PRIVACY_URL],
         [ISSUES_URL],
       ]);
-      expect(send.mock.calls).toEqual([["agent-setup"]]);
+      expect(send.mock.calls).toEqual([["whats-new"], ["agent-setup"]]);
     }
     // Links work with no Kamapathy window in front; Set Up Agents… needs it.
     const send = vi.fn();
@@ -130,6 +131,16 @@ describe("application menu", () => {
       click(item, undefined);
     expect(open).toHaveBeenCalledTimes(4);
     expect(send).not.toHaveBeenCalled();
+  });
+  it("Help lists What's New, which sends whats-new", () => {
+    const send = vi.fn();
+    const { items } = helpItems(true, send);
+    expect(items.map((item) => item.label).slice(0, 2)).toEqual([
+      "Kamapathy Help",
+      "What's New",
+    ]);
+    click(items[1], kamapathyWindow);
+    expect(send.mock.calls).toEqual([["whats-new"]]);
   });
   it("lists Set up agents and Help in the browser menu and four help commands in the palette", () => {
     expect(toolsMenuLayout.slice(-3)).toEqual([
