@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { RefBook } from "../electron/agent/refs";
 import {
   startAutomation,
   type AutomationServer,
@@ -21,6 +22,7 @@ import {
 
 describe("local automation socket", () => {
   let controller: FakeController;
+  let refs: RefBook;
   let api: AutomationServer;
   let socket: ReturnType<typeof testSocket>;
   let send: ReturnType<typeof socketFetch>;
@@ -71,10 +73,10 @@ describe("local automation socket", () => {
     const response = await request(`/spaces/${space.id}/tabs`, "POST", {
       url: "https://example.com/",
     });
-    return {
-      space,
-      tab: (await response.json()).tab as BrowserState["tabs"][number],
-    };
+    const tab = (await response.json()).tab as BrowserState["tabs"][number];
+    // The refs these checks send as a page's own: @e1 to @e4.
+    refs.record(tab.id, [1, 2, 3, 4]);
+    return { space, tab };
   };
   const uploadBody = (overrides: Record<string, unknown> = {}) => ({
     ref: "@e1",
@@ -117,8 +119,9 @@ describe("local automation socket", () => {
   };
   beforeEach(async () => {
     controller = new FakeController();
+    refs = new RefBook();
     socket = testSocket();
-    api = await startAutomation(controller, { socketPath: socket.path });
+    api = await startAutomation(controller, { socketPath: socket.path, refs });
     send = socketFetch(socket.path);
   });
   afterEach(async () => {
@@ -727,6 +730,100 @@ describe("local automation socket", () => {
     await expect.poll(() => page.debugger.attached).toBe(true);
     expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
     expect(page.scripts.at(-1)!.code.endsWith(`${tab.id}:1")`)).toBe(true);
+  });
+
+  it("refuses never-issued and retired refs before any page work", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const activity = controller.activity.length;
+    // The page would answer every one of these.
+    page.result = { ok: true, x: 25, y: 45, selected: 1 };
+    const bodies = (ref: string, live: string) =>
+      [
+        ["click", { ref }],
+        ["fill", { ref, value: "Ada" }],
+        ["drag", { source: { ref }, target: { ref: live } }],
+        ["drag", { source: { ref: live }, target: { ref } }],
+        ["upload", uploadBody({ ref })],
+      ] as const;
+    for (const [route, body] of bodies("@e9", "@e1")) {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(404);
+      expect((await response.json()).error, route).toEqual({
+        code: "unknown_ref",
+        message:
+          "Kamapathy never issued this ref for this page. Take a snapshot and use a ref from it.",
+        ref: "@e9",
+      });
+    }
+    refs.expireTab(tab.id);
+    // A ref the tab is issued after the retirement is live again.
+    const current = refs.reserve(1);
+    refs.record(tab.id, [current]);
+    for (const [route, body] of bodies("@e2", `@e${current}`)) {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(409);
+      expect((await response.json()).error, route).toEqual({
+        code: "stale_ref",
+        message: "Element reference is stale. Take a new snapshot.",
+        ref: "@e2",
+      });
+    }
+    expect(page.scripts).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("records only the refs a snapshot assigned", async () => {
+    const { tab } = await createPage();
+    controller.contents.result = (code: string) => {
+      const firstRef = Number(code.match(/"firstRef":(\d+)/)![1]);
+      return {
+        url: "https://example.com/",
+        title: "Example",
+        text: "Hello from the agent page",
+        interactables: [],
+        truncated: false,
+        // Two of the block, and one number outside it.
+        issued: [firstRef, firstRef + 2, firstRef + 100],
+      };
+    };
+    const response = await request(`/tabs/${tab.id}/snapshot`);
+    expect(response.status).toBe(200);
+    const firstRef = Number(
+      controller.contents.scripts.at(-1)!.code.match(/"firstRef":(\d+)/)![1],
+    );
+    expect(await response.json()).toEqual({
+      tabId: tab.id,
+      url: "https://example.com/",
+      title: "Example",
+      text: "Hello from the agent page",
+      interactables: [],
+      truncated: false,
+    });
+    controller.contents.result = { ok: true, x: 25, y: 45 };
+    const click = (number: number) =>
+      request(`/tabs/${tab.id}/click`, "POST", { ref: `@e${number}` });
+    expect((await click(firstRef)).status).toBe(200);
+    expect((await click(firstRef + 2)).status).toBe(200);
+    // Reserved with the block but never assigned, and past the block.
+    for (const number of [firstRef + 1, firstRef + 100]) {
+      const refused = await click(number);
+      expect(refused.status, `@e${number}`).toBe(404);
+      expect((await refused.json()).error.code).toBe("unknown_ref");
+    }
+  });
+
+  it("adds the tab's ref generation to the namespace once its refs expire", async () => {
+    const { tab } = await createPage();
+    await request(`/tabs/${tab.id}/snapshot`);
+    const namespace = () => controller.contents.scripts.at(-1)!.code;
+    expect(namespace().endsWith(`${tab.id}:0")`)).toBe(true);
+    refs.expireTab(tab.id);
+    await request(`/tabs/${tab.id}/snapshot`);
+    expect(namespace().endsWith(`${tab.id}:0:g1")`)).toBe(true);
+    await request(`/tabs/${tab.id}/snapshot`);
+    expect(namespace().endsWith(`${tab.id}:0:g1")`)).toBe(true);
   });
 
   it("rejects ambiguous targets and propagates stale refs without falling back to a selector", async () => {

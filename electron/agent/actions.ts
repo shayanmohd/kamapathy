@@ -4,7 +4,7 @@ import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
-import { allocateRefs } from "./refs";
+import { REF_BLOCK, type RefBook } from "./refs";
 import type { AutomationController } from "./server";
 import {
   CdpTimeoutError,
@@ -17,6 +17,12 @@ import type { Step } from "./session/types";
 import { PRESS_KEYS, type ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
+
+// The ref a target carries, if it carries one.
+const refOf = (spec: unknown): string | undefined => {
+  const ref = (spec as { ref?: unknown } | null | undefined)?.ref;
+  return typeof ref === "string" ? ref : undefined;
+};
 
 export const finitePoint = (point: unknown): point is Point =>
   !!point &&
@@ -90,8 +96,9 @@ export function createActions(deps: {
   authority: Authority;
   sessions: TabSessions;
   referenceSession: string;
+  refs: RefBook;
 }): Actions {
-  const { controller, authority, sessions, referenceSession } = deps;
+  const { controller, authority, sessions, referenceSession, refs } = deps;
   const { authorizeTab } = authority;
   // Each page of a tab the agent controls has a debugger session from the
   // moment its view exists.
@@ -179,8 +186,17 @@ export function createActions(deps: {
     step?: Step,
   ) => {
     authorizeTab(id);
+    // A ref outside every range the tab was issued, or one its refs retired,
+    // is answered here, before anything reaches the page.
+    for (const spec of [payload, payload.source, payload.target]) {
+      const ref = refOf(spec);
+      if (ref !== undefined) refs.check(id, ref);
+    }
     const epoch = session.epoch;
-    const namespace = `${referenceSession}:${id}:${epoch}`;
+    // Page registries start empty once a tab's refs are retired.
+    const generation = refs.generation(id);
+    const retired = generation ? `:g${generation}` : "";
+    const namespace = `${referenceSession}:${id}:${epoch}${retired}`;
     const frameId = await session.mainFrameId({
       deadline,
       signal: step?.signal,
@@ -477,18 +493,28 @@ export function createActions(deps: {
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
-      const firstRef = allocateRefs();
-      result = {
-        tabId: id,
-        ...(await evaluatePage(
-          id,
-          session,
-          "snapshot",
-          { ...payload, firstRef },
-          deadline,
-          step,
-        )),
-      };
+      const firstRef = refs.reserve(REF_BLOCK);
+      const listing = await evaluatePage(
+        id,
+        session,
+        "snapshot",
+        { ...payload, firstRef },
+        deadline,
+        step,
+      );
+      // Only the refs the page says it assigned are issued, and the numbers
+      // are the book's business, not the agent's.
+      refs.record(
+        id,
+        (Array.isArray(listing.issued) ? listing.issued : []).filter(
+          (number): number is number =>
+            typeof number === "number" &&
+            number >= firstRef &&
+            number < firstRef + REF_BLOCK,
+        ),
+      );
+      delete listing.issued;
+      result = { tabId: id, ...listing };
     } else if (action.type === "click") {
       const point = await evaluatePage(
         id,

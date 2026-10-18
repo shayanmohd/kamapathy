@@ -1290,13 +1290,18 @@ export function pageOperation(
     }
     const limit = options.mode === "compact" ? 80 : 200;
     let nextRef = options.firstRef;
+    // The numbers this snapshot assigned, so the main process knows which
+    // refs the tab was issued.
+    const issued: number[] = [];
     let remainingOptions = 100;
     let optionsTruncated = false;
     const prints = new Map<string, Fingerprint>();
     const interactables = chosen.map((element, index) => {
       let ref = registry.refs.get(element);
       if (!ref || registry.elements.get(ref) !== element) {
-        ref = `@e${nextRef++}`;
+        const number = nextRef++;
+        issued.push(number);
+        ref = `@e${number}`;
         registry.refs.set(element, ref);
         registry.elements.set(ref, element);
       }
@@ -1436,6 +1441,7 @@ export function pageOperation(
       title: document.title,
       text: text.slice(0, options.maxChars),
       interactables,
+      ...(issued.length ? { issued } : {}),
       ...(omitted ? { omittedControls: omitted } : {}),
       truncated:
         text.length > options.maxChars || omitted > 0 || optionsTruncated,

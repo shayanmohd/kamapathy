@@ -339,6 +339,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -361,7 +362,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
-| `stale_ref` | 409 | not retryable |  | The ref belongs to an earlier snapshot or a control the page removed. |
+| `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
 | `element_obscured` | 409 | retryable |  | Another element covers the target. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |

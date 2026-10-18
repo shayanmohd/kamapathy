@@ -22,6 +22,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { processRefs, type RefBook } from "./refs";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -144,9 +145,10 @@ function testProbe(sessions: TabSessions): TestProbe {
 // connection needs no token.
 export async function startAutomation(
   controller: AutomationController,
-  options: { socketPath: string },
+  options: { socketPath: string; refs?: RefBook },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
+  const refs = options.refs ?? processRefs;
   const authority = createAuthority(controller);
   const scheduler = new Scheduler();
   const sessions = new TabSessions({
@@ -164,7 +166,12 @@ export async function startAutomation(
     authority,
     sessions,
     referenceSession,
+    refs,
   });
+  // Refs a closed tab was issued are nobody's, so the book forgets them.
+  const forgetClosedTabs = controller.subscribe(() =>
+    refs.retain(new Set(controller.state.tabs.map((tab) => tab.id))),
+  );
   const deps: RouteDeps = { controller, authority, actions, sessions };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -359,6 +366,7 @@ export async function startAutomation(
         authority.stop();
         requests.close();
         scheduler.close();
+        forgetClosedTabs();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

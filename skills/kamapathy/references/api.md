@@ -1,6 +1,6 @@
 # Kamapathy API reference
 
-Client 0.2.0, API level 2. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
+Client 0.2.0, API level 3. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
 
 ## Globals
 
@@ -346,31 +346,31 @@ Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_fie
 
 Clicks a control.
 
-Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.fill(target, value)`
 
 Replaces the value of a field, select or editable region.
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.press(key, target?)`
 
 Presses a supported key, focusing a control first when given.
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.scroll(direction, pixels?, target?)`
 
 Scrolls the page, the panel holding a control, or the panel in the middle when the page cannot scroll.
 
-Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.drag(source, target)`
 
 Drags one element onto another with native mouse input or HTML drag and drop.
 
-Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.wait(options?)`
 
@@ -388,13 +388,13 @@ Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_time
 
 Runs 1 to 20 actions in order and stops at the first failure.
 
-Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.upload(ref, files)`
 
 Selects local files on a file input. The site may upload them at once.
 
-Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `unknown_ref`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.screenshot(path)`
 
@@ -595,6 +595,7 @@ Show the commands, or help on one
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -617,7 +618,7 @@ Show the commands, or help on one
 | `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
-| `stale_ref` | 409 | not retryable |  | The ref belongs to an earlier snapshot or a control the page removed. |
+| `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
 | `element_obscured` | 409 | retryable |  | Another element covers the target. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |

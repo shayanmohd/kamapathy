@@ -96,6 +96,13 @@ export const ERRORS = {
     "No tab in an accessible agent space has this ID.",
     ["tabId"],
   ),
+  unknown_ref: code(
+    404,
+    false,
+    "The ref was never issued for this page.",
+    ["ref"],
+    3,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -182,7 +189,8 @@ export const ERRORS = {
   stale_ref: code(
     409,
     false,
-    "The ref belongs to an earlier snapshot or a control the page removed.",
+    "The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired.",
+    ["ref"],
   ),
   element_obscured: code(409, true, "Another element covers the target."),
   body_too_large: code(
