@@ -40,6 +40,7 @@ import type {
   SpaceRequest,
   Tab,
 } from "../shared/types";
+import { activeSpace } from "./agent/authority";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
 
@@ -155,6 +156,7 @@ export class BrowserController {
   >();
   private blockedRedirects = new Set<(tabId: string, url: string) => void>();
   private downloadStarts = new Set<(tabId: string) => void>();
+  private leaveGuards = new Set<(tabId: string, at: number) => void>();
   private closedTabs: Tab[] = [];
   private lastActive = new Map<string, string>();
   private bounds: ContentBounds = {
@@ -896,6 +898,39 @@ export class BrowserController {
       event.preventDefault();
       this.notify(this.blockedRedirects, tab.id, url);
     });
+    // A page asking to stay. Under agent control the page leaves and the
+    // running operation reports the override; the person is asked instead,
+    // unless they are looking at another tab or window.
+    contents.on("will-prevent-unload", (event) => {
+      if (!isCurrentView()) return;
+      if (activeSpace(space) && space.owner === "agent") {
+        event.preventDefault();
+        this.notify(this.leaveGuards, tab.id, Date.now());
+        this.addActivity(
+          tab.spaceId,
+          "Agent left a page that asked it to stay",
+          "info",
+        );
+        return;
+      }
+      // The window test a capture uses: nothing is shown over a hidden or
+      // minimized window, and a background tab keeps its page.
+      if (
+        !this.canCapturePage() ||
+        this.shownTab(this.state.activeSpaceId)?.id !== tab.id
+      )
+        return;
+      const answer = dialog.showMessageBoxSync(this.window, {
+        type: "question",
+        message: "Leave site?",
+        detail: "Changes you made may not be saved.",
+        buttons: ["Leave", "Stay"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (answer === 0) event.preventDefault();
+    });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.on("did-start-navigation", (details) => {
       if (!isCurrentView() || !details.isMainFrame || !allowed(details.url))
@@ -1258,6 +1293,12 @@ export class BrowserController {
   onDownloadStarted(listener: (tabId: string) => void): () => void {
     this.downloadStarts.add(listener);
     return () => this.downloadStarts.delete(listener);
+  }
+
+  // A leave guard this agent overrode, with the moment it happened.
+  onLeaveGuard(listener: (tabId: string, at: number) => void): () => void {
+    this.leaveGuards.add(listener);
+    return () => this.leaveGuards.delete(listener);
   }
 
   // A failed load is retried by loading its URL again, as before.

@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { watchLeaveGuard } from "../electron/agent/routes/navigation";
 import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
   startAutomation,
@@ -1156,6 +1157,23 @@ describe("local automation socket", () => {
     expect((await response.json()).error).toMatchObject({
       code: "no_web_page",
     });
+  });
+
+  it("watchLeaveGuard reports only the watched tab's overridden guard", async () => {
+    const { tab } = await createPage();
+    const other = controller.state.tabs.find((item) => item.id !== tab.id)!;
+    const quiet = watchLeaveGuard(controller, tab.id);
+    controller.leaveGuard(other.id);
+    expect(quiet.stop()).toEqual({});
+    const watch = watchLeaveGuard(controller, tab.id);
+    controller.leaveGuard(tab.id);
+    controller.leaveGuard(tab.id);
+    expect(watch.stop()).toEqual({
+      dialog: { type: "beforeunload", message: "", answer: "accepted" },
+    });
+    // A guard after the operation belongs to the next one.
+    controller.leaveGuard(tab.id);
+    expect(watchLeaveGuard(controller, tab.id).stop()).toEqual({});
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {

@@ -26,7 +26,11 @@ vi.mock("electron", () => ({
       return sessions.get(partition)!;
     }),
   },
-  dialog: { showMessageBox: vi.fn(), showSaveDialog: vi.fn() },
+  dialog: {
+    showMessageBox: vi.fn(),
+    showMessageBoxSync: vi.fn(),
+    showSaveDialog: vi.fn(),
+  },
   shell: { showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) },
 }));
 vi.mock("../electron/persistence", async (original) => ({
@@ -2414,5 +2418,140 @@ describe("agent navigation", () => {
       page.emit("will-navigate", refused, "file:///etc/hosts");
       expect(refused.preventDefault).toHaveBeenCalledOnce();
     }
+  });
+});
+
+describe("leave guards", () => {
+  const guard = () => ({ preventDefault: vi.fn() });
+  // An agent space, its first tab and that tab's page.
+  function agentPage(browser: BrowserController) {
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.state.tabs.find((item) => item.spaceId === space.id)!;
+    browser.navigateAgentTab(tab.id, "https://example.com/form");
+    return { space, tab, page: contents(browser, tab.id) };
+  }
+  // The person's first tab, on a page of its own.
+  async function personPage(browser: BrowserController) {
+    const space = browser.state.spaces[0];
+    const tab = browser.state.tabs[0];
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/form",
+    });
+    return { space, tab, page: contents(browser, tab.id) };
+  }
+
+  it("an agent-controlled tab leaves a guarded page without asking", async () => {
+    const browser = controller();
+    const { space, tab, page } = agentPage(browser);
+    const overrides: { tabId: string; at: number }[] = [];
+    const stop = browser.onLeaveGuard((tabId, at) =>
+      overrides.push({ tabId, at }),
+    );
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(overrides).toHaveLength(1);
+    expect(overrides[0].tabId).toBe(tab.id);
+    expect(overrides[0].at).toBeGreaterThan(0);
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: space.id,
+      message: "Agent left a page that asked it to stay",
+    });
+    // A stopped listener hears no more guards.
+    stop();
+    page.emit("will-prevent-unload", guard());
+    expect(overrides).toHaveLength(1);
+  });
+
+  it("a granted personal space follows the same rule while the agent has control", async () => {
+    const browser = controller();
+    const { space, page } = await personPage(browser);
+    // The view was wired before the grant, so control is read as the guard
+    // fires.
+    browser.grantAccess(space.id);
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: space.id,
+      message: "Agent left a page that asked it to stay",
+    });
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const asked = guard();
+    page.emit("will-prevent-unload", asked);
+    expect(asked.preventDefault).not.toHaveBeenCalled();
+    expect(dialog.showMessageBoxSync).toHaveBeenCalledOnce();
+  });
+
+  it("the person in control is asked, with Stay as the default", async () => {
+    const browser = controller();
+    const { tab, page } = await personPage(browser);
+    const overrides: string[] = [];
+    browser.onLeaveGuard((tabId) => overrides.push(tabId));
+    vi.mocked(dialog.showMessageBoxSync).mockReturnValue(1);
+    const staying = guard();
+    page.emit("will-prevent-unload", staying);
+    expect(dialog.showMessageBoxSync).toHaveBeenCalledWith(expect.anything(), {
+      type: "question",
+      message: "Leave site?",
+      detail: "Changes you made may not be saved.",
+      buttons: ["Leave", "Stay"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    expect(staying.preventDefault).not.toHaveBeenCalled();
+    vi.mocked(dialog.showMessageBoxSync).mockReturnValue(0);
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    // The prompt is the person's, so no agent hears of it and Recent
+    // activity stays quiet.
+    expect(overrides).toEqual([]);
+    expect(
+      browser.state.activity.some((entry) =>
+        entry.message.startsWith("Agent left"),
+      ),
+    ).toBe(false);
+    expect(tab.url).toBe("https://example.com/form");
+  });
+
+  it("a background tab under the person's control keeps the page without a box", async () => {
+    const browser = controller();
+    const { space } = await personPage(browser);
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/second",
+      spaceId: space.id,
+      background: true,
+    });
+    const background = browser.state.tabs.at(-1)!;
+    expect(background.id).not.toBe(browser.state.activeTabId);
+    const page = contents(browser, background.id);
+    const staying = guard();
+    page.emit("will-prevent-unload", staying);
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(staying.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("closing a tab skips the guard", async () => {
+    const browser = controller();
+    const { tab, page } = agentPage(browser);
+    const overrides: string[] = [];
+    browser.onLeaveGuard((tabId) => overrides.push(tabId));
+    const close = vi.spyOn(page, "close");
+    browser.closeTab(tab.id, "agent");
+    expect(close).toHaveBeenCalledWith({ waitForBeforeUnload: false });
+    expect(page.destroyed).toBe(true);
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(overrides).toEqual([]);
   });
 });

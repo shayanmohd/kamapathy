@@ -117,6 +117,7 @@ export class FakeController implements AutomationController {
   captureAvailable = true;
   private blockedRedirects = new Set<(tabId: string, url: string) => void>();
   private downloadStarts = new Set<(tabId: string) => void>();
+  private leaveGuards = new Set<(tabId: string, at: number) => void>();
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
@@ -269,12 +270,21 @@ export class FakeController implements AutomationController {
       this.downloadStarts.delete(listener);
     };
   }
+  onLeaveGuard(listener: (tabId: string, at: number) => void) {
+    this.leaveGuards.add(listener);
+    return () => {
+      this.leaveGuards.delete(listener);
+    };
+  }
   // The controller's own hooks, as a test fires them.
   blockRedirect(tabId: string, url: string) {
     for (const listener of this.blockedRedirects) listener(tabId, url);
   }
   startDownload(tabId: string) {
     for (const listener of this.downloadStarts) listener(tabId);
+  }
+  leaveGuard(tabId: string) {
+    for (const listener of this.leaveGuards) listener(tabId, Date.now());
   }
   closeTab(tabId: string, by: ClosedBy) {
     const result = this.removeTab(this.getTab(tabId), by);

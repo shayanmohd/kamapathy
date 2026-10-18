@@ -155,6 +155,13 @@ export const ERRORS = {
     ["reason"],
   ),
   page_changed: code(409, false, "The page navigated during the operation."),
+  navigation_blocked: code(
+    409,
+    false,
+    "The page's leave guard kept it open.",
+    ["url", "reason"],
+    2,
+  ),
   dialog_open: code(409, false, "A JavaScript dialog is open on the page.", [
     "dialog",
     "started",

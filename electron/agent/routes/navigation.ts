@@ -1,5 +1,6 @@
 import { remaining } from "../actions";
 import { send, type Run, type RouteDeps, type RouteImpl } from "../http";
+import type { AutomationController } from "../server";
 import type { ToolAction } from "../validate";
 import { tabView } from "../views";
 
@@ -24,6 +25,34 @@ interface PageStateInfo {
 // A page state read is capped well below the route's budget, so a page that
 // slow is reported as page_timeout instead of holding its space's lane.
 const INFO_MS = 2000;
+// The leave guard an agent overrode while its operation ran. Section 7's
+// other receipt fields arrive later; navigate and reload report this one.
+export interface LeaveReceipt {
+  type: "beforeunload";
+  message: "";
+  answer: "accepted";
+}
+
+// Collects the guards overridden on one tab for as long as an operation
+// runs. stop() unsubscribes and answers with the operation's receipt.
+export function watchLeaveGuard(
+  controller: AutomationController,
+  tabId: string,
+): { stop(): { dialog?: LeaveReceipt } } {
+  let overridden = false;
+  const unsubscribe = controller.onLeaveGuard((id) => {
+    if (id === tabId) overridden = true;
+  });
+  return {
+    stop() {
+      unsubscribe();
+      if (!overridden) return {};
+      return {
+        dialog: { type: "beforeunload", message: "", answer: "accepted" },
+      };
+    },
+  };
+}
 
 export function createNavigation({
   controller,

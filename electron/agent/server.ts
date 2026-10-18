@@ -72,6 +72,8 @@ export interface AutomationController {
   onBlockedRedirect(listener: (tabId: string, url: string) => void): () => void;
   /** A download the session started for a tab, before any refusal. */
   onDownloadStarted(listener: (tabId: string) => void): () => void;
+  /** A leave guard this agent overrode, with the moment it happened. */
+  onLeaveGuard(listener: (tabId: string, at: number) => void): () => void;
   /** Retires the tab's label; a space left empty gets a blank tab. */
   closeTab(tabId: string, by: ClosedBy): { closed?: string; replacement?: Tab };
   setManaged(tabId: string, managed: boolean): Tab;
