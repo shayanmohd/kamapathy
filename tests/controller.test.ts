@@ -497,12 +497,13 @@ describe("native browser lifecycle", () => {
     browser.releaseHold(browser.holdForPerson(space.id, "device", "usb"));
     expect(space.owner).toBe("agent");
     expect(space).not.toHaveProperty("control");
+    // Only a handoff and a reported failure name their own reason.
     await expect(
       browser.dispatch({
         type: "space:ownership",
         id: space.id,
         owner: "human",
-        reason: "failed",
+        reason: "approval",
       } as never),
     ).rejects.toThrow();
     expect(space.owner).toBe("agent");
@@ -2220,5 +2221,202 @@ describe("popups", () => {
     otherPage.emit("destroyed");
     expect(browser.state.tabs).toEqual(remaining);
     expect(browser.state.activeTabId).toBe(id);
+  });
+});
+
+describe("agent task state", () => {
+  it("setTask creates, patches and deletes a space's task and bumps changedAt only on a state change", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const browser = controller();
+      const space = browser.createAgentSpace("Task");
+      let emits = 0;
+      browser.subscribe(() => (emits += 1));
+      expect(browser.setTask(space.id, { status: "Comparing prices" })).toEqual({
+        status: "Comparing prices",
+        changedAt: 1000,
+      });
+      expect(emits).toBe(1);
+      // A status change leaves the key the renderer marks as seen alone.
+      vi.setSystemTime(2000);
+      expect(browser.setTask(space.id, { status: "Checking stock" })).toEqual({
+        status: "Checking stock",
+        changedAt: 1000,
+      });
+      expect(emits).toBe(2);
+      browser.setTask(space.id, { status: "Checking stock" });
+      expect(emits).toBe(2);
+      expect(
+        browser.setTask(space.id, { state: "needs-you", reason: "Sign in" }),
+      ).toEqual({
+        status: "Checking stock",
+        state: "needs-you",
+        reason: "Sign in",
+        changedAt: 2000,
+      });
+      expect(emits).toBe(3);
+      vi.setSystemTime(3000);
+      expect(
+        browser.setTask(space.id, { state: undefined, reason: undefined }),
+      ).toEqual({ status: "Checking stock", changedAt: 3000 });
+      expect(space.task).not.toHaveProperty("state");
+      expect(space.task).not.toHaveProperty("reason");
+      expect(emits).toBe(4);
+      expect(browser.setTask(space.id, null)).toBeUndefined();
+      expect(space).not.toHaveProperty("task");
+      expect(emits).toBe(5);
+      browser.setTask(space.id, null);
+      expect(emits).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a crashed agent page is flagged, logged once and cleared when its next main-frame navigation starts", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: space.id,
+      url: "https://example.com/",
+      background: true,
+    });
+    const tab = browser.state.tabs.at(-1)!;
+    const page = contents(browser, tab.id);
+    const crashes = () =>
+      browser.state.activity.filter(
+        (entry) => entry.message === "A page stopped working in this space",
+      );
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(tab.crashed).toBe(true);
+    expect(tab.error).toBe(
+      "The page process stopped (crashed). Reload to try again.",
+    );
+    expect(crashes()).toEqual([
+      expect.objectContaining({ spaceId: space.id, kind: "warning" }),
+    ]);
+    // The flag itself keeps a second crash of the same page quiet.
+    page.emit("render-process-gone", {}, { reason: "oom" });
+    expect(crashes()).toHaveLength(1);
+    page.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+      url: "https://example.com/again",
+    });
+    expect(tab).not.toHaveProperty("crashed");
+    expect(tab).not.toHaveProperty("error");
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(crashes()).toHaveLength(2);
+    // A crash while the person has control is theirs to see on the page.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    page.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+      url: "https://example.com/third",
+    });
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(tab.crashed).toBe(true);
+    expect(crashes()).toHaveLength(2);
+    // A personal space nobody granted writes nothing either.
+    const own = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    contents(browser, own.id).emit(
+      "render-process-gone",
+      {},
+      { reason: "crashed" },
+    );
+    expect(own.crashed).toBe(true);
+    expect(crashes()).toHaveLength(2);
+  });
+
+  it("activity entries carry the active label, the finish entry the status, and nothing else", () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    browser.setTask(space.id, {
+      status: "Booking a table",
+      label: { text: "Pick a time", active: true, at: Date.now() },
+    });
+    browser.addActivity(space.id, "Agent clicked Reserve");
+    expect(browser.state.activity[0]).toMatchObject({
+      message: "Agent clicked Reserve",
+      agentText: "Pick a time",
+    });
+    // An explicit text wins over the label, and keeps its own limit.
+    browser.addActivity(
+      space.id,
+      "Agent updated its status",
+      "info",
+      "y".repeat(400),
+    );
+    expect(browser.state.activity[0].agentText).toBe("y".repeat(300));
+    browser.setTask(space.id, {
+      label: { text: "Pick a time", active: false, at: Date.now() },
+    });
+    browser.addActivity(space.id, "Agent opened example.com");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+    browser.addActivity(space.id, "Agent finished", "success");
+    expect(browser.state.activity[0].agentText).toBe("Booking a table");
+    // Kamapathy's own words and the person's are never shown as the agent's.
+    browser.addActivity(space.id, "You took control. Agent access is paused.");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+    browser.setTask(space.id, null);
+    browser.addActivity(space.id, "Agent finished", "success");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+  });
+
+  it("a failure handover changes the owner without a control entry", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+      reason: "failed",
+    });
+    expect(space.owner).toBe("human");
+    expect(space.control).toMatchObject({ reason: "failed" });
+    expect(
+      browser.state.activity.some((entry) =>
+        entry.message.startsWith("You took control"),
+      ),
+    ).toBe(false);
+  });
+
+  it("space names are cleaned as agent text", async () => {
+    const browser = controller();
+    await browser.dispatch({
+      type: "space:create",
+      name: "Pa\u202eid\u200e work",
+      color: "blue",
+      kind: "personal",
+    });
+    const space = browser.state.spaces.at(-1)!;
+    expect(space.name).toBe("Paid work");
+    await browser.dispatch({
+      type: "space:rename",
+      id: space.id,
+      name: "\u200e\u202a ",
+    });
+    expect(space.name).toBe("Untitled space");
+    await expect(
+      browser.dispatch({
+        type: "space:rename",
+        id: space.id,
+        name: "x".repeat(49),
+      }),
+    ).rejects.toThrow("Invalid text value.");
+    expect(browser.createAgentSpace("Trip\u200e planning").name).toBe(
+      "Trip planning",
+    );
+    expect(browser.createAgentSpace("\u202a\u200f").name).toBe("Agent space");
   });
 });

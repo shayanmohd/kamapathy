@@ -403,6 +403,66 @@ describe("desktop session persistence", () => {
     expect(restored.settings.automationEnabled).toBe(true);
   });
 
+  it("never saves task, crashed or agent text, and restores the background notice", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    const [personal, work] = original.spaces;
+    Object.assign(personal, {
+      owner: "agent",
+      access: "granted",
+      task: {
+        status: "Comparing prices",
+        state: "done",
+        label: { text: "Open the cart", active: true, at: 4 },
+        changedAt: 5,
+      },
+    });
+    work.name = "\u200e\u202a";
+    Object.assign(original.tabs[0], {
+      url: "https://example.com/0",
+      crashed: true,
+    });
+    original.activity.push({
+      id: "entry",
+      spaceId: personal.id,
+      message: "Agent finished",
+      time: 6,
+      kind: "success",
+      agentText: "Comparing prices",
+    });
+    original.settings.backgroundNoticeShown = true;
+    writeState(path, original);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    for (const space of saved.spaces) expect(space).not.toHaveProperty("task");
+    for (const tab of saved.tabs) expect(tab).not.toHaveProperty("crashed");
+    expect(saved).not.toHaveProperty("activity");
+    expect(saved.settings.backgroundNoticeShown).toBe(true);
+    // A file that holds them anyway restores none of them.
+    writeFileSync(path, JSON.stringify(original));
+    const restored = readState(path, "darwin", "0.2.0");
+    for (const space of restored.spaces)
+      expect(space).not.toHaveProperty("task");
+    for (const tab of restored.tabs) expect(tab).not.toHaveProperty("crashed");
+    expect(restored.activity).toEqual([]);
+    // A saved name of nothing but bidirectional marks keeps its space.
+    expect(restored.spaces.map((space) => space.name)).toEqual([
+      "Personal",
+      "Untitled space",
+    ]);
+    expect(restored.settings.backgroundNoticeShown).toBe(true);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...original,
+        settings: { ...original.settings, backgroundNoticeShown: "yes" },
+      }),
+    );
+    expect(
+      readState(path, "darwin", "0.2.0").settings.backgroundNoticeShown,
+    ).toBe(false);
+    expect(initialState().settings.backgroundNoticeShown).toBe(false);
+  });
+
   it("keeps agent access off for a person who turned it off", () => {
     const path = statePath();
     const original = initialState();

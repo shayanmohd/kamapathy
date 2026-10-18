@@ -1,3 +1,8 @@
+import {
+  AGENT_TEXT_LIMITS,
+  cleanAgentText,
+  type AgentTextField,
+} from "../../shared/agent-text";
 import { isWebUrl } from "../../shared/url";
 import {
   ACTIONS,
@@ -226,6 +231,31 @@ export function stringField(
       `${key} must be ${empty ? "a" : "a nonempty"} string of at most ${max} characters.`,
     );
   return value;
+}
+// Text an agent wrote for the person to read. The raw length is checked
+// against its limit before cleaning, so nothing is silently trimmed, and an
+// empty result is refused unless an empty value means something to the route.
+export function agentTextField(
+  body: Record<string, unknown>,
+  key: string,
+  field: AgentTextField,
+  options: { allowEmpty?: boolean; index?: number } = {},
+): string {
+  const limit = AGENT_TEXT_LIMITS[field];
+  const refuse = (expected: string): never =>
+    fail("invalid_field", `${key} must be ${expected}.`, {
+      field: key,
+      expected,
+      ...(options.index === undefined ? {} : { index: options.index }),
+    });
+  const value = body[key];
+  if (typeof value !== "string")
+    return refuse(`a string of at most ${limit} characters`);
+  if (value.length > limit) return refuse(`at most ${limit} characters`);
+  const cleaned = cleanAgentText(value);
+  if (!cleaned && !options.allowEmpty)
+    return refuse("text that is not empty after cleaning");
+  return cleaned;
 }
 export function urlField(body: Record<string, unknown>): string {
   const value = stringField(body, "url", 8192);

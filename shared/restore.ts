@@ -1,3 +1,4 @@
+import { cleanAgentText } from "./agent-text";
 import { HOME_URL, initialState, newTab } from "./state";
 import { isWebUrl } from "./url";
 import type { BrowserState, Settings, Space } from "./types";
@@ -32,6 +33,10 @@ export function validSettings(value: unknown, base: Settings): Settings {
         : base.isolateAgentSpaces,
     welcomed:
       typeof settings.welcomed === "boolean" ? settings.welcomed : base.welcomed,
+    backgroundNoticeShown:
+      typeof settings.backgroundNoticeShown === "boolean"
+        ? settings.backgroundNoticeShown
+        : base.backgroundNoticeShown,
   };
 }
 
@@ -69,7 +74,7 @@ export function restoreState(
           .map(
             (space): Space => ({
               id: space.id,
-              name: space.name,
+              name: cleanAgentText(space.name) || "Untitled space",
               color: space.color,
               kind: "personal",
               owner: "human",

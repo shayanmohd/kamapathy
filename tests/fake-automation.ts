@@ -13,8 +13,10 @@ import {
   newTab,
   openingTab,
   PAGE_BUDGET,
+  patchTask,
 } from "../shared/state";
 import type {
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -99,7 +101,12 @@ export class FakeController implements AutomationController {
     (tabId: string, contents: WebContents) => void
   >();
   calls: BrowserAction[] = [];
-  activity: { spaceId?: string; message: string; kind: string }[] = [];
+  activity: {
+    spaceId?: string;
+    message: string;
+    kind: string;
+    agentText?: string;
+  }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
   constructor() {
@@ -194,8 +201,24 @@ export class FakeController implements AutomationController {
   canCapturePage() {
     return this.captureAvailable;
   }
-  addActivity(spaceId: string | undefined, message: string, kind: string) {
-    this.activity.push({ spaceId, message, kind });
+  addActivity(
+    spaceId: string | undefined,
+    message: string,
+    kind: string,
+    agentText?: string,
+  ) {
+    this.activity.push({
+      spaceId,
+      message,
+      kind,
+      ...(agentText ? { agentText } : {}),
+    });
+  }
+  setTask(spaceId: string, patch: Partial<AgentTask> | null) {
+    const space = this.state.spaces.find((item) => item.id === spaceId);
+    if (!space) throw new Error("Space was not found.");
+    if (patchTask(space, patch)) this.emit();
+    return space.task;
   }
   shownTab(spaceId: string): Tab | undefined {
     if (spaceId === this.state.activeSpaceId)

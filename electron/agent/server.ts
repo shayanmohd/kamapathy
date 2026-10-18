@@ -3,6 +3,7 @@ import { chmodSync } from "node:fs";
 import { createServer } from "node:http";
 import type { WebContents } from "electron";
 import type {
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -47,7 +48,17 @@ export interface AutomationController {
     spaceId: string | undefined,
     message: string,
     kind: "info" | "success" | "warning",
+    /** The agent's own words for this entry; a label or status otherwise. */
+    agentText?: string,
   ): void;
+  /**
+   * The only writer of a space's task: undefined fields are deleted, null
+   * deletes the task, and changedAt moves only when the state does.
+   */
+  setTask(
+    spaceId: string,
+    patch: Partial<AgentTask> | null,
+  ): AgentTask | undefined;
   subscribe(listener: (state: BrowserState) => void): () => void;
   /** The tab's live page, if it has one. Never creates a view. */
   peekWebContents(tabId: string): WebContents | undefined;

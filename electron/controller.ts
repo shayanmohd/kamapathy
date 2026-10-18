@@ -11,12 +11,14 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { AGENT_TEXT_LIMITS, cleanAgentText } from "../shared/agent-text";
 import {
   agentRules,
   HOME_URL,
   newTab,
   openingTab,
   PAGE_BUDGET,
+  patchTask,
 } from "../shared/state";
 import {
   googleSignInFallback,
@@ -26,6 +28,7 @@ import {
 } from "../shared/url";
 import type {
   Activity,
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -215,17 +218,46 @@ export class BrowserController {
     }
   }
 
+  // A space's task, or nothing when no agent is at work in it.
+  private taskOf(spaceId: string | undefined): AgentTask | undefined {
+    if (!spaceId) return undefined;
+    return this.state.spaces.find((space) => space.id === spaceId)?.task;
+  }
+
+  // The only writer of a space's task.
+  setTask(
+    spaceId: string,
+    patch: Partial<AgentTask> | null,
+  ): AgentTask | undefined {
+    const space = this.getSpace(spaceId);
+    if (patchTask(space, patch)) this.emit();
+    return space.task;
+  }
+
   addActivity(
     spaceId: string | undefined,
     message: string,
     kind: Activity["kind"] = "info",
+    agentText?: string,
   ): void {
+    // An entry about the agent carries what the agent said it was doing: the
+    // label of the action it logs, or the status its run ended on. Kamapathy's
+    // own notices and the person's entries carry none.
+    const task = this.taskOf(spaceId);
+    const text =
+      agentText ??
+      (message === "Agent finished"
+        ? task?.status
+        : message.startsWith("Agent ") && task?.label?.active
+          ? task.label.text
+          : undefined);
     this.state.activity.unshift({
       id: randomUUID(),
       spaceId,
       message: message.slice(0, 500),
       kind,
       time: Date.now(),
+      ...(text ? { agentText: text.slice(0, AGENT_TEXT_LIMITS.message) } : {}),
     });
     this.state.activity = this.state.activity.slice(0, 100);
     this.emit();
@@ -869,6 +901,7 @@ export class BrowserController {
         return;
       tab.url = details.url;
       delete tab.error;
+      delete tab.crashed;
       if (!details.isSameDocument) {
         tab.title = details.url;
         delete tab.favicon;
@@ -942,9 +975,19 @@ export class BrowserController {
     );
     contents.on("render-process-gone", (_event, details) => {
       if (!isCurrentView()) return;
+      // One entry per crash, for a space an agent is working in; the flag
+      // itself keeps a second crash of the same page quiet.
+      const log = !tab.crashed && agentRules(space) && space.owner === "agent";
       tab.loading = false;
+      tab.crashed = true;
       tab.error = `The page process stopped (${details.reason}). Reload to try again.`;
-      this.emit();
+      if (log)
+        this.addActivity(
+          space.id,
+          "A page stopped working in this space",
+          "warning",
+        );
+      else this.emit();
     });
     contents.on("context-menu", (_event, params) => {
       import("electron")
@@ -1130,7 +1173,7 @@ export class BrowserController {
       throw new Error("The maximum of 200 tabs has been reached.");
     const space: Space = {
       id: randomUUID(),
-      name: cleanText(name, 48) || "Agent space",
+      name: cleanAgentText(cleanText(name, 48)) || "Agent space",
       color: colors.includes(color) ? color : "purple",
       kind: "agent",
       owner: "agent",
@@ -1534,7 +1577,8 @@ export class BrowserController {
           throw new Error("The maximum of 30 spaces has been reached.");
         if (this.state.tabs.length >= 200)
           throw new Error("The maximum of 200 tabs has been reached.");
-        const name = cleanText(action.name, 48) || "Untitled space";
+        const name =
+          cleanAgentText(cleanText(action.name, 48)) || "Untitled space";
         const signIns = signInsOf(action.signIns);
         let space: Space;
         if (action.kind === "agent") {
@@ -1572,7 +1616,7 @@ export class BrowserController {
       }
       case "space:rename":
         this.getSpace(action.id).name =
-          cleanText(action.name, 48) || "Untitled space";
+          cleanAgentText(cleanText(action.name, 48)) || "Untitled space";
         break;
       case "space:color":
         if (!colors.includes(action.color))
@@ -1610,7 +1654,7 @@ export class BrowserController {
         if (
           !agentRules(space) ||
           !["human", "agent"].includes(action.owner) ||
-          ![undefined, "handoff"].includes(action.reason)
+          ![undefined, "handoff", "failed"].includes(action.reason)
         )
           throw new Error("Only agent spaces can change ownership.");
         if (action.owner === "human")
@@ -1618,13 +1662,15 @@ export class BrowserController {
             reason: action.reason ?? "manual",
           });
         else this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
-        this.addActivity(
-          space.id,
-          action.owner === "human"
-            ? "You took control. Agent access is paused."
-            : "Control returned to the agent.",
-          "info",
-        );
+        // A reported failure has its own entry, so this one would repeat it.
+        if (action.reason !== "failed")
+          this.addActivity(
+            space.id,
+            action.owner === "human"
+              ? "You took control. Agent access is paused."
+              : "Control returned to the agent.",
+            "info",
+          );
         break;
       }
       case "space:grant":
