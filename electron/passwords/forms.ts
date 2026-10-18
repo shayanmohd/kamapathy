@@ -1,8 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { dialog, Menu, screen } from "electron";
 import type { BrowserWindow, WebContents } from "electron";
 import { agentRules } from "../../shared/state";
-import type { BrowserState, PasswordPrompt, Space } from "../../shared/types";
+import type {
+  BrowserState,
+  PasswordPrompt,
+  PasswordPromptAnswer,
+  Space,
+} from "../../shared/types";
 import type { BrowserController } from "../controller";
+import { PasswordError } from "./errors";
 import {
   FORM_CHANNELS,
   type CaptureReport,
@@ -11,8 +18,9 @@ import {
   type HelloReply,
   type OutcomeReport,
 } from "./form-dom";
+import { asciiHost } from "./origin";
 import { memorySealer, type Sealer } from "./seal";
-import type { Vault } from "./vault";
+import { VAULT_LIMITS, type Vault } from "./vault";
 
 // The parts of WebFrameMain and WebContents the broker uses.
 export interface FormFrame {
@@ -84,6 +92,68 @@ export function underPersonControl(
   space: Pick<Space, "kind" | "access" | "owner">,
 ): boolean {
   return !agentRules(space) || space.owner === "human";
+}
+
+// A capture whose sealed values main has opened.
+export interface CaptureInput {
+  origin: string;
+  kind: "sign-in" | "sign-up" | "change";
+  username: string;
+  password?: string;
+  newPassword?: string;
+}
+export type SaveDecision =
+  | { prompt: "none" }
+  | { prompt: "save"; username: string }
+  | { prompt: "update"; loginId: string; username: string };
+
+// How long main waits for a sign-in to work, keeps a username-only step's
+// value for the next capture, and shows a prompt.
+export const CAPTURE_MS = {
+  success: 30000,
+  lend: 300000,
+  prompt: 300000,
+} as const;
+
+const NO_PROMPT: SaveDecision = { prompt: "none" };
+
+// What to offer once a sign-in worked. Saved passwords are compared one at
+// a time, and a login the person already has is only used.
+export async function saveDecision(
+  vault: Vault,
+  capture: CaptureInput,
+  offerToSave: boolean,
+): Promise<SaveDecision> {
+  if (!offerToSave || vault.isNeverSaved(capture.origin)) return NO_PROMPT;
+  const secret =
+    capture.kind === "sign-in" ? capture.password : capture.newPassword;
+  if (!secret) return NO_PROMPT;
+  const matches = vault.matches(capture.origin);
+  // A change form says which login it is about through its old password.
+  if (capture.kind === "change" && capture.password)
+    for (const login of matches)
+      if (await vault.passwordEquals(login.id, capture.password)) {
+        if (capture.password === secret) {
+          vault.touch(login.id);
+          return NO_PROMPT;
+        }
+        return {
+          prompt: "update",
+          loginId: login.id,
+          username: login.username,
+        };
+      }
+  const named = matches.filter((login) => login.username === capture.username);
+  for (const login of named)
+    if (await vault.passwordEquals(login.id, secret)) {
+      vault.touch(login.id);
+      return NO_PROMPT;
+    }
+  const saved =
+    named.find((login) => login.origin === capture.origin) ?? named[0];
+  if (saved)
+    return { prompt: "update", loginId: saved.id, username: saved.username };
+  return { prompt: "save", username: capture.username };
 }
 
 type FormReport =
@@ -173,6 +243,8 @@ function webFrame(
 
 interface FrameRecord {
   frame: FormFrame;
+  // Its place in the tab's frame tree, which outlives its documents.
+  node: number;
   // The origin the frame said hello from.
   origin: string;
   flags: FormFlags;
@@ -180,9 +252,32 @@ interface FrameRecord {
   // When its recent messages came, for the rate limit.
   times: number[];
 }
+// A capture waiting for the sign-in to work. Its values stay sealed.
+interface PendingCapture {
+  node: number;
+  origin: string;
+  kind: CaptureInput["kind"];
+  username: string;
+  password?: Buffer;
+  newPassword?: Buffer;
+  timer: ReturnType<typeof setTimeout>;
+}
+// What a prompt carries beside what the shell sees.
+interface HeldPrompt {
+  prompt: PasswordPrompt;
+  origin: string;
+  // The password to save, still sealed.
+  secret: Buffer;
+  loginId?: string;
+  timer: ReturnType<typeof setTimeout>;
+}
 interface TabRecord {
   contents: FormContents;
   frames: Map<number, FrameRecord>;
+  capture?: PendingCapture;
+  // A username-only step's value for the next password-only capture.
+  lent?: { origin: string; username: string; at: number };
+  prompt?: HeldPrompt;
   // The control, save setting and vault revision the flags were last
   // checked against.
   signature?: string;
@@ -258,6 +353,48 @@ export class FormBroker {
     if (!tab) return;
     this.tabs.delete(tabId);
     tab.stop();
+    if (this.forget(tab)) this.publish();
+  }
+
+  // The person's answer to a save or update prompt. The vault is written
+  // first: a failure keeps the prompt, so the bar can show its message. A
+  // prompt that is gone takes no answer.
+  async answer(
+    promptId: string,
+    answer: PasswordPromptAnswer,
+  ): Promise<{ ok: true }> {
+    const tab = [...this.tabs.values()].find(
+      (record) => record.prompt?.prompt.id === promptId,
+    );
+    const held = tab?.prompt;
+    if (!tab || !held) return { ok: true };
+    if (answer.action === "save") {
+      const { username } = answer;
+      if (typeof username !== "string")
+        throw new PasswordError("invalid_login", { field: "username" });
+      if (username.length > VAULT_LIMITS.username)
+        throw new PasswordError("invalid_login", {
+          field: "username",
+          limit: VAULT_LIMITS.username,
+        });
+      const password = await this.opened(held.secret);
+      const existing = this.vault.find("form", held.origin, username);
+      if (existing) await this.vault.update(existing.id, { password });
+      else
+        await this.vault.add({
+          kind: "form",
+          origin: held.origin,
+          username,
+          password,
+        });
+    } else if (answer.action === "update" && held.loginId !== undefined)
+      await this.vault.update(held.loginId, {
+        password: await this.opened(held.secret),
+      });
+    else if (answer.action === "never")
+      await this.vault.addNeverSaved(held.origin);
+    if (tab.prompt === held && this.dropPrompt(tab)) this.publish();
+    return { ok: true };
   }
 
   // Tells each recorded frame whose flags changed. Tabs whose control, save
@@ -265,10 +402,12 @@ export class FormBroker {
   controlChanged(spaceId?: string): void {
     if (this.disposed) return;
     const setting = this.host.state().settings.offerToSavePasswords;
+    let dropped = false;
     for (const [tabId, tab] of this.tabs) {
       const space = this.spaceOf(tabId);
       if (spaceId !== undefined && space?.id !== spaceId) continue;
       const control = !!space && underPersonControl(space);
+      if (!control && this.forget(tab)) dropped = true;
       const signature = `${control} ${setting} ${this.vault.revision}`;
       if (tab.signature === signature) continue;
       tab.signature = signature;
@@ -291,6 +430,7 @@ export class FormBroker {
         }
       }
     }
+    if (dropped) this.publish();
   }
 
   dispose(): void {
@@ -315,16 +455,22 @@ export class FormBroker {
       !!space && underPersonControl(space),
       sender.origin,
     );
+    // A new document of the capturing frame, or of the main frame, is asked
+    // whether it still shows a password field.
+    const checkOutcome =
+      tab.capture !== undefined &&
+      (sender.id === tab.capture.node || sender.id === this.mainNode(tab));
     tab.frames.set(sender.id, {
       frame: sender.frame,
+      node: sender.id,
       origin: sender.origin,
       flags,
-      checkOutcome: false,
+      checkOutcome,
       times,
     });
     // The next change of control checks this tab again.
     delete tab.signature;
-    return { ...flags, checkOutcome: false };
+    return { ...flags, checkOutcome };
   }
 
   // Refused reports are dropped without an answer.
@@ -352,12 +498,165 @@ export class FormBroker {
   }
 
   // Reports that passed every check, from frames the person controls.
-  // Nothing acts on them yet.
-  private report(
-    _tabId: string,
-    _frame: FrameRecord,
-    _report: FormReport,
-  ): void {}
+  private report(tabId: string, frame: FrameRecord, report: FormReport): void {
+    const tab = this.tabs.get(tabId);
+    if (!tab) return;
+    if (report.channel === "captured")
+      void this.captured(tabId, tab, frame, report.payload);
+    else if (report.channel === "outcome")
+      this.outcome(tabId, tab, frame, report.payload);
+  }
+
+  // What the person submitted is sealed at once and waits for the sign-in
+  // to work. The newest capture is the one the tab keeps.
+  private async captured(
+    tabId: string,
+    tab: TabRecord,
+    frame: FrameRecord,
+    payload: CaptureReport,
+  ): Promise<void> {
+    if (!frame.flags.capture) return;
+    const { node, origin } = frame;
+    if (payload.kind === "username") {
+      tab.lent = { origin, username: payload.username, at: this.now() };
+      return;
+    }
+    let { username } = payload;
+    const lent = tab.lent;
+    if (
+      payload.kind === "sign-in" &&
+      !username &&
+      lent &&
+      lent.origin === origin &&
+      this.now() - lent.at < CAPTURE_MS.lend
+    ) {
+      username = lent.username;
+      delete tab.lent;
+    }
+    const sealed = async (text?: string) =>
+      text === undefined ? undefined : await this.memory.seal(text);
+    const password = await sealed(
+      "password" in payload ? payload.password : undefined,
+    );
+    const newPassword = await sealed(
+      "newPassword" in payload ? payload.newPassword : undefined,
+    );
+    if (this.tabs.get(tabId) !== tab) return;
+    this.dropCapture(tab);
+    tab.capture = {
+      node,
+      origin,
+      kind: payload.kind,
+      username,
+      ...(password === undefined ? {} : { password }),
+      ...(newPassword === undefined ? {} : { newPassword }),
+      timer: setTimeout(() => this.dropCapture(tab), CAPTURE_MS.success),
+    };
+  }
+
+  // A new document without a password field, or the captured field going
+  // away, means the sign-in worked. A password field that came back means
+  // it did not.
+  private outcome(
+    tabId: string,
+    tab: TabRecord,
+    frame: FrameRecord,
+    payload: OutcomeReport,
+  ): void {
+    const capture = tab.capture;
+    if (!capture) return;
+    if ("formGone" in payload) {
+      if (frame.node !== capture.node || frame.origin !== capture.origin)
+        return;
+    } else {
+      if (!frame.checkOutcome) return;
+      if (payload.passwordField) {
+        this.dropCapture(tab);
+        return;
+      }
+    }
+    this.dropCapture(tab);
+    void this.succeeded(tabId, tab, capture);
+  }
+
+  private async succeeded(
+    tabId: string,
+    tab: TabRecord,
+    capture: PendingCapture,
+  ): Promise<void> {
+    const secret =
+      capture.kind === "sign-in" ? capture.password : capture.newPassword;
+    if (!secret) return;
+    const password = capture.password && (await this.opened(capture.password));
+    const newPassword =
+      capture.newPassword && (await this.opened(capture.newPassword));
+    const decision = await saveDecision(
+      this.vault,
+      {
+        origin: capture.origin,
+        kind: capture.kind,
+        username: capture.username,
+        ...(password === undefined ? {} : { password }),
+        ...(newPassword === undefined ? {} : { newPassword }),
+      },
+      this.host.state().settings.offerToSavePasswords,
+    );
+    if (decision.prompt === "none" || this.tabs.get(tabId) !== tab) return;
+    this.dropPrompt(tab);
+    tab.prompt = {
+      prompt: {
+        id: randomUUID(),
+        tabId,
+        kind: decision.prompt,
+        host: asciiHost(capture.origin),
+        username: decision.username,
+      },
+      origin: capture.origin,
+      secret,
+      ...(decision.prompt === "update" ? { loginId: decision.loginId } : {}),
+      timer: setTimeout(() => {
+        if (this.dropPrompt(tab)) this.publish();
+      }, CAPTURE_MS.prompt),
+    };
+    this.publish();
+  }
+
+  // Prompts are runtime state of the window, one per tab.
+  private publish(): void {
+    const prompts: PasswordPrompt[] = [];
+    for (const tab of this.tabs.values())
+      if (tab.prompt) prompts.push(tab.prompt.prompt);
+    this.host.setPrompts(prompts);
+  }
+
+  private dropCapture(tab: TabRecord): void {
+    if (!tab.capture) return;
+    clearTimeout(tab.capture.timer);
+    delete tab.capture;
+  }
+  private dropPrompt(tab: TabRecord): boolean {
+    if (!tab.prompt) return false;
+    clearTimeout(tab.prompt.timer);
+    delete tab.prompt;
+    return true;
+  }
+  // Nothing of the person's sign-ins outlives their control of the tab.
+  private forget(tab: TabRecord): boolean {
+    this.dropCapture(tab);
+    delete tab.lent;
+    return this.dropPrompt(tab);
+  }
+  private async opened(sealed: Buffer): Promise<string> {
+    return (await this.memory.open(sealed)).text;
+  }
+  // The frame tree node of the tab's main frame, if its page is still there.
+  private mainNode(tab: TabRecord): number | undefined {
+    try {
+      return tab.contents.mainFrame.frameTreeNodeId;
+    } catch {
+      return undefined;
+    }
+  }
 
   // Counts a message unless the frame already sent 20 in the last second.
   private allowed(times: number[]): boolean {

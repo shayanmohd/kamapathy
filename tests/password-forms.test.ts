@@ -7,11 +7,14 @@ import type { BrowserWindow } from "electron";
 import { dialog, Menu, screen } from "electron";
 import type { BrowserController } from "../electron/controller";
 import type { RegistryEvent } from "../electron/agent/tab-registry";
+import { PasswordError } from "../electron/passwords/errors";
 import { FORM_CHANNELS } from "../electron/passwords/form-dom";
 import {
+  CAPTURE_MS,
   connectForms,
   FORM_LIMITS,
   FormBroker,
+  saveDecision,
   underPersonControl,
   type FormFrame,
   type FormHost,
@@ -19,7 +22,7 @@ import {
 import type { Sealer } from "../electron/passwords/seal";
 import { Vault } from "../electron/passwords/vault";
 import { initialState, newTab } from "../shared/state";
-import type { BrowserState, Space } from "../shared/types";
+import type { BrowserState, PasswordPrompt, Space } from "../shared/types";
 
 vi.mock("electron", () => ({
   Menu: { buildFromTemplate: vi.fn() },
@@ -179,12 +182,12 @@ const reversing: Sealer = {
   }),
 };
 const directories: string[] = [];
-function vaultAt(): Vault {
+function vaultAt(sealer: Sealer = reversing): Vault {
   const directory = mkdtempSync(join(tmpdir(), "kamapathy-forms-test-"));
   directories.push(directory);
   return new Vault({
     path: join(directory, "passwords", "vault.bin"),
-    sealer: reversing,
+    sealer,
   });
 }
 // An opened vault with a login for each origin.
@@ -220,8 +223,30 @@ function reports() {
 const reported = (spy: ReturnType<typeof reports>) =>
   spy.mock.calls.map(([tabId, , report]) => ({ tabId, ...(report as object) }));
 
+// Captures are sealed and decided through promises: let them settle.
+async function settled() {
+  for (let count = 0; count < 20; count += 1) await Promise.resolve();
+}
+// The prompts the broker published last.
+const promptsOf = (host: ReturnType<typeof fakeHost>): PasswordPrompt[] =>
+  (host.setPrompts.mock.calls.at(-1)?.[0] as PasswordPrompt[] | undefined) ??
+  [];
+// A capture whose form then goes away, which main reads as a sign-in that
+// worked.
+async function signedIn(
+  page: FakeContents,
+  payload: unknown,
+  frame: FakeFrame = page.mainFrame,
+) {
+  page.report("captured", payload, frame);
+  await settled();
+  page.report("outcome", { formGone: true }, frame);
+  await settled();
+}
+
 afterEach(() => {
   for (const broker of brokers.splice(0)) broker.dispose();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   for (const directory of directories.splice(0))
@@ -855,5 +880,430 @@ describe("form broker", () => {
     broker.dispose();
     expect(existing.registrations()).toEqual(removed);
     expect([views.size, registry.size, subscribers.size]).toEqual([0, 0, 0]);
+  });
+
+  it("a page without a password field after navigation prompts save, a returning form does not", async () => {
+    vi.useFakeTimers();
+    let time = 0;
+    const vault = await openVault();
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state, () => (time += 1000));
+    const page = new FakeContents("https://a.example", "https://a.example");
+    const [main, sub] = page.frames;
+    broker.attach(tabs.personal.id, page);
+    expect(await page.hello(main)).toEqual({
+      fill: false,
+      capture: true,
+      checkOutcome: false,
+    });
+
+    // The new document of the capturing frame is asked about its fields.
+    page.report("captured", signIn, main);
+    await settled();
+    expect(await page.hello(main)).toEqual({
+      fill: false,
+      capture: true,
+      checkOutcome: true,
+    });
+    page.report("outcome", { passwordField: false }, main);
+    await settled();
+    expect(host.setPrompts).toHaveBeenCalledOnce();
+    expect(promptsOf(host)).toEqual([
+      {
+        id: expect.any(String),
+        tabId: tabs.personal.id,
+        kind: "save",
+        host: "a.example",
+        username: "alice",
+      },
+    ]);
+    expect(
+      await broker.answer(promptsOf(host)[0].id, { action: "dismiss" }),
+    ).toEqual({ ok: true });
+    expect(promptsOf(host)).toEqual([]);
+    host.setPrompts.mockClear();
+
+    // A new document still showing a password field means the form came
+    // back, so the capture goes.
+    page.report("captured", signIn, main);
+    await settled();
+    expect(await page.hello(main)).toMatchObject({ checkOutcome: true });
+    page.report("outcome", { passwordField: true }, main);
+    page.report("outcome", { formGone: true }, main);
+    await settled();
+    expect(host.setPrompts).not.toHaveBeenCalled();
+
+    // The captured field going away counts from the capturing frame only.
+    expect(await page.hello(sub)).toMatchObject({
+      capture: true,
+      checkOutcome: false,
+    });
+    page.report("captured", { ...signIn, username: "carol" }, sub);
+    await settled();
+    // The document that captured was never asked about its fields.
+    page.report("outcome", { passwordField: false }, sub);
+    page.report("outcome", { formGone: true }, main);
+    await settled();
+    expect(host.setPrompts).not.toHaveBeenCalled();
+
+    // A form on another origin in the same frame is not the captured one.
+    sub.origin = "https://moved.example";
+    sub.url = "https://moved.example/";
+    await page.hello(sub);
+    page.report("outcome", { formGone: true }, sub);
+    await settled();
+    expect(host.setPrompts).not.toHaveBeenCalled();
+    sub.origin = "https://a.example";
+    sub.url = "https://a.example/";
+    await page.hello(sub);
+    page.report("outcome", { formGone: true }, sub);
+    await settled();
+    expect(promptsOf(host)).toMatchObject([
+      { kind: "save", username: "carol" },
+    ]);
+    await broker.answer(promptsOf(host)[0].id, { action: "dismiss" });
+    host.setPrompts.mockClear();
+
+    // Neither outcome within 30000 ms drops the capture.
+    page.report("captured", signIn, main);
+    await settled();
+    vi.advanceTimersByTime(CAPTURE_MS.success);
+    expect(await page.hello(main)).toMatchObject({ checkOutcome: false });
+    page.report("outcome", { passwordField: false }, main);
+    page.report("outcome", { formGone: true }, main);
+    await settled();
+    expect(host.setPrompts).not.toHaveBeenCalled();
+  });
+
+  it("a new password for a saved username prompts update", async () => {
+    let time = 0;
+    const vault = vaultAt();
+    await vault.open();
+    const saved = await vault.add({
+      kind: "form",
+      origin: "https://a.example",
+      username: "alice",
+      password: "secret",
+      compromised: "leaked",
+      changedAt: 1000,
+    });
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state, () => (time += 1000));
+    const page = new FakeContents("https://a.example");
+    broker.attach(tabs.personal.id, page);
+    expect(await page.hello()).toMatchObject({ fill: true, capture: true });
+
+    // alice signs in with another password.
+    await signedIn(page, {
+      kind: "sign-in",
+      username: "alice",
+      password: "newer",
+    });
+    expect(promptsOf(host)).toEqual([
+      {
+        id: expect.any(String),
+        tabId: tabs.personal.id,
+        kind: "update",
+        host: "a.example",
+        username: "alice",
+      },
+    ]);
+    await broker.answer(promptsOf(host)[0].id, { action: "update" });
+    expect(await vault.passwordEquals(saved.id, "newer")).toBe(true);
+    expect(vault.get(saved.id)).toMatchObject({ username: "alice" });
+    expect(vault.get(saved.id)?.compromised).toBeUndefined();
+    expect(vault.get(saved.id)!.changedAt).toBeGreaterThan(1000);
+    expect(promptsOf(host)).toEqual([]);
+    expect(vault.list()).toHaveLength(1);
+
+    // A change form says which login it is about through its old password.
+    await signedIn(page, {
+      kind: "change",
+      username: "",
+      password: "newer",
+      newPassword: "third",
+    });
+    expect(promptsOf(host)).toMatchObject([
+      { kind: "update", username: "alice" },
+    ]);
+    await broker.answer(promptsOf(host)[0].id, { action: "update" });
+    expect(await vault.passwordEquals(saved.id, "third")).toBe(true);
+    expect(vault.list()).toHaveLength(1);
+  });
+
+  it("saving off, never-saved sites and identical logins give no prompt", async () => {
+    let time = 0;
+    const vault = await openVault("https://a.example");
+    await vault.addNeverSaved("https://b.example");
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state, () => (time += 1000));
+    const fresh = {
+      origin: "https://c.example",
+      kind: "sign-in",
+      username: "dave",
+      password: "typed",
+    } as const;
+    expect(await saveDecision(vault, fresh, false)).toEqual({ prompt: "none" });
+    expect(await saveDecision(vault, fresh, true)).toEqual({
+      prompt: "save",
+      username: "dave",
+    });
+    // The www twin of a never-saved site is never saved either.
+    expect(
+      await saveDecision(
+        vault,
+        { ...fresh, origin: "https://www.b.example" },
+        true,
+      ),
+    ).toEqual({ prompt: "none" });
+
+    const page = new FakeContents("https://www.b.example", "https://a.example");
+    const [main, sub] = page.frames;
+    broker.attach(tabs.personal.id, page);
+    await page.hello(main);
+    await page.hello(sub);
+    await signedIn(page, signIn, main);
+    expect(host.setPrompts).not.toHaveBeenCalled();
+
+    // The same login as the saved one is only used, never offered.
+    const [saved] = vault.list();
+    expect(saved.usedAt).toBeUndefined();
+    await signedIn(page, signIn, sub);
+    expect(host.setPrompts).not.toHaveBeenCalled();
+    expect(vault.get(saved.id)?.usedAt).toBeTypeOf("number");
+    await vault.flush();
+
+    // Saving off stops the capture where it arrives, so turning it on again
+    // offers nothing for what was never captured.
+    state.settings.offerToSavePasswords = false;
+    broker.controlChanged();
+    page.report("captured", { ...signIn, password: "another" }, sub);
+    await settled();
+    state.settings.offerToSavePasswords = true;
+    broker.controlChanged();
+    page.report("outcome", { formGone: true }, sub);
+    await settled();
+    expect(host.setPrompts).not.toHaveBeenCalled();
+  });
+
+  it("a username-first step lends its username to the next password-only capture", async () => {
+    let time = 100_000;
+    const vault = await openVault();
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state, () => time);
+    const page = new FakeContents("https://a.example", "https://b.example");
+    const [main, sub] = page.frames;
+    broker.attach(tabs.personal.id, page);
+    await page.hello(main);
+    await page.hello(sub);
+
+    // A username step alone is never a sign-in.
+    await signedIn(page, { kind: "username", username: "alice" }, main);
+    expect(host.setPrompts).not.toHaveBeenCalled();
+    time += CAPTURE_MS.lend - 1;
+    const only = { kind: "sign-in", username: "", password: "secret" } as const;
+    await signedIn(page, only, main);
+    expect(promptsOf(host)).toMatchObject([
+      { kind: "save", username: "alice" },
+    ]);
+    await broker.answer(promptsOf(host)[0].id, { action: "dismiss" });
+
+    // The lent username is used up.
+    time += 1000;
+    await signedIn(page, only, main);
+    expect(promptsOf(host)).toMatchObject([{ kind: "save", username: "" }]);
+    await broker.answer(promptsOf(host)[0].id, { action: "dismiss" });
+
+    // A step on another origin lends nothing to this one.
+    time += 1000;
+    await signedIn(page, { kind: "username", username: "bob" }, sub);
+    await signedIn(page, only, main);
+    expect(promptsOf(host)).toMatchObject([{ kind: "save", username: "" }]);
+    await broker.answer(promptsOf(host)[0].id, { action: "dismiss" });
+
+    // A step from five minutes ago is too old.
+    time += 1000;
+    page.report("captured", { kind: "username", username: "carol" }, main);
+    await settled();
+    time += CAPTURE_MS.lend;
+    await signedIn(page, only, main);
+    expect(promptsOf(host)).toMatchObject([{ kind: "save", username: "" }]);
+  });
+
+  it("one prompt per tab, replaced, expiring and leaving with its tab", async () => {
+    vi.useFakeTimers();
+    let time = 0;
+    const vault = await openVault();
+    const { state, tabs, work } = browserState();
+    work.access = "ended";
+    work.owner = "human";
+    const { broker, host } = brokerFor(vault, state, () => (time += 1000));
+    const page = new FakeContents("https://a.example");
+    const other = new FakeContents("https://b.example");
+    broker.attach(tabs.personal.id, page);
+    broker.attach(tabs.work.id, other);
+    await page.hello();
+    await other.hello();
+
+    // A payload with a key the form script never sends is dropped.
+    await signedIn(page, { ...signIn, origin: "https://b.example" });
+    expect(host.setPrompts).not.toHaveBeenCalled();
+
+    await signedIn(page, signIn);
+    const first = promptsOf(host)[0];
+    expect(first).toMatchObject({ kind: "save", username: "alice" });
+    // The newest capture replaces the prompt the tab had.
+    await signedIn(page, { ...signIn, username: "bob" });
+    expect(promptsOf(host)).toMatchObject([{ kind: "save", username: "bob" }]);
+    expect(promptsOf(host)[0].id).not.toBe(first.id);
+    // Each tab keeps its own.
+    await signedIn(other, signIn);
+    expect(promptsOf(host)).toMatchObject([
+      { tabId: tabs.personal.id, username: "bob" },
+      { tabId: tabs.work.id, host: "b.example" },
+    ]);
+    // A prompt that is gone takes no answer.
+    expect(await broker.answer(first.id, { action: "never" })).toEqual({
+      ok: true,
+    });
+    expect(vault.neverSaved()).toEqual([]);
+
+    // Prompts wait five minutes.
+    vi.advanceTimersByTime(CAPTURE_MS.prompt - 1);
+    expect(promptsOf(host)).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(promptsOf(host)).toEqual([]);
+
+    // A prompt leaves with its tab.
+    await signedIn(page, signIn);
+    expect(promptsOf(host)).toHaveLength(1);
+    broker.detach(tabs.personal.id);
+    expect(promptsOf(host)).toEqual([]);
+
+    // An agent taking the space over takes the prompt with it.
+    await signedIn(other, signIn);
+    expect(promptsOf(host)).toMatchObject([{ tabId: tabs.work.id }]);
+    work.access = "granted";
+    work.owner = "agent";
+    broker.controlChanged(work.id);
+    expect(promptsOf(host)).toEqual([]);
+    expect(other.mainFrame.send).toHaveBeenLastCalledWith(FORM_CHANNELS.state, {
+      fill: false,
+      capture: false,
+    });
+  });
+
+  it("answers save with the edited username, never-save the site or dismiss", async () => {
+    let time = 0;
+    const vault = await openVault();
+    const { state, tabs, work } = browserState();
+    const { broker, host } = brokerFor(vault, state, () => (time += 1000));
+    const page = new FakeContents("https://a.example");
+    broker.attach(tabs.personal.id, page);
+    await page.hello();
+
+    // An unknown prompt id is answered with nothing.
+    expect(
+      await broker.answer("gone", { action: "save", username: "bob" }),
+    ).toEqual({ ok: true });
+    expect(host.setPrompts).not.toHaveBeenCalled();
+
+    await signedIn(page, signIn);
+    const offered = promptsOf(host)[0];
+    expect(offered).toMatchObject({ kind: "save", username: "alice" });
+    // A username over the limit is refused and the prompt stays.
+    const refused = broker.answer(offered.id, {
+      action: "save",
+      username: "x".repeat(1001),
+    });
+    await expect(refused).rejects.toBeInstanceOf(PasswordError);
+    await expect(refused).rejects.toMatchObject({
+      code: "invalid_login",
+      fields: { field: "username", limit: 1000 },
+    });
+    expect(promptsOf(host)).toEqual([offered]);
+
+    // The person edits the username before saving.
+    expect(
+      await broker.answer(offered.id, { action: "save", username: "bob" }),
+    ).toEqual({ ok: true });
+    const [saved] = vault.list();
+    expect(saved).toMatchObject({
+      kind: "form",
+      origin: "https://a.example",
+      username: "bob",
+    });
+    expect(await vault.passwordEquals(saved.id, "secret")).toBe(true);
+    expect(promptsOf(host)).toEqual([]);
+
+    // Saving as a username the site already has replaces its password.
+    await signedIn(page, {
+      kind: "sign-in",
+      username: "carol",
+      password: "another",
+    });
+    expect(promptsOf(host)).toMatchObject([
+      { kind: "save", username: "carol" },
+    ]);
+    await broker.answer(promptsOf(host)[0].id, {
+      action: "save",
+      username: "bob",
+    });
+    expect(vault.list()).toHaveLength(1);
+    expect(await vault.passwordEquals(saved.id, "another")).toBe(true);
+
+    // Not now leaves the vault alone.
+    await signedIn(page, {
+      kind: "sign-in",
+      username: "dave",
+      password: "third",
+    });
+    await broker.answer(promptsOf(host)[0].id, { action: "dismiss" });
+    expect(vault.list()).toHaveLength(1);
+    expect(promptsOf(host)).toEqual([]);
+
+    // Never for this site keeps the origin out of the vault.
+    await signedIn(page, {
+      kind: "sign-in",
+      username: "dave",
+      password: "third",
+    });
+    await broker.answer(promptsOf(host)[0].id, { action: "never" });
+    expect(vault.neverSaved()).toMatchObject([{ origin: "https://a.example" }]);
+    expect(vault.list()).toHaveLength(1);
+    expect(promptsOf(host)).toEqual([]);
+    await signedIn(page, {
+      kind: "sign-in",
+      username: "erin",
+      password: "fourth",
+    });
+    expect(promptsOf(host)).toEqual([]);
+
+    // A vault that cannot be written keeps the prompt for another try.
+    const refusing: Sealer = {
+      check: async () => {
+        throw new PasswordError("vault_unavailable", { reason: "no_keyring" });
+      },
+      seal: reversing.seal,
+      open: reversing.open,
+    };
+    const broken = vaultAt(refusing);
+    await broken.open();
+    work.access = "ended";
+    work.owner = "human";
+    const second = brokerFor(broken, state);
+    const elsewhere = new FakeContents("https://d.example");
+    second.broker.attach(tabs.work.id, elsewhere);
+    await elsewhere.hello();
+    await signedIn(elsewhere, signIn);
+    const pending = promptsOf(second.host)[0];
+    expect(pending).toMatchObject({ kind: "save", host: "d.example" });
+    const failed = second.broker.answer(pending.id, {
+      action: "save",
+      username: "alice",
+    });
+    await expect(failed).rejects.toBeInstanceOf(PasswordError);
+    await expect(failed).rejects.toMatchObject({ code: "vault_unavailable" });
+    expect(promptsOf(second.host)).toEqual([pending]);
   });
 });
