@@ -26,6 +26,17 @@ import type {
 import { isWebUrl } from "../shared/url";
 import { FakeHost } from "./fake-cdp";
 
+// A PNG's signature and header, which is all a capture's size needs.
+export function fakePng(width: number, height: number): Buffer {
+  const png = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(13, 8);
+  png.write("IHDR", 12, "ascii");
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png;
+}
+
 // A page whose debugger answers page operations with `result`. It records
 // each operation with the world it ran in, and each input command.
 export class FakeContents extends FakeHost {
@@ -102,6 +113,10 @@ export class FakeController implements AutomationController {
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
+  // The tabs whose views were lent to a capture window, in order.
+  lent: string[] = [];
+  scale = 1;
+  emptyCapture = false;
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
@@ -193,6 +208,21 @@ export class FakeController implements AutomationController {
   }
   canCapturePage() {
     return this.captureAvailable;
+  }
+  async withVisibleView<T>(tabId: string, capture: () => Promise<T>) {
+    this.lent.push(tabId);
+    return capture();
+  }
+  deviceScale() {
+    return this.scale;
+  }
+  cropPng(png: Buffer, width: number, height: number) {
+    if (this.emptyCapture || png.length < 24) return null;
+    const cropped = {
+      width: Math.min(width, png.readUInt32BE(16)),
+      height: Math.min(height, png.readUInt32BE(20)),
+    };
+    return { png: fakePng(cropped.width, cropped.height), ...cropped };
   }
   addActivity(spaceId: string | undefined, message: string, kind: string) {
     this.activity.push({ spaceId, message, kind });
