@@ -1,4 +1,6 @@
 // New interface text lives here so renaming the product touches one file.
+import type { ImportErrorCode } from "../shared/types";
+
 export const toolsMenuCopy = {
   label: "Browser menu",
   "new-tab": "New tab",
@@ -30,7 +32,8 @@ export const settingsCopy = {
   activity: "Recent activity",
   noActivity: "Actions will appear here when an agent gets to work.",
   import: "Import bookmarks and history",
-  importNote: "Bring them over from another browser on this computer.",
+  importNote:
+    "Bring your bookmarks, history and sign-ins over from another browser on this computer.",
   importButton: "Import...",
 } as const;
 
@@ -72,8 +75,46 @@ export const importCopy = {
   looking: "Looking for browsers...",
   none: "No other browsers were found on this computer.",
   failed: "The import did not finish. Try again.",
-  done: (bookmarks: number, history: number) =>
-    `Imported ${bookmarks} ${bookmarks === 1 ? "bookmark" : "bookmarks"} and ${history} ${history === 1 ? "site" : "sites"}.`,
+  allProfiles: "All profiles",
+  signIns: "Sign-ins (cookies)",
+  signInsHint:
+    "Sign-ins come from Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera.",
+  sharedChoice: "Add them to your shared sign-ins",
+  sharedNote:
+    "These sign-ins will work in every space that shares your sign-ins, and for agents there.",
+  separateChoice: "A new space for each profile",
+  separateNote:
+    "Each profile gets a personal space of its own, with sign-ins kept apart from your other spaces.",
+  keychainNote:
+    "macOS asks for your password once for each browser, so Kamapathy can read its sign-ins.",
+  needsPermission: "Needs permission",
+  permission: "Kamapathy needs permission to read this browser's data.",
+  openSettings: "Open system settings",
+  safariTitle: "Safari",
+  safariSteps:
+    "In Safari, choose File > Export Browsing Data to File. Then choose that .zip file here, or drop it on this box.",
+  chooseZip: "Choose .zip file",
+  dropZip: "Drop the Safari .zip file here",
+  tooLarge: "That file is larger than 16 MB. Choose the file Safari exported.",
+  done: (bookmarks: number, history: number, signIns?: number) => {
+    const counted = `Imported ${bookmarks} ${bookmarks === 1 ? "bookmark" : "bookmarks"}`;
+    const sites = `${history} ${history === 1 ? "site" : "sites"}`;
+    if (signIns === undefined) return `${counted} and ${sites}.`;
+    return `${counted}, ${sites} and ${signIns} ${signIns === 1 ? "sign-in" : "sign-ins"}.`;
+  },
+  spaces: (names: string[]) => `New spaces: ${names.join(", ")}.`,
+  errors: {
+    import_invalid_request: "Something was wrong with that import. Try again.",
+    source_not_found: "That browser was not found on this computer.",
+    profile_not_found: "That profile was not found.",
+    import_busy: "An import is already running.",
+    read_blocked: "Kamapathy needs permission to read this browser's data.",
+    keychain_denied:
+      "Kamapathy could not get the sign-in key from your keychain.",
+    cookies_unavailable:
+      "Sign-ins from this browser could not be imported on this system.",
+    invalid_archive: "That is not the file Safari exported. Choose it again.",
+  } satisfies Record<ImportErrorCode, string>,
 } as const;
 
 export const agentBarCopy = {
