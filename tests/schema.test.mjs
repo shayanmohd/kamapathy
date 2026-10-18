@@ -244,6 +244,9 @@ describe("API schema", () => {
     expect(Math.max(...since)).toBe(API_LEVEL);
     expect(API_LEVEL).toBe(4);
     expect(Math.min(...since)).toBe(1);
+    expect(read("docs/automation.md")).toContain(
+      `This version is level ${API_LEVEL},`,
+    );
   });
 
   it("assigns statuses by class", () => {
