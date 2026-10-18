@@ -2,13 +2,23 @@ import { poll, waitForState } from "./wait.mjs";
 import { prepareDesktopRuntime } from "./desktop-runtime.mjs";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+  rm,
+} from "node:fs/promises";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { startFormSite } from "../tests/fixtures/form-site.mjs";
+import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
 const temporary = await mkdtemp(join(tmpdir(), "kamapathy-skill-e2e-"));
@@ -26,6 +36,36 @@ const environment = {
   KAMAPATHY_TEST_HOOKS: "1",
 };
 delete environment.ELECTRON_RUN_AS_NODE;
+const packaged = Boolean(process.env.KAMAPATHY_EXECUTABLE);
+// Agent setup and update checks run against a temporary home and a local
+// feed, so no agent folder of this computer and no GitHub release is touched.
+const agentHome = join(temporary, "home");
+for (const folder of [".claude", ".codex"])
+  await mkdir(join(agentHome, folder), { recursive: true });
+const feed = await startUpdateFeed();
+const appEnvironment = {
+  ...environment,
+  ...(process.platform === "win32"
+    ? { USERPROFILE: agentHome, LOCALAPPDATA: agentHome }
+    : { HOME: agentHome }),
+  KAMAPATHY_UPDATE_FEED: feed.origin,
+  KAMAPATHY_UPDATE_KIND: "linux-appimage",
+};
+for (const name of [
+  "ZDOTDIR",
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "XDG_CONFIG_HOME",
+])
+  delete appEnvironment[name];
+// A packaged build ignores the test feed, so its checks stay off GitHub.
+if (packaged) {
+  await mkdir(environment.KAMAPATHY_USER_DATA, { recursive: true });
+  await writeFile(
+    join(environment.KAMAPATHY_USER_DATA, "browser-state.json"),
+    JSON.stringify({ settings: { updateChecks: false } }),
+  );
+}
 const checks = [];
 const calls = [];
 let browser;
@@ -187,6 +227,55 @@ async function cli(args, input, options = {}) {
 async function json(args, input) {
   return JSON.parse((await cli([...args, "--json"], input)).output);
 }
+// A program agent setup wrote, run the way a terminal would run it.
+async function program(file, args, options = {}) {
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      env: options.env ?? environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "",
+      errors = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${file} timed out`));
+    }, 60000);
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, output, errors });
+    });
+  });
+  assert.equal(result.code, 0, `${file} failed: ${result.errors}`);
+  return result;
+}
+const noticeLines = (text) =>
+  text.split("\n").filter((line) => line.startsWith("notice: "));
+// Every file left under a folder, by path, so a deleted download shows.
+async function filesUnder(folder) {
+  if (!existsSync(folder)) return [];
+  const entries = await readdir(folder, {
+    recursive: true,
+    withFileTypes: true,
+  });
+  return entries
+    .filter((entry) => !entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+// The updater reuses a list it read less than 60 seconds ago.
+async function pastReuse() {
+  const last = feed.lastListRequestAt();
+  if (last === null) return;
+  const remaining = 61000 - (Date.now() - last);
+  if (remaining > 0) await sleep(remaining);
+}
 const observe = (id) => json(["snapshot", id, "--full"]);
 function ref(snapshot, label, tag) {
   const matches = snapshot.interactables.filter(
@@ -227,7 +316,7 @@ try {
       ? resolve(process.env.KAMAPATHY_EXECUTABLE)
       : await prepareDesktopRuntime(),
     args: process.env.KAMAPATHY_EXECUTABLE ? [] : [resolve("out/main/index.js")],
-    env: environment,
+    env: appEnvironment,
   });
   if (diagnostics) await browser.evaluate(installRecorder, PAGE_RECORDER);
   chrome = await browser.firstWindow();
@@ -1559,6 +1648,117 @@ try {
     { code: "unknown_field", field: "zz" },
   );
   passed("a raw socket POST with an extra field gets 400 unknown_field");
+  // Section 12: setup gives agents the skill and a working command.
+  const setUp = await chrome.evaluate(() =>
+    window.kamapathy.applyAgentSetup({
+      agents: ["claude-code"],
+      replace: [],
+      command: true,
+      path: false,
+      codexRule: false,
+    }),
+  );
+  assert.equal(setUp.command.state, "on");
+  const claudeCode = setUp.agents.find((agent) => agent.id === "claude-code");
+  assert.equal(claudeCode?.state, "linked", JSON.stringify(setUp.agents));
+  const commandPath = setUp.command.path;
+  const throughCommand = await program(
+    ...(process.platform === "win32"
+      ? ["cmd.exe", ["/d", "/c", commandPath, "health"]]
+      : ["/bin/sh", [commandPath, "health"]]),
+  );
+  assert.equal(throughCommand.output.trim(), `ok Kamapathy ${packageVersion}`);
+  const entry = join(claudeCode.folder, "kamapathy");
+  const throughEntry = await program(process.execPath, [
+    join(entry, "scripts", "kamapathy.mjs"),
+    "health",
+  ]);
+  assert.equal(throughEntry.output.trim(), `ok Kamapathy ${packageVersion}`);
+  const takenBack = await chrome.evaluate(() =>
+    window.kamapathy.removeAgentSetup(),
+  );
+  assert.equal(takenBack.command.state, "off");
+  assert.notEqual(
+    takenBack.agents.find((agent) => agent.id === "claude-code")?.state,
+    "linked",
+  );
+  assert.equal(existsSync(commandPath), false);
+  assert.equal(existsSync(entry), false);
+  passed(
+    "setup gives agents a working command through the launcher and their skills folder",
+  );
+  // Section 13 last, so its notices reach no earlier check's stderr.
+  if (packaged)
+    console.log("SKIP update check: a packaged run ignores the test feed");
+  else {
+    const downloads = join(environment.KAMAPATHY_USER_DATA, "updates");
+    await pastReuse();
+    feed.setMode("bad-sum");
+    const refused = await cli(["upgrade"], undefined, { failure: true });
+    assert.equal(refused.code, 1);
+    assert.match(
+      refused.errors,
+      /^Kamapathy: update_verify_failed: The download didn't match its checksum, so it was deleted\.$/m,
+    );
+    assert.deepEqual(await filesUnder(downloads), []);
+    // The same release, now with the checksum it publishes.
+    feed.setMode("available");
+    const available = await cli(["upgrade", "--check"]);
+    assert.equal(
+      available.output.trim(),
+      `Kamapathy 9.9.9 is available (this is ${packageVersion}). Run kamapathy upgrade, with the person's approval, to download it.`,
+    );
+    assert.deepEqual(await filesUnder(downloads), []);
+    const notified = await cli(["health"]);
+    assert.equal(notified.output.trim(), `ok Kamapathy ${packageVersion}`);
+    assert.deepEqual(noticeLines(notified.errors), [
+      `notice: update_available: Kamapathy 9.9.9 is out (this is ${packageVersion}). Finish this task first, then ask the person before you run kamapathy upgrade. Read the Kamapathy skill again after the update.`,
+    ]);
+    // A run that reaches Kamapathy announces the update once, then exits 0.
+    const announced = await cli(["run", "-e", "await spaces();"]);
+    assert.equal(announced.code, 0);
+    assert.equal(noticeLines(announced.errors).length, 1, announced.errors);
+    const upgraded = await cli(["upgrade"]);
+    assert.ok(
+      upgraded.errors.includes(
+        `Downloading ${feed.installer.name} (2 MB)...\n`,
+      ),
+      upgraded.errors,
+    );
+    const lines = upgraded.output.trimEnd().split("\n");
+    assert.equal(
+      lines[0],
+      `Kamapathy 9.9.9 is downloaded and checked (this is ${packageVersion}).`,
+    );
+    const installer = join(downloads, "9.9.9", feed.installer.name);
+    assert.equal(lines[1], `Installer: ${installer}`);
+    assert.match(lines[2], /^Next: /);
+    const file = statSync(installer);
+    assert.equal(file.size, feed.installer.size);
+    if (process.platform !== "win32")
+      assert.equal(file.mode & 0o777, 0o755);
+    assert.equal(
+      createHash("sha256").update(await readFile(installer)).digest("hex"),
+      feed.installer.sha256,
+    );
+    const ready = await cli(["health"]);
+    assert.deepEqual(noticeLines(ready.errors), [
+      `notice: update_ready: Kamapathy 9.9.9 is downloaded (this is ${packageVersion}). Finish this task first, then tell the person they can install it from Settings, under Updates. Read the Kamapathy skill again after the update.`,
+    ]);
+    const install = await socketFetch(await resolveSocket(environment))(
+      "/update/install",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    assert.equal(install.status, 404);
+    assert.equal((await install.json()).error.code, "route_not_found");
+    passed(
+      "an agent sees the notice, downloads a verified installer and cannot install it",
+    );
+  }
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");
@@ -1593,6 +1793,7 @@ try {
   }
   if (browser) await browser.close().catch(() => {});
   await fixture.close();
+  await feed.close();
   await rm(temporary, {
     recursive: true,
     force: true,

@@ -2,16 +2,17 @@ import { poll, waitForState } from "./wait.mjs";
 import { prepareDesktopRuntime } from "./desktop-runtime.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { _electron as electron } from "playwright";
 import {
   resolveSocket,
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
+import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 
 const profile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-"));
 let failRecoverablePage = true;
@@ -94,6 +95,21 @@ const env = {
     : { HOME: home }),
 };
 delete env.ELECTRON_RUN_AS_NODE;
+// Agent setup reads these only from the app's own environment, so a run
+// never reaches the real agent folders or startup files.
+for (const name of [
+  "ZDOTDIR",
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "XDG_CONFIG_HOME",
+])
+  delete env[name];
+// Claude Code and Codex are found by their folders in this home.
+for (const folder of [".claude", ".codex"])
+  await mkdir(join(home, folder), { recursive: true });
+// The second profile for What's new and update checks, with its own feed.
+let updateProfile;
+let updateFeed;
 const visibleViews = () =>
   app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0]
@@ -184,6 +200,11 @@ try {
     ],
   );
   checked("the welcome dialog imports bookmarks and history from another browser, then offers top sites, once");
+  // What's new never opens on a fresh profile: restore saves the running
+  // version as the one seen.
+  const whatsNew = (target) =>
+    target.getByRole("dialog", { name: /^What's new in Kamapathy/ });
+  assert.equal(await whatsNew(page).count(), 0);
   assert.equal(await page.getByRole("complementary").count(), 0);
   if (process.platform === "darwin") {
     assert.deepEqual(
@@ -788,6 +809,10 @@ try {
   await page.keyboard.press("ArrowDown");
   assert.match(await focusedText(), /^New space/);
   await page.keyboard.press("End");
+  assert.match(await focusedText(), /^Help/);
+  // Settings sits two items above Help, under Set up agents.
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
   assert.match(await focusedText(), /^Settings/);
   await page.keyboard.press("Enter");
   await page.getByRole("heading", { name: "Make Kamapathy yours" }).waitFor();
@@ -1664,6 +1689,141 @@ try {
   );
   await page.getByRole("button", { name: "Close dialog", exact: true }).click();
   checked("the popover's agent access line opens Settings at the switch");
+  // Section 12 in the window: Set up agents links the agents on this
+  // computer, leaves the Codex rule off, and takes back what it wrote.
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Set up agents" }).click();
+  const setupDialog = page.getByRole("dialog", { name: "Set up agents" });
+  // A link counts as there even when what it points at is gone.
+  const present = (path) => {
+    try {
+      lstatSync(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Every box is named by its own label, so each name matches in full.
+  const agentBox = (name) =>
+    setupDialog.getByRole("checkbox", { name, exact: true });
+  await agentBox("Claude Code").waitFor();
+  for (const name of ["Claude Code", "Codex", "Add the kamapathy command"])
+    assert.equal(await agentBox(name).isChecked(), true, name);
+  const codexRule = agentBox("Let Codex run kamapathy without asking");
+  assert.equal(await codexRule.isChecked(), false);
+  // The runner's own PATH stays as it is.
+  if (process.platform === "win32") {
+    const windowsPath = agentBox("Add it to your PATH");
+    if (await windowsPath.isChecked()) await windowsPath.uncheck();
+  }
+  await setupDialog.getByRole("button", { name: "Set up", exact: true }).click();
+  await setupDialog
+    .getByText("Restart your agents to load the skill.", { exact: false })
+    .waitFor();
+  const setup = await page.evaluate(() => window.kamapathy.agentSetupStatus());
+  const stable = setup.skillFolder;
+  assert.ok(existsSync(join(stable, "SKILL.md")), stable);
+  const entries = [];
+  for (const id of ["claude-code", "codex"]) {
+    const agent = setup.agents.find((row) => row.id === id);
+    assert.equal(agent?.state, "linked", JSON.stringify(setup.agents));
+    const entry = join(agent.folder, "kamapathy");
+    entries.push(entry);
+    assert.ok(existsSync(join(entry, "SKILL.md")), entry);
+    if (process.platform === "win32")
+      assert.ok(lstatSync(entry).isDirectory());
+    else assert.equal(readlinkSync(entry), stable);
+  }
+  assert.equal(setup.command.state, "on");
+  assert.ok(existsSync(setup.command.path));
+  // The probed shell has a startup file Kamapathy knows.
+  if (setup.command.profileFile) {
+    assert.equal(setup.command.pathAdded, true);
+    assert.match(
+      await readFile(setup.command.profileFile, "utf8"),
+      /# Added by Kamapathy for the kamapathy command/,
+    );
+  }
+  assert.equal(setup.codex.allowed, false);
+  assert.equal(
+    existsSync(join(home, ".codex", "rules", "default.rules")),
+    false,
+  );
+  await setupDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await setupDialog.waitFor({ state: "detached" });
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByText("Set up for Claude Code and Codex").waitFor();
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Set up agents" }).click();
+  await setupDialog.getByRole("button", { name: "Remove setup" }).click();
+  // Removal answers on the same chain as this status call.
+  await poll(
+    async () =>
+      (await page.evaluate(() => window.kamapathy.agentSetupStatus()))
+        .skillFolder === null,
+    { label: "agent setup removed" },
+  );
+  for (const path of [...entries, setup.command.path, dirname(stable)])
+    assert.equal(present(path), false, path);
+  if (setup.command.profileFile)
+    assert.doesNotMatch(
+      await readFile(setup.command.profileFile, "utf8"),
+      /Kamapathy/,
+    );
+  await setupDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await setupDialog.waitFor({ state: "detached" });
+  checked(
+    "Set up agents links Claude Code and Codex, leaves the Codex rule off, and removes cleanly",
+  );
+  // Help pages open as the person's tab, never in the agent space in front.
+  const helpWatcher = (
+    await (await api("/spaces", "POST", { name: "Help watcher" })).json()
+  ).space;
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    helpWatcher.id,
+  );
+  await waitForState(
+    page,
+    (state, id) => state.activeSpaceId === id,
+    helpWatcher.id,
+  );
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Help", exact: true }).click();
+  state = await waitForState(page, (next) =>
+    next.tabs.some((tab) => tab.url.startsWith("https://kamapathy.app/")),
+  );
+  const helpTab = state.tabs.find((tab) =>
+    tab.url.startsWith("https://kamapathy.app/"),
+  );
+  assert.equal(helpTab.url, "https://kamapathy.app/#faq");
+  assert.equal(state.activeTabId, helpTab.id);
+  assert.notEqual(helpTab.spaceId, helpWatcher.id);
+  assert.equal(
+    state.spaces.find((space) => space.id === helpTab.spaceId)?.kind,
+    "personal",
+  );
+  assert.equal(state.activeSpaceId, helpTab.spaceId);
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    helpTab.id,
+  );
+  assert.equal((await api(`/spaces/${helpWatcher.id}`, "DELETE")).status, 200);
+  checked("Help opens the FAQ in the personal space used last");
+  // Section 13 in the window: Updates, with this copy running from source.
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Settings" }).click();
+  const updateChecks = page.getByRole("switch", { name: "Check for updates" });
+  assert.equal(await updateChecks.getAttribute("aria-checked"), "true");
+  await page
+    .getByText("This copy runs from source. Pull the latest code to update it.")
+    .waitFor();
+  assert.equal(await whatsNew(page).count(), 0);
+  await updateChecks.click();
+  await waitForState(page, (next) => next.settings.updateChecks === false);
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
   await page.evaluate(() =>
     window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
   );
@@ -1731,6 +1891,18 @@ try {
     state.spaces.some((space) => space.id === kept && space.kind === "personal"),
   );
   checked("a kept space survives a restart");
+  // The update switch and the version seen survive the restart.
+  assert.equal(await whatsNew(page).count(), 0);
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  assert.equal(
+    await page
+      .getByRole("switch", { name: "Check for updates" })
+      .getAttribute("aria-checked"),
+    "false",
+  );
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  checked("Settings shows Updates on and remembers it off after a restart");
   const cookieCount = await app.evaluate(
     async ({ session }, { project, origin }) =>
       (
@@ -1901,6 +2073,135 @@ try {
     );
     checked("closing the last empty tab closes the window");
   }
+  // Section 13 on a second profile, with the first Kamapathy closed: What's
+  // new after a version change, and an update the person installs.
+  if (app) {
+    await app.close().catch(() => {});
+    app = undefined;
+  }
+  updateProfile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-update-"));
+  const updateHome = join(updateProfile, "home");
+  await mkdir(updateHome, { recursive: true });
+  await writeFile(
+    join(updateProfile, "browser-state.json"),
+    JSON.stringify({
+      settings: { welcomed: true, seenVersion: "0.1.0", updateChecks: true },
+    }),
+  );
+  updateFeed = await startUpdateFeed();
+  updateFeed.setMode("available");
+  const launchWith = async (folder, extraEnv) => {
+    app = await electron.launch({
+      executablePath: await prepareDesktopRuntime(),
+      args: [resolve("out/main/index.js")],
+      env: {
+        ...env,
+        KAMAPATHY_USER_DATA: folder,
+        ...(process.platform === "win32"
+          ? {
+              USERPROFILE: updateHome,
+              LOCALAPPDATA: updateHome,
+              APPDATA: join(updateHome, "roaming"),
+            }
+          : { HOME: updateHome }),
+        ...extraEnv,
+      },
+      timeout: 30000,
+    });
+    const next = await app.firstWindow();
+    await next.waitForSelector(".home-page, .web-page");
+    await next.waitForFunction(() => !!window.kamapathy);
+    return next;
+  };
+  const updateEnv = {
+    KAMAPATHY_UPDATE_FEED: updateFeed.origin,
+    KAMAPATHY_UPDATE_KIND: "linux-appimage",
+  };
+  page = await launchWith(updateProfile, updateEnv);
+  const version = (await page.evaluate(() => window.kamapathy.getState()))
+    .version;
+  const notes = page.getByRole("dialog", {
+    name: `What's new in Kamapathy ${version}`,
+  });
+  await notes.waitFor();
+  await notes.getByRole("button", { name: "Got it" }).click();
+  await notes.waitFor({ state: "detached" });
+  // An update the person can install: checked, downloaded, never opened here.
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Check now" }).click();
+  await page.getByText("Kamapathy 9.9.9 is available.").waitFor();
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await page.locator(".menu-dot").waitFor();
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  const updateMenu = page.getByRole("menu", { name: "Browser menu" });
+  await updateMenu.waitFor();
+  assert.match(
+    await updateMenu.getByRole("menuitem").first().textContent(),
+    /^Update Kamapathy/,
+  );
+  await updateMenu.getByRole("menuitem", { name: "Update Kamapathy" }).click();
+  await page.getByRole("dialog", { name: "Make Kamapathy yours" }).waitFor();
+  await poll(
+    async () =>
+      (await page.evaluate(() =>
+        document.activeElement?.getAttribute("aria-label"),
+      )) === "Check for updates",
+    { label: "focus on the update switch" },
+  );
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  await page.getByText("Kamapathy 9.9.9 is ready to install.").waitFor();
+  // One agent space is open, so the install dialog says what quitting closes.
+  await page.evaluate(() =>
+    window.kamapathy.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: true },
+    }),
+  );
+  await waitForState(page, (next) => next.automation.running);
+  const updateSend = socketFetch(
+    await resolveSocket({
+      KAMAPATHY_USER_DATA: updateProfile,
+      KAMAPATHY_NO_LAUNCH: "1",
+    }),
+  );
+  const watched = await (
+    await updateSend("/spaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Update watcher" }),
+    })
+  ).json();
+  assert.ok(watched.space?.id, JSON.stringify(watched));
+  await page.getByRole("button", { name: "Install...", exact: true }).click();
+  const installDialog = page.getByRole("dialog", {
+    name: "Install Kamapathy 9.9.9",
+  });
+  await installDialog.waitFor();
+  await installDialog
+    .getByText("Quit Kamapathy, replace your copy with this file, then open it.")
+    .waitFor();
+  await installDialog
+    .getByText("1 agent space is open. It closes when Kamapathy quits.")
+    .waitFor();
+  await installDialog.getByRole("button", { name: "Not now" }).click();
+  await installDialog.waitFor({ state: "detached" });
+  checked(
+    "an update adds Update Kamapathy and an Install dialog that names open agent spaces",
+  );
+  await app.close();
+  app = undefined;
+  page = await launchWith(updateProfile, updateEnv);
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  assert.equal(await whatsNew(page).count(), 0);
+  checked(
+    "What's new appears once after a version change and never on a fresh profile",
+  );
   console.log(`Desktop smoke passed: ${checks} checks.`);
 } catch (error) {
   if (app) {
@@ -1933,10 +2234,12 @@ try {
 } finally {
   if (app) await app.close().catch(() => {});
   await new Promise((resolve) => fixture.close(resolve));
-  await rm(profile, {
-    recursive: true,
-    force: true,
-    maxRetries: 3,
-    retryDelay: 150,
-  });
+  if (updateFeed) await updateFeed.close();
+  for (const folder of [profile, updateProfile].filter(Boolean))
+    await rm(folder, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 150,
+    });
 }
