@@ -6,6 +6,7 @@ import {
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { SnapshotOptions } from "../automation-dom";
 import { ApiError, fail } from "./errors";
+import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
@@ -235,6 +236,22 @@ export function urlField(body: Record<string, unknown>): string {
       "Use a complete HTTP or HTTPS URL without embedded credentials.",
     );
   return new URL(value).href;
+}
+export function expectationFields(body: Record<string, unknown>): {
+  event: ExpectationEvent;
+  timeoutMs: number;
+} {
+  const event = stringField(body, "event", 20);
+  if (!(EXPECTATION_EVENTS as readonly string[]).includes(event))
+    return fail(
+      "invalid_field",
+      `event must be ${EXPECTATION_EVENTS.slice(0, -1).join(", ")}, or ${EXPECTATION_EVENTS.at(-1)}.`,
+      { field: "event" },
+    );
+  return {
+    event: event as ExpectationEvent,
+    timeoutMs: integerField(body, "timeoutMs", 10000, 1, 60000),
+  };
 }
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);

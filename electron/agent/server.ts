@@ -15,6 +15,7 @@ import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
 import { activeSpace, createAuthority } from "./authority";
 import { envelope, fail } from "./errors";
+import { createExpectations } from "./expectations";
 import {
   buildRoutes,
   findRoute,
@@ -23,6 +24,7 @@ import {
   type RouteDeps,
 } from "./http";
 import { createReceipts } from "./receipts";
+import { eventRoutes } from "./routes/events";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -183,9 +185,16 @@ export async function startAutomation(
     controller.registry,
     () => controller.state,
   );
-  // A long run keeps no ring or request window for a tab that is gone.
+  const expectations = createExpectations({
+    tabLog,
+    controller,
+    authority,
+    sessions,
+  });
+  // A long run keeps no ring, request window or arm for a tab that is gone.
   const stopTabForget = controller.registry.on((event) => {
     if (event.type !== "closed") return;
+    expectations.endTab(event.tabId, "tab_closed");
     tabLog.forget(event.tabId);
     receipts.forget(event.tabId);
   });
@@ -196,6 +205,7 @@ export async function startAutomation(
     sessions,
     tabLog,
     receipts,
+    expectations,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -206,6 +216,7 @@ export async function startAutomation(
   const routes = buildRoutes({
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
+    ...eventRoutes(deps),
     ...requests.routes,
   });
   const versions = Object.fromEntries(
@@ -266,22 +277,31 @@ export async function startAutomation(
       // while the person has control and whether it reaches unadopted tabs.
       const authorize = () => {
         const access = route?.access;
+        // A route whose path names neither a space nor a tab says which ids
+        // its own id belongs to, and answers 404 for an unknown one.
+        const named = route?.resolve?.(parts);
+        const spaceId =
+          named?.spaceId ??
+          (parts[0] === "spaces" && parts.length >= 2 ? parts[1] : undefined);
+        const tabId =
+          named?.tabId ??
+          (parts[0] === "tabs" && parts.length >= 2 ? parts[1] : undefined);
         return {
           space:
-            parts[0] === "spaces" && parts.length >= 2
-              ? authority.authorizeSpace(parts[1], {
+            spaceId === undefined
+              ? undefined
+              : authority.authorizeSpace(spaceId, {
                   human:
                     access?.human === "resume" && !resumeFromHuman
                       ? undefined
                       : access?.human,
-                })
-              : undefined,
+                }),
           tab:
-            parts[0] === "tabs" && parts.length >= 2
-              ? authority.authorizeTab(parts[1], {
+            tabId === undefined
+              ? undefined
+              : authority.authorizeTab(tabId, {
                   unmanaged: access?.unmanaged,
-                })
-              : undefined,
+                }),
         };
       };
       const route = findRoute(routes, method, parts);
@@ -390,6 +410,8 @@ export async function startAutomation(
         authority.stop();
         requests.close();
         scheduler.close();
+        // A pending wait is answered before its tab session is released.
+        expectations.endAll("access_off");
         stopPopupLog();
         stopTabForget();
         // Nothing keeps a request window open once the server stops.

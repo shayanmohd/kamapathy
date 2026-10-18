@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAuthority } from "../electron/agent/authority";
+import type { ApiError } from "../electron/agent/errors";
+import { createExpectations } from "../electron/agent/expectations";
+import type { Run } from "../electron/agent/http";
 import {
   createReceipts,
   REQUEST_WINDOW_MS,
   SETTLE_MS,
   type ReceiptFields,
 } from "../electron/agent/receipts";
+import type { TabSession } from "../electron/agent/session/tab-session";
 import { createTabLog, watchPopups } from "../electron/agent/tab-log";
+import { expectationFields } from "../electron/agent/validate";
 import type { Tab } from "../shared/types";
 import { FakeController } from "./fake-automation";
 
@@ -316,5 +322,321 @@ describe("agent action receipts", () => {
     tabLog.forget(tab.id);
     receipts.forget(tab.id);
     expect((await act(receipts, tab.id)).deniedRequests).toBeUndefined();
+  });
+});
+
+// A tab's debugger session, whose "closed" event ends a pending wait.
+class FakeTabSession {
+  private listeners = new Set<() => void>();
+  on(name: string, listener: () => void) {
+    if (name === "closed") this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  close() {
+    for (const listener of [...this.listeners]) listener();
+  }
+}
+// The expectation registry over the same fake controller, with the real
+// authority, so a takeover ends a wait exactly as it does in the server.
+function arming() {
+  const base = setup();
+  const authority = createAuthority(base.controller);
+  authority.managedSpaces.add(base.space.id);
+  const sessions = new Map<string, FakeTabSession>();
+  return {
+    ...base,
+    authority,
+    expectations: createExpectations({
+      tabLog: base.tabLog,
+      controller: base.controller,
+      authority,
+      sessions: {
+        get: (tabId) =>
+          sessions.get(tabId) as unknown as TabSession | undefined,
+      },
+    }),
+    sessionFor(tabId: string) {
+      const session = new FakeTabSession();
+      sessions.set(tabId, session);
+      return session;
+    },
+  };
+}
+const fakeRun = (signal = new AbortController().signal): Run => ({
+  deadline: Date.now() + 60000,
+  signal,
+  dispatch: { dispatched: false },
+  park: (wait) => wait(),
+});
+// What task 5's DownloadView carries, as a wait answers with it.
+const DOWNLOAD = {
+  id: "d1",
+  tabId: "",
+  url: "https://example.com/report.pdf",
+  suggestedFilename: "report.pdf",
+  mimeType: "application/pdf",
+  state: "completed",
+  receivedBytes: 12,
+  totalBytes: 12,
+  failure: null,
+};
+const thrown = (run: () => unknown): ApiError => {
+  try {
+    run();
+  } catch (error) {
+    return error as ApiError;
+  }
+  throw new Error("Nothing was thrown.");
+};
+const rejection = (promise: Promise<unknown>) =>
+  promise.then(
+    (value) => ({ resolved: value }) as Record<string, unknown>,
+    (error: unknown) => {
+      const api = error as ApiError;
+      return { code: api.code, status: api.status, ...api.fields };
+    },
+  );
+
+describe("agent event expectations", () => {
+  it("a wait resolves with the first popup after arming", async () => {
+    const { controller, expectations, tab } = arming();
+    const arm = expectations.arm(tab, "popup", 10000);
+    expect(arm).toMatchObject({
+      event: "popup",
+      tabId: tab.id,
+      spaceId: tab.spaceId,
+      fromSeq: 0,
+      timeoutMs: 10000,
+    });
+    expect(arm.id).toMatch(/^[0-9a-f]{16}$/);
+    const waiting = expectations.wait(arm, fakeRun());
+    const first = controller.openPopup(tab.id, "https://example.com/first");
+    const second = controller.openPopup(tab.id, "https://example.com/second");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await waiting).toEqual({
+      popup: expect.objectContaining({
+        id: first.id,
+        label: first.label,
+        url: "https://example.com/first",
+        openerId: tab.id,
+        managed: true,
+      }),
+    });
+    // The result reports the popup, so a run's end never names it again.
+    const live = (id: string) =>
+      controller.state.tabs.find((item) => item.id === id);
+    expect(live(first.id)?.unseen).toBeUndefined();
+    expect(live(second.id)?.unseen).toBe(true);
+    // One event uses the arm up.
+    expect(expectations.get(arm.id)).toBeUndefined();
+    expect(expectations.count()).toBe(0);
+  });
+
+  it("a wait times out naming awaited, event and timeoutMs", async () => {
+    const { expectations, tab } = arming();
+    const arm = expectations.arm(tab, "download", 5000);
+    let settled = false;
+    const waiting = rejection(expectations.wait(arm, fakeRun())).then(
+      (value) => {
+        settled = true;
+        return value;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await waiting).toEqual({
+      code: "expectation_timeout",
+      status: 504,
+      awaited: "event",
+      event: "download",
+      timeoutMs: 5000,
+    });
+    // An arm that ran out is gone, so a late wait is not found instead.
+    expect(expectations.get(arm.id)).toBeUndefined();
+    expect(await rejection(expectations.wait(arm, fakeRun()))).toMatchObject({
+      code: "expectation_not_found",
+      status: 404,
+    });
+  });
+
+  it("timeoutMs 0 is rejected with invalid_field", () => {
+    expect(expectationFields({ event: "popup" })).toEqual({
+      event: "popup",
+      timeoutMs: 10000,
+    });
+    expect(
+      expectationFields({ event: "filechooser", timeoutMs: 60000 }),
+    ).toEqual({ event: "filechooser", timeoutMs: 60000 });
+    for (const timeoutMs of [0, 60001, 1.5, "1000"])
+      expect(thrown(() => expectationFields({ event: "popup", timeoutMs })))
+        .toMatchObject({
+          code: "invalid_field",
+          status: 400,
+          message: "timeoutMs must be an integer from 1 to 60000.",
+        });
+    expect(thrown(() => expectationFields({ event: "navigation" }))).toMatchObject({
+      code: "invalid_field",
+      message: "event must be popup, download, filechooser, or dialog.",
+    });
+  });
+
+  it("one wait per event", () => {
+    const { expectations, tab, other } = arming();
+    const first = expectations.arm(tab, "popup", 10000);
+    expect(thrown(() => expectations.arm(tab, "popup", 10000))).toMatchObject({
+      code: "expectation_pending",
+      status: 409,
+      fields: { event: "popup", expectationId: first.id },
+    });
+    // Another event on the same page, and the same event on another page,
+    // are armed side by side.
+    expectations.arm(tab, "dialog", 10000);
+    expectations.arm(other, "popup", 10000);
+    expect(expectations.count()).toBe(3);
+    // Cancelling frees the event again.
+    expectations.end(first.id, "deleted");
+    expect(expectations.arm(tab, "popup", 10000).id).not.toBe(first.id);
+    expect(expectations.count()).toBe(3);
+  });
+
+  it("actions run during a wait", async () => {
+    const { controller, expectations, receipts, tab } = arming();
+    const arm = expectations.arm(tab, "popup", 10000);
+    const waiting = expectations.wait(arm, fakeRun());
+    // The wait holds no lane, so the action answers with its own receipt
+    // while the wait is still pending, and the popup resolves both.
+    const result = await act(receipts, tab.id, () =>
+      controller.openPopup(tab.id, "https://example.com/opened"),
+    );
+    expect(result.popups).toHaveLength(1);
+    expect(await waiting).toMatchObject({
+      popup: { url: "https://example.com/opened" },
+    });
+  });
+
+  it("a popup opened before the arm, and one opened by another tab, leave the wait waiting", async () => {
+    const { controller, expectations, tab, other } = arming();
+    controller.openPopup(tab.id, "https://example.com/early");
+    const arm = expectations.arm(tab, "popup", 10000);
+    expect(arm.fromSeq).toBe(1);
+    let settled = false;
+    const waiting = expectations.wait(arm, fakeRun()).then((value) => {
+      settled = true;
+      return value;
+    });
+    const theirs = controller.openPopup(other.id, "https://example.com/theirs");
+    // A popup of a popup lands on its own opener's log, never higher up.
+    controller.openPopup(theirs.id, "https://example.com/nested");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(false);
+    const mine = controller.openPopup(tab.id, "https://example.com/mine");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await waiting).toMatchObject({ popup: { id: mine.id } });
+  });
+
+  it("a takeover ends a pending wait with human_control, a tab close with tab_closed, and DELETE answers ok", async () => {
+    const { controller, expectations, space, tab, sessionFor } = arming();
+    const taken = expectations.arm(tab, "popup", 10000);
+    const waiting = rejection(expectations.wait(taken, fakeRun()));
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(await waiting).toMatchObject({
+      code: "human_control",
+      status: 409,
+      spaceId: space.id,
+      reason: "manual",
+    });
+    expect(expectations.count()).toBe(0);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+
+    // The tab's own session says when the page is gone.
+    const session = sessionFor(tab.id);
+    const closing = expectations.arm(tab, "popup", 10000);
+    const closed = rejection(expectations.wait(closing, fakeRun()));
+    session.close();
+    expect(await closed).toMatchObject({ code: "tab_closed", status: 409 });
+
+    // A cancelled arm answers the wait that was already running.
+    const deleted = expectations.arm(tab, "download", 10000);
+    const cancelled = rejection(expectations.wait(deleted, fakeRun()));
+    expectations.end(deleted.id, "deleted");
+    expect(await cancelled).toMatchObject({
+      code: "expectation_not_found",
+      status: 404,
+    });
+
+    // Agent access off ends every wait; a client that goes away leaves the
+    // arm, so it can wait again.
+    const stopping = expectations.arm(tab, "dialog", 10000);
+    const stopped = rejection(expectations.wait(stopping, fakeRun()));
+    expectations.endAll("access_off");
+    expect(await stopped).toMatchObject({
+      code: "automation_stopped",
+      status: 503,
+    });
+    const abort = new AbortController();
+    const dropped = expectations.arm(tab, "filechooser", 10000);
+    const gone = expectations.wait(dropped, fakeRun(abort.signal));
+    abort.abort();
+    expect(await gone).toBeUndefined();
+    expect(expectations.get(dropped.id)).toBeDefined();
+
+    // An arm fires for nobody while the person has control, and works
+    // again once the agent has it back.
+    const held = expectations.arm(tab, "download", 10000);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(expectations.armFor(tab.id, "download")).toBeUndefined();
+    expect(
+      expectations.deliver(tab.id, "download", { download: DOWNLOAD }),
+    ).toBe(false);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+    expect(expectations.armFor(tab.id, "download")?.id).toBe(held.id);
+  });
+
+  it("an armed download covers a popup the tab opened after arming, and not one it opened before", async () => {
+    const { controller, expectations, tab, other } = arming();
+    const early = controller.openPopup(tab.id, "https://example.com/early");
+    const arm = expectations.arm(tab, "download", 10000);
+    const late = controller.openPopup(tab.id, "https://example.com/late");
+    const nested = controller.openPopup(late.id, "https://example.com/nested");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(expectations.armFor(tab.id, "download")?.id).toBe(arm.id);
+    expect(expectations.armFor(late.id, "download")?.id).toBe(arm.id);
+    expect(expectations.armFor(nested.id, "download")?.id).toBe(arm.id);
+    expect(expectations.armFor(early.id, "download")).toBeUndefined();
+    expect(expectations.armFor(other.id, "download")).toBeUndefined();
+    // A popup wait is never resolved by a popup of a popup.
+    expect(expectations.armFor(late.id, "popup")).toBeUndefined();
+    // The first download uses the arm up.
+    expect(
+      expectations.deliver(late.id, "download", { download: DOWNLOAD }),
+    ).toBe(true);
+    expect(
+      expectations.deliver(late.id, "download", { download: DOWNLOAD }),
+    ).toBe(false);
+    expect(
+      expectations.deliver(tab.id, "download", { download: DOWNLOAD }),
+    ).toBe(false);
+    // The result waits for the wait that collects it.
+    expect(await expectations.wait(expectations.get(arm.id)!, fakeRun())).toEqual(
+      { download: DOWNLOAD },
+    );
+    expect(expectations.get(arm.id)).toBeUndefined();
   });
 });

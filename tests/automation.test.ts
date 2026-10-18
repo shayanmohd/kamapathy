@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { takeWaitSlot } from "../electron/agent/expectations";
 import {
   startAutomation,
   type AutomationServer,
@@ -1599,6 +1600,196 @@ describe("local automation socket", () => {
     ]);
   });
 
+  it("the popup list reports every tab this tab opened with its label, url, openedAt and unseen flag", async () => {
+    const { tab } = await createPage();
+    const first = controller.openPopup(tab.id, "https://example.com/one");
+    const second = controller.openPopup(tab.id, "https://example.com/two");
+    const nested = controller.openPopup(second.id, "https://example.com/three");
+    const popupsOf = async (tabId: string) => {
+      const response = await request(`/tabs/${tabId}/popups`);
+      expect(response.status).toBe(200);
+      return (await response.json()).popups as { unseen?: true }[];
+    };
+    expect(await popupsOf(tab.id)).toEqual([
+      {
+        id: first.id,
+        label: first.label,
+        url: "https://example.com/one",
+        openedAt: first.createdAt,
+        unseen: true,
+      },
+      {
+        id: second.id,
+        label: second.label,
+        url: "https://example.com/two",
+        openedAt: second.createdAt,
+        unseen: true,
+      },
+    ]);
+    // Listing a page twice leaves every flag for the run's own notice.
+    expect((await popupsOf(tab.id)).map((item) => item.unseen)).toEqual([
+      true,
+      true,
+    ]);
+    // A route that addresses a popup reports it, so its flag clears.
+    expect((await request(`/tabs/${first.id}/snapshot`)).status).toBe(200);
+    expect(await popupsOf(tab.id)).toEqual([
+      expect.not.objectContaining({ unseen: true }),
+      expect.objectContaining({ id: second.id, unseen: true }),
+    ]);
+    // A popup of a popup belongs to its own opener.
+    expect(await popupsOf(second.id)).toEqual([
+      expect.objectContaining({ id: nested.id, label: nested.label }),
+    ]);
+  });
+
+  it("answers a popup wait with the page the action opened", async () => {
+    const { tab } = await createPage();
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+    });
+    expect(armed.status).toBe(201);
+    const { expectation } = await armed.json();
+    expect(expectation).toEqual({
+      id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      event: "popup",
+      tabId: tab.id,
+      expiresAt: expect.any(Number),
+    });
+    // The page waits for one popup at a time.
+    const again = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+    });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({
+      error: {
+        code: "expectation_pending",
+        message: expect.stringContaining("already waiting"),
+        event: "popup",
+        expectationId: expectation.id,
+      },
+    });
+
+    const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
+    let opened = false;
+    controller.contents.result = (code: string) => {
+      if (!code.includes(')("target",')) return { ok: true };
+      if (!opened) {
+        opened = true;
+        controller.openPopup(tab.id, "https://example.com/share");
+      }
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(click.status).toBe(200);
+    const popup = controller.state.tabs.find(
+      (item) => item.openerId === tab.id,
+    )!;
+    const answered = await waiting;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      popup: expect.objectContaining({
+        id: popup.id,
+        label: popup.label,
+        url: "https://example.com/share",
+        openerId: tab.id,
+      }),
+    });
+    // The result and the click's receipt both report it, so it is seen.
+    expect(popup.unseen).toBeUndefined();
+    // One event uses the arm up.
+    expect(
+      (await request(`/expectations/${expectation.id}/wait`, "POST", {})).status,
+    ).toBe(404);
+    expect(
+      (await request(`/expectations/${expectation.id}`, "DELETE")).status,
+    ).toBe(404);
+  });
+
+  it("a 17th wait answers 429 busy with scope server and retryable, and expectation routes never take the space lane", async () => {
+    const { space, tab } = await createPage();
+    const arm = async (tabId: string, event: string) => {
+      const response = await request(`/tabs/${tabId}/expectations`, "POST", {
+        event,
+        timeoutMs: 60000,
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()).expectation.id as string;
+    };
+    // A click holds the space's lane while the popup list, a wait and a
+    // cancel answer beside it.
+    const held = await arm(tab.id, "popup");
+    let releaseClick!: () => void;
+    controller.contents.result = (code: string) =>
+      code.includes(')("target",')
+        ? new Promise((resolve) => {
+            releaseClick = () => resolve({ ok: true, x: 25, y: 45 });
+          })
+        : { ok: true };
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+    await expect.poll(() => releaseClick).toBeDefined();
+    expect((await request(`/tabs/${tab.id}/popups`)).status).toBe(200);
+    const waiting = request(`/expectations/${held}/wait`, "POST", {});
+    expect((await request(`/expectations/${held}`, "DELETE")).status).toBe(200);
+    expect((await waiting).status).toBe(404);
+    // Arming is a page route, so it waits for the lane the click holds.
+    const queued = request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "dialog",
+    });
+    expect(
+      await Promise.race([
+        queued.then(() => "answered"),
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]),
+    ).toBe("waiting");
+    releaseClick();
+    expect((await click).status).toBe(200);
+    const answered = await queued;
+    expect(answered.status).toBe(201);
+    const { expectation } = await answered.json();
+    expect(
+      (await request(`/expectations/${expectation.id}`, "DELETE")).status,
+    ).toBe(200);
+
+    // Sixteen waits run at once, and each takes one of the slots they share.
+    const tabs = [tab.id];
+    for (let index = 0; index < 4; index += 1) {
+      const opened = await request(`/spaces/${space.id}/tabs`, "POST", {});
+      expect(opened.status).toBe(201);
+      tabs.push((await opened.json()).tab.id as string);
+    }
+    const ids: string[] = [];
+    for (const tabId of tabs)
+      for (const event of ["popup", "download", "filechooser", "dialog"])
+        if (ids.length < 17) ids.push(await arm(tabId, event));
+    const waits = ids
+      .slice(0, 16)
+      .map((id) => request(`/expectations/${id}/wait`, "POST", {}));
+    await expect
+      .poll(() => {
+        const release = takeWaitSlot();
+        release?.();
+        return release === undefined;
+      })
+      .toBe(true);
+    const refused = await request(`/expectations/${ids[16]}/wait`, "POST", {});
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("16"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    for (const id of ids.slice(0, 16))
+      expect((await request(`/expectations/${id}`, "DELETE")).status).toBe(200);
+    for (const answer of await Promise.all(waits))
+      expect(answer.status).toBe(404);
+  });
+
   it("requires a file input ref and rejects malformed file metadata before execution", async () => {
     const { tab } = await createPage();
     const validFile = uploadBody().files[0];
@@ -1831,14 +2022,26 @@ describe("local automation socket", () => {
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
       "POST /tabs/:id/upload": uploadBody(),
+      "POST /tabs/:id/expectations": { event: "popup", timeoutMs: 1000 },
+      "POST /expectations/:id/wait": {},
     };
+    // A wait names its arm, not a space or a tab.
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+      timeoutMs: 60000,
+    });
+    const expectationId = (await armed.json()).expectation.id as string;
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
       const key = routeKey(route);
       expect(SAMPLES, key).toHaveProperty(key);
       const path = route.path.replace(
         ":id",
-        route.path.startsWith("/spaces/") ? space.id : tab.id,
+        route.path.startsWith("/spaces/")
+          ? space.id
+          : route.path.startsWith("/expectations/")
+            ? expectationId
+            : tab.id,
       );
       const response = await request(path, "POST", { ...SAMPLES[key], extra: true });
       expect(response.status, key).toBe(400);

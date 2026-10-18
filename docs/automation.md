@@ -299,6 +299,10 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
+| POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
+| DELETE | `/expectations/:id` |  | Cancels an armed wait and ends the wait running on it. Returns `{ ok: true }`. |
+| GET | `/tabs/:id/popups` |  | Lists the open pages this page opened, with the ones nothing has reported yet marked unseen. Returns `{ popups: [{ id, label, url, openedAt, unseen? }] }`. |
 <!-- /generated:routes -->
 
 Navigation accepts only complete HTTP or HTTPS URLs without embedded credentials. Paths do not accept query strings or encoded segments. The server manages at most 12 spaces at once, granted personal spaces included, and a space under agent rules holds at most 20 tabs; within that, each space's page budget limits the pages the agent manages. Requests for one space run one at a time in arrival order, and different spaces run at the same time, up to six at once. A space can have 16 requests pending and the server 32; more return `429 busy`. Requests that only list spaces or tabs count only toward the server's 32. Waits for control and requests for a space wait outside these queues, at most 8 and 3 at once. A wait lets other requests in its space run between checks. Waiting beyond 3 seconds comes out of a request's own timeout, and a request that cannot start in time returns `504 action_timeout` with `awaited: "queue"` without touching the page. Page operations wait up to 15 seconds for loading and another 15 seconds for a response. A timeout does not guarantee a page action was cancelled; inspect the page before retrying a consequential action.
@@ -338,6 +342,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -346,6 +351,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `space_protected` | 409 | not retryable | `tabs` | The space holds tabs the person opened, so the agent cannot close it. |
 | `sign_ins_mismatch` | 409 | not retryable | `spaceId`, `signIns` | The space a reuse found uses other sign-ins than the request asked for. |
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
+| `expectation_pending` | 409 | not retryable | `event`, `expectationId` | The page already waits for that event. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
 | `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
@@ -381,6 +387,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |

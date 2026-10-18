@@ -90,6 +90,13 @@ export const ERRORS = {
     "No tab in an accessible agent space has this ID.",
     ["tabId"],
   ),
+  expectation_not_found: code(
+    404,
+    false,
+    "No live wait has this ID: it was answered, cancelled, or its time ran out.",
+    [],
+    2,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -137,6 +144,13 @@ export const ERRORS = {
     false,
     "The agent finished this space or the person stopped it. Only the person can let an agent use it again.",
     ["spaceId", "endedBy", "reason"],
+    2,
+  ),
+  expectation_pending: code(
+    409,
+    false,
+    "The page already waits for that event.",
+    ["event", "expectationId"],
     2,
   ),
   tab_limit: code(409, false, "The space already has its most tabs."),
@@ -244,6 +258,13 @@ export const ERRORS = {
     false,
     "The person did not answer a request for a space in time. Asking again interrupts them.",
     ["awaited", "timeoutMs"],
+    2,
+  ),
+  expectation_timeout: code(
+    504,
+    false,
+    "No popup, download, file chooser or dialog arrived before the arm ran out.",
+    ["awaited", "event", "timeoutMs"],
     2,
   ),
   wait_timeout: {

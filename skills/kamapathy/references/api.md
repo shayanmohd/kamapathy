@@ -571,6 +571,10 @@ Show the commands, or help on one
 | POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
+| POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
+| DELETE | `/expectations/:id` |  | Cancels an armed wait and ends the wait running on it. Returns `{ ok: true }`. |
+| GET | `/tabs/:id/popups` |  | Lists the open pages this page opened, with the ones nothing has reported yet marked unseen. Returns `{ popups: [{ id, label, url, openedAt, unseen? }] }`. |
 
 ## Errors
 
@@ -594,6 +598,7 @@ Show the commands, or help on one
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -602,6 +607,7 @@ Show the commands, or help on one
 | `space_protected` | 409 | not retryable | `tabs` | The space holds tabs the person opened, so the agent cannot close it. |
 | `sign_ins_mismatch` | 409 | not retryable | `spaceId`, `signIns` | The space a reuse found uses other sign-ins than the request asked for. |
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
+| `expectation_pending` | 409 | not retryable | `event`, `expectationId` | The page already waits for that event. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
 | `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
@@ -637,6 +643,7 @@ Show the commands, or help on one
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |

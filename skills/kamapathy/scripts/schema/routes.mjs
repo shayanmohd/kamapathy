@@ -438,6 +438,54 @@ export const ROUTES = [
     },
     { budget: 30000, limit: 24 * 1024 * 1024, follow: true },
   ),
+  route(
+    "POST",
+    "/tabs/:id/expectations",
+    "Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it.",
+    "201 { expectation: { id, event, tabId, expiresAt } }",
+    {
+      event: {
+        kind: "enum",
+        values: ["popup", "download", "filechooser", "dialog"],
+        required: true,
+        since: 2,
+        description: "Which event to wait for.",
+      },
+      timeoutMs: {
+        kind: "ms",
+        min: 1,
+        max: 60000,
+        default: 10000,
+        since: 2,
+        description: "How long the arm lasts, counted from arming.",
+      },
+    },
+    { since: 2 },
+  ),
+  route(
+    "POST",
+    "/expectations/:id/wait",
+    "Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile.",
+    "{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }",
+    {},
+    { lane: "none", budget: 60000, since: 2 },
+  ),
+  route(
+    "DELETE",
+    "/expectations/:id",
+    "Cancels an armed wait and ends the wait running on it.",
+    "{ ok: true }",
+    null,
+    { lane: "none", since: 2 },
+  ),
+  route(
+    "GET",
+    "/tabs/:id/popups",
+    "Lists the open pages this page opened, with the ones nothing has reported yet marked unseen.",
+    "{ popups: [{ id, label, url, openedAt, unseen? }] }",
+    null,
+    { lane: "none", since: 2 },
+  ),
 ];
 
 export const ACTIONS = [
