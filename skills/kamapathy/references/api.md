@@ -1,6 +1,6 @@
 # Kamapathy API reference
 
-Client 0.2.0, API level 2. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
+Client 0.2.0, API level 3. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
 
 ## Globals
 
@@ -544,7 +544,10 @@ Show the commands, or help on one
 
 | Method | Route | Body | Description |
 | --- | --- | --- | --- |
-| GET | `/health` |  | Checks the connection. Returns `{ status: "ok", version, apiLevel, versions, skill? }`. |
+| GET | `/health` |  | Checks the connection. Returns `{ status: "ok", version, apiLevel, versions, skill?, update? }`. |
+| GET | `/update` |  | Reads Kamapathy's update status. Returns `UpdateStatus`. |
+| POST | `/update/check` | `{}` | Checks GitHub Releases for a newer Kamapathy, or returns the result of a check under 60 s old. Returns `UpdateStatus`. |
+| POST | `/update/download` | `{}` | Starts or joins the download of this computer's installer; only the person installs it. Returns `202 UpdateStatus while downloading; 200 UpdateStatus when current or ready`. |
 | GET | `/spaces` |  | Lists the spaces this API session can reach. Returns `{ spaces: SpaceView[] }`. |
 | POST | `/spaces` | `name`, `isolated?`, `pageBudget?`, `reuse?` | Creates an agent space whose first page is p1, or with reuse returns the listed space whose ID or name matches. Returns `201 { space: SpaceView, tab: TabView, created: true }; reused 200 { space: SpaceView, created: false }`. |
 | GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |
@@ -638,6 +641,10 @@ Show the commands, or help on one
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
+| `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
+| `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |
+| `update_download_failed` | in GET /update | retryable when reason is network or stalled, or httpStatus is in range | `reason`, `httpStatus` | The installer download stopped. |
+| `update_verify_failed` | in GET /update | not retryable | `reason`, `file` | The downloaded installer did not match its checksum, so it was deleted. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |
 | `request_too_large` | client | not retryable |  | The encoded request is larger than its route accepts. |

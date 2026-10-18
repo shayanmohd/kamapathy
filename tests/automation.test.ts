@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   startAutomation,
@@ -11,7 +12,14 @@ import {
   ROUTES,
   routeKey,
 } from "../skills/kamapathy/scripts/schema/index.mjs";
-import type { BrowserAction, BrowserState, Space } from "../shared/types";
+import type {
+  BrowserAction,
+  BrowserState,
+  Space,
+  UpdateReminder,
+  UpdateState,
+  UpdateStatus,
+} from "../shared/types";
 import {
   FakeContents,
   FakeController,
@@ -1692,6 +1700,77 @@ describe("local automation socket", () => {
     await expect.poll(() => release).toBeDefined();
     return { result, release: () => release!() };
   };
+  // A stand-in for the updater: the routes use only these four methods, so
+  // this file needs no Electron.
+  class FakeUpdates {
+    kind: UpdateState["kind"] = "mac-arm64";
+    state: UpdateState["state"] = "available";
+    notice: UpdateReminder | null = null;
+    started = true;
+    hold = false;
+    failure: Error | undefined;
+    checkCalls = 0;
+    downloadCalls = 0;
+    private waiting: (() => void)[] = [];
+    status(): UpdateStatus {
+      return {
+        kind: this.kind,
+        state: this.state,
+        version: "0.2.0",
+        checks: true,
+      };
+    }
+    async check(): Promise<UpdateStatus> {
+      this.checkCalls++;
+      if (this.failure) throw this.failure;
+      if (this.hold)
+        await new Promise<void>((resolve) => this.waiting.push(resolve));
+      return this.status();
+    }
+    async download(): Promise<{ status: UpdateStatus; started: boolean }> {
+      this.downloadCalls++;
+      if (this.failure) throw this.failure;
+      return { status: this.status(), started: this.started };
+    }
+    reminder(): UpdateReminder | null {
+      return this.notice;
+    }
+    release(): void {
+      for (const resolve of this.waiting.splice(0)) resolve();
+    }
+  }
+  // What electron/updates.ts throws when a check fails or this copy has no
+  // installer.
+  class FakeFailure extends Error {
+    constructor(
+      readonly code: string,
+      message: string,
+      readonly fields: Record<string, unknown>,
+    ) {
+      super(message);
+      this.name = "UpdateFailure";
+    }
+  }
+  const withUpdates = async (updates: FakeUpdates) => {
+    await api.close();
+    api = await startAutomation(controller, {
+      socketPath: socket.path,
+      updates,
+    });
+    return updates;
+  };
+  // Requests on one connection, answered in order. Their answers are never
+  // read, so 32 pending requests stay under the server's connection limit.
+  const pipelined = (path: string, count: number) => {
+    const client = netConnect(socket.path);
+    client.on("error", () => {});
+    client.write(
+      `POST ${path} HTTP/1.1\r\nHost: kamapathy\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}`.repeat(
+        count,
+      ),
+    );
+    return client;
+  };
 
   it("reports API level, engine versions and skill folder from health before the queue", async () => {
     // Electron's and Chromium's versions are present only in the app.
@@ -1719,6 +1798,203 @@ describe("local automation socket", () => {
     });
   });
 
+  it("answers update routes without a lane", async () => {
+    const updates = await withUpdates(new FakeUpdates());
+    const { tab } = await createPage();
+    const snapshot = await heldSnapshot(tab.id);
+    // The space's lane is busy, and each update route still answers at once.
+    for (const [path, method, status] of [
+      ["/update", "GET", 200],
+      ["/update/check", "POST", 200],
+      ["/update/download", "POST", 202],
+    ] as const)
+      expect(
+        await within(
+          settled(request(path, method, method === "POST" ? {} : undefined)),
+          1000,
+        ),
+        path,
+      ).toEqual({ status });
+    snapshot.release();
+    expect(await snapshot.result).toEqual({ status: 200 });
+    controller.pages.get(tab.id)!.result = { text: "" };
+    // Pending update requests, two per connection so 32 of them stay under
+    // the server's 32 connections.
+    updates.hold = true;
+    updates.checkCalls = 0;
+    const connections = Array.from({ length: 9 }, () =>
+      pipelined("/update/check", 2),
+    );
+    await expect.poll(() => updates.checkCalls).toBe(18);
+    // More than a space's 16, and the space's own cap is untouched.
+    const page = settled(request(`/tabs/${tab.id}/snapshot`));
+    expect(await within(page, 1000)).toEqual({ status: 200 });
+    for (let more = 0; more < 7; more++)
+      connections.push(pipelined("/update/check", 2));
+    await expect.poll(() => updates.checkCalls).toBe(32);
+    const refused = await request("/update");
+    expect(refused.status).toBe(429);
+    expect((await refused.json()).error).toEqual({
+      code: "busy",
+      message: "Kamapathy has too many requests waiting. Try again shortly.",
+      scope: "server",
+      retryable: true,
+    });
+    // Health is answered before admission, so the full server still has it.
+    expect((await request("/health")).status).toBe(200);
+    updates.release();
+    for (const client of connections) client.destroy();
+  });
+
+  it("adds update to /health only with a reminder", async () => {
+    const updates = await withUpdates(new FakeUpdates());
+    const health = async () => (await request("/health")).json();
+    expect(await health()).not.toHaveProperty("update");
+    updates.notice = { version: "0.3.0", state: "available" };
+    expect(await health()).toMatchObject({
+      status: "ok",
+      update: { version: "0.3.0", state: "available" },
+    });
+    // Still before admission, while the space's lane runs a page read.
+    const { tab } = await createPage();
+    const snapshot = await heldSnapshot(tab.id);
+    expect(await within(health(), 1000)).toMatchObject({
+      update: { version: "0.3.0", state: "available" },
+    });
+    snapshot.release();
+    expect(await snapshot.result).toEqual({ status: 200 });
+    // Read for each request, so a reminder that ends disappears.
+    updates.notice = null;
+    expect(await health()).not.toHaveProperty("update");
+  });
+
+  it("maps check failures to 502 with reason and retryable", async () => {
+    const updates = await withUpdates(new FakeUpdates());
+    expect(await (await request("/update")).json()).toEqual({
+      kind: "mac-arm64",
+      state: "available",
+      version: "0.2.0",
+      checks: true,
+    });
+    const check = async (fields: Record<string, unknown>) => {
+      updates.failure = new FakeFailure(
+        "update_check_failed",
+        "Kamapathy couldn't reach GitHub to check for updates.",
+        fields,
+      );
+      const response = await request("/update/check", "POST", {});
+      return { status: response.status, error: (await response.json()).error };
+    };
+    const failed = (fields: Record<string, unknown>) => ({
+      status: 502,
+      error: {
+        code: "update_check_failed",
+        message: "Kamapathy couldn't reach GitHub to check for updates.",
+        ...fields,
+      },
+    });
+    expect(await check({ reason: "network" })).toEqual(
+      failed({ reason: "network", retryable: true }),
+    );
+    expect(await check({ reason: "rate_limited", retryAfterMs: 60000 })).toEqual(
+      failed({ reason: "rate_limited", retryAfterMs: 60000, retryable: true }),
+    );
+    expect(await check({ reason: "invalid_response" })).toEqual(
+      failed({ reason: "invalid_response" }),
+    );
+    expect(await check({ reason: "http_status", httpStatus: 404 })).toEqual(
+      failed({ reason: "http_status", httpStatus: 404 }),
+    );
+    expect(await check({ reason: "http_status", httpStatus: 503 })).toEqual(
+      failed({ reason: "http_status", httpStatus: 503, retryable: true }),
+    );
+    updates.failure = undefined;
+    const download = async () => {
+      const response = await request("/update/download", "POST", {});
+      return { status: response.status, body: await response.json() };
+    };
+    updates.state = "downloading";
+    expect(await download()).toMatchObject({
+      status: 202,
+      body: { state: "downloading" },
+    });
+    // A second request joins the download that is already running.
+    updates.started = false;
+    expect(await download()).toMatchObject({ status: 202 });
+    updates.state = "ready";
+    expect(await download()).toMatchObject({
+      status: 200,
+      body: { state: "ready" },
+    });
+    updates.state = "current";
+    expect(await download()).toMatchObject({ status: 200 });
+    expect(updates.downloadCalls).toBe(4);
+  });
+
+  it("refuses update routes in a source run, and a body key with unknown_field", async () => {
+    const calls = [
+      ["/update", "GET"],
+      ["/update/check", "POST"],
+      ["/update/download", "POST"],
+    ] as const;
+    const refusals = async () => {
+      const seen = [];
+      for (const [path, method] of calls) {
+        const response = await request(
+          path,
+          method,
+          method === "POST" ? {} : undefined,
+        );
+        seen.push({
+          path,
+          status: response.status,
+          error: (await response.json()).error,
+        });
+      }
+      return seen;
+    };
+    const unsupported = (message: string, reason: string) => ({
+      code: "update_unsupported",
+      message,
+      reason,
+      platform: process.platform,
+      arch: process.arch,
+    });
+    // beforeEach started the server without an update service.
+    for (const seen of await refusals())
+      expect(seen.status, seen.path).toBe(409);
+    for (const seen of await refusals())
+      expect(seen.error, seen.path).toEqual(
+        unsupported("No installer is published for this computer yet.", "platform"),
+      );
+    const updates = await withUpdates(new FakeUpdates());
+    updates.kind = "source";
+    for (const seen of await refusals())
+      expect(seen.error, seen.path).toEqual(
+        unsupported(
+          "This copy runs from source. Pull the latest code to update it.",
+          "source",
+        ),
+      );
+    updates.kind = "other";
+    for (const seen of await refusals())
+      expect(seen.error, seen.path).toEqual(
+        unsupported("No installer is published for this computer yet.", "platform"),
+      );
+    // A refusal never reaches the updater's own check or download.
+    expect([updates.checkCalls, updates.downloadCalls]).toEqual([0, 0]);
+    const response = await request("/update/check", "POST", { force: true });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toEqual({
+      code: "unknown_field",
+      message: 'POST /update/check has no field "force". Allowed: none.',
+      field: "force",
+      allowed: [],
+      route: "POST /update/check",
+      apiLevel: API_LEVEL,
+    });
+  });
+
   it("rejects unknown fields on every route and batch action before any page step", async () => {
     const { space, tab } = await createPage();
     // A minimal valid body for each route that reads one.
@@ -1742,6 +2018,8 @@ describe("local automation socket", () => {
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
       "POST /tabs/:id/upload": uploadBody(),
+      "POST /update/check": {},
+      "POST /update/download": {},
     };
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {

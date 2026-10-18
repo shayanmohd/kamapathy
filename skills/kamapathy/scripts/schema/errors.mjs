@@ -253,6 +253,49 @@ export const ERRORS = {
     ]),
     override: { status: 408, route: "POST /tabs/:id/wait", action: "wait" },
   },
+  update_unsupported: code(
+    409,
+    false,
+    "No installer is published for this copy of Kamapathy.",
+    ["reason", "platform", "arch"],
+    3,
+  ),
+  update_check_failed: code(
+    502,
+    [
+      {
+        field: "reason",
+        values: ["offline", "network", "timeout", "rate_limited"],
+      },
+      { field: "httpStatus", min: 500, max: 599 },
+    ],
+    "GitHub Releases gave no usable answer to the update check.",
+    ["reason", "httpStatus", "retryAfterMs"],
+    3,
+  ),
+  update_download_failed: {
+    ...code(
+      null,
+      [
+        { field: "reason", values: ["network", "stalled"] },
+        { field: "httpStatus", min: 500, max: 599 },
+      ],
+      "The installer download stopped.",
+      ["reason", "httpStatus"],
+      3,
+    ),
+    carriedIn: "GET /update",
+  },
+  update_verify_failed: {
+    ...code(
+      null,
+      false,
+      "The downloaded installer did not match its checksum, so it was deleted.",
+      ["reason", "file"],
+      3,
+    ),
+    carriedIn: "GET /update",
+  },
   not_connected: code(
     null,
     [{ field: "reason", values: ["busy"] }],

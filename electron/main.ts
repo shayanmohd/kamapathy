@@ -198,6 +198,7 @@ async function syncAutomation(): Promise<void> {
           automation = await startAutomation(owner, {
             socketPath,
             skillPath: bundledSkill ?? undefined,
+            updates: updater ?? undefined,
           });
           if (owner === controller) {
             publishEndpoint(agent, automation.endpoint, automation.instance);

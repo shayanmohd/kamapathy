@@ -6,6 +6,7 @@ import { buildRoutes } from "../electron/agent/http.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
+import { updateRoutes } from "../electron/agent/routes/update.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
 import {
   Client,
@@ -144,6 +145,7 @@ describe("API schema", () => {
       ...spaceRoutes(deps),
       ...tabRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
+      ...updateRoutes({}),
     };
     expect(keys.sort()).toEqual([...Object.keys(impls), "GET /health"].sort());
     // The router's lane, budget and body limit come from each entry.
@@ -277,6 +279,20 @@ describe("API schema", () => {
       "app_outdated",
     ])
       expect(ERRORS[code].status, code).toBeNull();
+    // One upstream service failure, and codes that only ride in a status
+    // name the response that carries them.
+    expect(
+      Object.entries(ERRORS)
+        .filter(([, spec]) => spec.status === 502)
+        .map(([code]) => code),
+    ).toEqual(["update_check_failed"]);
+    for (const [code, spec] of Object.entries(ERRORS))
+      if (spec.carriedIn !== undefined) {
+        expect(spec.status, code).toBeNull();
+        expect(spec.carriedIn, code).toBe("GET /update");
+      }
+    for (const code of ["update_download_failed", "update_verify_failed"])
+      expect(ERRORS[code].carriedIn, code).toBe("GET /update");
   });
 
   it("evaluates transient rules on fields", () => {
@@ -296,6 +312,48 @@ describe("API schema", () => {
       "invalid_field",
     ])
       expect(isTransient(code), code).toBe(false);
+    for (const fields of [
+      { reason: "offline" },
+      { reason: "network" },
+      { reason: "timeout" },
+      { reason: "rate_limited" },
+      { reason: "http_status", httpStatus: 503 },
+    ])
+      expect(
+        isTransient("update_check_failed", fields),
+        JSON.stringify(fields),
+      ).toBe(true);
+    for (const fields of [
+      { reason: "invalid_response" },
+      { reason: "http_status", httpStatus: 404 },
+    ])
+      expect(
+        isTransient("update_check_failed", fields),
+        JSON.stringify(fields),
+      ).toBe(false);
+    for (const fields of [
+      { reason: "network" },
+      { reason: "stalled" },
+      { reason: "http_status", httpStatus: 502 },
+    ])
+      expect(
+        isTransient("update_download_failed", fields),
+        JSON.stringify(fields),
+      ).toBe(true);
+    for (const fields of [
+      { reason: "cancelled" },
+      { reason: "size_mismatch" },
+      { reason: "insecure_redirect" },
+      { reason: "http_status", httpStatus: 404 },
+    ])
+      expect(
+        isTransient("update_download_failed", fields),
+        JSON.stringify(fields),
+      ).toBe(false);
+    for (const reason of ["sums_mismatch", "digest_mismatch", "sums_invalid"])
+      expect(isTransient("update_verify_failed", { reason }), reason).toBe(
+        false,
+      );
     expect(isTransient("no_such_code")).toBe(false);
     // Nothing is retryable once anything reached the page.
     const covered = new ApiError(

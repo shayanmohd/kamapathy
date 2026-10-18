@@ -23,6 +23,7 @@ import {
 } from "./update-release";
 import { aptInstallCommand, updateReminder } from "../shared/state";
 import { compareVersions, isVersion } from "../shared/version";
+import { isTransient } from "../skills/kamapathy/scripts/schema/index.mjs";
 import type {
   BrowserAction,
   InstallKind,
@@ -260,31 +261,6 @@ interface Download {
   stop: Stop | VerifyStop | null;
   controller: AbortController;
   done: Promise<void>;
-}
-
-// A check failure the person can retry, and one the server answers as 502.
-function checkTransient(fields: {
-  reason: string;
-  httpStatus?: number;
-}): boolean {
-  if (["offline", "network", "timeout", "rate_limited"].includes(fields.reason))
-    return true;
-  return (
-    fields.reason === "http_status" &&
-    fields.httpStatus !== undefined &&
-    fields.httpStatus >= 500 &&
-    fields.httpStatus <= 599
-  );
-}
-
-function downloadTransient(reason: string, httpStatus?: number): boolean {
-  if (reason === "network" || reason === "stalled") return true;
-  return (
-    reason === "http_status" &&
-    httpStatus !== undefined &&
-    httpStatus >= 500 &&
-    httpStatus <= 599
-  );
 }
 
 // The download folder is checked like the agent folder.
@@ -652,7 +628,9 @@ export class Updater {
         ...(fields.retryAfterMs !== undefined
           ? { retryAfterMs: fields.retryAfterMs }
           : {}),
-        ...(checkTransient(fields) ? { retryable: true } : {}),
+        ...(isTransient("update_check_failed", fields)
+          ? { retryable: true }
+          : {}),
       },
     });
     return failure;
@@ -909,7 +887,9 @@ export class Updater {
         message: reason === "cancelled" ? CANCELLED_MESSAGE : DOWNLOAD_MESSAGE,
         reason,
         ...(httpStatus !== undefined ? { httpStatus } : {}),
-        ...(downloadTransient(reason, httpStatus) ? { retryable: true } : {}),
+        ...(isTransient("update_download_failed", { reason, httpStatus })
+          ? { retryable: true }
+          : {}),
       },
     });
   }

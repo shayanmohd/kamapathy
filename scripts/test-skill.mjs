@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { startFormSite } from "../tests/fixtures/form-site.mjs";
+import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
 const temporary = await mkdtemp(join(tmpdir(), "kamapathy-skill-e2e-"));
 const fixture = await startFormSite();
@@ -1519,7 +1520,7 @@ try {
   passed("run --timeout 3000 ends a script waiting on /hold with run_timeout after its earlier output");
   // Section 11 in the real app: versions, help, diagnostics and field checks.
   const versions = (await cli(["--version"])).output;
-  assert.match(versions, /API level 2/);
+  assert.match(versions, new RegExp(`API level ${API_LEVEL}`));
   assert.match(versions, /Electron 44\./);
   assert.match(versions, /Chromium 152\./);
   passed("--version shows API level, Electron 44. and Chromium 152.");
