@@ -221,4 +221,26 @@ export const passwordsCopy = {
   neverSaved: "Never saved",
   remove: "Remove",
   footnote: "Stored on this computer, encrypted with your system's keychain.",
+  transfer: {
+    import: "Import...",
+    export: "Export...",
+    replace: "Replace saved passwords that differ",
+    start: "Import",
+    imported: (count: number) =>
+      count === 1 ? "Imported 1 password." : `Imported ${count} passwords.`,
+    already: (count: number) =>
+      count === 1 ? "1 was already saved." : `${count} were already saved.`,
+    kept: (count: number) =>
+      count === 1
+        ? "1 differs from saved ones and was kept."
+        : `${count} differ from saved ones and were kept.`,
+    skipped: (count: number) =>
+      count === 1 ? "1 row was skipped." : `${count} rows were skipped.`,
+    trash: (name: string) =>
+      `Move ${name} to the Trash? It holds your passwords in plain text.`,
+    moveToTrash: "Move to Trash",
+    keepFile: "Keep file",
+    exported: (count: number) =>
+      count === 1 ? "Exported 1 password." : `Exported ${count} passwords.`,
+  },
 } as const;

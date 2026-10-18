@@ -1,6 +1,7 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, systemPreferences } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, shell, systemPreferences } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
@@ -8,6 +9,7 @@ import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
+import { writeCsvFile } from "./passwords/csv";
 import { connectForms, type FormBroker } from "./passwords/forms";
 import { registerPasswordIpc } from "./passwords/ipc";
 import { createReauth } from "./passwords/reauth";
@@ -58,6 +60,9 @@ let quitting = false;
 let vault: Vault | null = null;
 let forms: FormBroker | null = null;
 let vaultOpenScheduled = false;
+// One import runs at a time, whether it brings another browser's data or a
+// file of saved passwords.
+let importing = false;
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -68,6 +73,20 @@ const developmentUrl = externalApplication
   ? process.env.ELECTRON_RENDERER_URL
   : undefined;
 const rendererUrl = developmentUrl || pathToFileURL(rendererFile).href;
+
+async function exclusive<T>(work: () => Promise<T>): Promise<T> {
+  if (importing) {
+    const busy = new Error("An import is already running.");
+    (busy as { code?: string }).code = "import_busy";
+    throw busy;
+  }
+  importing = true;
+  try {
+    return await work();
+  } finally {
+    importing = false;
+  }
+}
 
 function trustedUrl(url: string): boolean {
   try {
@@ -338,10 +357,11 @@ function registerIpc(): void {
         (item) => item.id === request.source,
       );
       if (!source) throw new Error("That browser was not found.");
-      const data = await importFrom(
-        source.id as BrowserId,
-        request.profile,
-        { bookmarks: request.bookmarks, history: request.history },
+      const data = await exclusive(() =>
+        importFrom(source.id as BrowserId, request.profile, {
+          bookmarks: request.bookmarks,
+          history: request.history,
+        }),
       );
       const bookmarksBefore = owner.state.bookmarks.length;
       const known = new Set(owner.state.history.map((entry) => entry.url));
@@ -398,6 +418,46 @@ function registerIpc(): void {
     reauth,
     forms: () => forms,
     clipboard,
+    files: {
+      async choose() {
+        if (!window || window.isDestroyed()) return undefined;
+        const chosen = await dialog.showOpenDialog(window, {
+          properties: ["openFile"],
+          filters: [{ name: "CSV files", extensions: ["csv"] }],
+        });
+        return chosen.canceled ? undefined : chosen.filePaths[0];
+      },
+      size: async (path) => (await stat(path)).size,
+      read: (path) => readFile(path),
+      async saveTo(defaultPath) {
+        if (!window || window.isDestroyed()) return undefined;
+        const chosen = await dialog.showSaveDialog(window, {
+          defaultPath,
+          filters: [{ name: "CSV files", extensions: ["csv"] }],
+        });
+        return chosen.canceled ? undefined : chosen.filePath;
+      },
+      write: (path, text) => writeCsvFile(path, text),
+      trash: (path) => shell.trashItem(path),
+    },
+    // An export holds passwords in plain text, so it says so first.
+    confirmExport: async () =>
+      !!window &&
+      !window.isDestroyed() &&
+      (
+        await dialog.showMessageBox(window, {
+          type: "question",
+          message: "Export passwords?",
+          detail:
+            "The file holds your passwords in plain text. Anyone who can open it can read them.",
+          buttons: ["Export", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          noLink: true,
+        })
+      ).response === 0,
+    downloads: () => app.getPath("downloads"),
+    exclusive,
   });
 }
 

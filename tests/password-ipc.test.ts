@@ -1,10 +1,15 @@
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IpcMainInvokeEvent } from "electron";
+import { CSV_LIMITS, writeCsvFile } from "../electron/passwords/csv";
 import { PasswordError } from "../electron/passwords/errors";
 import type { FormBroker } from "../electron/passwords/forms";
 import {
   CLIPBOARD_CLEAR_MS,
   PASSWORD_CHANNELS,
+  TRASH_TOKEN_MS,
   errorResult,
   registerPasswordIpc,
 } from "../electron/passwords/ipc";
@@ -33,7 +38,7 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
-// The channels task 8 registers. Import, Trash and export come with task 11.
+// Every channel the shell calls, in the order the bridge names them.
 const REGISTERED = [
   PASSWORD_CHANNELS.status,
   PASSWORD_CHANNELS.list,
@@ -42,6 +47,9 @@ const REGISTERED = [
   PASSWORD_CHANNELS.add,
   PASSWORD_CHANNELS.update,
   PASSWORD_CHANNELS.remove,
+  PASSWORD_CHANNELS.importFile,
+  PASSWORD_CHANNELS.trashFile,
+  PASSWORD_CHANNELS.exportFile,
   PASSWORD_CHANNELS.answer,
   PASSWORD_CHANNELS.retry,
   PASSWORD_CHANNELS.startOver,
@@ -50,9 +58,12 @@ const REGISTERED = [
 ];
 
 const stop: (() => void)[] = [];
+const folders: string[] = [];
 afterEach(() => {
   vi.useRealTimers();
   for (const unregister of stop.splice(0)) unregister();
+  for (const folder of folders.splice(0))
+    rmSync(folder, { recursive: true, force: true });
   hashes.length = 0;
 });
 
@@ -92,12 +103,47 @@ function fakeClipboard() {
   };
 }
 
+const CSV = "url,username,password\r\nhttps://example.com,ada,secret-1\r\n";
+
+// The chosen file, the save dialog and the Trash, with every path recorded.
+function fakeFiles() {
+  const files = {
+    chosen: "/Users/ada/Downloads/chrome.csv" as string | undefined,
+    saved: "/Users/ada/Downloads/Kamapathy Passwords.csv" as string | undefined,
+    text: CSV,
+    bytes: undefined as number | undefined,
+    order: [] as string[],
+    written: [] as { path: string; text: string }[],
+    trashed: [] as string[],
+    defaults: [] as string[],
+    choose: vi.fn(async () => files.chosen),
+    size: vi.fn(async () => files.bytes ?? Buffer.byteLength(files.text)),
+    read: vi.fn(async () => Buffer.from(files.text, "utf8")),
+    saveTo: vi.fn(async (defaultPath: string) => {
+      files.order.push("saveTo");
+      files.defaults.push(defaultPath);
+      return files.saved;
+    }),
+    write: vi.fn(async (path: string, text: string) => {
+      files.order.push("write");
+      files.written.push({ path, text });
+    }),
+    trash: vi.fn(async (path: string) => {
+      files.trashed.push(path);
+    }),
+  };
+  return files;
+}
+
 function setup(
   options: {
     validate?: (event: IpcMainInvokeEvent) => void;
     vault?: Vault;
     reauth?: Reauth;
     forms?: FormBroker | null;
+    files?: ReturnType<typeof fakeFiles>;
+    confirmExport?: () => Promise<boolean>;
+    exclusive?: <T>(work: () => Promise<T>) => Promise<T>;
   } = {},
 ) {
   const handlers = new Map<
@@ -129,6 +175,17 @@ function setup(
   const vaultDep = vi.fn(() => vault);
   const formsDep = vi.fn(() => options.forms ?? null);
   const validate = vi.fn(options.validate ?? (() => {}));
+  const files = options.files ?? fakeFiles();
+  const confirmExport = vi.fn(
+    options.confirmExport ??
+      (async () => {
+        files.order.push("confirm");
+        return true;
+      }),
+  );
+  const exclusive = vi.fn(
+    options.exclusive ?? (<T>(work: () => Promise<T>) => work()),
+  );
   const unregister = registerPasswordIpc({
     ipcMain,
     validate,
@@ -136,12 +193,19 @@ function setup(
     reauth,
     forms: formsDep,
     clipboard,
+    files,
+    confirmExport,
+    downloads: () => "/Users/ada/Downloads",
+    exclusive: exclusive as <T>(work: () => Promise<T>) => Promise<T>,
   });
   stop.push(unregister);
   return {
     vault,
     check,
     clipboard,
+    files,
+    confirmExport,
+    exclusive,
     vaultDep,
     formsDep,
     validate,
@@ -518,5 +582,171 @@ describe("passwords shell IPC", () => {
         action: "never",
       }),
     ).toEqual({ ok: true });
+  });
+  it("import offers the file to the Trash by token, export checks, confirms and writes 0600", async () => {
+    vi.useFakeTimers();
+    const harness = setup();
+    const files = harness.files;
+    const result = (await harness.invoke(PASSWORD_CHANNELS.importFile, {
+      replace: false,
+    })) as { summary: Record<string, unknown>; file: Record<string, string> };
+    expect(harness.exclusive).toHaveBeenCalledTimes(1);
+    expect(result.summary).toEqual({
+      added: 1,
+      unchanged: 0,
+      kept: 0,
+      replaced: 0,
+      skipped: 0,
+      neverSaved: 0,
+      warnings: [],
+    });
+    expect(result.file.name).toBe("chrome.csv");
+    // The shell gets a token, never the path.
+    expect(JSON.stringify(result)).not.toContain("/Users/ada/Downloads");
+    expect(harness.vault.list()).toHaveLength(1);
+    expect(
+      failed(await harness.invoke(PASSWORD_CHANNELS.importFile, { replace: 1 }))
+        .code,
+    ).toBe("invalid_login");
+
+    // The Trash offer works once, by that token only.
+    expect(
+      failed(await harness.invoke(PASSWORD_CHANNELS.trashFile, "other")).code,
+    ).toBe("login_not_found");
+    expect(
+      await harness.invoke(PASSWORD_CHANNELS.trashFile, result.file.token),
+    ).toEqual({ ok: true });
+    expect(files.trashed).toEqual(["/Users/ada/Downloads/chrome.csv"]);
+    expect(
+      failed(
+        await harness.invoke(PASSWORD_CHANNELS.trashFile, result.file.token),
+      ).code,
+    ).toBe("login_not_found");
+
+    // Cancelling the file dialog reads nothing; an oversized file is refused
+    // before it is read; and the token is forgotten after ten minutes.
+    files.chosen = undefined;
+    expect(
+      await harness.invoke(PASSWORD_CHANNELS.importFile, { replace: false }),
+    ).toEqual({ canceled: true });
+    expect(files.read).toHaveBeenCalledTimes(1);
+    files.chosen = "/Users/ada/Downloads/chrome.csv";
+    files.bytes = CSV_LIMITS.bytes + 1;
+    expect(
+      failed(
+        await harness.invoke(PASSWORD_CHANNELS.importFile, { replace: false }),
+      ),
+    ).toEqual({
+      code: "import_file_invalid",
+      reason: "size",
+      message: expect.any(String),
+    });
+    expect(files.read).toHaveBeenCalledTimes(1);
+    files.bytes = undefined;
+    const second = (await harness.invoke(PASSWORD_CHANNELS.importFile, {
+      replace: false,
+    })) as { file: Record<string, string> };
+    await vi.advanceTimersByTimeAsync(TRASH_TOKEN_MS);
+    expect(
+      failed(
+        await harness.invoke(PASSWORD_CHANNELS.trashFile, second.file.token),
+      ).code,
+    ).toBe("login_not_found");
+    expect(files.trashed).toHaveLength(1);
+
+    // An import already running answers section 15's import_busy.
+    const busy = setup({
+      exclusive: async () => {
+        const error = new Error("An import is already running.");
+        (error as { code?: string }).code = "import_busy";
+        throw error;
+      },
+    });
+    expect(
+      failed(
+        await busy.invoke(PASSWORD_CHANNELS.importFile, { replace: true }),
+      ),
+    ).toEqual({
+      code: "import_busy",
+      message: "An import is already running.",
+      retryable: true,
+    });
+    expect(busy.files.choose).not.toHaveBeenCalled();
+
+    // Export: the check, the warning, the save dialog, then a 0600 file.
+    const folder = mkdtempSync(join(tmpdir(), "kamapathy-export-"));
+    folders.push(folder);
+    const target = join(folder, "Kamapathy Passwords.csv");
+    const exported = fakeFiles();
+    exported.saved = target;
+    exported.write.mockImplementation(async (path: string, text: string) => {
+      exported.order.push("write");
+      await writeCsvFile(path, text);
+    });
+    const out = setup({
+      files: exported,
+      reauth: {
+        check: vi.fn(async (purpose: ReauthPurpose) => {
+          exported.order.push(`check:${purpose}`);
+        }),
+        forget: vi.fn(),
+      },
+    });
+    await out.invoke(PASSWORD_CHANNELS.add, sample);
+    await out.invoke(PASSWORD_CHANNELS.add, { ...sample, username: "grace" });
+    expect(await out.invoke(PASSWORD_CHANNELS.exportFile)).toEqual({
+      count: 2,
+      name: "Kamapathy Passwords.csv",
+    });
+    expect(exported.order).toEqual([
+      "check:export",
+      "confirm",
+      "saveTo",
+      "write",
+    ]);
+    expect(exported.defaults).toEqual([
+      "/Users/ada/Downloads/Kamapathy Passwords.csv",
+    ]);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    const text = readFileSync(target, "utf8");
+    expect(text.split("\r\n")[0]).toBe("name,url,username,password,note");
+    expect(text).toContain(sample.password);
+    // Written again, the file keeps its mode.
+    await out.invoke(PASSWORD_CHANNELS.exportFile);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+
+    // Cancel at the warning or the save dialog writes nothing.
+    const stopped = fakeFiles();
+    const warned = setup({ files: stopped, confirmExport: async () => false });
+    await warned.invoke(PASSWORD_CHANNELS.add, sample);
+    expect(await warned.invoke(PASSWORD_CHANNELS.exportFile)).toEqual({
+      canceled: true,
+    });
+    expect(warned.check).toHaveBeenCalledWith("export");
+    expect(stopped.saveTo).not.toHaveBeenCalled();
+    expect(stopped.write).not.toHaveBeenCalled();
+    const closed = fakeFiles();
+    closed.saved = undefined;
+    const kept = setup({ files: closed });
+    await kept.invoke(PASSWORD_CHANNELS.add, sample);
+    expect(await kept.invoke(PASSWORD_CHANNELS.exportFile)).toEqual({
+      canceled: true,
+    });
+    expect(closed.write).not.toHaveBeenCalled();
+
+    // A refused check exports nothing.
+    const refused = setup({
+      reauth: {
+        check: vi.fn(async () => {
+          throw new PasswordError("reauth_failed");
+        }),
+        forget: vi.fn(),
+      },
+    });
+    expect(
+      failed(await refused.invoke(PASSWORD_CHANNELS.exportFile)).code,
+    ).toBe("reauth_failed");
+    expect(refused.confirmExport).not.toHaveBeenCalled();
+    expect(refused.files.write).not.toHaveBeenCalled();
   });
 });

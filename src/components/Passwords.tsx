@@ -3,6 +3,7 @@ import { Password, Plus, ShieldWarning } from "@phosphor-icons/react";
 import type {
   LoginChanges,
   NeverSavedOrigin,
+  PasswordImportSummary,
   SavedLoginSummary,
   VaultStatus,
 } from "../../shared/types";
@@ -11,6 +12,7 @@ import { bridge } from "../lib/bridge";
 import {
   compromisedCount,
   filterLogins,
+  importSummaryLines,
   isPasswordError,
   loginHost,
   sortLogins,
@@ -69,6 +71,11 @@ function PasswordsBody() {
   const [secretShown, setSecretShown] = useState(false);
   const [showBlocked, setShowBlocked] = useState(false);
   const [copiedAt, setCopiedAt] = useState(0);
+  const [importing, setImporting] = useState(false);
+  const [replace, setReplace] = useState(false);
+  const [summary, setSummary] = useState<PasswordImportSummary>();
+  const [imported, setImported] = useState<{ token: string; name: string }>();
+  const [exported, setExported] = useState("");
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
@@ -233,6 +240,45 @@ function PasswordsBody() {
     setError(undefined);
     await refresh();
   };
+  const clearTransfer = () => {
+    setSummary(undefined);
+    setImported(undefined);
+    setExported("");
+    setError(undefined);
+  };
+  const runImport = async () => {
+    const result = await bridge.passwords.importFile({ replace });
+    if (isPasswordError(result)) {
+      setError({ where: "transfer", message: result.error.message });
+      return;
+    }
+    clearTransfer();
+    setImporting(false);
+    if ("canceled" in result) return;
+    setSummary(result.summary);
+    setImported(result.file);
+    await refresh();
+  };
+  const runExport = async () => {
+    clearTransfer();
+    setImporting(false);
+    const result = await bridge.passwords.exportFile();
+    if (isPasswordError(result)) {
+      setError({ where: "transfer", message: result.error.message });
+      return;
+    }
+    if ("canceled" in result) return;
+    setExported(passwordsCopy.transfer.exported(result.count));
+  };
+  // The file is the person's; a Trash that fails leaves it where it is.
+  const trashImported = async (token: string) => {
+    setImported(undefined);
+    const result = await bridge.passwords
+      .trashFile(token)
+      .catch(() => undefined);
+    if (result && isPasswordError(result))
+      setError({ where: "transfer", message: result.error.message });
+  };
   const vaultAction = async (
     call: () => ReturnType<typeof bridge.passwords.retry>,
   ) => {
@@ -343,12 +389,97 @@ function PasswordsBody() {
         >
           {passwordsCopy.neverSaved}
         </button>
+        <button
+          type="button"
+          className="secondary-button"
+          aria-expanded={importing}
+          onClick={() => {
+            clearTransfer();
+            setImporting(!importing);
+          }}
+        >
+          {passwordsCopy.transfer.import}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => void runExport()}
+        >
+          {passwordsCopy.transfer.export}
+        </button>
         {copiedAt > 0 && (
           <span className="passwords-copied" role="status">
             {passwordsCopy.copied}
           </span>
         )}
       </div>
+      {importing && (
+        <div className="passwords-form">
+          <label>
+            <input
+              type="checkbox"
+              checked={replace}
+              onChange={(event) => setReplace(event.target.checked)}
+            />
+            {passwordsCopy.transfer.replace}
+          </label>
+          <div className="passwords-actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void runImport()}
+            >
+              {passwordsCopy.transfer.start}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setImporting(false)}
+            >
+              {passwordsCopy.cancel}
+            </button>
+          </div>
+        </div>
+      )}
+      {summary &&
+        importSummaryLines(summary).map((line) => (
+          <p className="passwords-note" role="status" key={line}>
+            {line}
+          </p>
+        ))}
+      {imported && (
+        <>
+          <p className="passwords-note">
+            {passwordsCopy.transfer.trash(imported.name)}
+          </p>
+          <div className="passwords-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void trashImported(imported.token)}
+            >
+              {passwordsCopy.transfer.moveToTrash}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setImported(undefined)}
+            >
+              {passwordsCopy.transfer.keepFile}
+            </button>
+          </div>
+        </>
+      )}
+      {exported && (
+        <p className="passwords-note" role="status">
+          {exported}
+        </p>
+      )}
+      {error?.where === "transfer" && (
+        <p className="form-error" role="alert">
+          {error.message}
+        </p>
+      )}
       {editing && (
         <form
           className="passwords-form"

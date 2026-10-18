@@ -1,9 +1,11 @@
 import type {
   PasswordErrorBody,
+  PasswordImportSummary,
   PasswordResult,
   SavedLoginSummary,
 } from "../../shared/types";
 import { hostname } from "../../shared/url";
+import { passwordsCopy } from "../copy";
 
 // Every passwords bridge call resolves with its result or an error body.
 export function isPasswordError<T>(
@@ -48,4 +50,16 @@ export function filterLogins(
 
 export function compromisedCount(logins: SavedLoginSummary[]): number {
   return logins.filter((login) => login.compromised).length;
+}
+
+// What an import did, in the spec's order; counts of zero say nothing.
+export function importSummaryLines(summary: PasswordImportSummary): string[] {
+  const { transfer } = passwordsCopy;
+  return [
+    transfer.imported(summary.added + summary.replaced),
+    ...(summary.unchanged ? [transfer.already(summary.unchanged)] : []),
+    ...(summary.kept ? [transfer.kept(summary.kept)] : []),
+    ...(summary.skipped ? [transfer.skipped(summary.skipped)] : []),
+    ...summary.warnings,
+  ];
 }

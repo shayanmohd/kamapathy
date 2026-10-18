@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { basename, join } from "node:path";
 import type { Clipboard, IpcMain, IpcMainInvokeEvent } from "electron";
 import type {
   PasswordErrorBody,
   PasswordPromptAnswer,
 } from "../../shared/types";
+import { CSV_LIMITS, readLoginCsv, writeLoginCsv } from "./csv";
 import { PasswordError, passwordErrorBody } from "./errors";
 import type { FormBroker } from "./forms";
 import { loginOrigin } from "./origin";
@@ -29,6 +31,7 @@ export const PASSWORD_CHANNELS = {
 } as const;
 
 export const CLIPBOARD_CLEAR_MS = 60000;
+export const TRASH_TOKEN_MS = 600000;
 // Ids and tokens come from the shell's own rows.
 const ID_LIMIT = 64;
 
@@ -39,6 +42,19 @@ export interface PasswordIpcDeps {
   reauth: Reauth;
   forms(): FormBroker | null;
   clipboard: Pick<Clipboard, "writeText" | "readText" | "clear">;
+  // The chosen file, the export file and the Trash. Paths stay in main.
+  files: {
+    choose(): Promise<string | undefined>;
+    size(path: string): Promise<number>;
+    read(path: string): Promise<Buffer>;
+    saveTo(defaultPath: string): Promise<string | undefined>;
+    write(path: string, text: string): Promise<void>;
+    trash(path: string): Promise<void>;
+  };
+  confirmExport(): Promise<boolean>;
+  downloads(): string;
+  // Section 15's guard: one import at a time, or its import_busy.
+  exclusive<T>(work: () => Promise<T>): Promise<T>;
   now?: () => number;
 }
 
@@ -100,6 +116,11 @@ function loginChanges(value: unknown): VaultChanges {
   if (value.note !== undefined) changes.note = text(value.note, "note") || null;
   return changes;
 }
+function replaceOf(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.replace !== "boolean")
+    throw invalid("replace");
+  return value.replace;
+}
 function answerOf(value: unknown): PasswordPromptAnswer {
   if (!isRecord(value)) throw invalid("action");
   switch (value.action) {
@@ -135,6 +156,23 @@ export function registerPasswordIpc(deps: PasswordIpcDeps): () => void {
   const channels: string[] = [];
   let copied:
     { digest: string; timer: ReturnType<typeof setTimeout> } | undefined;
+  // The file the last import read, offered to the Trash once. Only its
+  // token leaves main, and it is forgotten after ten minutes.
+  let imported:
+    | { token: string; path: string; timer: ReturnType<typeof setTimeout> }
+    | undefined;
+  function holdFile(path: string): string {
+    if (imported) clearTimeout(imported.timer);
+    const token = randomUUID();
+    imported = {
+      token,
+      path,
+      timer: setTimeout(() => {
+        imported = undefined;
+      }, TRASH_TOKEN_MS),
+    };
+    return token;
+  }
 
   // A copied password leaves the clipboard, unless the person copied
   // something else in the meantime. Only its digest is kept.
@@ -218,6 +256,48 @@ export function registerPasswordIpc(deps: PasswordIpcDeps): () => void {
     await deps.vault().remove(idOf(id));
     return { ok: true };
   });
+  register(PASSWORD_CHANNELS.importFile, async (options) => {
+    const replace = replaceOf(options);
+    return await deps.exclusive(async () => {
+      const path = await deps.files.choose();
+      if (!path) return { canceled: true };
+      if ((await deps.files.size(path)) > CSV_LIMITS.bytes)
+        throw new PasswordError("import_file_invalid", { reason: "size" });
+      const { rows, skipped } = readLoginCsv(await deps.files.read(path));
+      const vault = deps.vault();
+      await vault.open();
+      const summary = await vault.merge(rows, [], { replace, skipped });
+      return { summary, file: { token: holdFile(path), name: basename(path) } };
+    });
+  });
+  register(PASSWORD_CHANNELS.trashFile, async (token) => {
+    const key = idOf(token);
+    if (!imported || imported.token !== key)
+      throw new PasswordError("login_not_found");
+    const { path, timer } = imported;
+    await deps.files.trash(path);
+    clearTimeout(timer);
+    imported = undefined;
+    return { ok: true };
+  });
+  register(PASSWORD_CHANNELS.exportFile, async () => {
+    const vault = deps.vault();
+    await readable(vault);
+    await deps.reauth.check("export");
+    if (!(await deps.confirmExport())) return { canceled: true };
+    const path = await deps.files.saveTo(
+      join(deps.downloads(), "Kamapathy Passwords.csv"),
+    );
+    if (!path) return { canceled: true };
+    const rows = await vault.exportRows();
+    const text = writeLoginCsv(rows);
+    try {
+      await deps.files.write(path, text);
+    } catch {
+      throw new PasswordError("vault_write_failed", { retryable: true });
+    }
+    return { count: rows.length, name: basename(path) };
+  });
   register(PASSWORD_CHANNELS.answer, async (promptId, answer) => {
     const id = idOf(promptId);
     const given = answerOf(answer);
@@ -246,6 +326,8 @@ export function registerPasswordIpc(deps: PasswordIpcDeps): () => void {
   return () => {
     if (copied) clearTimeout(copied.timer);
     copied = undefined;
+    if (imported) clearTimeout(imported.timer);
+    imported = undefined;
     for (const channel of channels) deps.ipcMain.removeHandler(channel);
   };
 }

@@ -12,10 +12,12 @@ import type {
   Compromised,
   LoginKind,
   NeverSavedOrigin,
+  PasswordImportSummary,
   SavedLoginSummary,
   VaultState,
   VaultStatus,
 } from "../../shared/types";
+import type { ExportRow } from "./csv";
 import { PasswordError } from "./errors";
 import { httpUpgradeOrigin, loginOrigin, webOrigin, wwwTwin } from "./origin";
 import type { Sealer } from "./seal";
@@ -165,6 +167,33 @@ function originOf(value: unknown): string {
     throw invalid("url");
   return loginOrigin(value);
 }
+
+// A login's fields, checked against the limits but not yet sealed. A form
+// login carries no realm, whatever the input held.
+type CheckedLogin = LoginInput;
+function checkedLogin(input: LoginInput): CheckedLogin {
+  const origin = originOf(input.origin);
+  const realm =
+    input.kind === "http"
+      ? within(input.realm ?? "", "realm", VAULT_LIMITS.realm)
+      : undefined;
+  const username = within(input.username, "username", VAULT_LIMITS.username);
+  const password = checkPassword(input.password);
+  const note = input.note
+    ? within(input.note, "note", VAULT_LIMITS.note)
+    : undefined;
+  return { ...input, origin, realm, username, password, note };
+}
+
+// What a merge changes about a saved login; a compromised flag of null is
+// that flag removed.
+interface MergeEdit {
+  password?: string;
+  note?: string;
+  compromised?: Compromised | null;
+}
+const flagOf = (value: unknown): Compromised | undefined =>
+  value === "leaked" || value === "phished" ? value : undefined;
 
 function storedLogin(value: unknown): StoredLogin | undefined {
   if (!isRecord(value)) return;
@@ -401,51 +430,36 @@ export class Vault {
     const login = await this.stored(id);
     return (await this.openValue(login.password)) === password;
   }
+  // Every saved login as plain rows, opened one at a time.
+  async exportRows(): Promise<ExportRow[]> {
+    await this.open();
+    this.usable();
+    const rows: ExportRow[] = [];
+    for (const login of this.data.logins)
+      rows.push({
+        origin: login.origin,
+        username: login.username,
+        password: await this.openValue(login.password),
+        ...(login.note === undefined
+          ? {}
+          : { note: await this.openValue(login.note) }),
+      });
+    return rows;
+  }
 
   add(input: LoginInput): Promise<SavedLoginSummary> {
     return this.change(async () => {
       const now = this.now();
-      const origin = originOf(input.origin);
-      const realm =
-        input.kind === "http"
-          ? within(input.realm ?? "", "realm", VAULT_LIMITS.realm)
-          : undefined;
-      const username = within(
-        input.username,
-        "username",
-        VAULT_LIMITS.username,
-      );
-      const password = checkPassword(input.password);
-      const note = input.note
-        ? within(input.note, "note", VAULT_LIMITS.note)
-        : undefined;
+      const checked = checkedLogin(input);
       const existing = this.byIdentity.get(
-        identity(input.kind, origin, username, realm),
+        identity(checked.kind, checked.origin, checked.username, checked.realm),
       );
       if (existing)
         throw new PasswordError("login_exists", { id: existing.id });
       if (this.data.logins.length >= VAULT_LIMITS.logins)
         throw new PasswordError("vault_full", { limit: VAULT_LIMITS.logins });
       await this.unlock();
-      // Given times are kept unless they are in the future.
-      const time = (value: unknown) =>
-        isTime(value) && value <= now ? value : undefined;
-      const usedAt = time(input.usedAt);
-      const login: StoredLogin = {
-        id: randomUUID(),
-        kind: input.kind,
-        origin,
-        ...(realm === undefined ? {} : { realm }),
-        username,
-        password: await this.sealValue(password),
-        ...(note ? { note: await this.sealValue(note) } : {}),
-        ...(input.compromised === "leaked" || input.compromised === "phished"
-          ? { compromised: input.compromised }
-          : {}),
-        createdAt: time(input.createdAt) ?? now,
-        changedAt: time(input.changedAt) ?? now,
-        ...(usedAt === undefined ? {} : { usedAt }),
-      };
+      const login = await this.sealedLogin(checked, now);
       return {
         data: { ...this.data, logins: [...this.data.logins, login] },
         result: summary(login),
@@ -515,6 +529,120 @@ export class Vault {
           logins: this.data.logins.filter((login) => login.id !== id),
         },
         result: undefined,
+      };
+    });
+  }
+  // One import, written once. Rows go in order, the first row of an identity
+  // wins, and nothing changes when a limit would be passed.
+  merge(
+    rows: ImportedLogin[],
+    neverSaved: string[],
+    options: { replace: boolean; skipped?: number; warnings?: string[] },
+  ): Promise<PasswordImportSummary> {
+    return this.change(async () => {
+      const now = this.now();
+      const result: PasswordImportSummary = {
+        added: 0,
+        unchanged: 0,
+        kept: 0,
+        replaced: 0,
+        skipped: options.skipped ?? 0,
+        neverSaved: 0,
+        warnings: [...(options.warnings ?? [])],
+      };
+      const seen = new Set<string>();
+      const added: CheckedLogin[] = [];
+      const edits = new Map<string, MergeEdit>();
+      for (const row of rows) {
+        let checked: CheckedLogin;
+        try {
+          checked = checkedLogin(row);
+        } catch {
+          result.skipped += 1;
+          continue;
+        }
+        const key = identity(
+          checked.kind,
+          checked.origin,
+          checked.username,
+          checked.realm,
+        );
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const existing = this.byIdentity.get(key);
+        if (!existing) {
+          added.push(checked);
+          result.added += 1;
+          continue;
+        }
+        // An imported flag applies only where the password is the same.
+        if (await this.passwordEquals(existing.id, checked.password)) {
+          result.unchanged += 1;
+          const edit: MergeEdit = {};
+          if (checked.note && existing.note === undefined)
+            edit.note = checked.note;
+          const flag = flagOf(checked.compromised);
+          if (flag && flag !== existing.compromised) edit.compromised = flag;
+          if (Object.keys(edit).length) edits.set(existing.id, edit);
+          continue;
+        }
+        if (!options.replace) {
+          result.kept += 1;
+          continue;
+        }
+        result.replaced += 1;
+        edits.set(existing.id, {
+          password: checked.password,
+          compromised: flagOf(checked.compromised) ?? null,
+        });
+      }
+      const origins: NeverSavedOrigin[] = [];
+      for (const origin of neverSaved) {
+        const value = webOrigin(origin);
+        if (
+          !value ||
+          this.blocked.has(value) ||
+          origins.some((entry) => entry.origin === value)
+        )
+          continue;
+        origins.push({ origin: value, createdAt: now });
+        result.neverSaved += 1;
+      }
+      if (this.data.logins.length + added.length > VAULT_LIMITS.logins)
+        throw new PasswordError("vault_full", { limit: VAULT_LIMITS.logins });
+      if (
+        this.data.neverSaved.length + origins.length >
+        VAULT_LIMITS.neverSaved
+      )
+        throw new PasswordError("vault_full", {
+          limit: VAULT_LIMITS.neverSaved,
+        });
+      // An import with nothing to add or change never seals anything.
+      if (!added.length && !edits.size && !origins.length) return { result };
+      await this.unlock();
+      const logins: StoredLogin[] = [];
+      for (const login of this.data.logins) {
+        const edit = edits.get(login.id);
+        if (!edit) {
+          logins.push(login);
+          continue;
+        }
+        const next: StoredLogin = { ...login };
+        if (edit.password !== undefined) {
+          next.password = await this.sealValue(edit.password);
+          next.changedAt = now;
+        }
+        if (edit.note !== undefined)
+          next.note = await this.sealValue(edit.note);
+        if (edit.compromised) next.compromised = edit.compromised;
+        else if (edit.compromised === null) delete next.compromised;
+        logins.push(next);
+      }
+      for (const checked of added)
+        logins.push(await this.sealedLogin(checked, now));
+      return {
+        data: { logins, neverSaved: [...this.data.neverSaved, ...origins] },
+        result,
       };
     });
   }
@@ -659,6 +787,30 @@ export class Vault {
   }
   // Each change is checked against the data as it is, written whole, and
   // kept only once the file is written.
+  // Given times are kept unless they are in the future.
+  private async sealedLogin(
+    checked: CheckedLogin,
+    now: number,
+  ): Promise<StoredLogin> {
+    const time = (value: unknown) =>
+      isTime(value) && value <= now ? value : undefined;
+    const usedAt = time(checked.usedAt);
+    return {
+      id: randomUUID(),
+      kind: checked.kind,
+      origin: checked.origin,
+      ...(checked.realm === undefined ? {} : { realm: checked.realm }),
+      username: checked.username,
+      password: await this.sealValue(checked.password),
+      ...(checked.note ? { note: await this.sealValue(checked.note) } : {}),
+      ...(checked.compromised === "leaked" || checked.compromised === "phished"
+        ? { compromised: checked.compromised }
+        : {}),
+      createdAt: time(checked.createdAt) ?? now,
+      changedAt: time(checked.changedAt) ?? now,
+      ...(usedAt === undefined ? {} : { usedAt }),
+    };
+  }
   private async change<T>(
     work: () => Promise<{ data?: VaultData; result: T }>,
   ): Promise<T> {
