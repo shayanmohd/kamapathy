@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, safeStorage, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, systemPreferences } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,8 @@ import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
 import { connectForms, type FormBroker } from "./passwords/forms";
+import { registerPasswordIpc } from "./passwords/ipc";
+import { createReauth } from "./passwords/reauth";
 import { safeStorageSealer } from "./passwords/seal";
 import { Vault } from "./passwords/vault";
 import {
@@ -368,6 +370,34 @@ function registerIpc(): void {
     } catch {
       /* Ignore messages from untrusted frames. */
     }
+  });
+  // Showing, copying and editing a password asks who is at the computer.
+  const reauth = createReauth({
+    canPromptTouchID: () =>
+      process.platform === "darwin" && systemPreferences.canPromptTouchID(),
+    promptTouchID: (reason) => systemPreferences.promptTouchID(reason),
+    confirm: async () =>
+      !!window &&
+      !window.isDestroyed() &&
+      (
+        await dialog.showMessageBox(window, {
+          type: "question",
+          message: "Show passwords?",
+          detail: "Anyone using this computer account can see saved passwords.",
+          buttons: ["Show", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          noLink: true,
+        })
+      ).response === 0,
+  });
+  registerPasswordIpc({
+    ipcMain,
+    validate: (event) => void validateSender(event),
+    vault: () => vault!,
+    reauth,
+    forms: () => forms,
+    clipboard,
   });
 }
 
