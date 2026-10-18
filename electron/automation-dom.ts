@@ -3,6 +3,8 @@ import type { Decision, Invalid, Picked, Query } from "./agent/dom/select";
 export interface SnapshotOptions {
   mode: "compact" | "full";
   selector?: string;
+  root?: string;
+  scope?: "page" | "viewport";
   maxChars: number;
   maxControls: number;
   firstRef: number;
@@ -128,18 +130,20 @@ export function pageOperation(
   const opaqueFrame = (element: Element) =>
     (element.localName === "iframe" || element.localName === "frame") &&
     !frameDocument(element);
-  // The frame elements around an element, outermost first, or undefined once
-  // its document is no longer shown in this page.
-  const framesOf = (element: Element) => {
+  // The frame elements around a document, outermost first, or undefined once
+  // it is no longer shown in this page.
+  const framesOfDoc = (doc: Document) => {
     const frames: Element[] = [];
-    for (let doc = docOf(element); doc !== document; ) {
-      const frame = doc.defaultView?.frameElement;
+    for (let current = doc; current !== document; ) {
+      const frame = current.defaultView?.frameElement;
       if (!frame?.isConnected) return undefined;
       frames.unshift(frame);
-      doc = docOf(frame);
+      current = docOf(frame);
     }
     return frames;
   };
+  // The same for the document an element belongs to.
+  const framesOf = (element: Element) => framesOfDoc(docOf(element));
   const live = (element: Element) =>
     element.isConnected && framesOf(element) !== undefined;
   // The frames of one document in the order a person sees them, through open
@@ -268,16 +272,15 @@ export function pageOperation(
       scaleY,
     };
   };
-  // Where an element sits in the top viewport, through the frames around it,
-  // and the part of that viewport those frames can show.
-  const placed = (element: Element) => {
-    const box = element.getBoundingClientRect();
+  // Where a box of a document sits in the top viewport, through the frames
+  // around it, and the part of that viewport those frames can show.
+  const placedRect = (doc: Document, box: DOMRect) => {
     const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
     let x = 0,
       y = 0,
       scaleX = 1,
       scaleY = 1;
-    for (const frame of framesOf(element) || []) {
+    for (const frame of framesOfDoc(doc) || []) {
       const origin = frameOrigin(frame);
       x += origin.x * scaleX;
       y += origin.y * scaleY;
@@ -303,6 +306,24 @@ export function pageOperation(
       clip,
     };
   };
+  // Where an element sits in the top viewport.
+  const placed = (element: Element) =>
+    placedRect(docOf(element), element.getBoundingClientRect());
+  // Whether a box meets the part of the viewport its frames can show.
+  const onScreenBox = (box: ReturnType<typeof placedRect>) =>
+    box.bottom > box.clip.top &&
+    box.right > box.clip.left &&
+    box.top < box.clip.bottom &&
+    box.left < box.clip.right;
+  const onScreen = (element: Element) => onScreenBox(placed(element));
+  // A control with no box of its own, such as a file input inside visible
+  // upload UI, is on screen where the element around it is.
+  const drawnOnScreen = (element: Element) =>
+    onScreen(
+      element.getClientRects().length
+        ? element
+        : element.parentElement || element,
+    );
   // What a pointer at a point of the top viewport lands on: the element's
   // frame in every document around it, then the innermost element in its
   // own document, through open shadow roots.
@@ -389,7 +410,11 @@ export function pageOperation(
     /material (icons|symbols)|google symbols/i.test(
       styleOf(parent).fontFamily,
     );
-  const pageText = (scope: Element, maximum = Infinity) => {
+  const pageText = (
+    scope: Element,
+    maximum = Infinity,
+    onlyOnScreen = false,
+  ) => {
     let text = "",
       previousBlock: Element | null = null;
     let previousRect: DOMRect | undefined;
@@ -413,6 +438,12 @@ export function pageOperation(
         (rect) => rect.width > 0 && rect.height > 0,
       );
       if (!rects.length) return;
+      // A run of text is on screen when one of its rectangles is.
+      if (
+        onlyOnScreen &&
+        !rects.some((rect) => onScreenBox(placedRect(docOf(node), rect)))
+      )
+        return;
       let block = parent;
       while (
         block.parentElement &&
@@ -677,6 +708,16 @@ export function pageOperation(
       return isElement(found) ? reachable(found) : found;
     }
     return failure(NO_TARGET, "invalid_target");
+  };
+  // Where a listed link goes: an absolute web, mail or phone address. A
+  // script link and an address over 2,048 characters carry none.
+  const hrefOf = (element: Element) => {
+    if (!html(element) || !element.matches("a[href],area[href]")) return {};
+    const link = element as HTMLAnchorElement;
+    return ["http:", "https:", "mailto:", "tel:"].includes(link.protocol) &&
+      link.href.length <= 2048
+      ? { href: link.href }
+      : {};
   };
   const selectorFor = (element: Element) => {
     if (element.id && element.id.length <= 512) {
@@ -1242,12 +1283,25 @@ export function pageOperation(
   if (operation === "snapshot") {
     styles = new Map();
     const options = payload as unknown as SnapshotOptions;
+    const viewport = options.scope === "viewport";
     let scope: Element = document.body || document.documentElement;
-    const scoped = payload as ElementTarget;
-    if (scoped.ref !== undefined || scoped.selector !== undefined) {
+    // A root is a ref; any other form of scope is a selector the main
+    // process parsed.
+    const scoped =
+      options.root !== undefined
+        ? { ref: options.root }
+        : options.selector !== undefined
+          ? (payload as ElementTarget)
+          : undefined;
+    if (scoped) {
       const selected = target(scoped);
       if (!isElement(selected)) return selected;
-      scope = selected;
+      // A frame of this origin is read as its own document; one from
+      // another origin fails as any control inside it does.
+      const inner = frameDocument(selected);
+      scope = inner
+        ? inner.body || inner.documentElement || selected
+        : selected;
     }
     // A detached element's fingerprint stays, so its ref can follow the
     // control the page draws in its place.
@@ -1271,7 +1325,8 @@ export function pageOperation(
       if (
         (element.matches(query) || opaqueFrame(element)) &&
         isControl(element) &&
-        (visible(element) || uploadControl(element))
+        (visible(element) || uploadControl(element)) &&
+        (!viewport || drawnOnScreen(element))
       )
         found.push(element);
     };
@@ -1380,7 +1435,12 @@ export function pageOperation(
       ) {
         const text =
           clean(element.getAttribute("aria-label")) || ownText(element);
-        if (text && text.length <= 200 && visible(element)) {
+        if (
+          text &&
+          text.length <= 200 &&
+          visible(element) &&
+          (!viewport || drawnOnScreen(element))
+        ) {
           clickable.push(element);
           return false;
         }
@@ -1433,22 +1493,9 @@ export function pageOperation(
           box.width >= (view.innerWidth * 2) / 3
         );
       };
-      const onScreen = (element: Element) => {
-        const box = placed(element);
-        return (
-          box.bottom > box.clip.top &&
-          box.right > box.clip.left &&
-          box.top < box.clip.bottom &&
-          box.left < box.clip.right
-        );
-      };
       const rank = (element: Element) => {
         // A file input hidden inside upload UI sits where its parent is.
-        const shown = onScreen(
-          element.getClientRects().length
-            ? element
-            : element.parentElement || element,
-        );
+        const shown = drawnOnScreen(element);
         // A drawer kept rendered off screen is not an open popup.
         const open = element.parentElement?.closest(popup);
         const pin = shown ? pinOf(element) : null;
@@ -1524,6 +1571,7 @@ export function pageOperation(
         type: element.getAttribute("type") || undefined,
         label: label.slice(0, limit),
         selector,
+        ...hrefOf(element),
         disabled:
           element.matches(":disabled") ||
           element.getAttribute("aria-disabled") === "true",
@@ -1595,7 +1643,7 @@ export function pageOperation(
       names.add(kindOf(print) + print.label);
     }
     const others = new Set(
-      options.selector
+      scoped || viewport
         ? Array.from(document.querySelectorAll(query)).filter(
             (element) => isControl(element) && visible(element),
           )
@@ -1624,7 +1672,7 @@ export function pageOperation(
       if (lookalikes.get(keyOf(print))! > 1) registry.fingerprints.delete(ref);
       else registry.fingerprints.set(ref, print);
     const omitted = all.length - chosen.length;
-    let text = pageText(scope, options.maxChars);
+    let text = pageText(scope, options.maxChars, viewport);
     if (options.mode === "compact")
       text = text
         .replace(/[\t ]+/g, " ")
@@ -1635,6 +1683,7 @@ export function pageOperation(
       title: document.title,
       text: text.slice(0, options.maxChars),
       interactables,
+      ...reboundResult(),
       ...(issued.length ? { issued } : {}),
       ...(omitted ? { omittedControls: omitted } : {}),
       truncated:

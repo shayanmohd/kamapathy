@@ -194,6 +194,11 @@ export class FakeController implements AutomationController {
   canCapturePage() {
     return this.captureAvailable;
   }
+  // The tabs showing a PDF, which a snapshot header reports.
+  pdfTabs = new Set<string>();
+  pdfDocument(tabId: string) {
+    return this.pdfTabs.has(tabId);
+  }
   addActivity(spaceId: string | undefined, message: string, kind: string) {
     this.activity.push({ spaceId, message, kind });
   }

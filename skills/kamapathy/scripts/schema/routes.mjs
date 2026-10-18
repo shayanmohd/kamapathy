@@ -46,6 +46,27 @@ const FIELDS = {
       ...selector,
       description: "Read only the element this selector matches, of any form.",
     },
+    scope: {
+      kind: "enum",
+      values: ["page", "viewport"],
+      default: "page",
+      since: 3,
+      description:
+        "page reads everything; viewport keeps only what is on screen.",
+    },
+    root: {
+      kind: "string",
+      max: 32,
+      since: 3,
+      description:
+        "Read only this ref's subtree, or a frame ref's document. Not with selector.",
+    },
+    header: {
+      kind: "boolean",
+      default: true,
+      since: 3,
+      description: "Name the page, its space and the space's tabs.",
+    },
   },
   click: { ...target },
   fill: {

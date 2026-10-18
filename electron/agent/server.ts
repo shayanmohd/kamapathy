@@ -44,6 +44,8 @@ export interface AutomationController {
   ): Space;
   getWebContents(tabId: string): WebContents | undefined;
   canCapturePage(): boolean;
+  /** Whether the tab shows a PDF. Section 16 implements it; absent is no. */
+  pdfDocument?(tabId: string): boolean;
   addActivity(
     spaceId: string | undefined,
     message: string,

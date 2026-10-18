@@ -702,11 +702,111 @@ describe("local automation socket", () => {
       { maxControls: 101 },
       { maxControls: 1.5 },
       { selector: "" },
+      { scope: "window" },
+      { header: "yes" },
+      { root: 1 },
     ]) {
       expect(
         (await request(`/tabs/${tab.id}/snapshot`, "POST", body)).status,
       ).toBe(400);
     }
+  });
+
+  it("adds a header naming the page, space and tabs", async () => {
+    const { space, tab } = await createPage();
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    const popup = controller.openPopup(tab.id, "https://example.com/receipt");
+    const person = controller.openPersonTab(space.id);
+    // A title is cleaned like other agent text and cut at 60 characters.
+    blank.title = `‮${"x".repeat(70)}`;
+    const headerOf = async (body?: Record<string, unknown>) =>
+      (
+        await (body === undefined
+          ? request(`/tabs/${tab.id}/snapshot`)
+          : request(`/tabs/${tab.id}/snapshot`, "POST", body)
+        ).then((response) => response.json())
+      ).header;
+    const header = {
+      page: { id: tab.id, label: "p2", title: "https://example.com/" },
+      space: { id: space.id, name: "Research" },
+      tabs: [
+        {
+          id: blank.id,
+          label: "p1",
+          title: `${"x".repeat(57)}...`,
+          openedBy: "agent",
+          managed: true,
+        },
+        {
+          id: tab.id,
+          label: "p2",
+          title: "https://example.com/",
+          openedBy: "agent",
+          managed: true,
+          current: true,
+        },
+        {
+          id: popup.id,
+          label: "p3",
+          title: "https://example.com/receipt",
+          openedBy: "page",
+          managed: true,
+        },
+        {
+          id: person.id,
+          label: "p4",
+          title: "New tab",
+          openedBy: "person",
+          managed: false,
+        },
+      ],
+    };
+    // GET takes the defaults, and a batch step carries the header too.
+    expect(await headerOf()).toEqual(header);
+    expect(await headerOf({})).toEqual(header);
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "snapshot" }],
+    });
+    expect((await batch.json()).results[0].result.header).toEqual(header);
+    expect(await headerOf({ header: false })).toBeUndefined();
+    // The budget appears only once the space is one page from its limit.
+    controller.setPageBudget(space.id, 4);
+    expect(await headerOf()).toEqual({
+      ...header,
+      budget: { used: 3, limit: 4 },
+    });
+    controller.setPageBudget(space.id, 20);
+    controller.pdfTabs.add(tab.id);
+    expect(await headerOf()).toEqual({ ...header, pdf: true });
+  });
+
+  it("refuses a root beside a selector, a malformed root and an unknown one", async () => {
+    const { tab } = await createPage();
+    const taking = (body: Record<string, unknown>) =>
+      request(`/tabs/${tab.id}/snapshot`, "POST", body);
+    const combined = await taking({ root: "@e1", selector: "#form" });
+    expect(combined.status).toBe(400);
+    expect((await combined.json()).error).toEqual({
+      code: "invalid_field",
+      message: "root and selector cannot be combined. Give one of them.",
+      field: "root",
+      expected: "a ref, without selector",
+    });
+    const malformed = await taking({ root: "@21" });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error.code).toBe("invalid_ref");
+    const unknown = await taking({ root: "@e9" });
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()).error).toMatchObject({
+      code: "unknown_ref",
+      ref: "@e9",
+    });
+    expect(controller.contents.scripts).toEqual([]);
+    // A ref written as the selector is the root it names.
+    expect((await taking({ selector: "@e1" })).status).toBe(200);
+    expect(controller.contents.scripts.at(-1)!.code).toContain('"root":"@e1"');
   });
 
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
@@ -826,6 +926,9 @@ describe("local automation socket", () => {
       text: "Hello from the agent page",
       interactables: [],
       truncated: false,
+      header: expect.objectContaining({
+        page: expect.objectContaining({ id: tab.id }),
+      }),
     });
     controller.contents.result = { ok: true, x: 25, y: 45 };
     const click = (number: number) =>

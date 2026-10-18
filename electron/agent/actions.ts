@@ -7,6 +7,7 @@ import type { Park, Run } from "./http";
 import type { RefBook } from "./refs";
 import { createResolver } from "./resolve";
 import type { AutomationController } from "./server";
+import { createSnapshots, type SnapshotRequest } from "./snapshot";
 import {
   CdpTimeoutError,
   DialogOpenError,
@@ -223,6 +224,8 @@ export function createActions(deps: {
     }
     return result;
   };
+  // Snapshots carry the scope rules and the header of their own.
+  const snapshots = createSnapshots({ controller, evaluatePage });
   const nativeInput = async (
     id: string,
     session: TabSession,
@@ -485,17 +488,13 @@ export function createActions(deps: {
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
-      // The copy keeps the ref block the resolver reserves out of the
-      // action's own payload.
-      const listing = await evaluatePage(
+      result = await snapshots.take(
         id,
         session,
-        "snapshot",
-        { ...payload },
+        payload as unknown as SnapshotRequest,
         deadline,
         step,
       );
-      result = { tabId: id, ...listing };
     } else if (action.type === "click") {
       const point = await evaluatePage(
         id,

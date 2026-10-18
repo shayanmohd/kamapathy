@@ -27,6 +27,17 @@ const TARGET = [
   "element_action_failed",
 ];
 const INPUT = ["element_obscured", "input_not_delivered"];
+// What a snapshot's root or scope selector can answer.
+const SCOPE = [
+  "invalid_field",
+  "invalid_ref",
+  "invalid_selector",
+  "unknown_ref",
+  "stale_ref",
+  "cross_origin_frame",
+  "no_match",
+  "ambiguous_match",
+];
 const target = (name = "target", optional = false) => ({
   name,
   kind: "target",
@@ -126,7 +137,7 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<Snapshot>",
     "POST /tabs/:id/snapshot",
-    ["invalid_field", "invalid_selector"],
+    SCOPE,
     { options: body("POST /tabs/:id/snapshot") },
   ),
   method(
@@ -136,7 +147,7 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<string>",
     "POST /tabs/:id/snapshot",
-    ["invalid_field", "invalid_selector"],
+    SCOPE,
     { options: body("POST /tabs/:id/snapshot") },
   ),
   method(

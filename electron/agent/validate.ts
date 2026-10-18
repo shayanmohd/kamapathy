@@ -58,6 +58,16 @@ export function integerField(
     );
   return value;
 }
+// The one ref form, in the field that carries it.
+function refField(body: Record<string, unknown>, name: string): string {
+  const ref = stringField(body, name, 32);
+  if (!/^@e[1-9]\d*$/.test(ref))
+    return fail(
+      "invalid_ref",
+      "Use an element reference from a snapshot, such as @e1.",
+    );
+  return ref;
+}
 /** A target as the page receives it: a ref, or a selector beside its AST. */
 export type TargetPayload =
   | { ref: string }
@@ -75,15 +85,7 @@ export function targetFields(
       "invalid_target",
       "Provide exactly one of ref or selector.",
     );
-  if (hasRef) {
-    const ref = stringField(body, "ref", 32);
-    if (!/^@e[1-9]\d*$/.test(ref))
-      return fail(
-        "invalid_ref",
-        "Use an element reference from a snapshot, such as @e1.",
-      );
-    return { ref };
-  }
+  if (hasRef) return { ref: refField(body, "ref") };
   // The grammar is parsed here, so a selector reaches the page only as an
   // AST. A ref written as a selector is the ref.
   const selector = stringField(body, "selector", MAX_SELECTOR);
@@ -128,23 +130,47 @@ export function parseToolAction(
     const mode = body.mode ?? "compact";
     if (mode !== "compact" && mode !== "full")
       return fail("invalid_field", "mode must be compact or full.");
+    const maxChars = integerField(
+      body,
+      "maxChars",
+      mode === "compact" ? 4000 : 24000,
+      0,
+      24000,
+    );
+    const maxControls = integerField(
+      body,
+      "maxControls",
+      mode === "compact" ? 40 : 100,
+      0,
+      100,
+    );
+    const scope = body.scope ?? "page";
+    if (scope !== "page" && scope !== "viewport")
+      return fail("invalid_field", "scope must be page or viewport.");
+    const header = body.header ?? true;
+    if (typeof header !== "boolean")
+      return fail("invalid_field", "header must be true or false.");
+    if (body.root !== undefined && body.selector !== undefined)
+      return fail(
+        "invalid_field",
+        "root and selector cannot be combined. Give one of them.",
+        { field: "root", expected: "a ref, without selector" },
+      );
+    // A ref written as the selector is the root it names.
+    const scoped =
+      body.root === undefined
+        ? targetFields(body, true)
+        : { ref: refField(body, "root") };
     const options: Record<string, unknown> = {
       mode,
-      maxChars: integerField(
-        body,
-        "maxChars",
-        mode === "compact" ? 4000 : 24000,
-        0,
-        24000,
-      ),
-      maxControls: integerField(
-        body,
-        "maxControls",
-        mode === "compact" ? 40 : 100,
-        0,
-        100,
-      ),
-      ...targetFields(body, true),
+      maxChars,
+      maxControls,
+      ...("selector" in scoped
+        ? { selector: scoped.selector, query: scoped.query }
+        : {}),
+      ...("ref" in scoped ? { root: scoped.ref } : {}),
+      scope,
+      header,
     };
     return { type, payload: options };
   }

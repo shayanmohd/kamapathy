@@ -326,8 +326,11 @@ Reads bounded visible text and controls with refs.
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
 | `selector` | target |  | Read only the element this selector matches, of any form. |
+| `scope` | one of page, viewport | `"page"` | page reads everything; viewport keeps only what is on screen. |
+| `root` | string of at most 32 characters |  | Read only this ref's subtree, or a frame ref's document. Not with selector. |
+| `header` | true or false | `true` | Name the page, its space and the space's tabs. |
 
-Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.text(options?)`
 
@@ -339,8 +342,11 @@ The same compact text the CLI's snapshot command prints.
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
 | `selector` | target |  | Read only the element this selector matches, of any form. |
+| `scope` | one of page, viewport | `"page"` | page reads everything; viewport keeps only what is on screen. |
+| `root` | string of at most 32 characters |  | Read only this ref's subtree, or a frame ref's document. Not with selector. |
+| `header` | true or false | `true` | Name the page, its space and the space's tabs. |
 
-Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.click(target)`
 
@@ -561,7 +567,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
-| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
+| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
 | POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
