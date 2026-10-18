@@ -189,6 +189,7 @@ export type BrowserAction =
   | { type: "tab:activate"; id: string }
   | { type: "tab:navigate"; id: string; url: string }
   | { type: "tab:open-external"; id: string }
+  | { type: "tab:copy-external"; id: string }
   | {
       type:
         | "tab:back"

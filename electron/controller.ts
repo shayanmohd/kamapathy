@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   nativeTheme,
   session,
@@ -50,6 +51,10 @@ import type {
 } from "../shared/types";
 import { PDF_VIEWER_ID } from "./agent/session/frames";
 import { TabRegistry } from "./agent/tab-registry";
+import {
+  defaultBrowserStatus,
+  electronDefaultBrowserEnv,
+} from "./default-browser";
 import type { CookieOutcome, ProfileCookies } from "./import";
 import { validSettings, writeState } from "./persistence";
 
@@ -1777,7 +1782,21 @@ export class BrowserController {
         const tab = this.state.tabs.find((item) => item.id === action.id);
         if (tab && tab.id === this.state.activeTabId) {
           const destination = googleSignInFallback(tab.url);
-          if (destination) await shell.openExternal(destination);
+          // While Kamapathy is the default browser the link comes straight back.
+          const status = await defaultBrowserStatus(
+            electronDefaultBrowserEnv(),
+          );
+          if (destination && status.state !== "default")
+            await shell.openExternal(destination);
+        }
+        break;
+      }
+      // The person's own button, so agents never reach the clipboard.
+      case "tab:copy-external": {
+        const tab = this.state.tabs.find((item) => item.id === action.id);
+        if (tab && tab.id === this.state.activeTabId) {
+          const destination = googleSignInFallback(tab.url);
+          if (destination) clipboard.writeText(destination);
         }
         break;
       }

@@ -14,7 +14,8 @@ import {
   vi,
 } from "vitest";
 import type { BrowserWindow } from "electron";
-import { app, dialog, session, shell, WebContentsView } from "electron";
+import { app, clipboard, dialog, session, shell, WebContentsView } from "electron";
+import type { DefaultBrowserStatus } from "../shared/types";
 import { BrowserController } from "../electron/controller";
 import { PDF_VIEWER_ID } from "../electron/agent/session/frames";
 import {
@@ -40,6 +41,11 @@ vi.mock("electron", () => ({
   },
   dialog: { showMessageBox: vi.fn(), showSaveDialog: vi.fn() },
   shell: { showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) },
+  clipboard: { writeText: vi.fn() },
+}));
+vi.mock("../electron/default-browser", () => ({
+  defaultBrowserStatus: vi.fn(async () => defaultBrowser),
+  electronDefaultBrowserEnv: vi.fn(() => ({})),
 }));
 vi.mock("../electron/persistence", async (original) => ({
   ...(await original<typeof import("../electron/persistence")>()),
@@ -244,9 +250,11 @@ function attempt(
   page.emit(type, event, url);
   return event.preventDefault;
 }
+let defaultBrowser: DefaultBrowserStatus = { state: "available" };
 beforeEach(() => {
   sessions.clear();
   vi.clearAllMocks();
+  defaultBrowser = { state: "available" };
   vi.mocked(app.getApplicationNameForProtocol).mockReturnValue("");
 });
 afterEach(() => {
@@ -309,6 +317,24 @@ describe("native browser lifecycle", () => {
     browser.state.activeTabId = browser.state.tabs.find((item) => item.id !== tab.id)!.id;
     await browser.dispatch({ type: "tab:open-external", id: tab.id });
     expect(shell.openExternal).toHaveBeenCalledTimes(1);
+  });
+  it("no loop: copies the rejected sign-in link and opens nothing while Kamapathy is the default", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs.find((item) => item.id === browser.state.activeTabId)!;
+    tab.url = "https://accounts.google.com/v3/signin/rejected?continue=" + encodeURIComponent("https://play.google.com/console/private?state=secret");
+    defaultBrowser = { state: "default" };
+    await browser.dispatch({ type: "tab:open-external", id: tab.id });
+    expect(shell.openExternal).not.toHaveBeenCalled();
+    await browser.dispatch({ type: "tab:copy-external", id: tab.id });
+    expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith("https://play.google.com/console/");
+    defaultBrowser = { state: "available" };
+    await browser.dispatch({ type: "tab:open-external", id: tab.id });
+    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith("https://play.google.com/console/");
+    const other = browser.state.tabs.find((item) => item.id !== tab.id)!;
+    await browser.dispatch({ type: "tab:copy-external", id: other.id });
+    tab.url = "https://example.com/";
+    await browser.dispatch({ type: "tab:copy-external", id: tab.id });
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
   });
   it("preserves a new-window form's POST body and referrer when opening its tab", async () => {
     const browser = controller();

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { ArrowRight, Check, DownloadSimple } from "@phosphor-icons/react";
 import type {
   BrowserState,
+  DefaultBrowserStatus,
   ImportOutcome,
   ImportProfile,
   ImportReply,
@@ -19,7 +21,14 @@ import {
   selectableSource,
   signInsAvailable,
 } from "../lib/import";
-import { importCopy, welcomeCopy } from "../copy";
+import {
+  defaultBrowserChoice,
+  nextStep,
+  previousStep,
+  stepNumber,
+  type OnboardingStep,
+} from "../lib/onboarding";
+import { defaultBrowserCopy, importCopy, welcomeCopy } from "../copy";
 import { Modal, SiteIcon } from "./ui";
 import "./Welcome.css";
 
@@ -448,71 +457,149 @@ export function Welcome({
   state,
   onOpenSite,
   onClose,
+  defaultBrowser,
+  onMakeDefault,
+  updateSwitch,
+  agentSetup,
 }: {
   open: boolean;
   state: BrowserState;
   onOpenSite: (url: string) => void;
   onClose: () => void;
+  defaultBrowser: DefaultBrowserStatus | null;
+  onMakeDefault: () => void;
+  updateSwitch?: ReactNode;
+  agentSetup?: (next: () => void) => ReactNode;
 }) {
-  const [step, setStep] = useState<"import" | "sign-in">("import");
+  const [step, setStep] = useState<OnboardingStep>("welcome");
   const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const [makeDefault, setMakeDefault] = useState(false);
   const sites = topSites(state.history, state.bookmarks, 6);
-  const importing = step === "import";
+  const choice = defaultBrowserChoice(defaultBrowser, state.platform);
+  const back = previousStep(step);
+  const next = () => setStep((current) => nextStep(current) ?? current);
+  const headings: Record<OnboardingStep, [string, string?]> = {
+    welcome: [welcomeCopy.title, welcomeCopy.description],
+    privacy: [welcomeCopy.privacyTitle, welcomeCopy.privacy],
+    import: [welcomeCopy.importTitle, welcomeCopy.importDescription],
+    agents: [welcomeCopy.agentsTitle],
+    "sign-in": [welcomeCopy.signInTitle, welcomeCopy.signInDescription],
+    finish: [welcomeCopy.finishTitle, welcomeCopy.finish],
+  };
+  const [title, description] = headings[step];
+  function finish() {
+    if (makeDefault && choice.show) onMakeDefault();
+    onClose();
+  }
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={importing ? welcomeCopy.title : welcomeCopy.signInTitle}
-      description={
-        importing ? welcomeCopy.description : welcomeCopy.signInDescription
-      }
+      title={title}
+      description={description}
       className="welcome-modal"
       autoFocus={false}
     >
-      {importing ? (
-        <ImportPanel
-          onDone={() => setStep("sign-in")}
-          onSkip={() => setStep("sign-in")}
-        />
-      ) : (
-        <>
-          {sites.length ? (
-            <div className="top-sites" aria-label={welcomeCopy.sites}>
-              {sites.map((site) => {
-                const done = opened.has(site.url);
-                return (
-                  <button
-                    key={site.url}
-                    type="button"
-                    className={`top-site ${done ? "opened" : ""}`}
-                    aria-pressed={done}
-                    aria-label={`${welcomeCopy.open} ${site.title}`}
-                    onClick={() => {
-                      onOpenSite(site.url);
-                      setOpened(new Set([...opened, site.url]));
-                    }}
-                  >
-                    <span className="top-site-icon">
-                      <SiteIcon url={site.url} size={22} />
-                    </span>
-                    <span className="top-site-name">{site.title}</span>
-                    <span className="top-site-action">
-                      {done ? welcomeCopy.opened : welcomeCopy.open}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="info-note">{welcomeCopy.noSites}</p>
-          )}
-          <div className="modal-actions">
-            <button type="button" className="primary-button" onClick={onClose}>
-              {welcomeCopy.done} <Check size={16} />
-            </button>
-          </div>
-        </>
+      {step === "welcome" && (
+        <div className="welcome-cards">
+          <p>{welcomeCopy.spacesCard}</p>
+          <p>{welcomeCopy.agentsCard}</p>
+        </div>
       )}
+      {step === "privacy" && updateSwitch}
+      {step === "import" && <ImportPanel onDone={next} onSkip={next} />}
+      {step === "agents" &&
+        (agentSetup ? (
+          agentSetup(next)
+        ) : (
+          <p className="info-note">{welcomeCopy.agentsElsewhere}</p>
+        ))}
+      {step === "sign-in" &&
+        (sites.length ? (
+          <div className="top-sites" aria-label={welcomeCopy.sites}>
+            {sites.map((site) => {
+              const done = opened.has(site.url);
+              return (
+                <button
+                  key={site.url}
+                  type="button"
+                  className={`top-site ${done ? "opened" : ""}`}
+                  aria-pressed={done}
+                  aria-label={`${welcomeCopy.open} ${site.title}`}
+                  onClick={() => {
+                    onOpenSite(site.url);
+                    setOpened(new Set([...opened, site.url]));
+                  }}
+                >
+                  <span className="top-site-icon">
+                    <SiteIcon url={site.url} size={22} />
+                  </span>
+                  <span className="top-site-name">{site.title}</span>
+                  <span className="top-site-action">
+                    {done ? welcomeCopy.opened : welcomeCopy.open}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="info-note">{welcomeCopy.noSites}</p>
+        ))}
+      {step === "finish" && choice.show && (
+        <div className="welcome-default">
+          <label>
+            <input
+              type="checkbox"
+              checked={makeDefault}
+              onChange={(event) => setMakeDefault(event.target.checked)}
+            />
+            {defaultBrowserCopy.choice}
+          </label>
+          {choice.note && <p className="import-note">{choice.note}</p>}
+        </div>
+      )}
+      <p className="welcome-step">{welcomeCopy.step(stepNumber(step))}</p>
+      <div className="modal-actions">
+        {back && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setStep(back)}
+          >
+            {welcomeCopy.back}
+          </button>
+        )}
+        {step === "welcome" && (
+          <button
+            type="button"
+            className="primary-button"
+            autoFocus
+            onClick={next}
+          >
+            {welcomeCopy.start} <ArrowRight size={16} />
+          </button>
+        )}
+        {(step === "privacy" || step === "sign-in") && (
+          <button type="button" className="primary-button" onClick={next}>
+            {welcomeCopy.next} <ArrowRight size={16} />
+          </button>
+        )}
+        {step === "agents" && !agentSetup && (
+          <>
+            <button type="button" className="secondary-button" onClick={next}>
+              {welcomeCopy.agentsLater}
+            </button>
+            <button type="button" className="primary-button" onClick={next}>
+              {welcomeCopy.next} <ArrowRight size={16} />
+            </button>
+          </>
+        )}
+        {step === "finish" && (
+          <button type="button" className="primary-button" onClick={finish}>
+            {welcomeCopy.startBrowsing} <Check size={16} />
+          </button>
+        )}
+      </div>
     </Modal>
   );
 }

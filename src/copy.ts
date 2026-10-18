@@ -46,17 +46,47 @@ export const signInsCopy = {
 
 export const welcomeCopy = {
   title: "Welcome to Kamapathy",
-  description:
-    "Bring your bookmarks and history from another browser on this computer.",
+  description: "A calm browser you share with your agents.",
+  spacesCard:
+    "Your spaces: tabs you browse yourself. Agents never see them unless you share a space.",
+  agentsCard:
+    "Agent spaces: where agents work, in plain view. Take over whenever you like.",
+  start: "Get started",
+  privacyTitle: "Your data stays here",
+  privacy:
+    "History, bookmarks, passwords and site data stay on this computer. There is no account and no telemetry.",
+  importTitle: "Bring your browser with you",
+  importDescription:
+    "Bring your bookmarks, history and, if you like, your sign-ins from another browser on this computer.",
+  agentsTitle: "Connect your agent",
+  agentsLater: "Set up later",
+  agentsElsewhere:
+    "You can connect an agent any time from Settings, under Agents.",
   signInTitle: "Sign in once",
   signInDescription:
     "Kamapathy shares your sign-ins across your spaces and with your agents, so a site you sign in to here works everywhere. Any space can keep separate sign-ins, and Settings can isolate agent spaces.",
+  finishTitle: "You're all set",
+  finish: "Start browsing, or ask your agent to use Kamapathy.",
+  startBrowsing: "Start browsing",
+  next: "Next",
+  back: "Back",
+  step: (n: number) => `Step ${n} of 6`,
   sites: "Your sites",
   open: "Open",
   opened: "Opened",
-  done: "Done",
   noSites:
     "Open the sites you use most and sign in. Your agents can then use them too.",
+} as const;
+
+export const signInNoticeCopy = {
+  heading: "Google rejected this sign-in.",
+  elsewhere:
+    "Continue in your default browser, or sign in there and import the sign-in.",
+  whenDefault: "Sign in with another browser, then import the sign-in here.",
+  open: "Open in default browser",
+  importSignIns: "Import sign-ins...",
+  copyLink: "Copy link",
+  copied: "Link copied.",
 } as const;
 
 export const importCopy = {

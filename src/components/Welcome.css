@@ -198,3 +198,43 @@ label.import-source {
   font-size: 11px;
   color: var(--secondary);
 }
+.welcome-cards {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+.welcome-cards p {
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.welcome-default {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 13px;
+}
+.welcome-default label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.welcome-default input {
+  margin: 0;
+  accent-color: var(--text);
+}
+.welcome-default .import-note {
+  margin: 6px 0 0 24px;
+}
+.welcome-step {
+  margin-top: 20px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+.welcome-step + .modal-actions {
+  margin-top: 12px;
+}
