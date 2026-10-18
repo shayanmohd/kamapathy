@@ -14,6 +14,8 @@ import {
   connectForms,
   FORM_LIMITS,
   FormBroker,
+  MENU_LIMITS,
+  menuItems,
   saveDecision,
   underPersonControl,
   type FormFrame,
@@ -22,7 +24,12 @@ import {
 import type { Sealer } from "../electron/passwords/seal";
 import { Vault } from "../electron/passwords/vault";
 import { initialState, newTab } from "../shared/state";
-import type { BrowserState, PasswordPrompt, Space } from "../shared/types";
+import type {
+  BrowserState,
+  PasswordPrompt,
+  SavedLoginSummary,
+  Space,
+} from "../shared/types";
 
 vi.mock("electron", () => ({
   Menu: { buildFromTemplate: vi.fn() },
@@ -132,13 +139,13 @@ const removed = { handlers: 0, listeners: 0, navigations: 0, destroyed: 0 };
 function fakeHost(state: BrowserState) {
   return {
     state: () => state,
-    view: vi.fn(() => undefined),
+    view: vi.fn<FormHost["view"]>(() => undefined),
     windowFocused: vi.fn(() => true),
     contentOrigin: vi.fn(() => ({ x: 0, y: 0 })),
     cursor: vi.fn(() => ({ x: 0, y: 0 })),
     setPrompts: vi.fn(),
-    popup: vi.fn(),
-    confirm: vi.fn(async () => true),
+    popup: vi.fn<FormHost["popup"]>(),
+    confirm: vi.fn<FormHost["confirm"]>(async () => true),
     openManager: vi.fn(),
   } satisfies FormHost;
 }
@@ -256,6 +263,30 @@ afterEach(() => {
 const off = { fill: false, capture: false, checkOutcome: false };
 const rect = { x: 10, y: 20, width: 200, height: 32 };
 const signIn = { kind: "sign-in", username: "alice", password: "secret" };
+
+// The items and the point of the menu the broker opened last.
+function popped(host: ReturnType<typeof fakeHost>) {
+  const call = host.popup.mock.calls.at(-1);
+  return {
+    items: call?.[0] ?? [],
+    at: call?.[1],
+  };
+}
+const labels = (items: Electron.MenuItemConstructorOptions[]) =>
+  items.map((item) => item.label ?? `[${item.type}]`);
+// Chooses a menu item as Electron does when the person clicks it.
+function pick(items: Electron.MenuItemConstructorOptions[], label: string) {
+  const item = items.find((entry) => entry.label === label);
+  if (!item?.click) throw new Error(`No menu item "${label}".`);
+  (item.click as unknown as () => void)();
+}
+// The fills a frame was sent, among the state pushes.
+const filled = (frame: FakeFrame) =>
+  frame.send.mock.calls.filter(([channel]) => channel === FORM_CHANNELS.fill);
+const ASKED = [
+  "Agents can read pages in this space, including this password.",
+  "Fill",
+] as const;
 
 describe("form broker", () => {
   it("agent-controlled frames get fill and capture false and are ignored", async () => {
@@ -1305,5 +1336,314 @@ describe("form broker", () => {
     await expect(failed).rejects.toBeInstanceOf(PasswordError);
     await expect(failed).rejects.toMatchObject({ code: "vault_unavailable" });
     expect(promptsOf(second.host)).toEqual([pending]);
+  });
+  it("fill reaches only the reporting frame at its origin", async () => {
+    const vault = await openVault(
+      "https://sub.example",
+      "https://other.example",
+    );
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state);
+    host.view.mockReturnValue({
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      visible: true,
+    });
+    const page = new FakeContents(
+      "https://a.example",
+      "https://sub.example",
+      "https://sub.example",
+    );
+    broker.attach(tabs.personal.id, page);
+    const [main, frame, sibling] = page.frames;
+    await page.hello(frame);
+    await page.hello(sibling);
+    const field = {
+      kind: "sign-in",
+      rect: { x: 1, y: 2, width: 3, height: 4 },
+      click: { x: 0, y: 0 },
+      cause: "click",
+    } as const;
+
+    page.report("field", field, frame);
+    pick(popped(host).items, "alice");
+    await settled();
+    expect(filled(frame)).toEqual([
+      [
+        FORM_CHANNELS.fill,
+        {
+          origin: "https://sub.example",
+          username: "alice",
+          password: "secret",
+        },
+      ],
+    ]);
+    expect(filled(main)).toEqual([]);
+    expect(filled(sibling)).toEqual([]);
+    const saved = vault
+      .list()
+      .find((login) => login.origin === "https://sub.example")!;
+    expect(saved.usedAt).toBeGreaterThan(0);
+
+    // A frame that went away before the choice is sent nothing.
+    frame.send.mockClear();
+    page.report("field", field, frame);
+    const detached = popped(host).items;
+    frame.detached = true;
+    pick(detached, "alice");
+    await settled();
+    expect(filled(frame)).toEqual([]);
+    frame.detached = false;
+
+    // Neither is a frame whose origin changed while the menu was open.
+    page.report("field", field, frame);
+    const moved = popped(host).items;
+    frame.origin = "https://moved.example";
+    frame.url = "https://moved.example/";
+    pick(moved, "alice");
+    await settled();
+    expect(filled(frame)).toEqual([]);
+    frame.origin = "https://sub.example";
+    frame.url = "https://sub.example/";
+
+    // A login that no longer matches the frame's origin is never sent.
+    page.report("field", field, frame);
+    const edited = popped(host).items;
+    await vault.update(saved.id, { origin: "https://moved.example" });
+    pick(edited, "alice");
+    await settled();
+    expect(filled(frame)).toEqual([]);
+  });
+
+  it("agent-rule spaces fill only after confirming", async () => {
+    const vault = await openVault("https://a.example");
+    const { state, tabs, agent, work } = browserState();
+    // The person took the agent space over and stopped the agent in Work.
+    agent.owner = "human";
+    agent.control = { reason: "manual", since: 1 };
+    work.owner = "human";
+    const { broker, host } = brokerFor(vault, state);
+    host.view.mockReturnValue({
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      visible: true,
+    });
+    const pages = {
+      agent: new FakeContents("https://a.example"),
+      work: new FakeContents("https://a.example"),
+      personal: new FakeContents("https://a.example"),
+    };
+    broker.attach(tabs.agent.id, pages.agent);
+    broker.attach(tabs.work.id, pages.work);
+    broker.attach(tabs.personal.id, pages.personal);
+    for (const page of [pages.agent, pages.work, pages.personal])
+      await page.hello();
+    const field = { kind: "sign-in", rect, cause: "key" } as const;
+
+    pages.agent.report("field", field);
+    pick(popped(host).items, "alice");
+    await settled();
+    expect(host.confirm).toHaveBeenCalledExactlyOnceWith(...ASKED);
+    expect(filled(pages.agent.mainFrame)).toHaveLength(1);
+
+    // A granted personal space asks too.
+    host.confirm.mockClear();
+    pages.work.report("field", field);
+    pick(popped(host).items, "alice");
+    await settled();
+    expect(host.confirm).toHaveBeenCalledExactlyOnceWith(...ASKED);
+    expect(filled(pages.work.mainFrame)).toHaveLength(1);
+
+    // Cancel fills nothing.
+    pages.work.mainFrame.send.mockClear();
+    host.confirm.mockImplementation(async () => false);
+    pages.work.report("field", field);
+    pick(popped(host).items, "alice");
+    await settled();
+    expect(filled(pages.work.mainFrame)).toEqual([]);
+
+    // Neither does control going back to the agent while the dialog is open.
+    let allow = (_value: boolean) => {};
+    host.confirm.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          allow = resolve;
+        }),
+    );
+    pages.agent.mainFrame.send.mockClear();
+    pages.agent.report("field", field);
+    pick(popped(host).items, "alice");
+    await settled();
+    agent.owner = "agent";
+    delete agent.control;
+    broker.controlChanged(agent.id);
+    allow(true);
+    await settled();
+    expect(filled(pages.agent.mainFrame)).toEqual([]);
+
+    // A personal space nobody granted fills without asking.
+    host.confirm.mockClear();
+    host.confirm.mockImplementation(async () => true);
+    pages.personal.report("field", field);
+    pick(popped(host).items, "alice");
+    await settled();
+    expect(host.confirm).not.toHaveBeenCalled();
+    expect(filled(pages.personal.mainFrame)).toHaveLength(1);
+  });
+
+  it("the menu opens only for a shown tab in a focused window, under the field", async () => {
+    vi.useFakeTimers();
+    let clock = 1000;
+    vi.setSystemTime(clock);
+    const vault = vaultAt();
+    await vault.open();
+    const add = async (username: string, origin = "https://a.example") => {
+      vi.setSystemTime((clock += 1000));
+      const login = await vault.add({
+        kind: "form",
+        origin,
+        username,
+        password: "secret",
+      });
+      return login.id;
+    };
+    const alice = await add("alice");
+    const nameless = await add("");
+    const wendy = await add("wendy", "https://www.a.example");
+    for (const name of ["u4", "u5", "u6", "u7", "u8", "u9"]) await add(name);
+    for (const id of [wendy, nameless, alice]) {
+      vi.setSystemTime((clock += 1000));
+      vault.touch(id);
+    }
+
+    const { state, tabs } = browserState();
+    const { broker, host } = brokerFor(vault, state);
+    const page = new FakeContents(
+      "https://a.example",
+      "https://a.example",
+      "http://sub.example",
+    );
+    broker.attach(tabs.personal.id, page);
+    await page.hello();
+    const fieldRect = { x: 10, y: 20, width: 200, height: 30 };
+    const field = { kind: "sign-in", rect: fieldRect, cause: "key" } as const;
+    const bounds = { x: 100, y: 80, width: 900, height: 600 };
+
+    // A tab with no view, a background tab and a frozen shell show nothing.
+    page.report("field", field);
+    expect(host.view).toHaveBeenCalledWith(tabs.personal.id);
+    expect(host.popup).not.toHaveBeenCalled();
+    host.view.mockReturnValue({ bounds, visible: false });
+    page.report("field", field);
+    expect(host.popup).not.toHaveBeenCalled();
+
+    // Nor does an unfocused window or a vault that is not ready.
+    host.view.mockReturnValue({ bounds, visible: true });
+    host.windowFocused.mockReturnValue(false);
+    page.report("field", field);
+    expect(host.popup).not.toHaveBeenCalled();
+    host.windowFocused.mockReturnValue(true);
+    Object.defineProperty(vault, "state", {
+      get: () => "locked",
+      configurable: true,
+    });
+    page.report("field", field);
+    expect(host.popup).not.toHaveBeenCalled();
+    delete (vault as unknown as { state?: unknown }).state;
+    expect(vault.state).toBe("ready");
+
+    // A frame nothing matches and a tab under the agent show nothing.
+    const other = page.frames[2];
+    await page.hello(other);
+    other.send.mockClear();
+    page.report("field", field, other);
+    expect(host.popup).not.toHaveBeenCalled();
+    const agentPage = new FakeContents("https://a.example");
+    broker.attach(tabs.agent.id, agentPage);
+    expect(await agentPage.hello()).toEqual(off);
+    agentPage.report("field", field);
+    expect(host.popup).not.toHaveBeenCalled();
+
+    // Eight usernames, most recently used first, under a main-frame field.
+    vi.spyOn(page, "getZoomFactor").mockReturnValue(1.5);
+    page.report("field", field);
+    const menu = popped(host);
+    expect(menu.at).toEqual({ x: 115, y: 155 });
+    expect(labels(menu.items)).toEqual([
+      "alice",
+      "No username",
+      "wendy (www.a.example)",
+      "u9",
+      "u8",
+      "u7",
+      "u6",
+      "u5",
+      "[separator]",
+      "Manage passwords...",
+    ]);
+    expect(menu.items).toHaveLength(MENU_LIMITS.logins + 2);
+    expect(menu.items.some((item) => item.enabled === false)).toBe(false);
+    pick(menu.items, "Manage passwords...");
+    expect(host.openManager).toHaveBeenCalledOnce();
+
+    // A subframe's menu opens at the cursor for a click and at the view's
+    // top center for a key.
+    const sub = page.frames[1];
+    await page.hello(sub);
+    page.report(
+      "field",
+      { ...field, click: { x: 4, y: 6 }, cause: "click" },
+      sub,
+    );
+    expect(popped(host).at).toBeUndefined();
+    page.report("field", field, sub);
+    expect(popped(host).at).toEqual({ x: 550, y: 80 });
+
+    // Headers for another host and an insecure connection, with labels
+    // cleaned and cut.
+    const summary = (login: Partial<SavedLoginSummary>): SavedLoginSummary => ({
+      id: "1",
+      kind: "form",
+      origin: "https://a.example",
+      username: "alice",
+      createdAt: 0,
+      changedAt: 0,
+      ...login,
+    });
+    const chosen: string[] = [];
+    const items = menuItems({
+      logins: [
+        summary({ id: "1", username: "ev\u202eil\u0007" }),
+        summary({ id: "2", username: "x".repeat(70) }),
+      ],
+      frameOrigin: "http://pay.a.example",
+      tabOrigin: "https://a.example",
+      choose: (id) => chosen.push(id),
+      manage: () => {},
+    });
+    expect(labels(items)).toEqual([
+      "Passwords for pay.a.example",
+      "This connection isn't secure.",
+      "evil (a.example)",
+      "x".repeat(MENU_LIMITS.label),
+      "[separator]",
+      "Manage passwords...",
+    ]);
+    expect(items.slice(0, 2).map((item) => item.enabled)).toEqual([
+      false,
+      false,
+    ]);
+    pick(items, "evil (a.example)");
+    expect(chosen).toEqual(["1"]);
+    // A loopback page over http is not called insecure.
+    expect(
+      labels(
+        menuItems({
+          logins: [summary({ origin: "http://localhost:3000" })],
+          frameOrigin: "http://localhost:3000",
+          tabOrigin: "http://localhost:3000",
+          choose: () => {},
+          manage: () => {},
+        }),
+      ),
+    ).toEqual(["alice", "[separator]", "Manage passwords..."]);
   });
 });

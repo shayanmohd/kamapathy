@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { dialog, Menu, screen } from "electron";
 import type { BrowserWindow, WebContents } from "electron";
+import { cleanAgentText } from "../../shared/agent-text";
 import { agentRules } from "../../shared/state";
 import type {
   BrowserState,
   PasswordPrompt,
   PasswordPromptAnswer,
+  SavedLoginSummary,
   Space,
 } from "../../shared/types";
 import type { BrowserController } from "../controller";
@@ -14,11 +16,12 @@ import {
   FORM_CHANNELS,
   type CaptureReport,
   type FieldReport,
+  type FillMessage,
   type FormFlags,
   type HelloReply,
   type OutcomeReport,
 } from "./form-dom";
-import { asciiHost } from "./origin";
+import { asciiHost, isLoopbackOrigin } from "./origin";
 import { memorySealer, type Sealer } from "./seal";
 import { VAULT_LIMITS, type Vault } from "./vault";
 
@@ -156,6 +159,70 @@ export async function saveDecision(
   return { prompt: "save", username: capture.username };
 }
 
+// The fill menu holds up to 8 usernames, with labels of up to 60
+// characters.
+export const MENU_LIMITS = { logins: 8, label: 60 } as const;
+const FILL_CONFIRM =
+  "Agents can read pages in this space, including this password.";
+
+// The menu opens under the field: from the view bounds and the page zoom
+// in the main frame, at the cursor for a click in a subframe, and at the
+// top center of the view for a key press in one.
+export function menuPoint(
+  report: FieldReport,
+  view: { x: number; y: number; width: number; height: number },
+  zoom: number,
+  mainFrame: boolean,
+): { x: number; y: number } | undefined {
+  const { rect } = report;
+  if (mainFrame)
+    return {
+      x: view.x + rect.x * zoom,
+      y: view.y + (rect.y + rect.height) * zoom,
+    };
+  if (report.cause === "click") return undefined;
+  return { x: view.x + view.width / 2, y: view.y };
+}
+
+// Labels carry what a page may have chosen, so each is cleaned and cut.
+// Windows reads a single "&" as an accelerator.
+function menuLabel(text: string): string {
+  const label = cleanAgentText(text).slice(0, MENU_LIMITS.label);
+  return process.platform === "win32" ? label.replace(/&/g, "&&") : label;
+}
+
+export function menuItems(input: {
+  logins: SavedLoginSummary[];
+  frameOrigin: string;
+  tabOrigin: string;
+  choose(id: string): void;
+  manage(): void;
+}): Electron.MenuItemConstructorOptions[] {
+  const host = asciiHost(input.frameOrigin);
+  const items: Electron.MenuItemConstructorOptions[] = [];
+  const header = (text: string) =>
+    items.push({ label: menuLabel(text), enabled: false });
+  if (host !== asciiHost(input.tabOrigin)) header(`Passwords for ${host}`);
+  if (
+    input.frameOrigin.startsWith("http:") &&
+    !isLoopbackOrigin(input.frameOrigin)
+  )
+    header("This connection isn't secure.");
+  for (const login of input.logins.slice(0, MENU_LIMITS.logins)) {
+    const from = asciiHost(login.origin);
+    const name = login.username || "No username";
+    items.push({
+      label: menuLabel(from === host ? name : `${name} (${from})`),
+      click: () => input.choose(login.id),
+    });
+  }
+  items.push(
+    { type: "separator" },
+    { label: menuLabel("Manage passwords..."), click: () => input.manage() },
+  );
+  return items;
+}
+
 type FormReport =
   | { channel: "field"; payload: FieldReport }
   | { channel: "captured"; payload: CaptureReport }
@@ -249,6 +316,8 @@ interface FrameRecord {
   origin: string;
   flags: FormFlags;
   checkOutcome: boolean;
+  // The field the person last asked the menu for in this frame.
+  lastField?: { node: number; origin: string; at: number };
   // When its recent messages came, for the rate limit.
   times: number[];
 }
@@ -501,10 +570,97 @@ export class FormBroker {
   private report(tabId: string, frame: FrameRecord, report: FormReport): void {
     const tab = this.tabs.get(tabId);
     if (!tab) return;
-    if (report.channel === "captured")
+    if (report.channel === "field")
+      this.field(tabId, tab, frame, report.payload);
+    else if (report.channel === "captured")
       void this.captured(tabId, tab, frame, report.payload);
     else if (report.channel === "outcome")
       this.outcome(tabId, tab, frame, report.payload);
+  }
+
+  // The person asked for saved passwords in an empty field. The menu opens
+  // only while the vault has matches for the frame's own origin and the
+  // person can see the tab.
+  private field(
+    tabId: string,
+    tab: TabRecord,
+    frame: FrameRecord,
+    report: FieldReport,
+  ): void {
+    if (this.vault.state !== "ready") return;
+    const logins = this.vault.matches(frame.origin);
+    if (logins.length === 0) return;
+    const view = this.host.view(tabId);
+    if (!view?.visible || !this.host.windowFocused()) return;
+    const main = this.mainFrameOf(tab);
+    if (!main) return;
+    const { node, origin } = frame;
+    frame.lastField = { node, origin, at: this.now() };
+    const items = menuItems({
+      logins,
+      frameOrigin: origin,
+      tabOrigin: main.origin,
+      choose: (loginId) => void this.choose(tabId, node, origin, loginId),
+      manage: () => this.host.openManager(),
+    });
+    this.host.popup(
+      items,
+      menuPoint(report, view.bounds, main.zoom, node === main.node),
+    );
+  }
+
+  // The person chose a login. Everything is checked again after each wait,
+  // and the password reaches only the frame that reported the field, at the
+  // origin it reported from. A failure fills nothing and says nothing.
+  private async choose(
+    tabId: string,
+    node: number,
+    origin: string,
+    loginId: string,
+  ): Promise<void> {
+    try {
+      const space = this.spaceOf(tabId);
+      if (!space || !this.reporting(tabId, node, origin)) return;
+      if (agentRules(space) && !(await this.host.confirm(FILL_CONFIRM, "Fill")))
+        return;
+      const login = this.vault
+        .matches(origin)
+        .find((match) => match.id === loginId);
+      if (!login || !this.reporting(tabId, node, origin)) return;
+      const { password } = await this.vault.reveal(loginId);
+      const frame = this.reporting(tabId, node, origin);
+      if (!frame) return;
+      const message: FillMessage = {
+        origin,
+        username: login.username,
+        password,
+      };
+      frame.frame.send(FORM_CHANNELS.fill, message);
+      this.vault.touch(loginId);
+    } catch {
+      // Nothing is filled.
+    }
+  }
+
+  // The frame that reported the field, while the person still controls its
+  // tab, the vault is ready and the frame shows the same document.
+  private reporting(
+    tabId: string,
+    node: number,
+    origin: string,
+  ): FrameRecord | undefined {
+    const space = this.spaceOf(tabId);
+    const frame = this.tabs.get(tabId)?.frames.get(node);
+    if (!space || !underPersonControl(space) || this.vault.state !== "ready")
+      return undefined;
+    if (
+      !frame ||
+      frame.origin !== origin ||
+      frame.lastField?.origin !== origin ||
+      !current(frame)
+    )
+      return undefined;
+    return frame;
   }
 
   // What the person submitted is sealed at once and waits for the sign-in
@@ -651,8 +807,15 @@ export class FormBroker {
   }
   // The frame tree node of the tab's main frame, if its page is still there.
   private mainNode(tab: TabRecord): number | undefined {
+    return this.mainFrameOf(tab)?.node;
+  }
+  // The tab's main frame and the zoom its page is drawn at.
+  private mainFrameOf(
+    tab: TabRecord,
+  ): { node: number; origin: string; zoom: number } | undefined {
     try {
-      return tab.contents.mainFrame.frameTreeNodeId;
+      const { frameTreeNodeId: node, origin } = tab.contents.mainFrame;
+      return { node, origin, zoom: tab.contents.getZoomFactor() };
     } catch {
       return undefined;
     }
