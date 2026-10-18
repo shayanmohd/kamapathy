@@ -9,8 +9,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
+  compareVersions,
   extensionIdOf,
   extensionPermission,
   isComponentExtension,
@@ -18,6 +19,7 @@ import {
   restoreExtensions,
   type ExtensionEntry,
   type ExtensionsFile,
+  type Grant,
 } from "../../shared/extensions";
 import { extensionRefusalCopy } from "../../src/copy";
 import {
@@ -337,6 +339,92 @@ export class ExtensionHost {
     await this.write();
   }
 
+  // A newer build of a store extension replaces the running one: unload, swap
+  // the folders, record and load. A load that fails puts the old build back.
+  async replaceBuild(
+    id: string,
+    build: {
+      version: string;
+      folder: string;
+      manifest: CheckedManifest;
+      grant: Grant;
+    },
+  ): Promise<void> {
+    const entry = this.replaceable(id, build.version);
+    const path = `${STORE_FOLDER}/${id}/${build.version}`;
+    const folder = join(this.userData, path);
+    const manifest = this.manifests.get(id);
+    const { staged: _staged, ...rest } = entry;
+    this.unloadEverywhere(id);
+    try {
+      await this.moveInto(build.folder, folder);
+      await this.save(
+        {
+          ...rest,
+          version: build.version,
+          path,
+          grantedPermissions: build.grant.permissions,
+          grantedHosts: build.grant.hosts,
+        },
+        build.manifest,
+      );
+      await this.loadEverywhere(id);
+    } catch (error) {
+      await rm(folder, { recursive: true, force: true });
+      await this.save(rest, manifest ?? build.manifest);
+      await this.loadEverywhere(id).catch((failure) =>
+        this.failed(id, failure),
+      );
+      throw error;
+    }
+    await rm(join(this.userData, entry.path), { recursive: true, force: true });
+  }
+
+  // A build that waits: for the person's OK, or for a launch with none of the
+  // extension's pages open. The running build keeps its manifest.
+  async stage(
+    id: string,
+    build: {
+      version: string;
+      folder: string;
+      manifest: CheckedManifest;
+      review: boolean;
+    },
+  ): Promise<void> {
+    const entry = this.replaceable(id, build.version);
+    const path = `${STORE_FOLDER}/${id}/${build.version}`;
+    await this.moveInto(build.folder, join(this.userData, path));
+    await this.save(
+      {
+        ...entry,
+        staged: {
+          version: build.version,
+          path,
+          review: build.review,
+          permissions: build.manifest.permissions,
+          hosts: build.manifest.hosts,
+        },
+      },
+      this.manifests.get(id) ?? build.manifest,
+    );
+  }
+
+  async stagedManifest(id: string): Promise<CheckedManifest | undefined> {
+    const staged = this.entry(id)?.staged;
+    if (!staged) return undefined;
+    try {
+      return await readManifest(join(this.userData, staged.path), {
+        chromeVersion: this.chromeVersion,
+        locale: this.locale,
+        installed: 0,
+        replacing: true,
+      });
+    } catch (error) {
+      logError(`Extension ${id}'s update could not be read`, error);
+      return undefined;
+    }
+  }
+
   async forget(id: string): Promise<void> {
     if (!this.entry(id)) return;
     this.unloadEverywhere(id);
@@ -546,6 +634,26 @@ export class ExtensionHost {
           : extensionRefusalCopy.loadFailed,
       );
     }
+  }
+
+  // Only a newer build of a store extension the host knows.
+  private replaceable(id: string, version: string): ExtensionEntry {
+    const entry = this.entry(id);
+    if (
+      !entry ||
+      entry.source !== "webstore" ||
+      compareVersions(version, entry.version) <= 0
+    )
+      throw new Error(extensionRefusalCopy.loadFailed);
+    return entry;
+  }
+
+  // Moves a build into its version folder, or leaves one already there.
+  private async moveInto(from: string, to: string): Promise<void> {
+    await mkdir(dirname(to), { recursive: true });
+    if (resolve(from) === resolve(to)) return;
+    await rm(to, { recursive: true, force: true });
+    await rename(from, to);
   }
 
   // A staged build that needs no review replaces the current one, unless its

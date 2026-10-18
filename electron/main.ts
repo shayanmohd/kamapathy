@@ -13,6 +13,7 @@ import { ExtensionChannel } from "./extensions/channel";
 import { confirmAdd } from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
 import { ExtensionInstaller } from "./extensions/install";
+import { ExtensionUpdates } from "./extensions/updates";
 import {
   STORE_PARTITION,
   sessionFetcher,
@@ -69,6 +70,8 @@ let extensionChannel: ExtensionChannel | null = null;
 let extensionBridge: ExtensionBridge | null = null;
 // Adds extensions the person asked for, one install at a time.
 let extensionInstaller: ExtensionInstaller | null = null;
+// The daily Chrome Web Store check, while the person leaves it on.
+let extensionUpdates: ExtensionUpdates | null = null;
 // A window waiting for its extensions; later calls share it.
 let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
@@ -221,6 +224,7 @@ async function openWindow(): Promise<void> {
         : "linux";
   const statePath = join(app.getPath("userData"), "browser-state.json");
   const state = readState(statePath, platform, version);
+  extensionUpdates?.setEnabled(state.settings.extensionUpdates);
   const host = extensionHost;
   if (host) {
     await host.setDeveloperMode(state.settings.extensionDeveloperMode);
@@ -264,7 +268,8 @@ async function openWindow(): Promise<void> {
   );
   const currentController = controller;
   const unbindBridge = extensionBridge?.bind(currentController);
-  currentController.subscribe(() => {
+  currentController.subscribe((next) => {
+    extensionUpdates?.setEnabled(next.settings.extensionUpdates);
     void syncAutomation();
   });
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -508,6 +513,16 @@ else {
       fetcher: sessionFetcher(session.fromPartition(STORE_PARTITION)),
       env: storeEnv(),
       locale: app.getLocale(),
+      confirm: confirmAdd(() => window),
+    });
+    extensionUpdates = new ExtensionUpdates({
+      host: extensionHost,
+      installer: extensionInstaller,
+      fetcher: sessionFetcher(session.fromPartition(STORE_PARTITION)),
+      env: storeEnv(),
+      pagesOpen: (id) =>
+        (controller?.extensionPageTabs(id).length ?? 0) > 0 ||
+        (extensionHost?.surfacesOf(id).length ?? 0) > 0,
       confirm: confirmAdd(() => window),
     });
     registerIpc();

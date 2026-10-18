@@ -1,6 +1,10 @@
 import { net } from "electron";
 import type { Session } from "electron";
-import { STORE_UPDATE_URL } from "../../shared/extensions";
+import {
+  STORE_UPDATE_URL,
+  isExtensionId,
+  isVersion,
+} from "../../shared/extensions";
 
 // The store session: in memory, cookie free and used by no tab.
 export const STORE_PARTITION = "kamapathy-extension-store";
@@ -137,4 +141,114 @@ export function sessionFetcher(
       client.on("error", () => fail("network"));
       client.end();
     });
+}
+
+// The daily update check: one request for up to 25 extensions.
+export const UPDATE_LIMITS = {
+  timeoutMs: 30_000,
+  batch: 25,
+  maxBytes: 1024 * 1024,
+} as const;
+
+// What Chrome asks the update service about the extensions it has.
+export function updateCheckUrl(
+  items: readonly { id: string; version: string }[],
+  env: StoreEnv,
+): string {
+  return (
+    `${STORE_UPDATE_URL}?response=updatecheck&acceptformat=crx3` +
+    `&prodversion=${env.chromeVersion}&os=${env.os}&arch=${env.arch}` +
+    items
+      .map(({ id, version }) => `&x=id%3D${id}%26v%3D${version}%26uc`)
+      .join("")
+  );
+}
+
+export interface UpdateAnswer {
+  id: string;
+  status: "update" | "noupdate" | "error";
+  version?: string;
+  codebase?: string;
+  hashSha256?: string;
+}
+
+const ENTITIES: Readonly<Record<string, string>> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+function decode(value: string): string {
+  return value.replace(
+    /&(#[Xx]?[0-9A-Fa-f]+|[A-Za-z]+);/g,
+    (whole, name: string) => {
+      if (!name.startsWith("#")) return ENTITIES[name.toLowerCase()] ?? whole;
+      const digits = name.slice(1);
+      const code = Number(
+        digits.startsWith("x") || digits.startsWith("X")
+          ? `0x${digits.slice(1)}`
+          : digits,
+      );
+      return Number.isInteger(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : whole;
+    },
+  );
+}
+function attributes(tag: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const [, name, value] of tag.matchAll(/([\w:.-]+)\s*=\s*"([^"]*)"/g))
+    fields[name] = decode(value);
+  return fields;
+}
+const UPDATE_CHECK = /<updatecheck\s([^<>]*?)\/?>/;
+const SHA256 = /^[0-9A-Fa-f]{64}$/;
+
+function answerFor(
+  id: string,
+  status: string | undefined,
+  inner: string,
+): UpdateAnswer {
+  const found = status === "ok" ? UPDATE_CHECK.exec(inner) : null;
+  if (!found) return { id, status: "error" };
+  const fields = attributes(found[1]);
+  if (fields.status === "noupdate") return { id, status: "noupdate" };
+  const { version, codebase } = fields;
+  const hash = fields.hash_sha256;
+  if (
+    fields.status !== "ok" ||
+    !isVersion(version) ||
+    !codebase ||
+    !isSecure(codebase) ||
+    (hash !== undefined && !SHA256.test(hash))
+  )
+    return { id, status: "error" };
+  return {
+    id,
+    status: "update",
+    version,
+    codebase,
+    // The installer compares lowercase hex.
+    ...(hash ? { hashSha256: hash.toLowerCase() } : {}),
+  };
+}
+
+// A small reader for the update service's answer: one entry per app element
+// it knows, in the order they come.
+export function parseUpdateXml(xml: string): UpdateAnswer[] {
+  const answers: UpdateAnswer[] = [];
+  if (!xml.includes("<gupdate")) return answers;
+  const apps = [...xml.matchAll(/<app\s([^<>]*?)\/?>/g)];
+  for (const [at, app] of apps.entries()) {
+    const fields = attributes(app[1]);
+    const id = fields.appid;
+    if (!isExtensionId(id) || answers.some((answer) => answer.id === id))
+      continue;
+    const from = (app.index ?? 0) + app[0].length;
+    answers.push(
+      answerFor(id, fields.status, xml.slice(from, apps[at + 1]?.index)),
+    );
+  }
+  return answers;
 }
