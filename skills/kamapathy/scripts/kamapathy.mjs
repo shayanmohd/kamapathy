@@ -376,6 +376,28 @@ export const PARSERS = {
       throw new Error("Screenshot output must have a .png extension.");
     return { path: `/tabs/${tab(args[0])}/screenshot`, output };
   },
+  "pdf-text": (args) => {
+    const values = flags(args.slice(1), [
+      "--from",
+      "--to",
+      "--max-chars",
+      "--timeout",
+    ]);
+    const field = (flag, name, minimum, maximum) =>
+      values[flag] === undefined
+        ? {}
+        : { [name]: bounded(values[flag], flag, minimum, maximum) };
+    return {
+      path: `/tabs/${tab(args[0])}/pdf/text`,
+      method: "POST",
+      body: {
+        ...field("--from", "from", 1, 100000),
+        ...field("--to", "to", 1, 100000),
+        ...field("--max-chars", "maxChars", 0, 1000000),
+        ...field("--timeout", "timeoutMs", 0, 60000),
+      },
+    };
+  },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {
     const input = options.stdin || process.stdin;

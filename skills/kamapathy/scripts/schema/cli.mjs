@@ -397,6 +397,41 @@ export const COMMANDS = [
     },
   ),
   command(
+    "pdf-text",
+    "Page actions",
+    "pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]",
+    "Read a PDF's text by page",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--from",
+          value: "<n>",
+          description: "The first page to read, 1 to 100000, default 1.",
+        },
+        {
+          name: "--to",
+          value: "<n>",
+          description: "The last page, at most 499 after --from.",
+        },
+        {
+          name: "--max-chars",
+          value: "<n>",
+          description: "Most characters to return, 0 to 1000000, default 20000.",
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description: "0 to 60000, default 15000.",
+        },
+      ],
+      route: "POST /tabs/:id/pdf/text",
+      script: "page.pdfText",
+      examples: ["pdf-text 8c1f2e04:p2 --from 3"],
+      since: 3,
+    },
+  ),
+  command(
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",

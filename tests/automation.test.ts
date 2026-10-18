@@ -2,6 +2,12 @@ import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  createExtractor,
+  type Extractor,
+  type PdfChild,
+} from "../electron/agent/pdf/extract";
+import type { PdfPages } from "../electron/agent/pdf/worker";
+import {
   startAutomation,
   type AutomationServer,
   type TestProbe,
@@ -1732,6 +1738,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
       "POST /tabs/:id/upload": uploadBody(),
+      "POST /tabs/:id/pdf/text": { from: 1, maxChars: 0 },
     };
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
@@ -2153,5 +2160,302 @@ describe("local automation socket", () => {
     );
     await api.close();
     expect(installed()).toBeUndefined();
+  });
+
+  // Section 16's PDF route. A PDF tab answers pdfDocument with its content
+  // type, and its own session answers the re-read.
+  const PDF_BYTES = Buffer.concat([
+    Buffer.from("%PDF-1.7\n"),
+    Buffer.from("A short document.\n"),
+  ]);
+  const PDF_PAGES: PdfPages = {
+    title: "Quarterly report",
+    pageCount: 3,
+    from: 1,
+    to: 3,
+    pages: [
+      { number: 1, text: "Page one" },
+      { number: 2, text: "Page two" },
+      { number: 3, text: "Page three" },
+    ],
+    chars: 26,
+    truncated: false,
+  };
+  type PdfRange = { from: number; to?: number; maxChars: number };
+  // An extractor the test answers for, in place of the utility process.
+  const fakeExtractor = (extract: () => Promise<PdfPages>) => {
+    const calls: { bytes: Buffer; request: PdfRange; deadline: number }[] = [];
+    const extractor: Extractor = {
+      running: () => calls.length,
+      extract: (bytes, request, deadline) => {
+        calls.push({ bytes: Buffer.from(bytes), request, deadline });
+        return extract();
+      },
+    };
+    return { calls, extractor };
+  };
+  // A PDF worker that answers only when the test ends it.
+  class HangingWorker {
+    private exits: ((code: number) => void)[] = [];
+    postMessage() {}
+    on(event: "message" | "exit", listener: (value: never) => void) {
+      if (event === "exit") this.exits.push(listener as (code: number) => void);
+      return this;
+    }
+    kill() {
+      return true;
+    }
+    exit() {
+      for (const listener of this.exits) listener(0);
+    }
+  }
+  // A server with the test's own extractor, before any space exists.
+  const restartWithPdf = async (extractor: Extractor) => {
+    await api.close();
+    api = await startAutomation(controller, {
+      socketPath: socket.path,
+      pdf: { extractor },
+    });
+  };
+  const pdfTab = async (
+    options: { contentType?: string; body?: () => BodyInit } = {},
+  ) => {
+    const { space, tab } = await createPage();
+    const page = controller.pages.get(tab.id)!;
+    const contentType = options.contentType ?? "application/pdf";
+    page.result = (code: string) =>
+      code.includes("document.contentType") ? { contentType } : {};
+    page.fetchPdf = async () => new Response(options.body?.() ?? PDF_BYTES);
+    return { space, tab, page };
+  };
+
+  it("refuses a pdf range the schema or the route bounds before reaching the page", async () => {
+    const { tab, page } = await pdfTab();
+    for (const [body, field] of [
+      [{ to: 501 }, "to"],
+      [{ from: 2, to: 1 }, "to"],
+      [{ maxChars: 1000001 }, "maxChars"],
+      [{ from: 0 }, "from"],
+      [{ timeoutMs: 60001 }, "timeoutMs"],
+    ] as const) {
+      const response = await request(`/tabs/${tab.id}/pdf/text`, "POST", body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(
+        (await response.json()).error,
+        JSON.stringify(body),
+      ).toMatchObject({ code: "invalid_field", field });
+    }
+    const wide = await request(`/tabs/${tab.id}/pdf/text`, "POST", { to: 501 });
+    expect((await wide.json()).error).toMatchObject({
+      message: "to must be an integer from 1 to 500.",
+      expected: "an integer from 1 to 500",
+    });
+    expect(page.scripts).toEqual([]);
+    expect(page.fetches).toEqual([]);
+  });
+
+  it("answers not_pdf for a tab that is not showing a PDF, without reading bytes", async () => {
+    const { tab, page } = await pdfTab({ contentType: "text/html" });
+    const response = await request(`/tabs/${tab.id}/pdf/text`, "POST", {});
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatchObject({
+      code: "not_pdf",
+      contentType: "text/html",
+      message: "This tab is not showing a PDF. Use snapshot for web pages.",
+    });
+    expect(page.fetches).toEqual([]);
+  });
+
+  it("never sends a form again: a PDF a POST returned answers pdf_not_refetchable", async () => {
+    const { tab, page } = await pdfTab();
+    page.emitProtocol("Network.requestWillBeSent", {
+      requestId: "loader-1",
+      loaderId: "loader-1",
+      documentURL: "https://example.com/",
+      request: { url: "https://example.com/", method: "POST" },
+      type: "Document",
+      frameId: "main",
+    });
+    const response = await request(`/tabs/${tab.id}/pdf/text`, "POST", {});
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatchObject({
+      code: "pdf_not_refetchable",
+      reason: "post",
+    });
+    expect(page.fetches).toEqual([]);
+  });
+
+  it("stops a PDF streaming past 64 MiB", async () => {
+    const chunk = Buffer.alloc(8 * 1024 * 1024, 0x20);
+    chunk.write("%PDF-1.7");
+    const { tab } = await pdfTab({
+      body: () => {
+        let left = 12;
+        return new ReadableStream({
+          pull(stream) {
+            if (left-- > 0) stream.enqueue(chunk);
+            else stream.close();
+          },
+        });
+      },
+    });
+    const response = await request(`/tabs/${tab.id}/pdf/text`, "POST", {});
+    expect(response.status).toBe(422);
+    expect((await response.json()).error).toMatchObject({
+      code: "pdf_too_large",
+      limitBytes: 67108864,
+    });
+  });
+
+  it("reads a PDF's text page by page and reports it in the space", async () => {
+    let answer: PdfPages = PDF_PAGES;
+    const { extractor, calls } = fakeExtractor(async () => answer);
+    await restartWithPdf(extractor);
+    const { space, tab, page } = await pdfTab();
+    const response = await request(`/tabs/${tab.id}/pdf/text`, "POST", {
+      maxChars: 500,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      url: "https://example.com/",
+      title: "Quarterly report",
+      pageCount: 3,
+      from: 1,
+      to: 3,
+      pages: PDF_PAGES.pages,
+      chars: 26,
+      truncated: false,
+    });
+    expect(page.fetches.map((item) => item.url)).toEqual([
+      "https://example.com/",
+    ]);
+    expect(calls[0].request).toEqual({ from: 1, maxChars: 500 });
+    expect(calls[0].bytes.equals(PDF_BYTES)).toBe(true);
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: space.id,
+      message: "Agent read a PDF (3 pages).",
+      kind: "info",
+    });
+    // A document without a title of its own reads as the tab, and one page
+    // is one page.
+    answer = {
+      title: "",
+      pageCount: 1,
+      from: 1,
+      to: 1,
+      pages: [{ number: 1, text: "Only page" }],
+      chars: 9,
+      truncated: true,
+      nextPage: 1,
+      noText: true,
+    };
+    const second = await request(`/tabs/${tab.id}/pdf/text`, "POST", {
+      from: 1,
+      to: 1,
+      maxChars: 4,
+    });
+    expect(await second.json()).toEqual({
+      url: "https://example.com/",
+      title: "https://example.com/",
+      pageCount: 1,
+      from: 1,
+      to: 1,
+      pages: [{ number: 1, text: "Only page" }],
+      chars: 9,
+      truncated: true,
+      nextPage: 1,
+      noText: true,
+    });
+    expect(calls[1].request).toEqual({ from: 1, to: 1, maxChars: 4 });
+    expect(controller.activity.at(-1)?.message).toBe(
+      "Agent read a PDF (1 page).",
+    );
+  });
+
+  it("refuses a PDF whose page changed while Kamapathy read it", async () => {
+    const { extractor, calls } = fakeExtractor(async () => PDF_PAGES);
+    await restartWithPdf(extractor);
+    const { tab, page } = await pdfTab();
+    let release!: () => void;
+    page.fetchPdf = () =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(new Response(PDF_BYTES));
+      });
+    const pending = request(`/tabs/${tab.id}/pdf/text`, "POST", {});
+    await expect.poll(() => typeof release).toBe("function");
+    page.navigate("https://example.com/other.pdf");
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatchObject({
+      code: "page_changed",
+      message:
+        "The page changed while Kamapathy read the PDF. Read it again.",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("withholds a PDF's text when the person takes over while it is read", async () => {
+    let finish!: () => void;
+    const { extractor } = fakeExtractor(
+      () =>
+        new Promise<PdfPages>((resolve) => {
+          finish = () => resolve(PDF_PAGES);
+        }),
+    );
+    await restartWithPdf(extractor);
+    const { space, tab } = await pdfTab();
+    const pending = request(`/tabs/${tab.id}/pdf/text`, "POST", {});
+    await expect.poll(() => typeof finish).toBe("function");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    finish();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    const text = await response.text();
+    expect(JSON.parse(text).error.code).toBe("human_control");
+    expect(text).not.toContain("Page two");
+    expect(
+      controller.activity.some((item) =>
+        item.message.startsWith("Agent read a PDF"),
+      ),
+    ).toBe(false);
+  });
+
+  it("reads two PDFs at a time and refuses a third with busy", async () => {
+    const workers: HangingWorker[] = [];
+    await restartWithPdf(
+      createExtractor({
+        cMapUrl: "/cmaps/",
+        fork: () => {
+          const worker = new HangingWorker();
+          workers.push(worker);
+          return worker as unknown as PdfChild;
+        },
+      }),
+    );
+    const first = await pdfTab();
+    const second = await pdfTab();
+    const third = await pdfTab();
+    const held = [
+      request(`/tabs/${first.tab.id}/pdf/text`, "POST", {}),
+      request(`/tabs/${second.tab.id}/pdf/text`, "POST", {}),
+    ];
+    await expect.poll(() => workers.length).toBe(2);
+    const refused = await request(`/tabs/${third.tab.id}/pdf/text`, "POST", {});
+    expect(refused.status).toBe(429);
+    expect((await refused.json()).error).toMatchObject({
+      code: "busy",
+      scope: "pdf",
+      retryable: true,
+    });
+    for (const worker of workers) worker.exit();
+    for (const response of await Promise.all(held)) {
+      expect(response.status).toBe(422);
+      expect((await response.json()).error.code).toBe("pdf_unreadable");
+    }
   });
 });

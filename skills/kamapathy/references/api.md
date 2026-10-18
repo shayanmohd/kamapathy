@@ -402,6 +402,19 @@ Saves a viewport PNG. Never overwrites an existing file.
 
 Returns `Promise<string>`. Route `GET /tabs/:id/screenshot`. Errors: `screenshot_unavailable`, `screenshot_failed`, `empty_screenshot`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
+### `page.pdfText(options?)`
+
+Reads a PDF's text by page. Continue from nextPage.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `from` | integer from 1 to 100000 | `1` | The first page to read. |
+| `to` | integer from 1 to 100000 |  | The last page, at most from + 499. Defaults to the last page or from + 499. |
+| `maxChars` | integer from 0 to 1000000 | `20000` | Most characters to return; whole pages come in order. 0 returns only pageCount and title. |
+| `timeout` | milliseconds of at most 60000 |  | How long the read may take, 15000 by default. |
+
+Returns `Promise<PdfText>`. Route `POST /tabs/:id/pdf/text`. Errors: `not_pdf`, `pdf_not_refetchable`, `pdf_too_large`, `pdf_locked`, `pdf_unreadable`, `pdf_fetch_failed`, `page_out_of_range`, `pdf_timeout`, `busy`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 3.
+
 ### `page.opener()`
 
 The open page that opened this popup, or null.
@@ -524,6 +537,10 @@ Read an actions array or {actions} JSON
 
 Save a viewport PNG without overwriting
 
+### `pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]`
+
+Read a PDF's text by page
+
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
 Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself
@@ -571,6 +588,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected }`. |
+| POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |
 
 ## Errors
 

@@ -438,6 +438,43 @@ export const ROUTES = [
     },
     { budget: 30000, limit: 24 * 1024 * 1024, follow: true },
   ),
+  route(
+    "POST",
+    "/tabs/:id/pdf/text",
+    "Reads a PDF's text by page without entering Chromium's viewer.",
+    "PdfText",
+    {
+      from: {
+        kind: "integer",
+        min: 1,
+        max: 100000,
+        default: 1,
+        description: "The first page to read.",
+      },
+      to: {
+        kind: "integer",
+        min: 1,
+        max: 100000,
+        description:
+          "The last page, at most from + 499. Defaults to the last page or from + 499.",
+      },
+      maxChars: {
+        kind: "integer",
+        min: 0,
+        max: 1000000,
+        default: 20000,
+        description:
+          "Most characters to return; whole pages come in order. 0 returns only pageCount and title.",
+      },
+      timeoutMs: {
+        kind: "ms",
+        max: 60000,
+        default: 15000,
+        description: "How long loading, reading and extracting may take.",
+      },
+    },
+    { budget: { field: "timeoutMs", plusMs: 5000 }, follow: true, since: 3 },
+  ),
 ];
 
 export const ACTIONS = [

@@ -137,6 +137,13 @@ const boundaryLines = (data) => [
   ...(data.closed ?? []).map((label) => `closed ${line(label)}`),
 ];
 
+// A PDF's pages, each under its own [page N] line.
+const pdfPages = (data) =>
+  (data.pages ?? []).flatMap((page) => {
+    const text = printable(page.text).trim();
+    return [`[page ${Number(page.number)}]`, ...(text ? [text] : [])];
+  });
+
 // command names the CLI command, where the same answer reads differently.
 export function formatResult(data, command) {
   if (data && "interactables" in data && "url" in data)
@@ -147,6 +154,15 @@ export function formatResult(data, command) {
       ...["closed", "kept", "protected"]
         .filter((key) => data[key]?.length)
         .map((key) => `${key} ${data[key].map(line).join(" ")}`),
+    ].join("\n");
+  if (command === "pdf-text")
+    return [
+      `${line(data.title)}, ${Number(data.pageCount)} ${data.pageCount === 1 ? "page" : "pages"}, ${line(data.url)}`,
+      ...pdfPages(data),
+      ...(data.truncated
+        ? [`More pages: rerun with --from ${Number(data.nextPage)}.`]
+        : []),
+      ...(data.noText ? ["No text on these pages; they may be scans."] : []),
     ].join("\n");
   if (data?.space)
     return [

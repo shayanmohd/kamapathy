@@ -34,6 +34,17 @@ export class FakeContents extends FakeHost {
   captureError?: Error;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
+  // What the tab's own session was asked to fetch, as the PDF re-read does.
+  fetches: { url: string; init?: RequestInit }[] = [];
+  fetchPdf?: (url: string, init?: RequestInit) => Promise<Response>;
+  session = {
+    fetch: (url: string, init?: RequestInit) => {
+      this.fetches.push({ url, init });
+      return this.fetchPdf
+        ? this.fetchPdf(url, init)
+        : Promise.reject(new Error("No fetch in this test."));
+    },
+  };
   result: unknown = {
     url: "https://example.com/",
     title: "Example",

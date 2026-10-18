@@ -1308,6 +1308,104 @@ describe("scripted sessions", () => {
     expect(paths(api)).toEqual(["GET /spaces"]);
   });
 
+  it("pdf-text reads a page range, prints each page, offers the next and refuses bad values before connecting", async () => {
+    const current = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL };
+    const document = {
+      url: "https://example.test/report.pdf",
+      title: "Quarterly report",
+      pageCount: 9,
+      from: 2,
+      to: 3,
+    };
+    let answer = {
+      ...document,
+      pages: [{ number: 2, text: "Page two text" }],
+      chars: 13,
+      truncated: true,
+      nextPage: 3,
+    };
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/pdf/text": () => Response.json(answer),
+    });
+    const stdout = sink();
+    expect(
+      await runCli(
+        ["pdf-text", "tab-1", "--from", "2", "--to", "3", "--max-chars", "100", "--timeout", "20000"],
+        { env, fetch: api.fetch, health: current, stdout },
+      ),
+    ).toBe(0);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/pdf/text",
+      body: { from: 2, to: 3, maxChars: 100, timeoutMs: 20000 },
+    });
+    expect(stdout.text()).toBe(
+      "Quarterly report, 9 pages, https://example.test/report.pdf\n[page 2]\nPage two text\nMore pages: rerun with --from 3.\n",
+    );
+    // Every page of the range, and a range without text.
+    answer = {
+      ...document,
+      pages: [
+        { number: 2, text: "Page two text" },
+        { number: 3, text: "Page three text" },
+      ],
+      chars: 28,
+      truncated: false,
+    };
+    const both = sink();
+    expect(await runCli(["pdf-text", "tab-1"], { env, fetch: api.fetch, health: current, stdout: both })).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({});
+    expect(both.text()).toBe(
+      "Quarterly report, 9 pages, https://example.test/report.pdf\n[page 2]\nPage two text\n[page 3]\nPage three text\n",
+    );
+    answer = { ...document, pages: [{ number: 2, text: "" }], chars: 0, truncated: false, noText: true };
+    const scan = sink();
+    await runCli(["pdf-text", "tab-1"], { env, fetch: api.fetch, health: current, stdout: scan });
+    expect(scan.text()).toBe(
+      "Quarterly report, 9 pages, https://example.test/report.pdf\n[page 2]\nNo text on these pages; they may be scans.\n",
+    );
+    const asJson = sink();
+    await runCli(["pdf-text", "tab-1", "--json"], { env, fetch: api.fetch, health: current, stdout: asJson });
+    expect(JSON.parse(asJson.text())).toEqual(answer);
+    // Bad values never reach the socket.
+    const sent = api.requests.length;
+    for (const [args, message] of [
+      [["--from", "0"], "--from must be an integer from 1 to 100000."],
+      [["--to", "100001"], "--to must be an integer from 1 to 100000."],
+      [["--max-chars", "1000001"], "--max-chars must be an integer from 0 to 1000000."],
+      [["--timeout", "60001"], "--timeout must be an integer from 0 to 60000."],
+      [["--pages", "2"], "Unknown option: --pages. Run help for usage."],
+    ])
+      await expect(
+        runCli(["pdf-text", "tab-1", ...args], { env, fetch: api.fetch, health: current, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow(message);
+    expect(api.requests.length).toBe(sent);
+    const help = sink();
+    expect(await runCli(["help", "pdf-text"], { env, stdout: help })).toBe(0);
+    expect(help.text()).toContain("pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]");
+    expect(help.text()).toContain("Route: POST /tabs/:id/pdf/text");
+    expect(help.text()).toContain("Since: API level 3");
+    // A script sends timeout as the route's timeoutMs and refuses the field name.
+    const client = await connect({ env, fetch: api.fetch, health: current });
+    const page = (await client.space("space-1")).page("p1");
+    expect(await page.pdfText({ from: 2, timeout: 5000 })).toEqual(answer);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/pdf/text",
+      body: { from: 2, timeoutMs: 5000 },
+    });
+    expect(await page.pdfText()).toEqual(answer);
+    expect(api.requests.at(-1).body).toEqual({});
+    await expect(page.pdfText({ timeoutMs: 5000 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "timeoutMs",
+      suggestion: "timeout",
+      entry: "page.pdfText",
+    });
+  });
+
   it("asks for an isolated space only when told to", async () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });

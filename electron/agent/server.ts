@@ -22,6 +22,9 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { DocumentMethods } from "./pdf/document-method";
+import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
+import { pdfRoutes } from "./routes/pdf";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -144,11 +147,14 @@ function testProbe(sessions: TabSessions): TestProbe {
 // connection needs no token.
 export async function startAutomation(
   controller: AutomationController,
-  options: { socketPath: string },
+  options: { socketPath: string; pdf?: { extractor?: Extractor } },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
   const authority = createAuthority(controller);
   const scheduler = new Scheduler();
+  // Each document's HTTP method, so a PDF a form returned is never fetched
+  // again. A closed session emits nothing more, so nothing unwatches it.
+  const documents = new DocumentMethods();
   const sessions = new TabSessions({
     controller,
     agentDriven: (spaceId) => authority.agentDriven(spaceId),
@@ -157,6 +163,9 @@ export async function startAutomation(
     waitForSpaceIdle: (spaceId, timeoutMs) =>
       scheduler.whenIdle(spaceId, timeoutMs),
     buffers: new EventBufferPool(),
+    onOpen: (session) => {
+      documents.watch(session);
+    },
   });
   const referenceSession = randomBytes(12).toString("hex");
   const actions = createActions({
@@ -172,9 +181,14 @@ export async function startAutomation(
     return space;
   };
   const requests = spaceRequestRoutes({ ...deps, grantSpace });
+  // The extractor finds its CMaps on the first read, so starting the server
+  // needs no app paths.
+  const extractor =
+    options.pdf?.extractor ?? createExtractor({ fork: forkPdfWorker });
   const routes = buildRoutes({
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
+    ...pdfRoutes({ ...deps, pdf: { extractor, documents } }),
     ...requests.routes,
   });
   const versions = Object.fromEntries(

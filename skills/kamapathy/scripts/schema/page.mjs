@@ -2,6 +2,8 @@
 import { ROUTES, routeKey } from "./routes.mjs";
 
 const body = (key) => ROUTES.find((route) => routeKey(route) === key).body;
+// pdfText's client options are the route's fields, with timeout for timeoutMs.
+const pdfText = body("POST /tabs/:id/pdf/text");
 const PAGE = [
   "human_control",
   "tab_not_found",
@@ -276,6 +278,39 @@ export const PAGE_ENTRIES = [
       "empty_screenshot",
       "invalid_response",
     ],
+  ),
+  method(
+    "Page.pdfText",
+    "page.pdfText(options?)",
+    "Reads a PDF's text by page. Continue from nextPage.",
+    [{ name: "options", kind: "options", optional: true }],
+    "Promise<PdfText>",
+    "POST /tabs/:id/pdf/text",
+    [
+      "not_pdf",
+      "pdf_not_refetchable",
+      "pdf_too_large",
+      "pdf_locked",
+      "pdf_unreadable",
+      "pdf_fetch_failed",
+      "page_out_of_range",
+      "pdf_timeout",
+      "busy",
+      "invalid_field",
+    ],
+    {
+      options: {
+        from: pdfText.from,
+        to: pdfText.to,
+        maxChars: pdfText.maxChars,
+        timeout: {
+          kind: "ms",
+          max: 60000,
+          description: "How long the read may take, 15000 by default.",
+        },
+      },
+      since: 3,
+    },
   ),
   method(
     "Page.opener",
