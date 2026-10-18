@@ -22,6 +22,8 @@ const TARGET = [
   "unknown_ref",
   "stale_ref",
   "cross_origin_frame",
+  "no_match",
+  "ambiguous_match",
   "element_action_failed",
 ];
 const INPUT = ["element_obscured", "input_not_delivered"];

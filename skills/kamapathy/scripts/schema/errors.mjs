@@ -201,6 +201,20 @@ export const ERRORS = {
   files_too_large: code(413, false, "The upload files total more than 16 MiB."),
   content_type: code(415, false, "The request body is not JSON."),
   element_action_failed: code(422, false, "The page refused the action."),
+  no_match: code(
+    422,
+    false,
+    "Nothing matched the selector by the deadline.",
+    ["selector", "waitedMs"],
+    3,
+  ),
+  ambiguous_match: code(
+    422,
+    false,
+    "The selector matched more than one element the action can take.",
+    ["selector", "count", "visible", "hidden", "actionable", "candidates"],
+    3,
+  ),
   drag_out_of_view: code(
     422,
     false,

@@ -1,9 +1,12 @@
 import { pageOperation, type PageOperation } from "../../automation-dom";
+import { selectorEngine } from "../dom/select";
 
 // Kamapathy's isolated world in each frame. Isolated init scripts use the
 // same name, so they share it.
 export const WORLD_NAME = "kamapathy";
-export const PAGE_SOURCE = pageOperation.toString();
+// The page script with the selector engine passed in beside it, so selectors
+// travel as JSON and the engine as code.
+export const PAGE_SOURCE = `function(operation,payload,namespace){return (${pageOperation})(operation,payload,namespace,(${selectorEngine}))}`;
 
 // Operations that change the page themselves. The others only read it, even
 // when they scroll a target into view to measure it.

@@ -1,3 +1,5 @@
+import type { Decision, Invalid, Picked, Query } from "./agent/dom/select";
+
 export interface SnapshotOptions {
   mode: "compact" | "full";
   selector?: string;
@@ -8,6 +10,7 @@ export interface SnapshotOptions {
 export interface ElementTarget {
   ref?: string;
   selector?: string;
+  query?: Query;
 }
 export type PageOperation =
   | "snapshot"
@@ -25,11 +28,14 @@ export type PageOperation =
   | "frameIndex";
 
 // This complete function is serialized into a separate Chromium world. It has no
-// imports, Node APIs, or access to the browser interface's preload bridge.
+// imports, Node APIs, or access to the browser interface's preload bridge. The
+// selector engine travels the same way, as an argument, so operations that
+// resolve no selector work without it.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
   namespace: string,
+  selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -72,10 +78,15 @@ export function pageOperation(
     if (operation !== "ready" && operation !== "frameIndex")
       world.__kamapathyReferences = registry;
   }
-  const failure = (error: string, code = "element_action_failed") => ({
+  const failure = (
+    error: string,
+    code = "element_action_failed",
+    fields?: Record<string, unknown>,
+  ) => ({
     ok: false as const,
     code,
     error,
+    ...(fields === undefined ? {} : { fields }),
   });
   // Refs this operation moved to a control the page drew again.
   const rebound: string[] = [];
@@ -458,6 +469,201 @@ export function pageOperation(
           "cross_origin_frame",
         )
       : element;
+  const PAGE_CHANGED =
+    "The page changed during this operation. Take a new snapshot.";
+  const disabledElement = (element: Element) =>
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled") === "true";
+  // Whether something else draws over the middle of the part of an element
+  // a person can see. Nothing off screen and nothing without size counts.
+  const covered = (element: Element) => {
+    const box = placed(element);
+    const left = Math.max(box.clip.left, box.left),
+      right = Math.min(box.clip.right, box.right);
+    const top = Math.max(box.clip.top, box.top),
+      bottom = Math.min(box.clip.bottom, box.bottom);
+    if (right <= left || bottom <= top) return false;
+    return !within(
+      element,
+      hitAt(element, (left + right) / 2, (top + bottom) / 2),
+    );
+  };
+  const editingHost = (element: Element) => {
+    if (!html(element) || !element.isContentEditable) return false;
+    const parent = element.parentElement;
+    return !(html(parent) && parent.isContentEditable);
+  };
+  let engine: ReturnType<NonNullable<typeof selectorEngine>> | undefined;
+  const engineOf = () =>
+    (engine ||= selectorEngine!({
+      documents,
+      visible,
+      disabled: disabledElement,
+      covered,
+      editingHost,
+    }));
+  // The nodes a role resolution left for this operation, taken once.
+  const takePicked = (key: string | undefined) => {
+    const store = (
+      globalThis as unknown as { __kamapathyPicked?: Map<string, Picked[]> }
+    ).__kamapathyPicked;
+    const entries = key === undefined ? undefined : store?.get(key);
+    if (entries) store?.delete(key!);
+    return entries;
+  };
+  const pickedFor = (query: Query): readonly Picked[] | undefined | null =>
+    query.ast.kind === "role" ? (takePicked(query.picked) ?? null) : undefined;
+  // Role words agents write that name a different role here.
+  const ROLE_ALIASES: Record<string, string> = {
+    textfield: "textbox",
+    listboxoption: "option",
+    menulistoption: "option",
+    image: "img",
+  };
+  // The role word an element carries: the same word role= matches.
+  const roleOf = (element: Element): string => {
+    const explicit = (element.getAttribute("role") || "")
+      .trim()
+      .split(/\s+/)[0]
+      .toLowerCase();
+    if (explicit && explicit !== "none" && explicit !== "presentation")
+      return ROLE_ALIASES[explicit] || explicit;
+    const tag = element.localName;
+    if ((tag === "a" || tag === "area") && element.hasAttribute("href"))
+      return "link";
+    if (tag === "button" || tag === "summary") return "button";
+    if (inputElement(element)) {
+      const type = element.type;
+      if (type === "hidden") return "none";
+      if (type === "checkbox" || type === "radio") return type;
+      if (type === "range") return "slider";
+      if (type === "number") return "spinbutton";
+      if (
+        ["button", "submit", "reset", "image", "file", "color"].includes(type)
+      )
+        return "button";
+      if (element.hasAttribute("list")) return "combobox";
+      if (type === "search") return "searchbox";
+      return "textbox";
+    }
+    if (selectElement(element))
+      return element.multiple || element.size > 1 ? "listbox" : "combobox";
+    if (textAreaElement(element)) return "textbox";
+    if (tag === "option") return "option";
+    if (tag === "img") return "img";
+    if (editingHost(element)) return "textbox";
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
+    if (tag === "li") return "listitem";
+    if (tag === "table") return "table";
+    if (tag === "tr") return "row";
+    if (tag === "td") return "cell";
+    if (tag === "th")
+      return element.getAttribute("scope") === "row"
+        ? "rowheader"
+        : "columnheader";
+    if (tag === "nav") return "navigation";
+    if (tag === "main") return "main";
+    if (tag === "aside") return "complementary";
+    if (tag === "header" || tag === "footer")
+      return element.parentElement?.closest("article,aside,main,nav,section")
+        ? "generic"
+        : tag === "header"
+          ? "banner"
+          : "contentinfo";
+    if (tag === "search") return "search";
+    if (tag === "form") return "form";
+    if (tag === "section") return "region";
+    if (tag === "dialog") return "dialog";
+    if (tag === "fieldset" || tag === "details") return "group";
+    if (tag === "iframe" || tag === "frame") return "iframe";
+    return tag;
+  };
+  // The ref numbers this operation handed out, beyond a snapshot's own.
+  const issuedRefs: number[] = [];
+  // What an agent needs to tell matches apart, with a ref to act on. An
+  // element that already holds a ref keeps it.
+  const candidatesOf = (found: Element[], firstRef: number | undefined) => {
+    let next = firstRef;
+    return found.map((element) => {
+      let ref = registry.refs.get(element);
+      if (
+        (!ref || registry.elements.get(ref) !== element) &&
+        next !== undefined
+      ) {
+        ref = `@e${next}`;
+        issuedRefs.push(next++);
+        registry.refs.set(element, ref);
+        registry.elements.set(ref, element);
+      }
+      const frame = framePath(element);
+      return {
+        ...(ref === undefined ? {} : { ref }),
+        tag: element.localName,
+        role: roleOf(element),
+        name: labelOf(element).slice(0, 80),
+        context: contextOf(element).slice(0, 80),
+        visible: visible(element, true),
+        disabled: disabledElement(element),
+        ...(frame ? { frame } : {}),
+      };
+    });
+  };
+  const invalidSelector = (selector: string, result: Invalid) => {
+    const fields = {
+      selector,
+      reason: result.reason,
+      ...(result.hint === undefined ? {} : { hint: result.hint }),
+    };
+    return failure(result.message, "invalid_selector", fields);
+  };
+  // How every operation reports a resolution that gave it no element.
+  const selectFailure = (
+    selector: string,
+    decision: Exclude<Decision, { kind: "match" }>,
+    firstRef: number | undefined,
+  ) => {
+    if (decision.kind === "invalid") return invalidSelector(selector, decision);
+    if (decision.kind === "none") {
+      const fields = { selector };
+      return failure(
+        "Nothing on the page matches this selector. Take a snapshot to check the page.",
+        "no_match",
+        fields,
+      );
+    }
+    if (decision.kind === "blocked")
+      return {
+        ...failure(
+          decision.blocker === "hidden"
+            ? "Element is not visible."
+            : "Element is disabled.",
+        ),
+        blocked: { blocker: decision.blocker },
+      };
+    const { count, visible: shown, hidden } = decision.tally;
+    const fields = {
+      selector,
+      ...decision.tally,
+      candidates: candidatesOf(decision.candidates, firstRef),
+    };
+    const result = failure(
+      `Selector matched ${count} elements (${shown} visible, ${hidden} hidden). Use a ref from candidates or a more specific selector.`,
+      "ambiguous_match",
+      fields,
+    );
+    return issuedRefs.length ? { ...result, issued: issuedRefs } : result;
+  };
+  // A target the main process parsed: the engine decides, and the element it
+  // picks goes through the same checks a ref does.
+  const select = (spec: { selector: string; query: Query }) => {
+    const picked = pickedFor(spec.query);
+    if (picked === null) return failure(PAGE_CHANGED, "page_changed");
+    const decision = engineOf().decide(spec.query, picked);
+    return decision.kind === "match"
+      ? decision.element
+      : selectFailure(spec.selector, decision, spec.query.firstRef);
+  };
   const target = (spec = payload as ElementTarget) => {
     if (typeof spec.ref === "string") {
       const element = registry.elements.get(spec.ref);
@@ -477,7 +683,10 @@ export function pageOperation(
       );
     }
     if (typeof spec.selector === "string") {
-      const found = unique(spec.selector);
+      const found =
+        spec.query && selectorEngine
+          ? select({ selector: spec.selector, query: spec.query })
+          : unique(spec.selector);
       return isElement(found) ? reachable(found) : found;
     }
     return failure(
@@ -1051,7 +1260,11 @@ export function pageOperation(
     const options = payload as unknown as SnapshotOptions;
     let scope: Element = document.body || document.documentElement;
     if (options.selector) {
-      const selected = unique(options.selector);
+      const query = (payload as ElementTarget).query;
+      const selected =
+        query && selectorEngine
+          ? select({ selector: options.selector, query })
+          : unique(options.selector);
       if (!isElement(selected)) return selected;
       scope = selected;
     }
@@ -1448,8 +1661,36 @@ export function pageOperation(
     };
   }
   if (operation === "check") {
+    const query = (payload as ElementTarget).query;
+    const selector =
+      typeof payload.selector === "string" ? payload.selector : "";
     let scope: Element = document.body || document.documentElement;
-    if (typeof payload.selector === "string") {
+    if (query && selectorEngine) {
+      const picked = pickedFor(query);
+      if (picked === null) return failure(PAGE_CHANGED, "page_changed");
+      if (query.state === "hidden" || query.state === "detached") {
+        const counts = engineOf().tally(query, picked);
+        if ("kind" in counts) return invalidSelector(selector, counts);
+        const met =
+          query.state === "hidden" ? counts.visible === 0 : counts.count === 0;
+        if (!met) return { ok: true, matched: false };
+      } else {
+        // Without a state this is today's wait route: one visible match.
+        const decision = engineOf().decide(
+          query.state ? query : { ...query, mode: "strict", level: "visible" },
+          picked,
+        );
+        if (
+          decision.kind === "invalid" ||
+          (decision.kind === "ambiguous" &&
+            query.state &&
+            query.mode === "strict")
+        )
+          return selectFailure(selector, decision, query.firstRef);
+        if (decision.kind !== "match") return { ok: true, matched: false };
+        scope = decision.element;
+      }
+    } else if (typeof payload.selector === "string") {
       let matches: Element[];
       try {
         matches = matching(payload.selector);
@@ -1466,7 +1707,8 @@ export function pageOperation(
       matched:
         typeof payload.text === "string"
           ? text.includes(payload.text)
-          : typeof payload.selector === "string" ||
+          : query !== undefined ||
+            typeof payload.selector === "string" ||
             document.readyState !== "loading",
     };
   }

@@ -368,6 +368,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
 | `element_action_failed` | 422 | not retryable |  | The page refused the action. |
+| `no_match` | 422 | not retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
+| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
