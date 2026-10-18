@@ -14,6 +14,7 @@ import type {
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
 import { activeSpace, createAuthority } from "./authority";
+import { createDialogs } from "./dialogs";
 import { envelope, fail } from "./errors";
 import { createExpectations } from "./expectations";
 import {
@@ -69,6 +70,9 @@ export interface AutomationController {
   setPageBudget(spaceId: string, pageBudget: number): void;
   /** Clears a popup's unseen flag once the agent has addressed it. */
   markSeen(tabId: string): void;
+  /** Whether the agent has this tab now: managed, in a space it owns under
+   *  agent rules whose access has not ended. */
+  agentControlled(tabId: string): boolean;
   /** The prompt center, told when each route on a tab starts and ends. */
   readonly prompts?: {
     routeStarted(tabId: string): void;
@@ -191,12 +195,24 @@ export async function startAutomation(
     authority,
     sessions,
   });
+  const dialogs = createDialogs({ tabLog, controller, sessions });
+  // Every agent tab answers its own dialogs, so the person never sees a
+  // dialog box from a page an agent drives.
+  const dialogStops = new Set<() => void>();
+  const stopDialogSessions = sessions.onSession((session, tab) => {
+    const stop = dialogs.attach(session, tab.id);
+    dialogStops.add(stop);
+    session.on("closed", () => {
+      dialogStops.delete(stop);
+    });
+  });
   // A long run keeps no ring, request window or arm for a tab that is gone.
   const stopTabForget = controller.registry.on((event) => {
     if (event.type !== "closed") return;
     expectations.endTab(event.tabId, "tab_closed");
     tabLog.forget(event.tabId);
     receipts.forget(event.tabId);
+    dialogs.forget(event.tabId);
   });
   const deps: RouteDeps = {
     controller,
@@ -206,6 +222,7 @@ export async function startAutomation(
     tabLog,
     receipts,
     expectations,
+    dialogs,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -412,6 +429,12 @@ export async function startAutomation(
         scheduler.close();
         // A pending wait is answered before its tab session is released.
         expectations.endAll("access_off");
+        // No tab keeps an armed policy or a handler once the server stops.
+        for (const tab of controller.state.tabs)
+          dialogs.clear(tab.id, "access_off");
+        for (const stop of dialogStops) stop();
+        dialogStops.clear();
+        stopDialogSessions();
         stopPopupLog();
         stopTabForget();
         // Nothing keeps a request window open once the server stops.

@@ -2,17 +2,18 @@ import type { IncomingMessage } from "node:http";
 import { fail } from "../errors";
 import { expectationNotFound, takeWaitSlot, WAIT_LIMIT } from "../expectations";
 import { send, type RouteDeps, type RouteImpl } from "../http";
-import { expectationFields } from "../validate";
+import { dialogPolicyFields, expectationFields } from "../validate";
 
 // The id segment of /expectations/:id and /expectations/:id/wait. Paths
 // carry no query strings or encoded segments, so this is the raw id.
 const idOf = (request: IncomingMessage) =>
   (request.url ?? "").split("/").filter(Boolean)[1] ?? "";
 
-// Arming a wait, the long poll that answers it, and the list of the pages a
-// page opened.
+// Arming a wait, the long poll that answers it, the list of the pages a page
+// opened, and the dialog policy and log of a page.
 export function eventRoutes({
   controller,
+  dialogs,
   expectations,
 }: RouteDeps): Record<string, RouteImpl> {
   const notLive = (): never => {
@@ -63,6 +64,30 @@ export function eventRoutes({
       handler: async ({ request, response }) => {
         expectations.end(idOf(request), "deleted");
         return send(response, 200, { ok: true });
+      },
+    },
+    "POST /tabs/:id/dialog-policy": {
+      handler: async ({ response, body, tab }) =>
+        send(response, 200, {
+          policy: dialogs.setPolicy(tab!.id, dialogPolicyFields(body!)),
+        }),
+    },
+    "DELETE /tabs/:id/dialog-policy": {
+      handler: async ({ response, tab }) =>
+        send(response, 200, { policy: dialogs.setPolicy(tab!.id, null) }),
+    },
+    "GET /tabs/:id/dialogs": {
+      handler: async ({ response, tab, run }) => {
+        // What a frame without the binding queued is collected first, so
+        // the log answers with every dialog the page has seen.
+        await dialogs.drain(tab!.id, {
+          deadline: run.deadline,
+          signal: run.signal,
+        });
+        return send(response, 200, {
+          policy: dialogs.policy(tab!.id),
+          dialogs: dialogs.records(tab!.id),
+        });
       },
     },
     "GET /tabs/:id/popups": {

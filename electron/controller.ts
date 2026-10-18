@@ -1211,6 +1211,20 @@ export class BrowserController {
     this.emit();
   }
 
+  // The tab is the agent's now: it manages the page, and its space follows
+  // agent rules, is the agent's to drive and has not ended.
+  agentControlled(tabId: string): boolean {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab?.managed) return false;
+    const space = this.state.spaces.find((item) => item.id === tab.spaceId);
+    return (
+      !!space &&
+      space.owner === "agent" &&
+      space.access !== "ended" &&
+      agentRules(space)
+    );
+  }
+
   // Gives the person control until they answer a site's prompt or an
   // approval the agent asked for. Returns the id that releaseHold takes.
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string {

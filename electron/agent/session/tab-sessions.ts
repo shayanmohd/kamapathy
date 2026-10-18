@@ -25,6 +25,8 @@ export class TabSessions {
   private releases = new Map<SessionHost, Promise<void>>();
   private waiting = new WeakMap<TabSession, Promise<void>>();
   private stops: (() => void)[] = [];
+  // Told of every session this policy opens, before it attaches.
+  private openListeners = new Set<(session: TabSession, tab: Tab) => void>();
   private closed = false;
   // Each tab's event log, kept across its sessions until the tab closes.
   private buffers = new Map<string, EventBuffer>();
@@ -66,6 +68,14 @@ export class TabSessions {
   get(tabId: string): TabSession | undefined {
     const session = this.current.get(tabId);
     return session?.state === "released" ? undefined : session;
+  }
+
+  /** Every session this policy opens, before it attaches. */
+  onSession(listener: (session: TabSession, tab: Tab) => void): () => void {
+    this.openListeners.add(listener);
+    return () => {
+      this.openListeners.delete(listener);
+    };
   }
 
   attaches(tabId: string): number {
@@ -132,6 +142,13 @@ export class TabSessions {
       if (this.current.get(tab.id) === session) this.current.delete(tab.id);
       this.retire(session);
     });
+    // Setup hooks and init scripts are registered here, before the attach.
+    for (const listener of [...this.openListeners])
+      try {
+        listener(session, tab);
+      } catch (error) {
+        console.error("A tab session listener failed:", error);
+      }
     const previous = this.releases.get(contents);
     if (!previous) {
       session.attach();

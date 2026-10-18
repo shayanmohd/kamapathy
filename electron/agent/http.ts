@@ -7,6 +7,7 @@ import {
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
+import type { Dialogs } from "./dialogs";
 import { ApiError, fail } from "./errors";
 import type { Expectations } from "./expectations";
 import type { Receipts } from "./receipts";
@@ -106,6 +107,7 @@ export interface RouteDeps {
   tabLog: TabLog;
   receipts: Receipts;
   expectations: Expectations;
+  dialogs: Dialogs;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

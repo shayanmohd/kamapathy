@@ -574,6 +574,9 @@ Show the commands, or help on one
 | POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
 | POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
 | DELETE | `/expectations/:id` |  | Cancels an armed wait and ends the wait running on it. Returns `{ ok: true }`. |
+| POST | `/tabs/:id/dialog-policy` | `accept`, `promptText?`, `times?`, `lifetimeMs?` | Arms how the tab answers JavaScript dialogs, before the action that opens one. Without a policy, confirms are dismissed and prompts return nothing. Returns `{ policy: { accept, promptText, remaining, expiresAt } }`. |
+| DELETE | `/tabs/:id/dialog-policy` |  | Clears the tab's dialog policy, so its dialogs are dismissed again. Returns `{ policy: null }`. |
+| GET | `/tabs/:id/dialogs` |  | Reads the tab's dialog policy and the last 20 dialogs Kamapathy answered in it, oldest first. Returns `{ policy: { accept, promptText, remaining, expiresAt } \| null, dialogs: [{ type, message, defaultValue, answer, promptText, url, at }] }`. |
 | GET | `/tabs/:id/popups` |  | Lists the open pages this page opened, with the ones nothing has reported yet marked unseen. Returns `{ popups: [{ id, label, url, openedAt, unseen? }] }`. |
 
 ## Errors

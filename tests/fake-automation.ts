@@ -241,6 +241,17 @@ export class FakeController implements AutomationController {
     delete tab.unseen;
     this.emit();
   }
+  agentControlled(tabId: string) {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab?.managed) return false;
+    const space = this.state.spaces.find((item) => item.id === tab.spaceId);
+    return (
+      !!space &&
+      space.owner === "agent" &&
+      space.access !== "ended" &&
+      agentRules(space)
+    );
+  }
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string) {
     const space = this.state.spaces.find((item) => item.id === spaceId);
     if (space?.owner !== "agent")

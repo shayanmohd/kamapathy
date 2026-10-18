@@ -1790,6 +1790,118 @@ describe("local automation socket", () => {
       expect(answer.status).toBe(404);
   });
 
+  it("the dialog-policy route validates accept, promptText, times and lifetimeMs, DELETE resets, and the dialogs route answers the policy with its records", async () => {
+    const { tab } = await createPage();
+    const policy = `/tabs/${tab.id}/dialog-policy`;
+    for (const body of [
+      {},
+      { accept: "yes" },
+      { accept: true, promptText: "a".repeat(4097) },
+      { accept: true, times: 0 },
+      { accept: true, times: 21 },
+      { accept: true, lifetimeMs: 999 },
+      { accept: true, lifetimeMs: 600001 },
+      { accept: true, dismiss: true },
+    ]) {
+      const refused = await request(policy, "POST", body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+    }
+    const armed = await request(policy, "POST", {
+      accept: true,
+      promptText: "Ada",
+      times: 3,
+    });
+    expect(armed.status).toBe(200);
+    expect(await armed.json()).toEqual({
+      policy: {
+        accept: true,
+        promptText: "Ada",
+        remaining: 3,
+        expiresAt: expect.any(Number),
+      },
+    });
+    const empty = await request(`/tabs/${tab.id}/dialogs`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual({
+      policy: expect.objectContaining({ remaining: 3 }),
+      dialogs: [],
+    });
+
+    // The page's handler reports what it answered through its binding.
+    const binding = controller.contents.debugger.sent.find(
+      (command) => command.method === "Runtime.addBinding",
+    )!.params.name as string;
+    controller.contents.emitProtocol("Runtime.bindingCalled", {
+      name: binding,
+      executionContextId: 1,
+      payload: JSON.stringify({
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "accepted",
+        promptText: "Ada",
+        url: "https://example.com/",
+      }),
+    });
+    const listed = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await listed.json()).toEqual({
+      policy: expect.objectContaining({ remaining: 2 }),
+      dialogs: [
+        {
+          type: "prompt",
+          message: "Your name?",
+          defaultValue: "preset",
+          answer: "accepted",
+          promptText: "Ada",
+          url: "https://example.com/",
+          at: expect.any(Number),
+        },
+      ],
+    });
+    // A dialog the action itself causes is in its receipt.
+    controller.contents.result = (code: string) => {
+      if (!code.includes(')("target",')) return { ok: true };
+      controller.contents.emitProtocol("Runtime.bindingCalled", {
+        name: binding,
+        executionContextId: 1,
+        payload: JSON.stringify({
+          type: "confirm",
+          message: "Delete this file?",
+          answer: "accepted",
+          url: "https://example.com/",
+        }),
+      });
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect((await click.json()).dialog).toMatchObject({ type: "confirm" });
+    expect(
+      (await (await request(`/tabs/${tab.id}/dialogs`)).json()).policy,
+    ).toMatchObject({ remaining: 1 });
+
+    const reset = await request(policy, "DELETE");
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toEqual({ policy: null });
+    const after = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await after.json()).toEqual({
+      policy: null,
+      dialogs: [
+        expect.objectContaining({ type: "prompt" }),
+        expect.objectContaining({ type: "confirm" }),
+      ],
+    });
+    // A page with no debugger session cannot arm one.
+    const blank = await request(`/spaces/${tab.spaceId}/tabs`, "POST", {});
+    const other = (await blank.json()).tab as { id: string };
+    const refused = await request(`/tabs/${other.id}/dialog-policy`, "POST", {
+      accept: true,
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error.code).toBe("debugger_busy");
+  });
+
   it("requires a file input ref and rejects malformed file metadata before execution", async () => {
     const { tab } = await createPage();
     const validFile = uploadBody().files[0];
@@ -2024,6 +2136,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/upload": uploadBody(),
       "POST /tabs/:id/expectations": { event: "popup", timeoutMs: 1000 },
       "POST /expectations/:id/wait": {},
+      "POST /tabs/:id/dialog-policy": { accept: false },
     };
     // A wait names its arm, not a space or a tab.
     const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {

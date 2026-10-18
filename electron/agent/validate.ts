@@ -5,6 +5,7 @@ import {
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { SnapshotOptions } from "../automation-dom";
+import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
 import { ApiError, fail } from "./errors";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
@@ -251,6 +252,24 @@ export function expectationFields(body: Record<string, unknown>): {
   return {
     event: event as ExpectationEvent,
     timeoutMs: integerField(body, "timeoutMs", 10000, 1, 60000),
+  };
+}
+export function dialogPolicyFields(
+  body: Record<string, unknown>,
+): DialogPolicyInput {
+  if (typeof body.accept !== "boolean")
+    return fail("invalid_field", "accept must be true or false.", {
+      field: "accept",
+    });
+  const promptText =
+    body.promptText === undefined
+      ? undefined
+      : stringField(body, "promptText", MAX_PROMPT_TEXT, true);
+  return {
+    accept: body.accept,
+    ...(promptText === undefined ? {} : { promptText }),
+    times: integerField(body, "times", 1, 1, 20),
+    lifetimeMs: integerField(body, "lifetimeMs", 60000, 1000, 600000),
   };
 }
 export function uploadFields(body: Record<string, unknown>) {
