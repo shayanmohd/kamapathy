@@ -7,6 +7,7 @@ export const toolsMenuCopy = {
   bookmarks: "Bookmarks",
   history: "History",
   downloads: "Downloads",
+  passwords: "Passwords",
   split: "Split view",
   find: "Find",
   settings: "Settings",
@@ -32,6 +33,12 @@ export const settingsCopy = {
   import: "Import bookmarks and history",
   importNote: "Bring them over from another browser on this computer.",
   importButton: "Import...",
+  passwords: "Passwords",
+  offerToSave: "Offer to save passwords",
+  offerToSaveNote:
+    "Kamapathy asks after you sign in. Saved passwords stay on this computer.",
+  savedPasswords: "Saved passwords",
+  manage: "Manage...",
 } as const;
 
 export const signInsCopy = {
@@ -172,4 +179,46 @@ export const newTabCopy = {
   editDescription: "Change the name or address of this shortcut.",
   save: "Save shortcut",
   saved: "Shortcut saved.",
+} as const;
+
+export const passwordsCopy = {
+  title: "Passwords",
+  search: "Search passwords...",
+  opening: "Unlocking passwords...",
+  empty: "No saved passwords yet. Kamapathy offers to save one when you sign in.",
+  locked:
+    "Saved passwords are locked. Choose Try again and allow Kamapathy's keychain access.",
+  unavailable: "Kamapathy can't save passwords without a system keyring.",
+  web: "Saved passwords are available in the desktop app.",
+  tryAgain: "Try again",
+  startOver: "Start over",
+  startOverConfirm:
+    "Start over with no saved passwords? The unreadable file stays in Kamapathy's passwords folder.",
+  compromised: (count: number) =>
+    count === 1
+      ? "1 password is marked compromised."
+      : `${count} passwords are marked compromised.`,
+  showCompromised: "Show",
+  showAll: "Show all",
+  compromisedTag: "Compromised",
+  realm: (realm: string) => `Realm: ${realm}`,
+  noUsername: "No username",
+  show: "Show",
+  hide: "Hide",
+  copyUsername: "Copy username",
+  copyPassword: "Copy password",
+  copied: "Copied",
+  edit: "Edit",
+  delete: "Delete",
+  confirmDelete: "Delete this password?",
+  cancel: "Cancel",
+  save: "Save",
+  add: "Add password",
+  siteUrl: "Site URL",
+  username: "Username",
+  password: "Password",
+  note: "Note",
+  neverSaved: "Never saved",
+  remove: "Remove",
+  footnote: "Stored on this computer, encrypted with your system's keychain.",
 } as const;

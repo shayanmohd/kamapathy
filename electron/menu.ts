@@ -68,6 +68,7 @@ export function menuTemplate({
         command("Bookmarks", "bookmarks", "CmdOrCtrl+Shift+B"),
         command("History", "history", darwin ? "Cmd+Y" : "Ctrl+H"),
         command("Downloads", "downloads", "CmdOrCtrl+Shift+J"),
+        command("Passwords", "passwords"),
         { type: "separator" },
         command("Split View", "split"),
         command("Find", "find", "CmdOrCtrl+F"),

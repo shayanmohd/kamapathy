@@ -19,6 +19,7 @@ export function Settings({
   dispatch,
   focus,
   onImport,
+  onPasswords,
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,6 +27,7 @@ export function Settings({
   dispatch: (action: BrowserAction) => void;
   focus?: "agents";
   onImport: () => void;
+  onPasswords: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
   const warning =
@@ -158,6 +160,43 @@ export function Settings({
             onClick={onImport}
           >
             {settingsCopy.importButton}
+          </button>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h3>{settingsCopy.passwords}</h3>
+        <div className="setting-row">
+          <div>
+            <strong>{settingsCopy.offerToSave}</strong>
+            <p>{settingsCopy.offerToSaveNote}</p>
+          </div>
+          <button
+            role="switch"
+            aria-label={settingsCopy.offerToSave}
+            aria-checked={state.settings.offerToSavePasswords}
+            className={`toggle ${state.settings.offerToSavePasswords ? "on" : ""}`}
+            onClick={() =>
+              update({
+                type: "settings:update",
+                settings: {
+                  offerToSavePasswords: !state.settings.offerToSavePasswords,
+                },
+              })
+            }
+          >
+            <span />
+          </button>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>{settingsCopy.savedPasswords}</strong>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onPasswords}
+          >
+            {settingsCopy.manage}
           </button>
         </div>
       </section>
