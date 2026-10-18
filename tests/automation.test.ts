@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
   startAutomation,
   type AutomationServer,
@@ -1078,6 +1079,83 @@ describe("local automation socket", () => {
       started: false,
     });
     expect(page.listenerCount("did-stop-loading")).toBe(listening);
+  });
+
+  it("GET /tabs/:id/info answers the page state and the tab", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      viewport: { width: 1200, height: 800 },
+      scroll: { x: 0, y: 640 },
+      document: { width: 1200, height: 5400 },
+      readyState: "interactive",
+    };
+    // A page still loading its main frame answers, and says so.
+    page.isLoadingMainFrame = () => true;
+    const response = await request(`/tabs/${tab.id}/info`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tab: expect.objectContaining({
+        id: tab.id,
+        url: "https://example.com/",
+        managed: true,
+      }),
+      viewport: { width: 1200, height: 800 },
+      scroll: { x: 0, y: 640 },
+      document: { width: 1200, height: 5400 },
+      readyState: "interactive",
+      loading: true,
+    });
+    // The fixed page-state function runs, not the snapshot operation.
+    expect(page.scripts.at(-1)!.code).toBe(`(${PAGE_STATE_SOURCE})("info")`);
+    expect(page.scripts.at(-1)!.world).toBe("kamapathy");
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent read the page state",
+    });
+    page.isLoadingMainFrame = () => false;
+    expect(
+      (await (await request(`/tabs/${tab.id}/info`)).json()).loading,
+    ).toBe(false);
+  });
+
+  it("info answers the open dialog without touching the page", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.emitProtocol("Page.javascriptDialogOpening", {
+      url: "https://example.com/",
+      frameId: "main",
+      message: "Save your\u{202E} work?",
+      type: "confirm",
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    const response = await request(`/tabs/${tab.id}/info`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tab: expect.objectContaining({ id: tab.id }),
+      dialog: { type: "confirm", message: "Save your work?" },
+    });
+    expect(page.scripts).toEqual([]);
+    expect(
+      controller.activity.some(
+        (entry) => entry.message === "Agent read the page state",
+      ),
+    ).toBe(false);
+  });
+
+  it("info refuses a tab with no page", async () => {
+    const { space, tab } = await createPage();
+    // Every agent space opens with a tab on the new tab page.
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    const response = await request(`/tabs/${blank.id}/info`);
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatchObject({
+      code: "no_web_page",
+    });
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {

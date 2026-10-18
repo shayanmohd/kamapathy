@@ -22,6 +22,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { createNavigation } from "./routes/navigation";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -165,7 +166,19 @@ export async function startAutomation(
     sessions,
     referenceSession,
   });
-  const deps: RouteDeps = { controller, authority, actions, sessions };
+  const navigation = createNavigation({
+    controller,
+    authority,
+    actions,
+    sessions,
+  });
+  const deps: RouteDeps = {
+    controller,
+    authority,
+    actions,
+    sessions,
+    navigation,
+  };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
     sessions.sync();
@@ -175,6 +188,7 @@ export async function startAutomation(
   const routes = buildRoutes({
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
+    ...navigation.routes,
     ...requests.routes,
   });
   const versions = Object.fromEntries(

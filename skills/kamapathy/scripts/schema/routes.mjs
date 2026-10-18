@@ -331,6 +331,14 @@ export const ROUTES = [
   ),
   route(
     "GET",
+    "/tabs/:id/info",
+    "Reads the viewport, scroll offsets, document size and ready state.",
+    "{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }",
+    null,
+    { budget: 10000, follow: false, since: 2 },
+  ),
+  route(
+    "GET",
     "/tabs/:id/snapshot",
     "Reads a compact snapshot.",
     "snapshot",

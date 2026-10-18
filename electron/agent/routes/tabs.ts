@@ -22,6 +22,7 @@ export function tabRoutes({
   authority,
   actions: { readyContents, evaluatePage, executeToolAction },
   sessions,
+  navigation,
 }: RouteDeps): Record<string, RouteImpl> {
   const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
@@ -152,7 +153,9 @@ export function tabRoutes({
             results.push({
               index,
               type: action.type,
-              result: await executeToolAction(tab!.id, action, step),
+              result: navigation.stepTypes.includes(action.type)
+                ? await navigation.step(tab!.id, action, step)
+                : await executeToolAction(tab!.id, action, step),
             });
           } catch (error) {
             const { status, error: failure } = envelope(
