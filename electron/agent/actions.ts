@@ -204,17 +204,23 @@ export function createActions(deps: {
         "page_changed",
         "The page navigated during this operation. Inspect the new page before continuing.",
       );
-    // The page's code keeps its registered status; a code the registry
-    // does not know is reported as element_action_failed.
-    if (result?.ok === false)
+    // The page's code keeps its registered status and its fields; a code the
+    // registry does not know is reported as element_action_failed, without
+    // them. The page's blocker stays inside: section 5 waits on it.
+    if (result?.ok === false) {
+      const known =
+        typeof result.code === "string" && Object.hasOwn(ERRORS, result.code);
+      const fields = result.fields;
       return fail(
-        typeof result.code === "string" && Object.hasOwn(ERRORS, result.code)
-          ? result.code
-          : "element_action_failed",
+        known ? (result.code as string) : "element_action_failed",
         typeof result.error === "string"
           ? result.error
           : "Could not interact with the element.",
+        known && fields && typeof fields === "object" && !Array.isArray(fields)
+          ? (fields as Record<string, unknown>)
+          : undefined,
       );
+    }
     return result;
   };
   const nativeInput = async (

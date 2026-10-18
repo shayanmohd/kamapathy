@@ -226,7 +226,13 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<{ ok: true }>",
     "POST /tabs/:id/wait",
-    ["wait_timeout", "invalid_field", "invalid_selector"],
+    [
+      "wait_timeout",
+      "invalid_field",
+      "invalid_selector",
+      "unknown_ref",
+      "stale_ref",
+    ],
     { options: body("POST /tabs/:id/wait") },
   ),
   method(

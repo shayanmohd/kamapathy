@@ -11,7 +11,8 @@ const ref = {
 };
 const selector = {
   kind: "target",
-  description: "A CSS selector matching exactly one visible element.",
+  description:
+    "A ref or selector: CSS by default, or css=, text=, role=, href= or xpath=, with an optional final >> nth=N. It must pick one element the action can take.",
 };
 const target = { ref, selector };
 const url = {
@@ -43,7 +44,7 @@ const FIELDS = {
     },
     selector: {
       ...selector,
-      description: "Read only the element this CSS selector matches.",
+      description: "Read only the element this selector matches, of any form.",
     },
   },
   click: { ...target },
@@ -100,7 +101,7 @@ const FIELDS = {
   wait: {
     selector: {
       ...selector,
-      description: "Wait until this CSS selector matches a visible element.",
+      description: "Wait until this selector matches a visible element.",
     },
     text: {
       kind: "string",

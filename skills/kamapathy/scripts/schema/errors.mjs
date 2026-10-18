@@ -203,7 +203,7 @@ export const ERRORS = {
   element_action_failed: code(422, false, "The page refused the action."),
   no_match: code(
     422,
-    false,
+    true,
     "Nothing matched the selector by the deadline.",
     ["selector", "waitedMs"],
     3,

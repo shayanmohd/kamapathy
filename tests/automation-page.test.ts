@@ -6,12 +6,29 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { pageOperation, type PageOperation } from "../electron/automation-dom";
+import type { Level, Mode } from "../electron/agent/dom/select";
+import { parseSelector } from "../electron/agent/selectors";
+import { PAGE_SOURCE } from "../electron/agent/session/operations";
+import type { PageOperation } from "../electron/automation-dom";
 import { framePages } from "./fixtures/frame-pages.mjs";
 
 const executable = chromium.executablePath();
 const browserAvailable = !!executable && existsSync(executable);
-const script = `(${pageOperation.toString()})`;
+const script = `(${PAGE_SOURCE})`;
+
+// A target as the main process sends it: the selector as data beside the
+// query the resolver built from it.
+const selectorTarget = (
+  selector: string,
+  level: Level,
+  mode: Mode = "strict",
+  firstRef = 900000,
+) => {
+  const parsed = parseSelector(selector);
+  if (!parsed.ok) throw new Error(parsed.problem.message);
+  if (parsed.ast.kind === "ref") throw new Error(`${selector} is a ref.`);
+  return { selector, query: { ast: parsed.ast, level, mode, firstRef } };
+};
 
 describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   let site: Server;
@@ -141,19 +158,21 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     expect(saves.map((control: any) => control.frame)).toEqual([undefined, "0"]);
     expect(saves[0].selector).toBe("#save");
     expect(saves[1].selector).not.toBe("#save");
-    const outer = await operate("target", { selector: "#save" });
+    const pick = (selector: string) =>
+      operate("target", selectorTarget(selector, "pointer-enabled"));
+    const outer = await pick("#save");
     expect(outer.ok).toBe(true);
     await page.mouse.click(outer.x, outer.y);
     expect(
       await page.evaluate(() => document.getElementById("twin-result")!.textContent),
     ).toBe("Outer saved");
     // One match in the top document wins over two inside the frame.
-    expect(await operate("target", { selector: "button" })).toMatchObject({
+    expect(await pick("button")).toMatchObject({
       ok: true,
       x: outer.x,
       y: outer.y,
     });
-    const inner = await operate("target", { selector: "#other" });
+    const inner = await pick("#other");
     expect(inner.ok).toBe(true);
     await page.mouse.click(inner.x, inner.y);
     expect(
@@ -161,10 +180,13 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
         () => document.getElementById("other")!.textContent,
       ),
     ).toBe("Other saved");
-    expect(await operate("target", { selector: ".twin" })).toMatchObject({
+    const ambiguous = await pick(".twin");
+    expect(ambiguous).toMatchObject({
       ok: false,
-      error: "Selector matched 2 elements. Use a unique selector.",
+      code: "ambiguous_match",
     });
+    expect(ambiguous.fields.count).toBe(2);
+    expect(ambiguous.fields.candidates).toHaveLength(2);
   }, 20000);
 
   it("leaves out frames and shadow trees hidden by CSS visibility", async () => {

@@ -325,7 +325,7 @@ Reads bounded visible text and controls with refs.
 | `mode` | one of compact, full | `"compact"` | compact keeps the page short; full reads more. |
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
-| `selector` | target |  | Read only the element this CSS selector matches. |
+| `selector` | target |  | Read only the element this selector matches, of any form. |
 
 Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
@@ -338,7 +338,7 @@ The same compact text the CLI's snapshot command prints.
 | `mode` | one of compact, full | `"compact"` | compact keeps the page short; full reads more. |
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
-| `selector` | target |  | Read only the element this CSS selector matches. |
+| `selector` | target |  | Read only the element this selector matches, of any form. |
 
 Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
@@ -378,11 +378,11 @@ Waits for a visible element, text, or both.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
-| `selector` | target |  | Wait until this CSS selector matches a visible element. |
+| `selector` | target |  | Wait until this selector matches a visible element. |
 | `text` | string of at most 1000 characters |  | Wait until the page shows this text. |
 | `timeoutMs` | milliseconds of at most 15000 | `5000` | How long to wait. |
 
-Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_timeout`, `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_timeout`, `invalid_field`, `invalid_selector`, `unknown_ref`, `stale_ref`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.batch(actions)`
 
@@ -624,7 +624,7 @@ Show the commands, or help on one
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
 | `element_action_failed` | 422 | not retryable |  | The page refused the action. |
-| `no_match` | 422 | not retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
+| `no_match` | 422 | retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
 | `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |

@@ -448,18 +448,6 @@ export function pageOperation(
     inputElement(element) && element.type === "file" &&
     element.isConnected && !element.closest('[inert],[aria-hidden="true"]') &&
     (visible(element) || (!!element.parentElement && visible(element.parentElement)));
-  const unique = (selector: string) => {
-    try {
-      const matches = matching(selector);
-      if (matches.length !== 1)
-        return failure(
-          `Selector matched ${matches.length} elements. Use a unique selector.`,
-        );
-      return matches[0];
-    } catch {
-      return failure("Invalid CSS selector.", "invalid_selector");
-    }
-  };
   // A frame from another origin is listed so an agent knows content is
   // there, but nothing in it can be read or operated from this page.
   const reachable = (element: Element) =>
@@ -471,6 +459,7 @@ export function pageOperation(
       : element;
   const PAGE_CHANGED =
     "The page changed during this operation. Take a new snapshot.";
+  const NO_TARGET = "Provide an element reference or a selector.";
   const disabledElement = (element: Element) =>
     element.matches(":disabled") ||
     element.getAttribute("aria-disabled") === "true";
@@ -680,19 +669,14 @@ export function pageOperation(
       return failure(
         "Element reference is stale. Take a new snapshot.",
         "stale_ref",
+        { ref: spec.ref },
       );
     }
-    if (typeof spec.selector === "string") {
-      const found =
-        spec.query && selectorEngine
-          ? select({ selector: spec.selector, query: spec.query })
-          : unique(spec.selector);
+    if (typeof spec.selector === "string" && spec.query) {
+      const found = select({ selector: spec.selector, query: spec.query });
       return isElement(found) ? reachable(found) : found;
     }
-    return failure(
-      "Provide an element reference or a unique CSS selector.",
-      "invalid_target",
-    );
+    return failure(NO_TARGET, "invalid_target");
   };
   const selectorFor = (element: Element) => {
     if (element.id && element.id.length <= 512) {
@@ -1259,12 +1243,9 @@ export function pageOperation(
     styles = new Map();
     const options = payload as unknown as SnapshotOptions;
     let scope: Element = document.body || document.documentElement;
-    if (options.selector) {
-      const query = (payload as ElementTarget).query;
-      const selected =
-        query && selectorEngine
-          ? select({ selector: options.selector, query })
-          : unique(options.selector);
+    const scoped = payload as ElementTarget;
+    if (scoped.ref !== undefined || scoped.selector !== undefined) {
+      const selected = target(scoped);
       if (!isElement(selected)) return selected;
       scope = selected;
     }
@@ -1661,11 +1642,17 @@ export function pageOperation(
     };
   }
   if (operation === "check") {
-    const query = (payload as ElementTarget).query;
-    const selector =
-      typeof payload.selector === "string" ? payload.selector : "";
+    const spec = payload as ElementTarget;
+    const query = spec.query;
+    const selector = typeof spec.selector === "string" ? spec.selector : "";
     let scope: Element = document.body || document.documentElement;
-    if (query && selectorEngine) {
+    if (typeof spec.ref === "string") {
+      // A wait for `selector: "@eN"` waits for that element to be visible.
+      const element = target(spec);
+      if (!isElement(element)) return element;
+      if (!visible(element, true)) return { ok: true, matched: false };
+      scope = element;
+    } else if (query) {
       const picked = pickedFor(query);
       if (picked === null) return failure(PAGE_CHANGED, "page_changed");
       if (query.state === "hidden" || query.state === "detached") {
@@ -1690,16 +1677,8 @@ export function pageOperation(
         if (decision.kind !== "match") return { ok: true, matched: false };
         scope = decision.element;
       }
-    } else if (typeof payload.selector === "string") {
-      let matches: Element[];
-      try {
-        matches = matching(payload.selector);
-      } catch {
-        return failure("Invalid CSS selector.", "invalid_selector");
-      }
-      if (matches.length !== 1 || !visible(matches[0], true))
-        return { ok: true, matched: false };
-      scope = matches[0];
+    } else if (spec.selector !== undefined) {
+      return failure(NO_TARGET, "invalid_target");
     }
     const text = pageText(scope);
     return {
@@ -1708,7 +1687,7 @@ export function pageOperation(
         typeof payload.text === "string"
           ? text.includes(payload.text)
           : query !== undefined ||
-            typeof payload.selector === "string" ||
+            typeof spec.ref === "string" ||
             document.readyState !== "loading",
     };
   }

@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RefBook } from "../electron/agent/refs";
+import { FORMS, REF_HINT } from "../electron/agent/selectors";
 import {
   startAutomation,
   type AutomationServer,
@@ -111,6 +112,22 @@ describe("local automation socket", () => {
     // The upload holds its reservation once it has looked up the page.
     await expect.poll(() => controller.accessedTabs.length).toBeGreaterThan(accessed);
     return { client, result, finish: () => client.end(encoded.slice(1)) };
+  };
+  // The payload each operation travelled with, read back from the scripts the
+  // page ran. The namespace is the last argument, so the payload ends at the
+  // last comma before a string.
+  const payloads = (operation: string): Record<string, any>[] => {
+    const marker = `)(${JSON.stringify(operation)},`;
+    return controller.contents.scripts
+      .filter((script) => script.code.includes(marker))
+      .map((script) =>
+        JSON.parse(
+          script.code.slice(
+            script.code.indexOf(marker) + marker.length,
+            script.code.lastIndexOf(',"'),
+          ),
+        ),
+      );
   };
   // One debugger attach serves a tab for as long as the agent has it.
   const expectOneAttach = () => {
@@ -625,7 +642,16 @@ describe("local automation socket", () => {
     const executed = controller.contents.scripts[0];
     expect(
       executed.code.includes(
-        `)("fill",${JSON.stringify({ selector, value: 'quote " and newline\n' })},`,
+        `)("fill",${JSON.stringify({
+          selector,
+          query: {
+            ast: { kind: "css", css: selector, raw: true },
+            level: "enabled",
+            mode: "strict",
+            firstRef: payloads("fill")[0].query.firstRef,
+          },
+          value: 'quote " and newline\n',
+        })},`,
       ),
     ).toBe(true);
     expect(executed.world).toBe("kamapathy");
@@ -858,6 +884,370 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts[0].code).toContain(
       ')("fill",{"ref":"@e1","value":"test"}',
     );
+  });
+
+  it("parses every selector before the lane and answers invalid_selector with no page work", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const activity = controller.activity.length;
+    // The page would answer every one of these.
+    page.result = { ok: true, x: 25, y: 45 };
+    const refused = async (route: string, body: unknown) => {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(400);
+      return (await response.json()).error;
+    };
+    expect(await refused("click", { selector: "@21" })).toEqual({
+      code: "invalid_selector",
+      message: "This is not a ref. Refs look like @e21.",
+      selector: "@21",
+      reason: "ref_form",
+      forms: FORMS,
+      hint: REF_HINT,
+    });
+    for (const [route, body] of [
+      ["fill", { selector: "a >> b", value: "Ada" }],
+      ["drag", { source: { ref: "@e1" }, target: { selector: "a >> b" } }],
+      ["wait", { selector: "a >> b" }],
+      ["snapshot", { selector: "a >> b" }],
+    ] as const) {
+      const error = await refused(route, body);
+      expect(error.code, route).toBe("invalid_selector");
+      expect(error.reason, route).toBe("grammar");
+      expect(error.selector, route).toBe("a >> b");
+      expect(error.forms, route).toEqual(FORMS);
+      expect(error.index, route).toBeUndefined();
+    }
+    // The whole plan is parsed, so the steps before the malformed one never run.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "click", ref: "@e1" },
+        { type: "snapshot" },
+        { type: "fill", selector: "a >> b", value: "Ada" },
+      ],
+    });
+    expect(batch.status).toBe(400);
+    expect((await batch.json()).error).toMatchObject({
+      code: "invalid_selector",
+      reason: "grammar",
+      selector: "a >> b",
+      index: 2,
+    });
+    expect(page.scripts).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("sends each action's level and strict mode with the parsed selector", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const counted = () => ({
+      ok: true,
+      mouse: page.inputs.filter(
+        (input) => input.parameters.type === "mousePressed",
+      ).length,
+      key: page.inputs.filter((input) =>
+        ["keyDown", "rawKeyDown"].includes(input.parameters.type as string),
+      ).length,
+      drag: 0,
+    });
+    page.result = (code: string) =>
+      code.includes(')("input",')
+        ? counted()
+        : code.includes(')("drag",')
+          ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
+          : code.includes(')("check",')
+            ? { ok: true, matched: true }
+            : { ok: true, x: 25, y: 45 };
+    const act = (route: string, body: unknown) =>
+      request(`/tabs/${tab.id}/${route}`, "POST", body);
+    for (const [route, body] of [
+      ["click", { selector: "#save" }],
+      ["fill", { selector: "text=Save now", value: "Ada" }],
+      ["press", { key: "Enter", selector: "role=textbox" }],
+      ["scroll", { direction: "down", selector: "href=/plans" }],
+      ["drag", { source: { selector: "#card" }, target: { selector: "#zone" } }],
+      ["wait", { selector: "xpath=//button" }],
+      ["snapshot", { selector: "#form" }],
+    ] as const)
+      expect((await act(route, body)).status, route).toBe(200);
+    const queryOf = (operation: string) => payloads(operation)[0].query;
+    const strict = (ast: unknown, level: string, extra: object = {}) => ({
+      ast,
+      level,
+      mode: "strict",
+      firstRef: expect.any(Number),
+      ...extra,
+    });
+    expect(queryOf("target")).toEqual(
+      strict({ kind: "css", css: "#save", raw: true }, "pointer-enabled"),
+    );
+    expect(queryOf("fill")).toEqual(
+      strict({ kind: "text", value: "Save now", exact: false }, "enabled"),
+    );
+    // A role selector also carries the key its picked nodes wait under.
+    expect(queryOf("focus")).toEqual(
+      strict({ kind: "role", role: "textbox" }, "enabled", {
+        picked: expect.any(String),
+      }),
+    );
+    expect(queryOf("scroll")).toEqual(
+      strict({ kind: "href", href: "/plans" }, "visible"),
+    );
+    const drag = payloads("drag")[0];
+    expect(drag.source.query).toEqual(
+      strict({ kind: "css", css: "#card", raw: true }, "pointer"),
+    );
+    expect(drag.target.query).toEqual(
+      strict({ kind: "css", css: "#zone", raw: true }, "pointer"),
+    );
+    // Today's wait route has no state of its own.
+    expect(queryOf("check")).toEqual(
+      strict({ kind: "xpath", xpath: "//button" }, "visible"),
+    );
+    expect(queryOf("snapshot")).toEqual(
+      strict({ kind: "css", css: "#form", raw: true }, "none"),
+    );
+    // Every strict resolution reserves its own candidate refs.
+    const reserved = [
+      ...["target", "fill", "focus", "scroll", "check", "snapshot"].map(
+        (operation) => queryOf(operation).firstRef,
+      ),
+      drag.source.query.firstRef,
+      drag.target.query.firstRef,
+    ];
+    expect(new Set(reserved).size).toBe(reserved.length);
+    // A ref-form selector is the ref.
+    expect((await act("click", { selector: "@e3" })).status).toBe(200);
+    expect(payloads("target").at(-1)).toEqual({ ref: "@e3" });
+  });
+
+  it("maps page resolution failures to their codes and fields without showing blocked", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const candidates = [
+      {
+        ref: "@e7",
+        tag: "button",
+        role: "button",
+        name: "Save",
+        context: "Invoice 12",
+        visible: true,
+        disabled: false,
+      },
+      {
+        ref: "@e8",
+        tag: "button",
+        role: "button",
+        name: "Save",
+        context: "Invoice 13",
+        visible: true,
+        disabled: false,
+        frame: "0",
+      },
+    ];
+    const click = async () => {
+      const response = await request(`/tabs/${tab.id}/click`, "POST", {
+        selector: ".save",
+      });
+      return { status: response.status, error: (await response.json()).error };
+    };
+    page.result = {
+      ok: false,
+      code: "no_match",
+      error:
+        "Nothing on the page matches this selector. Take a snapshot to check the page.",
+      fields: { selector: ".save" },
+    };
+    expect(await click()).toEqual({
+      status: 422,
+      error: {
+        code: "no_match",
+        message:
+          "Nothing on the page matches this selector. Take a snapshot to check the page.",
+        selector: ".save",
+        waitedMs: expect.any(Number),
+        retryable: true,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "ambiguous_match",
+      error:
+        "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+      fields: {
+        selector: ".save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates,
+      },
+    };
+    expect(await click()).toEqual({
+      status: 422,
+      error: {
+        code: "ambiguous_match",
+        message:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        selector: ".save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "invalid_selector",
+      error: "The page rejected this CSS selector.",
+      fields: { selector: ".save", reason: "css" },
+    };
+    expect(await click()).toEqual({
+      status: 400,
+      error: {
+        code: "invalid_selector",
+        message: "The page rejected this CSS selector.",
+        selector: ".save",
+        reason: "css",
+        forms: FORMS,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "stale_ref",
+      error: "Element reference is stale. Take a new snapshot.",
+      fields: { ref: "@e1" },
+    };
+    expect(await click()).toEqual({
+      status: 409,
+      error: {
+        code: "stale_ref",
+        message: "Element reference is stale. Take a new snapshot.",
+        ref: "@e1",
+      },
+    });
+    // A match the action cannot take keeps today's codes, and the page's own
+    // blocker never reaches the agent.
+    for (const [failure, status, code] of [
+      [
+        {
+          ok: false,
+          error: "Element is not visible.",
+          blocked: { blocker: "hidden" },
+        },
+        422,
+        "element_action_failed",
+      ],
+      [
+        {
+          ok: false,
+          code: "element_obscured",
+          error: "Another element covers the target.",
+          blocked: { blocker: "covered" },
+        },
+        409,
+        "element_obscured",
+      ],
+    ] as const) {
+      page.result = failure;
+      const answer = await click();
+      expect(answer.status, code).toBe(status);
+      expect(answer.error.code, code).toBe(code);
+      expect(JSON.stringify(answer), code).not.toContain("blocker");
+    }
+  });
+
+  it("accepts a candidate ref from ambiguous_match in the next request", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    let candidate = 0;
+    page.result = (code: string) => {
+      if (code.includes(')("input",'))
+        return {
+          ok: true,
+          mouse: page.inputs.filter(
+            (input) => input.parameters.type === "mousePressed",
+          ).length,
+          key: 0,
+        };
+      if (!code.includes('"selector":".save"'))
+        return { ok: true, x: 25, y: 45 };
+      candidate = Number(code.match(/"firstRef":(\d+)/)![1]);
+      return {
+        ok: false,
+        code: "ambiguous_match",
+        error:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        fields: {
+          selector: ".save",
+          count: 2,
+          visible: 2,
+          hidden: 0,
+          actionable: 2,
+          candidates: [
+            {
+              ref: `@e${candidate}`,
+              tag: "button",
+              role: "button",
+              name: "Save",
+              context: "Invoice 12",
+              visible: true,
+              disabled: false,
+            },
+          ],
+        },
+        issued: [candidate],
+      };
+    };
+    const ambiguous = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".save",
+    });
+    expect(ambiguous.status).toBe(422);
+    const ref = (await ambiguous.json()).error.candidates[0].ref;
+    expect(ref).toBe(`@e${candidate}`);
+    const accepted = await request(`/tabs/${tab.id}/click`, "POST", { ref });
+    expect(accepted.status).toBe(200);
+    expect(payloads("target").at(-1)).toEqual({ ref });
+  });
+
+  it("keeps the wait route polling while a selector is ambiguous and stops at once on invalid_selector", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // The page reports an ambiguous wait selector as a condition not yet met.
+    page.result = { ok: true, matched: false };
+    const timedOut = await request(`/tabs/${tab.id}/wait`, "POST", {
+      selector: ".save",
+      timeoutMs: 300,
+    });
+    expect(timedOut.status).toBe(408);
+    expect((await timedOut.json()).error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "condition",
+      timeoutMs: 300,
+    });
+    expect(payloads("check").length).toBeGreaterThan(1);
+    page.scripts.length = 0;
+    page.result = {
+      ok: false,
+      code: "invalid_selector",
+      error: "The page rejected this CSS selector.",
+      fields: { selector: ".save", reason: "css" },
+    };
+    const stopped = await request(`/tabs/${tab.id}/wait`, "POST", {
+      selector: ".save",
+      timeoutMs: 5000,
+    });
+    expect(stopped.status).toBe(400);
+    expect((await stopped.json()).error).toEqual({
+      code: "invalid_selector",
+      message: "The page rejected this CSS selector.",
+      selector: ".save",
+      reason: "css",
+      forms: FORMS,
+    });
+    expect(payloads("check")).toHaveLength(1);
   });
 
   it("refuses a control inside a frame from another origin as a conflict, before any input", async () => {
@@ -1299,7 +1689,18 @@ describe("local automation socket", () => {
       drag: "mouse",
     });
     expect(controller.contents.scripts[0].code).toContain(
-      ')("drag",{"source":{"ref":"@e1"},"target":{"selector":"#zone"}}',
+      `)("drag",${JSON.stringify({
+        source: { ref: "@e1" },
+        target: {
+          selector: "#zone",
+          query: {
+            ast: { kind: "css", css: "#zone", raw: true },
+            level: "pointer",
+            mode: "strict",
+            firstRef: payloads("drag")[0].target.query.firstRef,
+          },
+        },
+      })}`,
     );
     expect(steps()).toEqual([
       "intercept true",
@@ -1622,6 +2023,14 @@ describe("local automation socket", () => {
       expect(response.status, JSON.stringify(body)).toBe(400);
     }
     expect(controller.contents.scripts).toEqual([]);
+    // A ref written as a selector is that ref.
+    controller.contents.result = { ok: true, selected: 1 };
+    const accepted = await request(`/tabs/${tab.id}/upload`, "POST", {
+      selector: "@e1",
+      files: [validFile],
+    });
+    expect(accepted.status).toBe(200);
+    expect(payloads("upload")[0].ref).toBe("@e1");
   });
 
   it("keeps ordinary requests at 64 KiB and bounds the dedicated upload body", async () => {
