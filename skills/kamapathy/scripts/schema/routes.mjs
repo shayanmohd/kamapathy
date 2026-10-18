@@ -212,6 +212,42 @@ export const ROUTES = [
   ),
   route(
     "POST",
+    "/spaces/:id/status",
+    "Shows the person what the agent is doing.",
+    "{ ok: true, status? }",
+    {
+      text: {
+        kind: "string",
+        min: 0,
+        max: 120,
+        required: true,
+        since: 3,
+        description:
+          "What the agent is doing now, shown as the agent's words. An empty string clears it.",
+      },
+    },
+    { since: 3 },
+  ),
+  route(
+    "POST",
+    "/spaces/:id/fail",
+    "Reports that the task cannot be done and hands the space to the person.",
+    '{ ok: true, owner: "human", state: "failed", status }',
+    {
+      message: {
+        kind: "string",
+        min: 1,
+        max: 300,
+        required: true,
+        since: 3,
+        description:
+          "Why the task cannot be finished, shown as the agent's words.",
+      },
+    },
+    { since: 3 },
+  ),
+  route(
+    "POST",
     "/spaces/:id/resume",
     "Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile.",
     '{ ok: true, owner: "agent", active: TabView | null, opened: TabView[], closed: label[] }',

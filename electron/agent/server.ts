@@ -23,8 +23,10 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { createPresence } from "./presence";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
+import { statusRoutes } from "./routes/status";
 import { tabRoutes } from "./routes/tabs";
 import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
@@ -176,7 +178,14 @@ export async function startAutomation(
     sessions,
     referenceSession,
   });
-  const deps: RouteDeps = { controller, authority, actions, sessions };
+  const presence = createPresence({ controller, authority });
+  const deps: RouteDeps = {
+    controller,
+    authority,
+    actions,
+    sessions,
+    presence,
+  };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
     sessions.sync();
@@ -185,6 +194,7 @@ export async function startAutomation(
   const requests = spaceRequestRoutes({ ...deps, grantSpace });
   const routes = buildRoutes({
     ...spaceRoutes(deps),
+    ...statusRoutes(deps),
     ...tabRoutes(deps),
     ...requests.routes,
   });
@@ -368,6 +378,7 @@ export async function startAutomation(
         if (probe && host.__kamapathyTest === probe)
           delete host.__kamapathyTest;
         authority.stop();
+        presence.close();
         requests.close();
         scheduler.close();
         closing = new Promise<void>((resolve) => {

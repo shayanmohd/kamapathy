@@ -1,6 +1,6 @@
 # Kamapathy API reference
 
-Client 0.2.0, API level 2. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
+Client 0.2.0, API level 3. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
 
 ## Globals
 
@@ -550,6 +550,8 @@ Show the commands, or help on one
 | GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |
 | DELETE | `/spaces/:id` |  | Closes an agent space and its tabs. A space holding tabs the person opened is refused. Returns `{ ok: true }`. |
 | POST | `/spaces/:id/handoff` | `{}` | Hands the space to the person. Returns `{ ok: true, owner: "human" }`. |
+| POST | `/spaces/:id/status` | `text` | Shows the person what the agent is doing. Returns `{ ok: true, status? }`. |
+| POST | `/spaces/:id/fail` | `message` | Reports that the task cannot be done and hands the space to the person. Returns `{ ok: true, owner: "human", state: "failed", status }`. |
 | POST | `/spaces/:id/resume` | `{}` | Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/wait-for-control` | `timeoutMs?` | Waits until the agent has control of the space, answering at once when it already has, and lists what changed while the person had control. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/finish` | `keep` | Ends the agent's task in a space: closes the pages it does not keep, keeps the person's tabs and ends its access. Returns `{ ok: true, spaceId, closedSpace, closed: label[], kept: label[], protected: label[] }`. |

@@ -8,6 +8,7 @@ import {
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
+import type { AgentPresence } from "./presence";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
 
@@ -96,6 +97,7 @@ export interface RouteDeps {
   authority: Authority;
   actions: Actions;
   sessions: TabSessions;
+  presence: AgentPresence;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

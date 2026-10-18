@@ -5,6 +5,7 @@ import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
+import { statusRoutes } from "../electron/agent/routes/status.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
 import {
@@ -139,9 +140,11 @@ describe("API schema", () => {
         executeToolAction() {},
       },
       sessions: { get() {} },
+      presence: { setStatus() {}, fail() {}, setState() {} },
     };
     const impls = {
       ...spaceRoutes(deps),
+      ...statusRoutes(deps),
       ...tabRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
     };
@@ -597,6 +600,43 @@ describe("API schema", () => {
     );
     expect(route("POST /tabs/:id/upload").limit).toBe(24 * 1024 * 1024);
     expect(route("GET /health").lane).toBe("preadmission");
+  });
+
+  it("the status and fail routes are declared at level 3", () => {
+    const declared = [
+      [
+        "POST /spaces/:id/status",
+        "text",
+        { kind: "string", min: 0, max: 120, required: true, since: 3 },
+      ],
+      [
+        "POST /spaces/:id/fail",
+        "message",
+        { kind: "string", min: 1, max: 300, required: true, since: 3 },
+      ],
+    ];
+    for (const [key, name, field] of declared) {
+      const item = route(key);
+      expect(item, key).toBeDefined();
+      expect(item.lane, key).toBe("space");
+      expect(item.budget, key).toBe(10000);
+      expect(item.limit, key).toBe(65536);
+      expect(item.follow, key).toBe(false);
+      expect(item.label, key).toBe(false);
+      expect(item.since, key).toBe(3);
+      expect(Object.keys(item.body), key).toEqual([name]);
+      expect(item.body[name], key).toMatchObject(field);
+      expect(typeof item.body[name].description, key).toBe("string");
+    }
+    expect(API_LEVEL).toBe(3);
+    // The reference and the documented table carry them.
+    const reference = read("skills/kamapathy/references/api.md");
+    const docs = read("docs/automation.md");
+    for (const [key] of declared) {
+      const path = key.split(" ")[1];
+      expect(reference, key).toContain(`\`${path}\``);
+      expect(docs, key).toContain(`\`${path}\``);
+    }
   });
 
   it("resolves help names in every accepted form", () => {

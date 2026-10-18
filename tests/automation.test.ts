@@ -1720,6 +1720,8 @@ describe("local automation socket", () => {
       "POST /spaces/:id/resume": {},
       "POST /spaces/:id/wait-for-control": { timeoutMs: 1000 },
       "POST /spaces/:id/finish": { keep: "all" },
+      "POST /spaces/:id/status": { text: "Comparing prices" },
+      "POST /spaces/:id/fail": { message: "The site needs a phone number" },
       "POST /space-requests": { reason: "Book a table" },
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
@@ -2023,5 +2025,105 @@ describe("local automation socket", () => {
     );
     await api.close();
     expect(installed()).toBeUndefined();
+  });
+  it("status and fail validate their bodies, run in the space lane and refuse under human control", async () => {
+    const { space, tab } = await createPage();
+    const statusOf = async (spaceId: string) =>
+      (await (await request(`/spaces/${spaceId}`)).json()).space;
+    // Section 11's body check answers the limit first, with the field and
+    // what it expected.
+    const long = await request(`/spaces/${space.id}/status`, "POST", {
+      text: "x".repeat(121),
+    });
+    expect(long.status).toBe(400);
+    expect((await long.json()).error).toMatchObject({
+      code: "invalid_field",
+      field: "text",
+      expected: "a string of at most 120 characters",
+    });
+    const unknown = await request(`/spaces/${space.id}/status`, "POST", {
+      text: "Comparing prices",
+      extra: true,
+    });
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).error.code).toBe("unknown_field");
+    // A status is cleaned, answered and listed, and an empty one clears it.
+    const set = await request(`/spaces/${space.id}/status`, "POST", {
+      text: "Comparing\u0000prices ",
+    });
+    expect(set.status).toBe(200);
+    expect(await set.json()).toEqual({ ok: true, status: "Comparingprices" });
+    expect(await statusOf(space.id)).toMatchObject({
+      status: "Comparingprices",
+    });
+    const cleared = await request(`/spaces/${space.id}/status`, "POST", {
+      text: "",
+    });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ ok: true });
+    expect(await statusOf(space.id)).not.toHaveProperty("status");
+    // Both run in the space's own lane, behind the page work before them.
+    const held = await heldSnapshot(tab.id);
+    const queued = settled(
+      request(`/spaces/${space.id}/status`, "POST", { text: "Reading" }),
+    );
+    expect(await within(queued, 100)).toBe("pending");
+    held.release();
+    expect(await held.result).toEqual({ status: 200 });
+    expect(await queued).toEqual({ status: 200 });
+    // A failure message must survive cleaning.
+    const blank = await request(`/spaces/${space.id}/fail`, "POST", {
+      message: " \u200e ",
+    });
+    expect(blank.status).toBe(400);
+    expect((await blank.json()).error).toMatchObject({
+      code: "invalid_field",
+      field: "message",
+      expected: "text that is not empty after cleaning",
+    });
+    const missing = await request(`/spaces/${space.id}/fail`, "POST", {});
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).error).toMatchObject({
+      code: "invalid_field",
+      field: "message",
+    });
+    const failed = await request(`/spaces/${space.id}/fail`, "POST", {
+      message: "The site needs a phone number I do not have",
+    });
+    expect(failed.status).toBe(200);
+    expect(await failed.json()).toEqual({
+      ok: true,
+      owner: "human",
+      state: "failed",
+      status: "The site needs a phone number I do not have",
+    });
+    expect(await statusOf(space.id)).toMatchObject({
+      owner: "human",
+      reason: "failed",
+      state: "failed",
+      status: "The site needs a phone number I do not have",
+    });
+    expect(controller.activity.at(-1)).toEqual({
+      spaceId: space.id,
+      message: "Agent could not finish",
+      kind: "warning",
+      agentText: "The site needs a phone number I do not have",
+    });
+    // Afterwards both are refused, naming the failure as the reason.
+    for (const [path, body] of [
+      ["status", { text: "Still here" }],
+      ["fail", { message: "Again" }],
+    ] as const) {
+      const response = await request(
+        `/spaces/${space.id}/${path}`,
+        "POST",
+        body,
+      );
+      expect(response.status, path).toBe(409);
+      expect((await response.json()).error, path).toMatchObject({
+        code: "human_control",
+        reason: "failed",
+      });
+    }
   });
 });

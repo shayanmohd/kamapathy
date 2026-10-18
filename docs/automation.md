@@ -278,6 +278,8 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |
 | DELETE | `/spaces/:id` |  | Closes an agent space and its tabs. A space holding tabs the person opened is refused. Returns `{ ok: true }`. |
 | POST | `/spaces/:id/handoff` | `{}` | Hands the space to the person. Returns `{ ok: true, owner: "human" }`. |
+| POST | `/spaces/:id/status` | `text` | Shows the person what the agent is doing. Returns `{ ok: true, status? }`. |
+| POST | `/spaces/:id/fail` | `message` | Reports that the task cannot be done and hands the space to the person. Returns `{ ok: true, owner: "human", state: "failed", status }`. |
 | POST | `/spaces/:id/resume` | `{}` | Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/wait-for-control` | `timeoutMs?` | Waits until the agent has control of the space, answering at once when it already has, and lists what changed while the person had control. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/finish` | `keep` | Ends the agent's task in a space: closes the pages it does not keep, keeps the person's tabs and ends its access. Returns `{ ok: true, spaceId, closedSpace, closed: label[], kept: label[], protected: label[] }`. |
@@ -397,7 +399,7 @@ Every code, its status, whether it can be retried, and its fields:
 
 ## Versions and API levels
 
-`GET /health` answers `{ "status": "ok", version, apiLevel, versions }` outside every queue, where `versions` holds the Electron, Chromium, Node and V8 versions Kamapathy runs on. The API level is an integer that rises when a release adds or changes a call, option, field, action or error code. This version is level 2, and a Kamapathy that answers without `apiLevel` is level 1. `help` and the [API reference](../skills/kamapathy/references/api.md) give the level each call and command needs.
+`GET /health` answers `{ "status": "ok", version, apiLevel, versions }` outside every queue, where `versions` holds the Electron, Chromium, Node and V8 versions Kamapathy runs on. The API level is an integer that rises when a release adds or changes a call, option, field, action or error code. This version is level 3, and a Kamapathy that answers without `apiLevel` is level 1. `help` and the [API reference](../skills/kamapathy/references/api.md) give the level each call and command needs.
 
 The client compares levels after its health check. A call, option or command the running Kamapathy predates fails before anything is sent, with `app_outdated` and the message `<call> needs Kamapathy API level <n>, and Kamapathy <version> has level <m>. Ask the person to update Kamapathy, then read the skill again.` A Kamapathy newer than the client still runs every call, and the client prints the skill notice `notice: Update this skill copy, then read its SKILL.md again.` once. `node scripts/kamapathy.mjs --version` prints the client's version and API level with its Node.js and skill folder, then Kamapathy's version, API level and engine versions, and a line about any level mismatch. It never starts Kamapathy, and `--json` prints the same as JSON.
 
