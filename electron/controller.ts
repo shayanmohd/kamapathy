@@ -47,6 +47,10 @@ const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 // Spaces that share sign-ins use the first space's partition, so sign-ins
 // made before shared sessions carry over.
 export const SHARED_PARTITION = "persist:space-personal";
+// What a tab may load: a web page, or the blank page agents may open. The
+// agent server checks the address it is given before it reaches here.
+const isLoadable = (url: string): boolean =>
+  isWebUrl(url) || url === "about:blank";
 const cleanText = (value: unknown, maximum = 300): string => {
   if (typeof value !== "string" || value.length > maximum)
     throw new Error("Invalid text value.");
@@ -149,6 +153,8 @@ export class BrowserController {
   private viewListeners = new Set<
     (tabId: string, contents: WebContents) => void
   >();
+  private blockedRedirects = new Set<(tabId: string, url: string) => void>();
+  private downloadStarts = new Set<(tabId: string) => void>();
   private closedTabs: Tab[] = [];
   private lastActive = new Map<string, string>();
   private bounds: ContentBounds = {
@@ -359,6 +365,29 @@ export class BrowserController {
     return undefined;
   }
 
+  private tabIdOf(contents: WebContents | null): string | undefined {
+    if (!contents) return undefined;
+    for (const [id, view] of this.views)
+      if (view.webContents === contents) return id;
+    return undefined;
+  }
+
+  // A listener the agent server set. One that throws must not stop the page.
+  private notify<Arguments extends unknown[]>(
+    listeners: Set<(...args: Arguments) => void>,
+    ...args: Arguments
+  ): void {
+    for (const listener of listeners)
+      try {
+        listener(...args);
+      } catch (error) {
+        console.error(
+          "Navigation listener failed:",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+      }
+  }
+
   private sessionFor(partition: string): Session {
     const existing = this.sessions.get(partition);
     if (existing) return existing;
@@ -512,6 +541,8 @@ export class BrowserController {
       item: Electron.DownloadItem,
       contents: WebContents,
     ) => {
+      const downloaded = this.tabIdOf(contents);
+      if (downloaded) this.notify(this.downloadStarts, downloaded);
       const space = this.spaceOf(contents);
       if (!space || agentRules(space)) {
         event.preventDefault();
@@ -780,7 +811,7 @@ export class BrowserController {
     const contents = view.webContents;
     // Popups may also show about:blank and web-origin blob: documents.
     const allowed = (url: string) =>
-      tab.openedBy === "page" ? isPopupUrl(url) : isWebUrl(url);
+      tab.openedBy === "page" ? isPopupUrl(url) : isLoadable(url);
     // Chromium paints nothing for a page that was never shown, so an agent
     // page nobody is watching would run no animations, accept no native
     // input and have nothing to capture. Each new document starts hidden,
@@ -861,7 +892,9 @@ export class BrowserController {
         });
     });
     contents.on("will-redirect", (event, url) => {
-      if (!isWebUrl(url)) event.preventDefault();
+      if (isLoadable(url)) return;
+      event.preventDefault();
+      this.notify(this.blockedRedirects, tab.id, url);
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.on("did-start-navigation", (details) => {
@@ -1035,7 +1068,7 @@ export class BrowserController {
     contents: WebContents,
     options?: Electron.LoadURLOptions,
   ): void {
-    if (!isWebUrl(tab.url)) return;
+    if (!isLoadable(tab.url)) return;
     const request = Symbol();
     const requestedUrl = tab.url;
     this.pendingLoads.set(tab.id, request);
@@ -1168,18 +1201,74 @@ export class BrowserController {
     if (this.state.tabs.length >= 200)
       throw new Error("The maximum of 200 tabs has been reached.");
     const space = this.getSpace(spaceId);
+    const requested = url === undefined ? "" : cleanText(url, 8192);
     const tab = newTab(
       space.id,
-      normalizeUrl(
-        url === undefined ? "" : cleanText(url, 8192),
-        this.state.settings.searchEngine,
-      ),
+      requested === "about:blank"
+        ? requested
+        : normalizeUrl(requested, this.state.settings.searchEngine),
     );
     this.registry.register(tab, { openedBy: "agent", managed: true });
     this.state.tabs.push(tab);
-    if (isWebUrl(tab.url)) this.ensureView(tab);
+    if (isLoadable(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
+  }
+
+  // Not a BrowserAction: only the agent server navigates an agent tab. The
+  // tab is updated as tab:navigate updates it, except that the address is
+  // loaded as given, so about:blank never reaches the search engine.
+  navigateAgentTab(
+    tabId: string,
+    url: string,
+    options: { referer?: string } = {},
+  ): void {
+    const tab = this.getTab(tabId);
+    if (!isLoadable(url)) throw new Error("This address cannot be opened.");
+    tab.url = url;
+    tab.title = url;
+    delete tab.favicon;
+    delete tab.error;
+    const loadOptions: Electron.LoadURLOptions | undefined = options.referer
+      ? { httpReferrer: { url: options.referer, policy: "unsafe-url" } }
+      : undefined;
+    const view = this.views.get(tab.id);
+    if (view) this.load(tab, view.webContents, loadOptions);
+    else this.ensureView(tab, loadOptions);
+    this.emit();
+  }
+
+  // The tab:reload path, past the cache with ignoreCache. Not a
+  // BrowserAction either.
+  reloadAgentTab(tabId: string, options: { ignoreCache?: boolean } = {}): void {
+    const tab = this.getTab(tabId);
+    const contents = this.getWebContents(tab.id);
+    if (contents) this.reloadTab(tab, contents, options.ignoreCache === true);
+  }
+
+  // A server redirect the agent URL rule cancelled.
+  onBlockedRedirect(
+    listener: (tabId: string, url: string) => void,
+  ): () => void {
+    this.blockedRedirects.add(listener);
+    return () => this.blockedRedirects.delete(listener);
+  }
+
+  // A download the session started for a tab, before any refusal.
+  onDownloadStarted(listener: (tabId: string) => void): () => void {
+    this.downloadStarts.add(listener);
+    return () => this.downloadStarts.delete(listener);
+  }
+
+  // A failed load is retried by loading its URL again, as before.
+  private reloadTab(
+    tab: Tab,
+    contents: WebContents,
+    ignoreCache = false,
+  ): void {
+    if (tab.error) this.load(tab, contents);
+    else if (ignoreCache) contents.reloadIgnoringCache();
+    else contents.reload();
   }
 
   closeTab(
@@ -1497,10 +1586,7 @@ export class BrowserController {
             contents.navigationHistory.canGoForward()
           )
             contents.navigationHistory.goForward();
-          if (action.type === "tab:reload") {
-            if (tab.error) this.load(tab, contents);
-            else contents.reload();
-          }
+          if (action.type === "tab:reload") this.reloadTab(tab, contents);
           if (action.type === "tab:stop") {
             contents.stop();
             tab.loading = false;

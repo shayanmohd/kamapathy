@@ -60,6 +60,18 @@ export interface AutomationController {
   shownTab(spaceId: string): Tab | undefined;
   /** A managed agent tab in the background; a blank page without url. */
   openAgentTab(spaceId: string, url?: string): Tab;
+  /** Not a BrowserAction: only the agent server navigates an agent tab. */
+  navigateAgentTab(
+    tabId: string,
+    url: string,
+    options?: { referer?: string },
+  ): void;
+  /** The tab:reload path, past the cache with ignoreCache. */
+  reloadAgentTab(tabId: string, options?: { ignoreCache?: boolean }): void;
+  /** A server redirect the agent URL rule cancelled. */
+  onBlockedRedirect(listener: (tabId: string, url: string) => void): () => void;
+  /** A download the session started for a tab, before any refusal. */
+  onDownloadStarted(listener: (tabId: string) => void): () => void;
   /** Retires the tab's label; a space left empty gets a blank tab. */
   closeTab(tabId: string, by: ClosedBy): { closed?: string; replacement?: Tab };
   setManaged(tabId: string, managed: boolean): Tab;
