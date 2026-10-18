@@ -4,6 +4,12 @@
   Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https://api.github.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
 
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+
+/install.ps1
+  Content-Type: text/plain; charset=utf-8
+
 /images/*
   Cache-Control: public, max-age=604800
 

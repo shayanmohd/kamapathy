@@ -143,6 +143,30 @@ describe("distribution files", () => {
     expect(plist.match(/<key>/g)).toHaveLength(3);
   });
 
+  it("site scripts equal the skill's, are ASCII and pass sh -n", () => {
+    const names = ["install.sh", "install.ps1"];
+    for (const name of names) {
+      const script = readFileSync(join(root, "skills/kamapathy/scripts", name));
+      expect(readFileSync(join(root, "site", name)).equals(script)).toBe(true);
+      // The scripts reach people through curl and irm, in any locale.
+      expect(script.toString("latin1")).toMatch(/^[\t\n\r\x20-\x7e]*$/);
+    }
+    const headers = read("site/_headers");
+    for (const name of names)
+      expect(headers).toContain(
+        `/${name}\n  Content-Type: text/plain; charset=utf-8\n`,
+      );
+    // Windows runners have no POSIX shell; the other three jobs parse it.
+    if (process.platform !== "win32")
+      expect(
+        execFileSync(
+          "sh",
+          ["-n", join(root, "skills/kamapathy/scripts/install.sh")],
+          { encoding: "utf8" },
+        ),
+      ).toBe("");
+  });
+
   it("check-bundled-skill finds a changed, missing or extra file", async () => {
     const folder = mkdtempSync(join(tmpdir(), "kamapathy-bundled-"));
     try {

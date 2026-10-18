@@ -43,6 +43,7 @@ for (const name of targets.keys()) {
   for (const stepName of [
     "Validate types, behavior, and copy",
     "Compile desktop app",
+    "Test install scripts",
     linux
       ? "Smoke test desktop on Linux"
       : "Smoke test desktop on macOS and Windows",
