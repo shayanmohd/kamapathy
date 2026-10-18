@@ -8,8 +8,10 @@ import {
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
 import { ApiError, fail } from "./errors";
+import type { Receipts } from "./receipts";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
+import type { TabLog } from "./tab-log";
 
 export const BODY_LIMIT = 65536;
 
@@ -96,6 +98,8 @@ export interface RouteDeps {
   authority: Authority;
   actions: Actions;
   sessions: TabSessions;
+  tabLog: TabLog;
+  receipts: Receipts;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

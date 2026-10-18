@@ -374,34 +374,34 @@ export const ROUTES = [
   action(
     "click",
     "Clicks a control with native mouse input.",
-    "{ ok: true, url, fallback?, rebound? }",
+    "{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
   ),
   action(
     "fill",
     "Replaces the value of a field, select or editable region.",
-    "{ ok: true, rebound? }",
+    "{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
   ),
   action(
     "press",
     "Presses a supported key, focusing a control first when given.",
-    "{ ok: true, url, rebound? }",
+    "{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
   ),
   action(
     "scroll",
     "Scrolls the page, the panel holding a control, or the panel in the middle.",
-    "{ ok: true, scrolled, selector?, x, y, moved }",
+    "{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
   ),
   action(
     "drag",
     "Drags one element onto another.",
-    "{ ok: true, url, drag, rebound? }",
+    "{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
   ),
   action("wait", "Waits for a visible element, text, or both.", "{ ok: true }"),
   route(
     "POST",
     "/tabs/:id/upload",
     "Selects files on a file input.",
-    "{ ok: true, selected }",
+    "{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
     {
       ...target,
       files: {

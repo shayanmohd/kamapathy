@@ -22,6 +22,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { createReceipts } from "./receipts";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -29,6 +30,7 @@ import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
+import { createTabLog, watchPopups } from "./tab-log";
 import type { TabRegistry } from "./tab-registry";
 import { routeNotFound, validateBody } from "./validate";
 
@@ -65,6 +67,11 @@ export interface AutomationController {
   setPageBudget(spaceId: string, pageBudget: number): void;
   /** Clears a popup's unseen flag once the agent has addressed it. */
   markSeen(tabId: string): void;
+  /** The prompt center, told when each route on a tab starts and ends. */
+  readonly prompts?: {
+    routeStarted(tabId: string): void;
+    routeEnded(tabId: string): void;
+  };
   /** Gives the person control until they answer; returns the hold's id. */
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
   /** Returns control to the agent unless the person took over since. */
@@ -165,7 +172,31 @@ export async function startAutomation(
     sessions,
     referenceSession,
   });
-  const deps: RouteDeps = { controller, authority, actions, sessions };
+  const tabLog = createTabLog();
+  const receipts = createReceipts({
+    tabLog,
+    controller,
+    prompts: controller.prompts,
+  });
+  const stopPopupLog = watchPopups(
+    tabLog,
+    controller.registry,
+    () => controller.state,
+  );
+  // A long run keeps no ring or request window for a tab that is gone.
+  const stopTabForget = controller.registry.on((event) => {
+    if (event.type !== "closed") return;
+    tabLog.forget(event.tabId);
+    receipts.forget(event.tabId);
+  });
+  const deps: RouteDeps = {
+    controller,
+    authority,
+    actions,
+    sessions,
+    tabLog,
+    receipts,
+  };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
     sessions.sync();
@@ -359,6 +390,10 @@ export async function startAutomation(
         authority.stop();
         requests.close();
         scheduler.close();
+        stopPopupLog();
+        stopTabForget();
+        // Nothing keeps a request window open once the server stops.
+        for (const tab of controller.state.tabs) receipts.forget(tab.id);
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

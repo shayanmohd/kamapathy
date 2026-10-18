@@ -1500,6 +1500,105 @@ describe("local automation socket", () => {
     expect(controller.contents.inputs).toEqual([]);
   });
 
+  it("answers an action that caused nothing without a receipt field, and keeps upload's body while adding them", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = (code: string) =>
+      code.includes(')("target",') ? { ok: true, x: 25, y: 45 } : { ok: true };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(click.status).toBe(200);
+    expect(await click.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+    });
+
+    // The page opens a window while the upload runs, so its answer names it.
+    const body = uploadBody();
+    page.result = (code: string) => {
+      if (code.includes(')("upload",'))
+        controller.openPopup(tab.id, "https://example.com/share");
+      return { ok: true, selected: 1 };
+    };
+    const upload = await request(`/tabs/${tab.id}/upload`, "POST", body);
+    expect(upload.status).toBe(200);
+    const popup = controller.state.tabs.find(
+      (item) => item.openerId === tab.id,
+    )!;
+    expect(await upload.json()).toEqual({
+      ok: true,
+      selected: 1,
+      popups: [
+        {
+          id: popup.id,
+          label: popup.label,
+          url: "https://example.com/share",
+        },
+      ],
+    });
+    expect(page.scripts.at(-1)!.code).toContain(
+      `)("upload",${JSON.stringify(body)},`,
+    );
+  });
+
+  it("opens the tab's request window at route entry and ends it when the route ends, failures included", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A read changes nothing, so it opens no window.
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    expect(controller.routeSignals).toEqual([]);
+
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    page.result = async () => {
+      await blocked;
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+    await expect
+      .poll(() => controller.routeSignals)
+      .toEqual([`start ${tab.id}`]);
+    release();
+    expect((await click).status).toBe(200);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+
+    controller.routeSignals = [];
+    page.result = () => {
+      throw new Error("the page went away");
+    };
+    const failed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(failed.status).toBe(500);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+
+    // Each batch step runs in its own window, like its own dispatch record.
+    controller.routeSignals = [];
+    page.result = { ok: true, x: 25, y: 45 };
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "click", ref: "@e1" },
+        { type: "click", ref: "@e2" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+  });
+
   it("requires a file input ref and rejects malformed file metadata before execution", async () => {
     const { tab } = await createPage();
     const validFile = uploadBody().files[0];

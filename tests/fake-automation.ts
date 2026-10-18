@@ -102,6 +102,12 @@ export class FakeController implements AutomationController {
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
+  // What the receipt wrapper tells the prompt center about each route.
+  routeSignals: string[] = [];
+  readonly prompts = {
+    routeStarted: (tabId: string) => this.routeSignals.push(`start ${tabId}`),
+    routeEnded: (tabId: string) => this.routeSignals.push(`end ${tabId}`),
+  };
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
