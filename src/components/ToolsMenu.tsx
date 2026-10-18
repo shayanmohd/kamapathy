@@ -7,6 +7,7 @@ import {
   DownloadSimple,
   GearSix,
   MagnifyingGlass,
+  Password,
   Plus,
   Stack,
 } from "@phosphor-icons/react";
@@ -26,6 +27,7 @@ const icons: Record<ToolsMenuAction, ReactNode> = {
   bookmarks: <BookmarkSimple size={16} />,
   history: <ClockCounterClockwise size={16} />,
   downloads: <DownloadSimple size={16} />,
+  passwords: <Password size={16} />,
   split: <Columns size={16} />,
   find: <MagnifyingGlass size={16} />,
   settings: <GearSix size={16} />,

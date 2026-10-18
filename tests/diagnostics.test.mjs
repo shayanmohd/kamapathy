@@ -10,6 +10,7 @@ import {
   formatApiError,
   hintsFor,
   locateSyntaxError,
+  PASSWORD_HINT,
 } from "../skills/kamapathy/scripts/diagnostics.mjs";
 import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
 import {
@@ -199,6 +200,66 @@ describe("script diagnostics", () => {
       hintsFor(new TypeError("page.goto is not a function"), { client: newer }),
     ).toEqual([
       `hint: This skill copy (${CLIENT_VERSION}) is older than Kamapathy 9.0.0. Update this skill copy, then read its SKILL.md again.`,
+    ]);
+  });
+
+  it("password names get the hint", () => {
+    expect(PASSWORD_HINT).toBe(
+      "hint: Saved passwords are for the person only. Hand the space to them with handoff() and say what to sign in to.",
+    );
+    expect(
+      hintsFor(new TypeError("page.fillPassword is not a function"))[0],
+    ).toBe(PASSWORD_HINT);
+    expect(
+      hintsFor(new TypeError("getSavedCredentials is not a function"))[0],
+    ).toBe(PASSWORD_HINT);
+    expect(hintsFor(new ReferenceError("AUTOFILL is not defined"))[0]).toBe(
+      PASSWORD_HINT,
+    );
+    // Other names keep their hints, and bare calls still get no Names hint.
+    const names =
+      "hint: No Kamapathy method is named clik. Did you mean page.click? help() lists every method.";
+    expect(hintsFor(new TypeError("page.clik is not a function"))).toEqual([
+      names,
+    ]);
+    expect(hintsFor(new TypeError("clik is not a function"))).toEqual([]);
+    // A password name near a schema member gets both, the password hint first.
+    const entries = [
+      {
+        name: "Page.credentials",
+        signature: "page.credentials()",
+        kind: "method",
+      },
+    ];
+    expect(
+      hintsFor(new TypeError("page.credential is not a function"), {
+        entries,
+      }),
+    ).toEqual([
+      PASSWORD_HINT,
+      "hint: No Kamapathy method is named credential. Did you mean page.credentials? help() lists every method.",
+    ]);
+    const newer = { app: { version: "9.0.0", apiLevel: API_LEVEL + 1 } };
+    expect(
+      hintsFor(new TypeError("page.fillPassword is not a function"), {
+        client: newer,
+      }),
+    ).toEqual([
+      PASSWORD_HINT,
+      `hint: This skill copy (${CLIENT_VERSION}) is older than Kamapathy 9.0.0. Update this skill copy, then read its SKILL.md again.`,
+    ]);
+    expect(
+      hintsFor(new TypeError("page.acceptDialog is not a function")),
+    ).toEqual([
+      'hint: Kamapathy answers page dialogs as they open. Call page.setDialogPolicy({ accept: true }) before the action, then read the answer in its dialog field, page.dialogs() or page.waitForEvent("dialog").',
+    ]);
+    expect(
+      describeError(new TypeError("page.fillPassword is not a function"), {
+        label: "-e",
+      }),
+    ).toEqual([
+      "error: TypeError: page.fillPassword is not a function",
+      PASSWORD_HINT,
     ]);
   });
 

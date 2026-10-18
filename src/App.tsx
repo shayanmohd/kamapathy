@@ -40,6 +40,7 @@ import { NewTab } from "./components/NewTab";
 import { CommandPalette } from "./components/CommandPalette";
 import { Settings } from "./components/Settings";
 import { LibraryDialog } from "./components/Library";
+import { PasswordsDialog } from "./components/Passwords";
 import { ToolsMenu } from "./components/ToolsMenu";
 import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
@@ -69,6 +70,7 @@ type Overlay =
   | "bookmarks"
   | "history"
   | "downloads"
+  | "passwords"
   | "tab-search"
   | "space-popover"
   | "activity"
@@ -377,6 +379,7 @@ export default function App() {
         case "bookmarks":
         case "history":
         case "downloads":
+        case "passwords":
           void show(name);
           break;
         case "next-tab":
@@ -650,6 +653,7 @@ export default function App() {
         dispatch={dispatch}
         focus={settingsFocus}
         onImport={() => void show("import")}
+        onPasswords={() => void show("passwords")}
       />
       <Welcome
         open={overlay === "welcome"}
@@ -684,6 +688,7 @@ export default function App() {
         }}
         onAddBookmark={openBookmark}
       />
+      <PasswordsDialog open={overlay === "passwords"} onClose={close} />
       <Modal
         open={overlay === "space"}
         onClose={close}

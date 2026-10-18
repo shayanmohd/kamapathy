@@ -7,7 +7,11 @@ import {
   type TestProbe,
 } from "../electron/agent/server";
 import {
+  ACTIONS,
   API_LEVEL,
+  COMMANDS,
+  ENTRIES,
+  ERRORS,
   ROUTES,
   routeKey,
 } from "../skills/kamapathy/scripts/schema/index.mjs";
@@ -1788,6 +1792,55 @@ describe("local automation socket", () => {
       method: "GET",
       route: "/nothing/here",
     });
+  });
+
+  it("no route serves passwords", async () => {
+    const passwordNames = /passw|vault|autofill|saved.?login/i;
+    const named = (names: string[]) =>
+      names.filter((name) => passwordNames.test(name));
+    expect(named(ROUTES.map((route) => route.path))).toEqual([]);
+    expect(named(ACTIONS.map((action) => action.type))).toEqual([]);
+    expect(named(ENTRIES.map((entry) => entry.name))).toEqual([]);
+    expect(named(COMMANDS.map((command) => command.name))).toEqual([]);
+    // The password manager's error codes answer shell calls only.
+    const shellCodes = [
+      "invalid_login",
+      "import_file_invalid",
+      "vault_unavailable",
+      "reauth_failed",
+      "login_not_found",
+      "vault_locked",
+      "vault_full",
+      "login_exists",
+      "vault_write_failed",
+    ];
+    expect(
+      Object.keys(ERRORS).filter((code) => shellCodes.includes(code)),
+    ).toEqual([]);
+    const { space, tab } = await createPage();
+    const page = controller.pages.get(tab.id)!;
+    const accessed = controller.accessedTabs.length;
+    const calls = controller.calls.length;
+    for (const [method, path] of [
+      ["GET", "/passwords"],
+      ["GET", "/vault"],
+      ["GET", `/spaces/${space.id}/passwords`],
+      ["POST", `/tabs/${tab.id}/autofill`],
+      ["POST", `/tabs/${tab.id}/passwords/fill`],
+    ]) {
+      const response = await request(
+        path,
+        method,
+        method === "POST" ? {} : undefined,
+      );
+      expect(response.status, path).toBe(404);
+      expect((await response.json()).error.code, path).toBe("route_not_found");
+    }
+    expect(page.scripts).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    expect(page.captureCalls).toBe(0);
+    expect(controller.accessedTabs).toHaveLength(accessed);
+    expect(controller.calls).toHaveLength(calls);
   });
 
   it("marks transient failures retryable only before anything reached the page", async () => {

@@ -14,6 +14,7 @@ import {
   Code,
   MagnifyingGlassMinus,
   MagnifyingGlassPlus,
+  Password,
   SquaresFour,
 } from "@phosphor-icons/react";
 import type { BrowserState } from "../../shared/types";
@@ -91,6 +92,12 @@ export function CommandPalette({
         title: "Downloads",
         hint: "Files you saved",
         icon: <DownloadSimple />,
+      },
+      {
+        id: "passwords",
+        title: "Passwords",
+        hint: "Your saved sign-ins",
+        icon: <Password />,
       },
       {
         id: "settings",

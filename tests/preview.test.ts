@@ -1,5 +1,24 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import type { KamapathyBridge } from "../shared/types";
+import type { KamapathyBridge, PasswordsBridge } from "../shared/types";
+
+// What the desktop preload hands to the shell and sends to main.
+const electron = vi.hoisted(() => ({
+  exposed: undefined as KamapathyBridge | undefined,
+  invoked: [] as unknown[][],
+}));
+vi.mock("electron", () => ({
+  contextBridge: {
+    exposeInMainWorld: (_key: string, value: KamapathyBridge) => {
+      electron.exposed = value;
+    },
+  },
+  ipcRenderer: {
+    invoke: async (...args: unknown[]) => {
+      electron.invoked.push(args);
+      return { ok: true };
+    },
+  },
+}));
 
 let storage: Map<string, string>;
 let create: () => KamapathyBridge;
@@ -267,5 +286,100 @@ describe("interactive preview state invariants", () => {
         url: "https://github.com/shayanmohd",
       }),
     ).rejects.toThrow("already bookmarked");
+  });
+});
+
+// One call of every password method, with arguments in bridge order.
+const passwordCalls = {
+  status: [],
+  list: [],
+  reveal: ["login-1"],
+  copy: ["login-1", "password"],
+  add: [{ url: "https://example.com", username: "ada", password: "secret" }],
+  update: ["login-1", { password: "newer", note: "" }],
+  remove: ["login-1"],
+  importFile: [{ replace: true }],
+  trashFile: ["file-token"],
+  exportFile: [],
+  answer: ["prompt-1", { action: "save", username: "ada" }],
+  retry: [],
+  startOver: [],
+  neverSaved: [],
+  removeNeverSaved: ["https://example.com"],
+} satisfies { [K in keyof PasswordsBridge]: Parameters<PasswordsBridge[K]> };
+type PasswordCall = (...values: unknown[]) => Promise<unknown>;
+const callPassword = (
+  passwords: PasswordsBridge,
+  name: string,
+  args: unknown[],
+) => (passwords[name as keyof PasswordsBridge] as PasswordCall)(...args);
+
+describe("password bridges", () => {
+  it("the web preview answers vault_unavailable for every password call", async () => {
+    const bridge = create();
+    expect(Object.keys(bridge.passwords).sort()).toEqual(
+      Object.keys(passwordCalls).sort(),
+    );
+    for (const [name, args] of Object.entries(passwordCalls))
+      expect(await callPassword(bridge.passwords, name, args), name).toEqual({
+        error: {
+          code: "vault_unavailable",
+          reason: "web",
+          message: expect.stringMatching(/\S/),
+        },
+      });
+    const state = await bridge.getState();
+    expect(state.passwordPrompts).toEqual([]);
+    // Prompts are runtime state, so a saved preview never brings one back.
+    storage.set(
+      "kamapathy-preview-v1",
+      JSON.stringify({
+        ...state,
+        passwordPrompts: [
+          {
+            id: "prompt-1",
+            tabId: state.activeTabId,
+            kind: "save",
+            host: "example.com",
+            username: "ada",
+          },
+        ],
+      }),
+    );
+    expect((await create().getState()).passwordPrompts).toEqual([]);
+  });
+
+  it("the desktop preload sends each password call on its channel with its arguments in order", async () => {
+    electron.invoked = [];
+    await import("../electron/preload");
+    const passwords = electron.exposed!.passwords;
+    expect(Object.keys(passwords).sort()).toEqual(
+      Object.keys(passwordCalls).sort(),
+    );
+    for (const [name, args] of Object.entries(passwordCalls))
+      await callPassword(passwords, name, args);
+    const channels: Record<keyof PasswordsBridge, string> = {
+      status: "kamapathy:passwords:status",
+      list: "kamapathy:passwords:list",
+      reveal: "kamapathy:passwords:reveal",
+      copy: "kamapathy:passwords:copy",
+      add: "kamapathy:passwords:add",
+      update: "kamapathy:passwords:update",
+      remove: "kamapathy:passwords:remove",
+      importFile: "kamapathy:passwords:import-file",
+      trashFile: "kamapathy:passwords:trash-file",
+      exportFile: "kamapathy:passwords:export-file",
+      answer: "kamapathy:passwords:answer",
+      retry: "kamapathy:passwords:retry",
+      startOver: "kamapathy:passwords:start-over",
+      neverSaved: "kamapathy:passwords:never-saved",
+      removeNeverSaved: "kamapathy:passwords:remove-never-saved",
+    };
+    expect(electron.invoked).toEqual(
+      Object.entries(passwordCalls).map(([name, args]) => [
+        channels[name as keyof PasswordsBridge],
+        ...args,
+      ]),
+    );
   });
 });

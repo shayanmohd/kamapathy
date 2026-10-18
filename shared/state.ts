@@ -105,11 +105,13 @@ export function initialState(
     downloads: [],
     activity: [],
     spaceRequests: [],
+    passwordPrompts: [],
     settings: {
       theme: "system",
       searchEngine: "duckduckgo",
       restoreSession: true,
       showBookmarksBar: false,
+      offerToSavePasswords: true,
       // Local agents may connect unless the person turns this off.
       automationEnabled: true,
       isolateAgentSpaces: false,
