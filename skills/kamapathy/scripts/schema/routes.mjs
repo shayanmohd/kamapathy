@@ -114,6 +114,66 @@ const FIELDS = {
       description: "How long to wait.",
     },
   },
+  screenshot: {
+    fullPage: {
+      kind: "boolean",
+      default: false,
+      since: 3,
+      description: "Capture the whole scrollable document, not the viewport.",
+    },
+    clip: {
+      kind: "object",
+      since: 3,
+      description:
+        "The part to capture, in CSS pixels of the image's own space.",
+      fields: {
+        x: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Distance from the left of that space.",
+        },
+        y: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Distance from the top of that space.",
+        },
+        width: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Width in CSS pixels, above 0.",
+        },
+        height: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Height in CSS pixels, above 0.",
+        },
+      },
+    },
+    scale: {
+      kind: "enum",
+      values: ["css", "device"],
+      default: "css",
+      since: 3,
+      description:
+        "css gives one image pixel per CSS pixel; device keeps device pixels.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      since: 3,
+      description: "Most time for the load wait and the capture together.",
+    },
+  },
 };
 
 const route = (method, path, summary, response, body, options = {}) => ({
@@ -366,10 +426,18 @@ export const ROUTES = [
   route(
     "GET",
     "/tabs/:id/screenshot",
-    "Captures the viewport as PNG.",
+    "Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}.",
     "image/png",
     null,
-    { budget: 30000, follow: true },
+    { budget: 15000, follow: true },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/screenshot",
+    "Captures the viewport, the whole page or a clip as PNG, at CSS or device scale.",
+    "image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio",
+    FIELDS.screenshot,
+    { budget: { field: "timeoutMs" }, follow: true, since: 3 },
   ),
   action(
     "click",

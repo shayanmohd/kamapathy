@@ -19,6 +19,12 @@ import {
   testSocket,
 } from "./fake-automation";
 
+// The size a PNG's header reports.
+const pngSize = (image: ArrayBuffer): number[] => {
+  const png = Buffer.from(image);
+  return [png.readUInt32BE(16), png.readUInt32BE(20)];
+};
+
 describe("local automation socket", () => {
   let controller: FakeController;
   let api: AutomationServer;
@@ -297,24 +303,133 @@ describe("local automation socket", () => {
     });
   });
 
-  it("rejects unavailable screenshots before capture while allowing snapshots, then recovers", async () => {
+  it("captures while hidden", async () => {
     const { tab } = await createPage();
-    controller.captureAvailable = false;
-    const unavailable = await request(`/tabs/${tab.id}/screenshot`);
-    expect(unavailable.status).toBe(409);
-    expect(await unavailable.json()).toMatchObject({
+    const page = controller.contents;
+    const response = await request(`/tabs/${tab.id}/screenshot`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-kamapathy-clip")).toBe("0,0,1200,800");
+    expect(response.headers.get("x-kamapathy-pixel-ratio")).toBe("1");
+    // The window state no longer decides: the tab's view is lent to the
+    // capture window, and the capture runs on the tab's own session.
+    expect(controller.lent).toEqual([tab.id]);
+    expect(page.captures).toEqual([
+      {
+        format: "png",
+        clip: { x: 0, y: 0, width: 1200, height: 800, scale: 1 },
+        captureBeyondViewport: false,
+        fromSurface: true,
+      },
+    ]);
+    expect(pngSize(await response.arrayBuffer())).toEqual([1200, 800]);
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+  });
+
+  it("crops to the planned size and answers 409 empty_screenshot for an empty image", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.metrics.cssVisualViewport.zoom = 1.25;
+    const response = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 0, y: 0, width: 201, height: 101 },
+    });
+    expect(response.status).toBe(200);
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 252, height: 127, scale: 0.8 },
+    });
+    // Chromium's own image is a pixel wider and taller; the answer is not.
+    expect(pngSize(await response.arrayBuffer())).toEqual([201, 101]);
+    expect(response.headers.get("x-kamapathy-clip")).toBe("0,0,201,101");
+    // The page's own zoom factor stands in for a reply without one.
+    page.metrics.cssVisualViewport.zoom = undefined;
+    page.zoom = 1.25;
+    expect((await request(`/tabs/${tab.id}/screenshot`)).status).toBe(200);
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 1500, height: 1000, scale: 0.8 },
+    });
+    controller.emptyCapture = true;
+    const empty = await request(`/tabs/${tab.id}/screenshot`, "POST", {});
+    expect(empty.status).toBe(409);
+    expect(await empty.json()).toMatchObject({
       error: {
-        code: "screenshot_unavailable",
-        message: expect.stringContaining("Restore or show the Kamapathy window"),
+        code: "empty_screenshot",
+        message: "The page has not rendered yet. Try again.",
+        retryable: true,
       },
     });
-    expect(controller.contents.captureCalls).toBe(0);
-    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
-    controller.captureAvailable = true;
-    const restored = await request(`/tabs/${tab.id}/screenshot`);
-    expect(restored.status).toBe(200);
-    expect(restored.headers.get("content-type")).toBe("image/png");
-    expect(controller.contents.captureCalls).toBe(1);
+  });
+
+  it("refuses clips and sizes the page cannot answer before lending a view", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const outside = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 1200, y: 0, width: 10, height: 10 },
+    });
+    expect(outside.status).toBe(422);
+    expect(await outside.json()).toMatchObject({
+      error: {
+        code: "clip_outside_page",
+        clip: { x: 1200, y: 0, width: 10, height: 10 },
+      },
+    });
+    page.metrics.contentSize = { width: 1200, height: 20000 };
+    const large = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      fullPage: true,
+    });
+    expect(large.status).toBe(422);
+    expect(await large.json()).toMatchObject({
+      error: {
+        code: "screenshot_too_large",
+        width: 1200,
+        height: 20000,
+        maxSide: 16384,
+        maxPixels: 33554432,
+      },
+    });
+    const zero = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 0, y: 0, width: 0, height: 10 },
+    });
+    expect(zero.status).toBe(400);
+    expect((await zero.json()).error).toMatchObject({
+      code: "invalid_field",
+      field: "clip.width",
+    });
+    expect(page.captures).toEqual([]);
+    expect(controller.lent).toEqual([]);
+  });
+
+  it("answers a GET like a POST with no options and names the capture in the activity", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    expect((await request(`/tabs/${tab.id}/screenshot`)).status).toBe(200);
+    expect(
+      (await request(`/tabs/${tab.id}/screenshot`, "POST", {})).status,
+    ).toBe(200);
+    expect(page.captures[0]).toEqual(page.captures[1]);
+    page.metrics.contentSize = { width: 1200, height: 2000 };
+    const full = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      fullPage: true,
+    });
+    expect(full.status).toBe(200);
+    expect(full.headers.get("x-kamapathy-clip")).toBe("0,0,1200,2000");
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 1200, height: 2000, scale: 1 },
+      captureBeyondViewport: true,
+    });
+    expect(
+      controller.activity
+        .filter(
+          (entry) =>
+            entry.spaceId === space.id && entry.message.includes("screenshot"),
+        )
+        .map((entry) => entry.message),
+    ).toEqual([
+      "Agent captured a page screenshot",
+      "Agent captured a page screenshot",
+      "Agent captured a full-page screenshot",
+    ]);
   });
 
   it("reports a rendering failure without leaking native capture errors", async () => {
@@ -1053,7 +1168,7 @@ describe("local automation socket", () => {
     const screenshot = await request(`/tabs/${tab.id}/screenshot`);
     expect(screenshot.status).toBe(409);
     expect((await screenshot.json()).error.code).toBe("dialog_open");
-    expect(page.captureCalls).toBe(0);
+    expect(page.captures).toEqual([]);
     page.emitProtocol("Page.javascriptDialogClosed", {
       result: true,
       userInput: "",
@@ -1731,6 +1846,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
+      "POST /tabs/:id/screenshot": {},
       "POST /tabs/:id/upload": uploadBody(),
     };
     const tabs = controller.state.tabs.length;

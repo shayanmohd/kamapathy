@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
+import type { LayoutMetrics } from "../electron/agent/screenshot";
 import type { AutomationController } from "../electron/agent/server";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
@@ -41,8 +42,22 @@ export function fakePng(width: number, height: number): Buffer {
 // each operation with the world it ran in, and each input command.
 export class FakeContents extends FakeHost {
   scripts: { world: string; code: string }[] = [];
-  captureCalls = 0;
+  // The clip of each capture, in the order they were sent.
+  captures: Record<string, any>[] = [];
   captureError?: Error;
+  // A 1,200 by 800 viewport at the document origin, showing a document of
+  // the same size, in CSS pixels at zoom 1.
+  metrics: LayoutMetrics = {
+    cssVisualViewport: {
+      pageX: 0,
+      pageY: 0,
+      clientWidth: 1200,
+      clientHeight: 800,
+      zoom: 1,
+    },
+    contentSize: { width: 1200, height: 800 },
+  };
+  zoom = 1;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
   result: unknown = {
@@ -71,6 +86,20 @@ export class FakeContents extends FakeHost {
         : this.result);
       return { result: { type: "object", value } };
     });
+    this.debugger.reply("Page.getLayoutMetrics", () => this.metrics);
+    // Chromium sizes the image from the clip, in device-independent pixels,
+    // times its scale.
+    this.debugger.reply("Page.captureScreenshot", (params) => {
+      this.captures.push(params);
+      if (this.captureError) throw this.captureError;
+      const { clip } = params;
+      return {
+        data: fakePng(
+          Math.ceil(clip.width * clip.scale),
+          Math.ceil(clip.height * clip.scale),
+        ).toString("base64"),
+      };
+    });
     for (const method of [
       "Input.dispatchMouseEvent",
       "Input.dispatchKeyEvent",
@@ -87,13 +116,8 @@ export class FakeContents extends FakeHost {
   emitProtocol(method: string, parameters: Record<string, unknown>) {
     this.debugger.event(method, parameters);
   }
-  async capturePage() {
-    this.captureCalls += 1;
-    if (this.captureError) throw this.captureError;
-    return {
-      isEmpty: () => false,
-      toPNG: () => Buffer.from([137, 80, 78, 71]),
-    };
+  getZoomFactor() {
+    return this.zoom;
   }
 }
 // BrowserController's state, registry and server-facing methods, without
@@ -112,7 +136,6 @@ export class FakeController implements AutomationController {
   calls: BrowserAction[] = [];
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
-  captureAvailable = true;
   // The tabs whose views were lent to a capture window, in order.
   lent: string[] = [];
   scale = 1;
@@ -205,9 +228,6 @@ export class FakeController implements AutomationController {
         listener(tab.id, page as unknown as WebContents);
     }
     return page;
-  }
-  canCapturePage() {
-    return this.captureAvailable;
   }
   async withVisibleView<T>(tabId: string, capture: () => Promise<T>) {
     this.lent.push(tabId);

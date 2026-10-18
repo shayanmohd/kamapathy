@@ -42,7 +42,6 @@ export interface AutomationController {
     options?: { isolated?: boolean; pageBudget?: number },
   ): Space;
   getWebContents(tabId: string): WebContents | undefined;
-  canCapturePage(): boolean;
   /** Runs a capture with Chromium painting the tab's view, in any window state. */
   withVisibleView<T>(tabId: string, capture: () => Promise<T>): Promise<T>;
   /** The scale factor of the display the window is on. */
