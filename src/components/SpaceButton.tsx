@@ -21,7 +21,12 @@ export function SpaceButton({
 }) {
   const view = spaceButtonState(state, now, seen);
   const current = state.spaces.find((space) => space.id === state.activeSpaceId);
-  const label = spacesCopy.button(current?.name ?? "", view.working, view.needsYou);
+  const label = spacesCopy.button(
+    current?.name ?? "",
+    view.working,
+    view.needsYou,
+    view.failed,
+  );
   return (
     <button
       ref={buttonRef}
@@ -38,7 +43,9 @@ export function SpaceButton({
       ) : (
         <span className={`space-trigger-dot color-${view.color}`} />
       )}
-      {view.needsYou && <span className="space-trigger-alert" />}
+      {(view.needsYou || view.failed) && (
+        <span className="space-trigger-alert" />
+      )}
     </button>
   );
 }

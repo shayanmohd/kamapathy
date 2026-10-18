@@ -25,7 +25,15 @@ export function ActivityDialog({
         <ol className="activity-entries">
           {items.map((item) => (
             <li key={item.id}>
-              <span>{item.message}</span>
+              <span>
+                {item.message}
+                {item.agentText && (
+                  <>
+                    {" "}
+                    <span className="agent-text">{item.agentText}</span>
+                  </>
+                )}
+              </span>
               <time>{activityTime(item.time)}</time>
             </li>
           ))}

@@ -17,6 +17,7 @@ import {
   agentStatus,
   spaceActivity,
   spaceColors,
+  statusLine,
   type AgentStatus,
 } from "../lib/spaces";
 import {
@@ -83,6 +84,7 @@ function SpaceList({
       space={space}
       state={state}
       status={agentStatus(space, state, now, seen)}
+      line={statusLine(space, now)}
       showDetails={details === space.id}
       showOptions={options === space.id}
       canClose={space.kind === "agent" || personal.length > 1}
@@ -169,6 +171,7 @@ function SpaceRow({
   space,
   state,
   status,
+  line,
   showDetails,
   showOptions,
   canClose,
@@ -181,6 +184,7 @@ function SpaceRow({
   space: Space;
   state: BrowserState;
   status: AgentStatus | undefined;
+  line: { text: string; agent: boolean } | undefined;
   showDetails: boolean;
   showOptions: boolean;
   canClose: boolean;
@@ -238,6 +242,11 @@ function SpaceRow({
           <DotsThree size={14} weight="bold" />
         </button>
       </div>
+      {line && (
+        <p className={line.agent ? "status-line agent-text" : "status-line"}>
+          {line.text}
+        </p>
+      )}
       {showDetails && status && (
         <div className="space-row-panel">
           <ol className="activity-entries">

@@ -44,7 +44,7 @@ import { ToolsMenu } from "./components/ToolsMenu";
 import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
 import { AgentBar } from "./components/AgentBar";
-import { acknowledgeTask, agentStatus } from "./lib/spaces";
+import { acknowledgeTask, agentStatus, statusLine } from "./lib/spaces";
 import { SpaceButton } from "./components/SpaceButton";
 import { SpacePopover } from "./components/SpacePopover";
 import { SpaceRequestDialog } from "./components/SpaceRequestDialog";
@@ -121,7 +121,8 @@ export default function App() {
     isDesktop && !!active && isGoogleSignInRejectedUrl(active.url);
   const ownedByAgent = agentRules(activeSpace) && activeSpace.owner === "agent";
   const barStatus = agentStatus(activeSpace, state, now, seen);
-  const ring = barStatus === "browsing" || barStatus === "idle";
+  const ring =
+    barStatus === "browsing" || barStatus === "idle" || barStatus === "error";
   const mac = state.platform === "darwin";
   const bookmarked = state.bookmarks.find(
     (bookmark) => bookmark.url === active?.url,
@@ -599,6 +600,7 @@ export default function App() {
                 key={activeSpace.id}
                 space={activeSpace}
                 status={barStatus}
+                line={statusLine(activeSpace, now)}
                 attempt={attempt}
               />
             )}

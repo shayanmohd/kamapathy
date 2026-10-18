@@ -100,13 +100,30 @@ export const agentBarCopy = {
   keepWarning: "Its temporary sign-ins end and its pages reload.",
 } as const;
 
+// The one phrase the bar announces. The agent's own words never join it;
+// they follow in the status line.
+export function agentBarPhrase(
+  status: keyof typeof agentBarCopy.status,
+  agentOwns: boolean,
+): string {
+  return status === "needs-you" && agentOwns
+    ? agentBarCopy.agentNeedsYou
+    : agentBarCopy.status[status];
+}
+
 export const spacesCopy = {
   menu: "Spaces",
-  button: (space: string, working: number, needsYou: boolean) =>
+  button: (
+    space: string,
+    working: number,
+    needsYou: boolean,
+    failed: boolean,
+  ) =>
     [
       `Spaces: ${space}`,
       working ? `${working} ${working === 1 ? "agent" : "agents"} working` : "",
       needsYou ? "an agent needs you" : "",
+      failed ? "an agent could not finish" : "",
     ]
       .filter(Boolean)
       .join(", "),

@@ -75,6 +75,9 @@
 .space-row-details[aria-expanded="true"] > svg {
   transform: rotate(90deg);
 }
+.space-row > .status-line {
+  padding: 0 10px 4px 28px;
+}
 .space-row-panel {
   display: flex;
   flex-direction: column;
@@ -89,7 +92,8 @@
   background: var(--space-color);
 }
 .space-dot.browsing,
-.space-dot.idle {
+.space-dot.idle,
+.space-dot.error {
   width: 10px;
   height: 10px;
   background: none;

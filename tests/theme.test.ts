@@ -14,6 +14,18 @@ function tokens(selector: string): Record<string, string> {
   );
 }
 
+function declarations(selector: string): Record<string, string> {
+  const rule = `${selector} {`;
+  const start = css.indexOf(rule) + rule.length;
+  const block = css.slice(start, css.indexOf("}", start));
+  return Object.fromEntries(
+    [...block.matchAll(/([a-z-]+):\s*([^;]+);/g)].map((match) => [
+      match[1],
+      match[2].trim(),
+    ]),
+  );
+}
+
 describe("visual tokens", () => {
   it("uses the approved light and dark values", () => {
     expect(tokens(":root")).toMatchObject({
@@ -60,6 +72,51 @@ describe("accent use", () => {
         .filter((selector) => !allowed.test(selector)),
     );
     expect(offenders).toEqual([]);
+  });
+});
+
+const shellSources = ["", "components/"].flatMap((folder) =>
+  readdirSync(new URL(`../src/${folder}`, import.meta.url))
+    .filter((name) => name.endsWith(".tsx"))
+    .map((name) => ({
+      name: `${folder}${name}`,
+      text: readFileSync(
+        new URL(`../src/${folder}${name}`, import.meta.url),
+        "utf8",
+      ),
+    })),
+);
+
+describe("agent text", () => {
+  it("is quoted, italic and secondary", () => {
+    const rule = declarations(".agent-text");
+    expect(rule["font-style"]).toBe("italic");
+    expect(rule.color).toBe("var(--secondary)");
+    expect(rule.quotes).toContain("\\201c");
+    expect(rule.quotes).toContain("\\201d");
+    expect(declarations(".agent-text::before").content).toBe("open-quote");
+    expect(declarations(".agent-text::after").content).toBe("close-quote");
+    const uses = shellSources.flatMap(({ name, text }) =>
+      [...text.matchAll(/agent-text/g)].map((match) => {
+        const tag = text.slice(
+          text.lastIndexOf("<", match.index),
+          text.indexOf(">", match.index) + 1,
+        );
+        return {
+          name,
+          element: /^<([A-Za-z]+)/.exec(tag)?.[1] ?? "",
+          live: /role="status"|aria-live/.test(tag),
+        };
+      }),
+    );
+    expect(uses.length).toBeGreaterThan(0);
+    // An agent's words are plain text beside Kamapathy's own: never a
+    // button, link, field or dialog of its own, and never announced.
+    expect(
+      uses.filter(
+        ({ element, live }) => live || !["p", "span"].includes(element),
+      ),
+    ).toEqual([]);
   });
 });
 

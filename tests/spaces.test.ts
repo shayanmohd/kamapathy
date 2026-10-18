@@ -10,7 +10,12 @@ import {
   taskKey,
   type AgentStatus,
 } from "../src/lib/spaces";
-import { agentBarCopy, spacesCopy, statusCopy } from "../src/copy";
+import {
+  agentBarCopy,
+  agentBarPhrase,
+  spacesCopy,
+  statusCopy,
+} from "../src/copy";
 
 const now = 1_000_000;
 const entry = (
@@ -247,6 +252,39 @@ describe("agent status", () => {
     ]);
     expect(agentBarCopy.agentNeedsYou).toBe("Agent needs you");
   });
+  it("the bar names the agent's state and the status line stays apart from it", () => {
+    const states: Record<AgentStatus, true> = {
+      browsing: true,
+      idle: true,
+      "needs-you": true,
+      "in-control": true,
+      paused: true,
+      done: true,
+      stopped: true,
+      failed: true,
+      error: true,
+    };
+    for (const state of Object.keys(states) as AgentStatus[]) {
+      expect(agentBarPhrase(state, false)).toBe(agentBarCopy.status[state]);
+      expect(agentBarPhrase(state, true)).toBeTruthy();
+    }
+    // The ask is the agent's own only while the agent still holds the space.
+    expect(agentBarPhrase("needs-you", true)).toBe("Agent needs you");
+    expect(agentBarPhrase("needs-you", false)).toBe("You're in control");
+    expect(agentBarPhrase("browsing", true)).toBe("Agent is browsing");
+    // What the agent wrote follows the phrase instead of joining it, so the
+    // live region never reads a label out.
+    const { space } = withAgent("agent");
+    space.task = {
+      status: "Comparing prices on three sites",
+      label: { text: "Opening the cart", active: true, at: now },
+      changedAt: 900,
+    };
+    const line = statusLine(space, now)!;
+    expect(line).toEqual({ text: "Opening the cart", agent: true });
+    for (const state of Object.keys(states) as AgentStatus[])
+      expect(agentBarPhrase(state, true)).not.toContain(line.text);
+  });
 });
 
 describe("space button", () => {
@@ -329,9 +367,23 @@ describe("space button", () => {
     expect(spaceButtonState(state, now, new Set()).needsYou).toBe(true);
   });
   it("names the button after the current space and what agents need", () => {
-    expect(spacesCopy.button("Personal", 0, false)).toBe("Spaces: Personal");
-    expect(spacesCopy.button("Personal", 2, true)).toBe(
+    expect(spacesCopy.button("Personal", 0, false, false)).toBe(
+      "Spaces: Personal",
+    );
+    expect(spacesCopy.button("Personal", 2, true, false)).toBe(
       "Spaces: Personal, 2 agents working, an agent needs you",
+    );
+  });
+  it("the Spaces button says an agent could not finish", () => {
+    expect(spacesCopy.button("Research", 1, false, false)).toBe(
+      "Spaces: Research, 1 agent working",
+    );
+    expect(spacesCopy.button("Research", 0, false, true)).toBe(
+      "Spaces: Research, an agent could not finish",
+    );
+    // The phrases keep their order whatever is true at once.
+    expect(spacesCopy.button("Research", 2, true, true)).toBe(
+      "Spaces: Research, 2 agents working, an agent needs you, an agent could not finish",
     );
   });
 });
