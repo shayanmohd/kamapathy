@@ -1,6 +1,6 @@
 import { dialog } from "electron";
 import type { BrowserWindow } from "electron";
-import { extensionInstallCopy } from "../../src/copy";
+import { extensionInstallCopy, extensionRemoveCopy } from "../../src/copy";
 
 export interface ConsentDetails {
   name: string;
@@ -32,5 +32,44 @@ export function confirmAdd(
       ? dialog.showMessageBox(parent, options)
       : dialog.showMessageBox(options));
     return response === 1;
+  };
+}
+
+// The native Remove dialog, asked before Remove's four steps.
+export function confirmRemove(
+  window: () => BrowserWindow | null,
+): (name: string) => Promise<boolean> {
+  return async (name) => {
+    const options: Electron.MessageBoxOptions = {
+      type: "question",
+      message: extensionRemoveCopy.title(name),
+      detail: extensionRemoveCopy.detail,
+      buttons: [extensionRemoveCopy.cancel, extensionRemoveCopy.remove],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const parent = window();
+    const { response } = await (parent
+      ? dialog.showMessageBox(parent, options)
+      : dialog.showMessageBox(options));
+    return response === 1;
+  };
+}
+
+// Load unpacked's folder chooser. Cancelling resolves undefined.
+export function chooseFolder(
+  window: () => BrowserWindow | null,
+): () => Promise<string | undefined> {
+  return async () => {
+    const options: Electron.OpenDialogOptions = {
+      title: extensionRemoveCopy.chooseFolder,
+      properties: ["openDirectory"],
+    };
+    const parent = window();
+    const { filePaths } = await (parent
+      ? dialog.showOpenDialog(parent, options)
+      : dialog.showOpenDialog(options));
+    return filePaths[0];
   };
 }

@@ -10,7 +10,7 @@ import {
 } from "./controller";
 import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
-import { confirmAdd } from "./extensions/dialogs";
+import { chooseFolder, confirmAdd } from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
 import { ExtensionInstaller } from "./extensions/install";
 import { ExtensionUpdates } from "./extensions/updates";
@@ -270,6 +270,8 @@ async function openWindow(): Promise<void> {
   const unbindBridge = extensionBridge?.bind(currentController);
   currentController.subscribe((next) => {
     extensionUpdates?.setEnabled(next.settings.extensionUpdates);
+    if (host && next.settings.extensionDeveloperMode !== host.developerMode)
+      void host.setDeveloperMode(next.settings.extensionDeveloperMode);
     void syncAutomation();
   });
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -492,6 +494,18 @@ else {
         error instanceof Error ? error.message : "Unknown error",
       );
     });
+    const extensions = extensionHost;
+    // Pages of an extension that runs in no session any more close.
+    extensions.onEvent((event) => {
+      if (
+        event.type !== "unloaded" ||
+        extensions
+          .partitions()
+          .some((partition) => extensions.isLoaded(partition, event.id))
+      )
+        return;
+      controller?.closeExtensionPages(event.id);
+    });
     extensionChannel = new ExtensionChannel({
       host: extensionHost,
       preloads: {
@@ -514,6 +528,7 @@ else {
       env: storeEnv(),
       locale: app.getLocale(),
       confirm: confirmAdd(() => window),
+      chooseFolder: chooseFolder(() => window),
     });
     extensionUpdates = new ExtensionUpdates({
       host: extensionHost,

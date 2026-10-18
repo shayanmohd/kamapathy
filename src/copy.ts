@@ -201,6 +201,17 @@ export const extensionInstallCopy = {
   invalidInput: "Paste a Chrome Web Store link or a 32-letter ID.",
 } as const;
 
+export const extensionRemoveCopy = {
+  title: (name: string) => `Remove "${name}"?`,
+  detail: "Its data in Kamapathy is deleted.",
+  cancel: "Cancel",
+  remove: "Remove",
+  chooseFolder: "Load unpacked",
+  developerModeOff: "Turn on developer mode to load a folder.",
+  pinLimit: "You can pin up to 8 extensions.",
+  folderChanged: "Its folder changed. Load it again.",
+} as const;
+
 export const extensionBridgeCopy = {
   notSupported: "Not supported in Kamapathy.",
   tooLarge: "This request is too large.",

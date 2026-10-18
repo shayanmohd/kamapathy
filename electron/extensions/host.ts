@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
+  MAX_PINNED,
   compareVersions,
   extensionIdOf,
   extensionPermission,
@@ -21,7 +22,11 @@ import {
   type ExtensionsFile,
   type Grant,
 } from "../../shared/extensions";
-import { extensionRefusalCopy } from "../../src/copy";
+import {
+  extensionInstallCopy,
+  extensionRefusalCopy,
+  extensionRemoveCopy,
+} from "../../src/copy";
 import {
   ManifestRefusal,
   readManifest,
@@ -232,7 +237,7 @@ export class ExtensionHost {
     this.attached.delete(partition);
     const unloaded = [...record.loaded].filter((id) => this.entry(id));
     record.loaded.clear();
-    for (const id of unloaded) this.remove(record.session, id);
+    for (const id of unloaded) this.removeFrom(record.session, id);
     for (const cleanup of record.cleanups.values())
       this.safely("An extension session could not be cleaned up", cleanup);
     record.cleanups.clear();
@@ -329,14 +334,95 @@ export class ExtensionHost {
   }
 
   async save(entry: ExtensionEntry, manifest: CheckedManifest): Promise<void> {
-    this.file.extensions = this.entry(entry.id)
-      ? this.file.extensions.map((item) =>
-          item.id === entry.id ? entry : item,
-        )
-      : [...this.file.extensions, entry];
     this.manifests.set(entry.id, manifest);
+    await this.store(entry);
+  }
+
+  // The reason the shell shows in an extension's row, for a folder the host
+  // can no longer load.
+  setLoadError(id: string, message: string): void {
+    if (!this.entry(id) || this.errors.get(id) === message) return;
+    this.errors.set(id, message);
     this.emit({ type: "changed" });
-    await this.write();
+  }
+
+  // Off unloads it everywhere and keeps its data. On loads it again, unless
+  // it is unpacked and Developer mode is off.
+  async setEnabled(id: string, enabled: boolean): Promise<void> {
+    const entry = this.entry(id);
+    if (!entry || entry.enabled === enabled) return;
+    const next = { ...entry, enabled };
+    await this.store(next);
+    if (!enabled) {
+      this.unloadEverywhere(id);
+      return;
+    }
+    if (!this.wanted(next)) return;
+    try {
+      await this.loadEverywhere(id);
+    } catch (error) {
+      await this.store({ ...next, enabled: false });
+      throw new Error(
+        extensionInstallCopy.couldNotAdd(
+          this.manifests.get(id)?.name ?? id,
+          messageOf(error),
+        ),
+      );
+    }
+  }
+
+  async setPinned(id: string, pinned: boolean): Promise<void> {
+    const entry = this.entry(id);
+    if (!entry || entry.pinned === pinned) return;
+    if (
+      pinned &&
+      this.file.extensions.filter((item) => item.pinned).length >= MAX_PINNED
+    )
+      throw new Error(extensionRemoveCopy.pinLimit);
+    await this.store({ ...entry, pinned });
+  }
+
+  // Remove's four steps: unload it, so its pages close with the unloaded
+  // events; delete a store build's folder, never an unpacked one; clear its
+  // origin in every session; and queue its chrome.storage folders, which
+  // removeExtension keeps, for the next launch.
+  async remove(id: string): Promise<void> {
+    const entry = this.entry(id);
+    if (!entry) return;
+    this.unloadEverywhere(id);
+    if (entry.source === "webstore")
+      await rm(join(this.userData, STORE_FOLDER, id), {
+        recursive: true,
+        force: true,
+      });
+    for (const record of [...this.attached.values()])
+      try {
+        await record.session.clearStorageData({
+          origin: `chrome-extension://${id}`,
+        });
+      } catch (error) {
+        logError(`Extension ${id}'s storage could not be cleared`, error);
+      }
+    await this.queueRemoval(id);
+    await this.forget(id);
+  }
+
+  // The id Electron gives an unpacked folder. It loads the folder into one
+  // attached session and unloads it again, so that the entry the installer
+  // then records loads everywhere with its manifest in place.
+  async loadFolder(folder: string): Promise<string> {
+    const [record] = [...this.attached.values()];
+    if (!record) throw new Error(extensionRefusalCopy.loadFailed);
+    const { id } = await record.session.extensions.loadExtension(folder, {
+      allowFileAccess: false,
+    });
+    this.removeFrom(record.session, id);
+    // Electron loaded the folder in place of an extension the host runs.
+    if (record.loaded.has(id)) {
+      this.unloadEverywhere(id);
+      void this.loadEverywhere(id).catch((error) => this.failed(id, error));
+    }
+    return id;
   }
 
   // A newer build of a store extension replaces the running one: unload, swap
@@ -471,7 +557,7 @@ export class ExtensionHost {
     this.generations.set(id, this.generation(id) + 1);
     for (const [partition, record] of [...this.attached])
       if (record.loaded.delete(id)) {
-        this.remove(record.session, id);
+        this.removeFrom(record.session, id);
         this.emit({ type: "unloaded", id, partition });
       }
   }
@@ -574,11 +660,11 @@ export class ExtensionHost {
           !isComponentExtension(extension.id) &&
           !record.loaded.has(extension.id)
         )
-          this.remove(record.session, extension.id);
+          this.removeFrom(record.session, extension.id);
         throw new OtherId();
       }
       if (!current()) {
-        this.remove(record.session, id);
+        this.removeFrom(record.session, id);
         return;
       }
       record.loaded.add(id);
@@ -605,12 +691,22 @@ export class ExtensionHost {
     this.emit({ type: "changed" });
   }
 
-  private remove(ses: Session, id: string): void {
+  private removeFrom(ses: Session, id: string): void {
     try {
       ses.extensions.removeExtension(id);
     } catch (error) {
       logError(`Extension ${id} could not be unloaded`, error);
     }
+  }
+
+  private async store(entry: ExtensionEntry): Promise<void> {
+    this.file.extensions = this.entry(entry.id)
+      ? this.file.extensions.map((item) =>
+          item.id === entry.id ? entry : item,
+        )
+      : [...this.file.extensions, entry];
+    this.emit({ type: "changed" });
+    await this.write();
   }
 
   private async check(entry: ExtensionEntry): Promise<void> {

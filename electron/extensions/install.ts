@@ -9,7 +9,11 @@ import {
   type ExtensionEntry,
   type Grant,
 } from "../../shared/extensions";
-import { extensionInstallCopy } from "../../src/copy";
+import {
+  extensionInstallCopy,
+  extensionRefusalCopy,
+  extensionRemoveCopy,
+} from "../../src/copy";
 import { CrxError, verifyCrx, type VerifiedCrx } from "./crx";
 import type { ConsentDetails } from "./dialogs";
 import { STAGING_FOLDER, STORE_FOLDER, type ExtensionHost } from "./host";
@@ -55,6 +59,8 @@ export interface InstallerDeps {
   // app.getLocale(), for _locales.
   locale: string;
   confirm(details: ConsentDetails): Promise<boolean>;
+  // Load unpacked's folder chooser.
+  chooseFolder?: () => Promise<string | undefined>;
   publisherKeyHash?: string;
   now?: () => number;
 }
@@ -89,6 +95,56 @@ export class ExtensionInstaller {
       if (at !== -1) this.pending.splice(at, 1);
       this.changed();
     });
+  }
+
+  // Developer mode's Load unpacked, queued behind any running install.
+  loadUnpacked(
+    folder?: string,
+    options: InstallOptions = {},
+  ): Promise<InstallOutcome> {
+    const queued = this.queue.then(() => this.unpacked(folder, options));
+    this.queue = queued.catch(() => undefined);
+    return queued;
+  }
+
+  // Rereads an unpacked folder and loads it again.
+  async reloadUnpacked(id: string): Promise<void> {
+    const { host } = this.deps;
+    if (!host.developerMode)
+      throw new InstallError(extensionRemoveCopy.developerModeOff);
+    const entry = host.entry(id);
+    if (!entry || entry.source !== "unpacked")
+      throw new InstallError(extensionRefusalCopy.loadFailed);
+    const manifest = await this.read(entry.path, true);
+    // The folder belongs to another id now, so Electron would refuse it.
+    if (manifest.keyId !== undefined && manifest.keyId !== id) {
+      host.unloadEverywhere(id);
+      host.setLoadError(id, extensionRemoveCopy.folderChanged);
+      throw new InstallError(extensionRemoveCopy.folderChanged);
+    }
+    if (
+      raisesPermissions(
+        { permissions: entry.grantedPermissions, hosts: entry.grantedHosts },
+        manifest,
+      ) &&
+      !(await this.agreed(manifest))
+    )
+      return;
+    host.unloadEverywhere(id);
+    await host.save(
+      {
+        ...entry,
+        version: manifest.version,
+        grantedPermissions: manifest.permissions,
+        grantedHosts: manifest.hosts,
+      },
+      manifest,
+    );
+    try {
+      await host.loadEverywhere(id);
+    } catch (error) {
+      throw new InstallError(this.failure(manifest.name, error));
+    }
   }
 
   // Verifies a downloaded CRX and leaves it in staging, checked and with the
@@ -196,6 +252,97 @@ export class ExtensionInstaller {
       await this.discard(build);
       throw error;
     }
+  }
+
+  // The same checks and consent as a store install, minus the signature: the
+  // folder loads where it is and keeps the id Electron gives it.
+  private async unpacked(
+    folder: string | undefined,
+    options: InstallOptions,
+  ): Promise<InstallOutcome> {
+    const { host } = this.deps;
+    if (!host.developerMode)
+      throw new InstallError(extensionRemoveCopy.developerModeOff);
+    const chosen = folder ?? (await this.deps.chooseFolder?.());
+    if (!chosen) return { added: false, id: "" };
+    const manifest = await this.read(chosen, false);
+    if (
+      (!options.consented || raisesPermissions(options.consented, manifest)) &&
+      !(await this.agreed(manifest))
+    )
+      return { added: false, id: "" };
+    let id: string;
+    try {
+      id = await host.loadFolder(chosen);
+    } catch (error) {
+      throw new InstallError(this.failure(manifest.name, error));
+    }
+    if (isComponentExtension(id))
+      throw new InstallError(extensionRefusalCopy.component);
+    if (host.entry(id))
+      throw new InstallError(extensionInstallCopy.alreadyAdded);
+    await host.save(
+      {
+        id,
+        source: "unpacked",
+        version: manifest.version,
+        path: chosen,
+        enabled: true,
+        pinned:
+          options.pinned ??
+          host.entries().filter((item) => item.pinned).length < MAX_PINNED,
+        installedAt: this.now(),
+        ...(options.importedFrom ? { importedFrom: options.importedFrom } : {}),
+        grantedPermissions: manifest.permissions,
+        grantedHosts: manifest.hosts,
+      },
+      manifest,
+    );
+    await this.load(id, manifest.name);
+    return { added: true, id, name: manifest.name };
+  }
+
+  private async read(
+    folder: string,
+    replacing: boolean,
+  ): Promise<CheckedManifest> {
+    try {
+      return await readManifest(folder, {
+        chromeVersion: this.deps.env.chromeVersion,
+        locale: this.deps.locale,
+        installed: this.deps.host.entries().length,
+        replacing,
+      });
+    } catch (error) {
+      if (error instanceof ManifestRefusal)
+        throw new InstallError(error.message);
+      throw error;
+    }
+  }
+
+  private agreed(manifest: CheckedManifest): Promise<boolean> {
+    return this.deps.confirm({
+      name: manifest.name,
+      lines: manifest.lines,
+      wontWork: manifest.wontWork,
+    });
+  }
+
+  // A recorded extension that fails to load is forgotten again.
+  private async load(id: string, name: string): Promise<void> {
+    try {
+      await this.deps.host.loadEverywhere(id);
+    } catch (error) {
+      await this.deps.host.forget(id);
+      throw new InstallError(this.failure(name, error));
+    }
+  }
+
+  private failure(name: string, error: unknown): string {
+    return extensionInstallCopy.couldNotAdd(
+      name,
+      messageOf(error).slice(0, MESSAGE_LIMIT),
+    );
   }
 
   private async download(id: string): Promise<Buffer> {

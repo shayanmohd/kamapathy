@@ -21,6 +21,9 @@ import { initialState } from "../shared/state";
 import { BrowserController } from "../electron/controller";
 import type { CheckedManifest } from "../electron/extensions/manifest";
 import { ExtensionHost, type HostEvent } from "../electron/extensions/host";
+import type { ConsentDetails } from "../electron/extensions/dialogs";
+import { ExtensionInstaller } from "../electron/extensions/install";
+import { idOf, keyPair } from "./extension-builders";
 import {
   EXTENSION_CALL,
   EXTENSION_EVENT,
@@ -34,7 +37,12 @@ import {
   type Caller,
   type ChannelDeps,
 } from "../electron/extensions/channel";
-import { extensionBridgeCopy, extensionRefusalCopy } from "../src/copy";
+import {
+  extensionBridgeCopy,
+  extensionInstallCopy,
+  extensionRefusalCopy,
+  extensionRemoveCopy,
+} from "../src/copy";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
@@ -1253,5 +1261,354 @@ describe("the extension bridge channel", () => {
     ipc.listen(page.event, ["tabs.onUpdated"]);
     page.emitter.emit("destroyed");
     expect(channel.callers(PERSONAL, A)).toEqual([]);
+  });
+});
+
+describe("extension management", () => {
+  const OTHER = "persist:space-x";
+  // The PDF viewer's public key, from Chromium's pdf/manifest.json.
+  const PDF_VIEWER_KEY =
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDN6hM0rsDYGbzQPQfOygqlRtQgKUXMfnSjhIBL7LnReAVBEd7ZmKtyN2qmSasMl4HZpMhVe2rPWVVwBDl6iyNE/Kok6E6v6V3vCLGsOpQAuuNVye/3QxzIldzG/jQAdWZiyXReRVapOhZtLjGfywCvlWq7Sl/e3sbc0vWybSDI2QIDAQAB";
+
+  async function attached(
+    userData: string,
+    developer = false,
+  ): Promise<{ host: ExtensionHost; sessions: FakeSession[] }> {
+    const host = await hostFor(userData);
+    if (developer) await host.setDeveloperMode(true);
+    const sessions = [sessionOf(PERSONAL), sessionOf(OTHER)];
+    await host.attach(PERSONAL, asSession(sessions[0]));
+    await host.attach(OTHER, asSession(sessions[1]));
+    return { host, sessions };
+  }
+  function installerFor(host: ExtensionHost) {
+    const confirm = vi.fn(async (_details: ConsentDetails) => true);
+    const chooseFolder = vi.fn(
+      async (): Promise<string | undefined> => undefined,
+    );
+    const installer = new ExtensionInstaller({
+      host,
+      fetcher: async () => {
+        throw new Error("no download");
+      },
+      env: { chromeVersion: CHROME, os: "mac", arch: "arm64" },
+      locale: "en-US",
+      confirm,
+      chooseFolder,
+      now: () => 1700,
+    });
+    return { installer, confirm, chooseFolder };
+  }
+  const saved = (userData: string) =>
+    restoreExtensions(
+      JSON.parse(readFileSync(join(userData, "extensions.json"), "utf8")),
+    );
+
+  it("turning an extension off unloads it everywhere, keeps its data and emits unloaded", async () => {
+    const userData = profile([storeEntry(A), storeEntry(B)]);
+    const { host, sessions } = await attached(userData);
+    const events = recorded(host);
+
+    await host.setEnabled(A, false);
+    expect(host.entry(A)).toEqual(storeEntry(A, "1.0.0", { enabled: false }));
+    expect(saved(userData).extensions).toEqual([
+      storeEntry(A, "1.0.0", { enabled: false }),
+      storeEntry(B),
+    ]);
+    expect(events.filter((event) => event.type === "unloaded")).toEqual([
+      { type: "unloaded", id: A, partition: PERSONAL },
+      { type: "unloaded", id: A, partition: OTHER },
+    ]);
+    for (const fake of sessions) {
+      expect(fake.extensions.removeExtension.mock.calls).toEqual([[A]]);
+      expect(fake.clearStorageData).not.toHaveBeenCalled();
+      expect(fake.loaded.has(B)).toBe(true);
+    }
+    expect([...host.loadedIds(PERSONAL)]).toEqual([B]);
+
+    await host.setEnabled(A, true);
+    expect(host.entry(A)).toEqual(storeEntry(A));
+    for (const fake of sessions) expect(fake.loaded.has(A)).toBe(true);
+    expect([...host.loadedIds(OTHER)]).toEqual([B, A]);
+  });
+
+  it("Remove unloads, deletes the store folder, clears its origin in every session and queues its storage folders", async () => {
+    const folder = temporary("kamapathy-unpacked-");
+    const userData = profile([storeEntry(A), unpackedEntry(B, folder)]);
+    const { host, sessions } = await attached(userData, true);
+
+    await host.remove(A);
+    for (const fake of sessions) {
+      expect(fake.extensions.removeExtension.mock.calls).toEqual([[A]]);
+      expect(fake.clearStorageData.mock.calls).toEqual([
+        [{ origin: `chrome-extension://${A}` }],
+      ]);
+    }
+    expect(existsSync(join(userData, "Extensions", A))).toBe(false);
+    expect(host.entry(A)).toBeUndefined();
+    expect(host.manifestOf(A)).toBeUndefined();
+    expect(saved(userData)).toEqual({
+      extensions: [unpackedEntry(B, folder)],
+      removals: [A],
+    });
+
+    await host.remove(B);
+    expect(existsSync(join(folder, "manifest.json"))).toBe(true);
+    expect(saved(userData)).toEqual({ extensions: [], removals: [A, B] });
+  });
+
+  it("queued storage folders are deleted under every partition at the next launch before anything loads", async () => {
+    const userData = profile([storeEntry(A), storeEntry(B)]);
+    const settings = (partition: string, kind: string, id: string) =>
+      join(userData, "Partitions", partition, `${kind} Extension Settings`, id);
+    const gone = [
+      settings("space-personal", "Local", A),
+      settings("space-x", "Local", A),
+      settings("space-x", "Sync", A),
+    ];
+    const kept = settings("space-x", "Local", B);
+    for (const folder of [...gone, kept]) {
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(join(folder, "000003.log"), "data");
+    }
+    const { host } = await attached(userData);
+    await host.remove(A);
+    // The folders are Chromium's to read until nothing is loaded.
+    for (const folder of gone) expect(existsSync(folder)).toBe(true);
+
+    const next = await hostFor(userData);
+    for (const folder of gone) expect(existsSync(folder)).toBe(false);
+    expect(existsSync(kept)).toBe(true);
+    expect(saved(userData)).toEqual({ extensions: [storeEntry(B)], removals: [] });
+    const later = sessionOf("persist:space-y");
+    await next.attach("persist:space-y", asSession(later));
+    expect([...next.loadedIds("persist:space-y")]).toEqual([B]);
+  });
+
+  it("Load unpacked runs the checks and consent without a signature and keeps Electron's id", async () => {
+    const userData = profile([]);
+    const { host, sessions } = await attached(userData, true);
+    const { installer, confirm, chooseFolder } = installerFor(host);
+
+    const empty = temporary("kamapathy-folder-");
+    await expect(installer.loadUnpacked(empty)).rejects.toThrow(
+      extensionRefusalCopy.noManifest,
+    );
+    const theme = temporary("kamapathy-folder-");
+    writeFolder(theme, { ...manifestFile("Theme", "1.0.0"), theme: {} });
+    await expect(installer.loadUnpacked(theme)).rejects.toThrow(
+      extensionRefusalCopy.themeOrApp,
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    for (const fake of sessions)
+      expect(fake.extensions.loadExtension).not.toHaveBeenCalled();
+
+    // No folder: the chooser, which the person can cancel.
+    await expect(installer.loadUnpacked()).resolves.toEqual({
+      added: false,
+      id: "",
+    });
+    expect(chooseFolder).toHaveBeenCalledTimes(1);
+    const folder = temporary("kamapathy-folder-");
+    writeFolder(folder, {
+      ...manifestFile("Marker", "2.1.0"),
+      permissions: ["tabs"],
+    });
+    folderIds.set(folder, D);
+
+    // Cancel loads nothing.
+    confirm.mockResolvedValueOnce(false);
+    chooseFolder.mockResolvedValueOnce(folder);
+    await expect(installer.loadUnpacked()).resolves.toEqual({
+      added: false,
+      id: "",
+    });
+    expect(host.entries()).toEqual([]);
+    for (const fake of sessions) expect(fake.loaded.has(D)).toBe(false);
+
+    await expect(installer.loadUnpacked(folder)).resolves.toEqual({
+      added: true,
+      id: D,
+      name: "Marker",
+    });
+    expect(confirm.mock.lastCall?.[0]).toEqual({
+      name: "Marker",
+      lines: ["Read your browsing history"],
+      wontWork: [],
+    });
+    expect(host.entry(D)).toEqual({
+      id: D,
+      source: "unpacked",
+      version: "2.1.0",
+      path: folder,
+      enabled: true,
+      pinned: true,
+      installedAt: 1700,
+      grantedPermissions: ["tabs"],
+      grantedHosts: [],
+    });
+    expect(saved(userData).extensions).toEqual([host.entry(D)]);
+    for (const fake of sessions) {
+      expect(fake.loaded.get(D)).toBe(folder);
+      expect(host.isLoaded(fake === sessions[0] ? PERSONAL : OTHER, D)).toBe(
+        true,
+      );
+    }
+
+    await expect(installer.loadUnpacked(folder)).rejects.toThrow(
+      extensionInstallCopy.alreadyAdded,
+    );
+    await host.setDeveloperMode(false);
+    await expect(installer.loadUnpacked(folder)).rejects.toThrow(
+      extensionRemoveCopy.developerModeOff,
+    );
+  });
+
+  it("Developer mode off unloads unpacked extensions and on loads them again", async () => {
+    const folder = temporary("kamapathy-unpacked-");
+    const { host, sessions } = await attached(
+      profile([storeEntry(A), unpackedEntry(B, folder)]),
+      true,
+    );
+    const events = recorded(host);
+
+    await host.setDeveloperMode(false);
+    expect(events).toEqual([
+      { type: "unloaded", id: B, partition: PERSONAL },
+      { type: "unloaded", id: B, partition: OTHER },
+    ]);
+    // Its entry and its data stay.
+    expect(host.entry(B)).toEqual(unpackedEntry(B, folder));
+    for (const fake of sessions) {
+      expect(fake.loaded.has(B)).toBe(false);
+      expect(fake.loaded.has(A)).toBe(true);
+      expect(fake.clearStorageData).not.toHaveBeenCalled();
+    }
+
+    events.length = 0;
+    await host.setDeveloperMode(true);
+    expect(events).toEqual([
+      { type: "loaded", id: B, partition: PERSONAL },
+      { type: "loaded", id: B, partition: OTHER },
+    ]);
+    for (const fake of sessions) expect(fake.loaded.get(B)).toBe(folder);
+  });
+
+  it("Reload rereads the folder and asks again only for new permissions", async () => {
+    const folder = temporary("kamapathy-unpacked-");
+    writeFolder(folder, {
+      ...manifestFile("Marker", "1.0.0"),
+      permissions: ["storage"],
+    });
+    folderIds.set(folder, D);
+    const { host, sessions } = await attached(profile([]), true);
+    const { installer, confirm } = installerFor(host);
+    await installer.loadUnpacked(folder);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    for (const fake of sessions) fake.extensions.removeExtension.mockClear();
+
+    // A new version that asks for no more reloads without asking.
+    writeFolder(folder, {
+      ...manifestFile("Marker", "1.1.0"),
+      permissions: ["storage"],
+    });
+    await installer.reloadUnpacked(D);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(host.entry(D)?.version).toBe("1.1.0");
+    expect(host.manifestOf(D)?.version).toBe("1.1.0");
+    for (const fake of sessions) {
+      expect(fake.extensions.removeExtension.mock.calls).toEqual([[D]]);
+      expect(fake.loaded.get(D)).toBe(folder);
+    }
+
+    // A new permission asks again, and Cancel keeps the loaded version.
+    writeFolder(folder, {
+      ...manifestFile("Marker", "1.2.0"),
+      permissions: ["storage", "tabs"],
+    });
+    confirm.mockResolvedValueOnce(false);
+    await installer.reloadUnpacked(D);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(host.entry(D)).toMatchObject({
+      version: "1.1.0",
+      grantedPermissions: ["storage"],
+    });
+    await installer.reloadUnpacked(D);
+    expect(confirm).toHaveBeenCalledTimes(3);
+    expect(host.entry(D)).toMatchObject({
+      version: "1.2.0",
+      grantedPermissions: ["storage", "tabs"],
+    });
+
+    // A folder that changed its key is unloaded, with its reason in the row.
+    const other = keyPair().publicKey;
+    expect(idOf(other)).not.toBe(D);
+    writeFolder(folder, {
+      ...manifestFile("Marker", "1.3.0"),
+      key: other.toString("base64"),
+    });
+    await expect(installer.reloadUnpacked(D)).rejects.toThrow(
+      extensionRemoveCopy.folderChanged,
+    );
+    expect(host.loadError(D)).toBe(extensionRemoveCopy.folderChanged);
+    expect(host.entry(D)?.version).toBe("1.2.0");
+    for (const fake of sessions) expect(fake.loaded.has(D)).toBe(false);
+
+    await host.setDeveloperMode(false);
+    await expect(installer.reloadUnpacked(D)).rejects.toThrow(
+      extensionRemoveCopy.developerModeOff,
+    );
+  });
+
+  it("no unpacked folder can take a component id", async () => {
+    const { host, sessions } = await attached(profile([]), true);
+    const { installer, confirm } = installerFor(host);
+
+    const keyed = temporary("kamapathy-folder-");
+    writeFolder(keyed, {
+      ...manifestFile("Viewer", "1.0.0"),
+      key: PDF_VIEWER_KEY,
+    });
+    await expect(installer.loadUnpacked(keyed)).rejects.toThrow(
+      extensionRefusalCopy.component,
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    for (const fake of sessions)
+      expect(fake.extensions.loadExtension).not.toHaveBeenCalled();
+
+    // An id Electron hands back that a component owns is unloaded and refused.
+    const folder = temporary("kamapathy-folder-");
+    writeFolder(folder, manifestFile("Sneak", "1.0.0"));
+    folderIds.set(folder, PDF_VIEWER_EXTENSION_ID);
+    await expect(installer.loadUnpacked(folder)).rejects.toThrow(
+      extensionRefusalCopy.component,
+    );
+    expect(host.entries()).toEqual([]);
+    expect(sessions[0].extensions.removeExtension.mock.calls).toEqual([
+      [PDF_VIEWER_EXTENSION_ID],
+    ]);
+    expect(sessions[0].loaded.has(PDF_VIEWER_EXTENSION_ID)).toBe(false);
+  });
+
+  it("pins stop at 8", async () => {
+    const ids = Array.from({ length: 10 }, (_, index) => idAt(index + 1));
+    const userData = profile(
+      ids.map((id, index) => storeEntry(id, "1.0.0", { pinned: index < 7 })),
+    );
+    const { host } = await attached(userData);
+
+    await host.setPinned(ids[7], true);
+    expect(host.entry(ids[7])?.pinned).toBe(true);
+    await expect(host.setPinned(ids[8], true)).rejects.toThrow(
+      extensionRemoveCopy.pinLimit,
+    );
+    expect(host.entry(ids[8])?.pinned).toBe(false);
+    expect(saved(userData).extensions.filter((entry) => entry.pinned)).toHaveLength(8);
+
+    await host.setPinned(ids[0], false);
+    await host.setPinned(ids[8], true);
+    expect(host.entry(ids[0])?.pinned).toBe(false);
+    expect(host.entry(ids[8])?.pinned).toBe(true);
+    expect(saved(userData).extensions.filter((entry) => entry.pinned)).toHaveLength(8);
   });
 });
