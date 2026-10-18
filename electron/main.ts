@@ -510,15 +510,18 @@ function updateCommand(value: unknown): UpdateCommand {
 // The kind this copy installs, and the releases it reads. A source run may
 // name a test feed and kind; a packaged build ignores both.
 function createUpdater(): Updater {
+  // The development runtime is a renamed Electron, so app.isPackaged alone is
+  // true there too, as electron/move-to-applications.ts explains.
+  const packaged = app.isPackaged && !externalApplication;
   const named = process.env.KAMAPATHY_UPDATE_KIND as InstallKind | undefined;
   const kind =
-    !app.isPackaged && named && INSTALLER_KINDS.includes(named)
+    !packaged && named && INSTALLER_KINDS.includes(named)
       ? named
       : installKind({
           platform: process.platform,
           arch: process.arch,
           translated: app.runningUnderARM64Translation,
-          packaged: app.isPackaged,
+          packaged,
           env: process.env,
           execPath: process.execPath,
         });
@@ -529,7 +532,7 @@ function createUpdater(): Updater {
     source: repo
       ? updateSource(
           repo,
-          !app.isPackaged ? process.env.KAMAPATHY_UPDATE_FEED : undefined,
+          !packaged ? process.env.KAMAPATHY_UPDATE_FEED : undefined,
         )
       : null,
     directory: join(app.getPath("userData"), "updates"),
