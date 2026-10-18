@@ -1,6 +1,7 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, session, shell } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,6 +9,18 @@ import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
 import { maybeMoveToApplications } from "./move-to-applications";
 import { readState } from "./persistence";
+import {
+  INSTALLER_KINDS,
+  installKind,
+  repository,
+  updateSource,
+} from "./update-release";
+import {
+  netTransport,
+  realTimers,
+  UpdateFailure,
+  Updater,
+} from "./updates";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
 import {
@@ -32,13 +45,15 @@ import {
   writeLaunchInfo,
 } from "./agent-socket";
 import { isWebUrl } from "../shared/url";
-import { version } from "../package.json";
+import { homepage, version } from "../package.json";
 import type {
   BrowserAction,
   BrowserState,
   ContentBounds,
   ImportOutcome,
   ImportRequest,
+  InstallKind,
+  UpdateCommand,
 } from "../shared/types";
 import { surfaceColor } from "../shared/theme";
 
@@ -59,6 +74,8 @@ let automationSyncing = false;
 // never saved as their choice, which would also stop agents from starting Kamapathy.
 let automationFailed = false;
 let quitting = false;
+let updater: Updater | null = null;
+let updaterStarted = false;
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -276,7 +293,11 @@ function createWindow(): void {
   const currentController = controller;
   currentController.subscribe(() => {
     void syncAutomation();
+    updater?.settingsChanged();
   });
+  // A window built later shows what the updater already knows. The first one
+  // keeps its saved record, which the updater reads when it starts.
+  if (updater && updaterStarted) currentController.setUpdate(updater.state);
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
@@ -444,6 +465,94 @@ function registerIpc(): void {
     "kamapathy:help-space",
     (event) => validateSender(event).incomingSpace().id,
   );
+  // Opening, installing, cancelling and quitting live only here, never on a
+  // route an agent can reach.
+  ipcMain.handle("kamapathy:update", async (event, command: unknown) => {
+    validateSender(event);
+    const current = updater!;
+    const wanted = updateCommand(command);
+    try {
+      if (wanted.command === "check") await current.check();
+      else if (wanted.command === "download") await current.download();
+      else if (wanted.command === "cancel") await current.cancel();
+      else if (wanted.command === "install") await current.install();
+      else if (wanted.command === "show") current.showFile();
+      else if (wanted.command === "copy-command") current.copyCommand();
+      else if (wanted.command === "notes") await current.openNotes(wanted.which);
+    } catch (error) {
+      // A check or download failure is already part of the status.
+      if (!(error instanceof UpdateFailure)) throw error;
+    }
+    return current.status();
+  });
+}
+
+function updateCommand(value: unknown): UpdateCommand {
+  const wanted = value as { command?: unknown; which?: unknown } | null;
+  if (
+    wanted?.command === "notes" &&
+    (wanted.which === "running" || wanted.which === "latest")
+  )
+    return { command: "notes", which: wanted.which };
+  if (
+    wanted?.command === "check" ||
+    wanted?.command === "download" ||
+    wanted?.command === "cancel" ||
+    wanted?.command === "install" ||
+    wanted?.command === "show" ||
+    wanted?.command === "copy-command"
+  )
+    return { command: wanted.command };
+  throw new Error("Invalid update command.");
+}
+
+// The kind this copy installs, and the releases it reads. A source run may
+// name a test feed and kind; a packaged build ignores both.
+function createUpdater(): Updater {
+  const named = process.env.KAMAPATHY_UPDATE_KIND as InstallKind | undefined;
+  const kind =
+    !app.isPackaged && named && INSTALLER_KINDS.includes(named)
+      ? named
+      : installKind({
+          platform: process.platform,
+          arch: process.arch,
+          translated: app.runningUnderARM64Translation,
+          packaged: app.isPackaged,
+          env: process.env,
+          execPath: process.execPath,
+        });
+  const repo = repository(homepage);
+  return new Updater({
+    version,
+    kind,
+    source: repo
+      ? updateSource(
+          repo,
+          !app.isPackaged ? process.env.KAMAPATHY_UPDATE_FEED : undefined,
+        )
+      : null,
+    directory: join(app.getPath("userData"), "updates"),
+    transport: netTransport(),
+    online: () => net.isOnline(),
+    now: () => Date.now(),
+    timers: realTimers(),
+    statfs: (path) => statfs(path),
+    settings: () => ({
+      updateChecks: controller?.state.settings.updateChecks ?? false,
+    }),
+    saved: () => ({
+      checkedAt: controller?.state.update.checkedAt,
+      latest: controller?.state.update.latest,
+    }),
+    publish: (next) => controller?.setUpdate(next),
+    dispatch: (action) =>
+      controller ? controller.dispatch(action) : Promise.resolve(),
+    helpSpaceId: () => controller!.incomingSpace().id,
+    openPath: (path) => shell.openPath(path),
+    showItemInFolder: (path) => shell.showItemInFolder(path),
+    writeClipboard: (text) => clipboard.writeText(text),
+    quit: () => app.quit(),
+  });
 }
 
 // Help pages open as the person's tab in a personal space no agent can
@@ -500,6 +609,7 @@ else {
       withdrawEndpoint(agent);
     } catch {}
     controller?.dispose();
+    void updater?.stop();
     void syncAutomation();
   });
   app.on("window-all-closed", () => {
@@ -555,6 +665,10 @@ else {
     agentSetup = createAgentSetup(setupEnvironment);
     registerIpc();
     installMenu();
+    // Before the window, so the agent service it starts already has it.
+    updater = createUpdater();
     createWindow();
+    updaterStarted = true;
+    void updater.start();
   });
 }

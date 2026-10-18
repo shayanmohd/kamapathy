@@ -188,6 +188,12 @@ export interface UpdateReminder {
   version: string;
   state: "available" | "downloading" | "ready";
 }
+// What the person's own interface may ask the updater to do.
+export type UpdateCommand =
+  | {
+      command: "check" | "download" | "cancel" | "install" | "show" | "copy-command";
+    }
+  | { command: "notes"; which: "running" | "latest" };
 export interface AgentSetupStatus {
   supported: boolean;
   reason?: "desktop_only" | "test_profile";
@@ -330,4 +336,5 @@ export interface KamapathyBridge {
   removeAgentSetup(): Promise<AgentSetupStatus>;
   copyText(text: string): Promise<void>;
   helpSpaceId(): Promise<string>;
+  update(command: UpdateCommand): Promise<UpdateStatus>;
 }

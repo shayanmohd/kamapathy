@@ -48,6 +48,7 @@ const bridge: KamapathyBridge = {
   removeAgentSetup: () => invoke("kamapathy:agent-setup-remove"),
   copyText: (text) => invoke("kamapathy:copy-text", text),
   helpSpaceId: () => invoke("kamapathy:help-space"),
+  update: (command) => invoke("kamapathy:update", command),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

@@ -145,3 +145,8 @@ export function updateReminder(
     return { version: latest.version, state };
   return null;
 }
+// `sudo apt install` for a path with spaces or quotes in it: every quote
+// closes the quoting, escapes itself and opens it again.
+export function aptInstallCommand(path: string): string {
+  return `sudo apt install '${path.replace(/'/g, "'\\''")}'`;
+}

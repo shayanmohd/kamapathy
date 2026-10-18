@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
 import { dialog, session, shell, WebContentsView } from "electron";
 import { BrowserController } from "../electron/controller";
+import { writeState } from "../electron/persistence";
+import type { UpdateState } from "../shared/types";
 import {
   agentRules,
   HOME_URL,
@@ -2277,5 +2279,81 @@ describe("incoming space", () => {
     browser.grantAccess("personal");
     expect(browser.incomingSpace().id).toBe("work");
     expect(browser.state.spaces).toHaveLength(2);
+  });
+});
+
+describe("update state", () => {
+  const sample = (
+    progress?: { receivedBytes: number; totalBytes: number },
+    over: Partial<UpdateState> = {},
+  ): UpdateState => ({
+    kind: "mac-arm64",
+    state: "downloading",
+    checkedAt: 5000,
+    latest: {
+      version: "0.3.0",
+      publishedAt: 1000,
+      url: "https://github.com/shayanmohd/kamapathy/releases/tag/v0.3.0",
+      installer: {
+        name: "Kamapathy-0.3.0-mac-arm64.dmg",
+        size: 2097152,
+        url: "https://github.com/shayanmohd/kamapathy/releases/download/v0.3.0/Kamapathy-0.3.0-mac-arm64.dmg",
+      },
+      sums: "https://github.com/shayanmohd/kamapathy/releases/download/v0.3.0/SHA256SUMS.txt",
+    },
+    ...(progress ? { progress } : {}),
+    ...over,
+  });
+
+  it("sends progress at most once a second and saves only new check results", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = controller();
+      const shell = browser.window.webContents as unknown as FakeContents;
+      const sent = () =>
+        shell.send.mock.calls.filter(
+          ([channel]) => channel === "kamapathy:state-changed",
+        );
+      vi.mocked(writeState).mockClear();
+      const first = sent().length;
+      browser.setUpdate(sample({ receivedBytes: 1, totalBytes: 10 }));
+      expect(sent()).toHaveLength(first + 1);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).toHaveBeenCalledTimes(1);
+
+      // Progress alone waits for the trailing send, which carries the last one.
+      vi.mocked(writeState).mockClear();
+      browser.setUpdate(sample({ receivedBytes: 2, totalBytes: 10 }));
+      browser.setUpdate(sample({ receivedBytes: 3, totalBytes: 10 }));
+      expect(sent()).toHaveLength(first + 1);
+      expect(browser.state.update.progress).toEqual({
+        receivedBytes: 3,
+        totalBytes: 10,
+      });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(sent()).toHaveLength(first + 2);
+      expect(sent().at(-1)?.[1].update.progress).toEqual({
+        receivedBytes: 3,
+        totalBytes: 10,
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).not.toHaveBeenCalled();
+
+      // Any other change sends at once, and saves only with a new result.
+      browser.setUpdate(
+        sample(undefined, {
+          state: "ready",
+          installer: { path: "/tmp/installer.dmg", sha256: "a".repeat(64) },
+        }),
+      );
+      expect(sent()).toHaveLength(first + 3);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).not.toHaveBeenCalled();
+      browser.setUpdate(sample(undefined, { state: "available", checkedAt: 9000 }));
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

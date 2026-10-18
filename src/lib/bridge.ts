@@ -391,6 +391,12 @@ export function createPreviewBridge(): KamapathyBridge {
       await navigator.clipboard?.writeText(text);
     },
     helpSpaceId: async () => state.activeSpaceId,
+    // The web preview has no updater; Settings hides Updates there.
+    update: async () => ({
+      ...state.update,
+      version: state.version,
+      checks: state.settings.updateChecks,
+    }),
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

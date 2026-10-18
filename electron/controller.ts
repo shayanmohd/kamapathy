@@ -39,6 +39,7 @@ import type {
   SpaceColor,
   SpaceRequest,
   Tab,
+  UpdateState,
 } from "../shared/types";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
@@ -159,6 +160,8 @@ export class BrowserController {
     hidden: true,
   };
   private saveTimer?: NodeJS.Timeout;
+  private updateTimer?: NodeJS.Timeout;
+  private updateSentAt = 0;
   private destroyed = false;
   private runId = randomUUID();
   private lastFind = { text: "", tabId: "" };
@@ -196,12 +199,13 @@ export class BrowserController {
     return () => this.viewListeners.delete(listener);
   }
 
-  private emit(): BrowserState {
+  private emit(options: { save?: boolean } = {}): BrowserState {
     if (this.destroyed) return this.state;
     this.layout();
     if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
       this.window.webContents.send("kamapathy:state-changed", this.state);
     for (const listener of this.listeners) listener(this.state);
+    if (options.save === false) return this.state;
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.persist(), 350);
     return this.state;
@@ -232,6 +236,34 @@ export class BrowserController {
     });
     this.state.activity = this.state.activity.slice(0, 100);
     this.emit();
+  }
+
+  // A download's progress would send hundreds of states a second, so only
+  // the first in each second goes now and the last one follows it. Only a new
+  // check result is worth saving.
+  setUpdate(next: UpdateState): void {
+    const previous = this.state.update;
+    const save =
+      previous.checkedAt !== next.checkedAt ||
+      JSON.stringify(previous.latest) !== JSON.stringify(next.latest);
+    const rest = (value: UpdateState) =>
+      JSON.stringify({ ...value, progress: undefined });
+    const onlyProgress = !save && rest(previous) === rest(next);
+    this.state.update = next;
+    const since = Date.now() - this.updateSentAt;
+    if (onlyProgress && since < 1000) {
+      if (!this.updateTimer)
+        this.updateTimer = setTimeout(() => {
+          this.updateTimer = undefined;
+          this.updateSentAt = Date.now();
+          this.emit({ save: false });
+        }, 1000 - since);
+      return;
+    }
+    clearTimeout(this.updateTimer);
+    this.updateTimer = undefined;
+    this.updateSentAt = Date.now();
+    this.emit({ save });
   }
 
   setAutomation(running: boolean): void {
@@ -1958,6 +1990,7 @@ export class BrowserController {
   dispose(): void {
     if (this.destroyed) return;
     clearTimeout(this.saveTimer);
+    clearTimeout(this.updateTimer);
     this.persist();
     this.destroyed = true;
     for (const id of this.views.keys()) this.destroyTab(id);
