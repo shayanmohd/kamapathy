@@ -35,6 +35,12 @@ export const ERRORS = {
     "The ref is not one a snapshot gives, such as @e1.",
   ),
   invalid_key: code(400, false, "The key is not one press supports."),
+  invalid_selector: code(
+    400,
+    false,
+    "The selector does not parse, or the page rejects its CSS or XPath.",
+    ["selector", "reason", "forms", "hint", "index"],
+  ),
   invalid_action: code(
     400,
     false,
@@ -203,11 +209,6 @@ export const ERRORS = {
     "The ref is not a file input that can take these files.",
   ),
   invalid_value: code(422, false, "The control cannot take this value."),
-  invalid_selector: code(
-    422,
-    false,
-    "The selector is not valid CSS, or matches no single visible element.",
-  ),
   busy: code(429, true, "Too many requests are waiting.", [
     "scope",
     "retryAfterMs",

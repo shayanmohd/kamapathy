@@ -269,6 +269,7 @@ describe("API schema", () => {
     });
     expect(ERRORS.stale_ref.status).toBe(409);
     expect(ERRORS.element_obscured.status).toBe(409);
+    expect(ERRORS.invalid_selector.status).toBe(400);
     for (const code of [
       "not_connected",
       "timeout",

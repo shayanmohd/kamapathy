@@ -583,6 +583,7 @@ Show the commands, or help on one
 | `invalid_target` | 400 | not retryable |  | The action needs exactly one of ref or selector, or cannot use the target it got. |
 | `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
 | `invalid_key` | 400 | not retryable |  | The key is not one press supports. |
+| `invalid_selector` | 400 | not retryable | `selector`, `reason`, `forms`, `hint`, `index` | The selector does not parse, or the page rejects its CSS or XPath. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
 | `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
@@ -626,7 +627,6 @@ Show the commands, or help on one
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
-| `invalid_selector` | 422 | not retryable |  | The selector is not valid CSS, or matches no single visible element. |
 | `busy` | 429 | retryable | `scope`, `retryAfterMs` | Too many requests are waiting. |
 | `upload_busy` | 429 | retryable |  | Another file transfer is in progress. |
 | `operation_failed` | 500 | not retryable |  | The browser could not complete the operation. |
