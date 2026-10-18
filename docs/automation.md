@@ -326,7 +326,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_field` | 400 | not retryable | `field`, `expected`, `index` | A field has the wrong kind or is out of range. |
 | `invalid_target` | 400 | not retryable |  | The action needs exactly one of ref or selector, or cannot use the target it got. |
 | `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
-| `invalid_key` | 400 | not retryable |  | The key is not one press supports. |
+| `invalid_key` | 400 | not retryable | `suggestion`, `forms` | The key is not a name, character or chord Kamapathy accepts. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
 | `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
@@ -335,6 +335,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
+| `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |

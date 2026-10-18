@@ -242,6 +242,7 @@ describe("API schema", () => {
       ...Object.values(ERRORS).map((item) => item.since),
     ];
     expect(Math.max(...since)).toBe(API_LEVEL);
+    expect(API_LEVEL).toBe(4);
     expect(Math.min(...since)).toBe(1);
   });
 
@@ -269,6 +270,11 @@ describe("API schema", () => {
     });
     expect(ERRORS.stale_ref.status).toBe(409);
     expect(ERRORS.element_obscured.status).toBe(409);
+    expect(ERRORS.clipboard_blocked).toMatchObject({
+      status: 403,
+      transient: false,
+      since: 4,
+    });
     for (const code of [
       "not_connected",
       "timeout",
