@@ -1,6 +1,6 @@
 # Kamapathy API reference
 
-Client 0.2.0, API level 2. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
+Client 0.2.0, API level 3. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
 
 ## Globals
 
@@ -609,6 +609,8 @@ Show the commands, or help on one
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `not_pdf` | 409 | not retryable | `contentType` | The tab is not showing a PDF. |
+| `pdf_not_refetchable` | 409 | not retryable | `reason` | The PDF came from a form submission, or from a scheme Kamapathy cannot read again. |
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |
@@ -627,6 +629,11 @@ Show the commands, or help on one
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
 | `invalid_selector` | 422 | not retryable |  | The selector is not valid CSS, or matches no single visible element. |
+| `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |
+| `pdf_locked` | 422 | not retryable |  | The PDF needs a password. |
+| `pdf_unreadable` | 422 | not retryable |  | The bytes are not a PDF Kamapathy can read, or reading them failed. |
+| `pdf_fetch_failed` | 422 | retryable when httpStatus is absent | `httpStatus` | Reading the PDF again failed. |
+| `page_out_of_range` | 422 | not retryable | `pageCount` | The first page asked for is past the last page. |
 | `busy` | 429 | retryable | `scope`, `retryAfterMs` | Too many requests are waiting. |
 | `upload_busy` | 429 | retryable |  | Another file transfer is in progress. |
 | `operation_failed` | 500 | not retryable |  | The browser could not complete the operation. |
@@ -635,6 +642,7 @@ Show the commands, or help on one
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
+| `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
