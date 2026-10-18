@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PageOperation } from "../../automation-dom";
+import type { PageStateOperation } from "../dom/page-state";
 import {
   CdpTimeoutError,
   ContextLostError,
@@ -470,7 +471,7 @@ export class TabSession {
   // world, on the session that hosts the frame.
   async evaluateInFrame(
     frameId: string,
-    op: PageOperation,
+    op: PageOperation | PageStateOperation,
     payload: object,
     step: Step & { namespace: string; timeoutMs?: number },
   ): Promise<Record<string, unknown>> {

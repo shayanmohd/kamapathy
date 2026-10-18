@@ -2,6 +2,7 @@ import type { WebContents } from "electron";
 import { ERRORS } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
+import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import { allocateRefs } from "./refs";
@@ -73,7 +74,7 @@ export interface Actions {
   evaluatePage(
     id: string,
     session: TabSession,
-    operation: PageOperation,
+    operation: PageOperation | PageStateOperation,
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
@@ -173,7 +174,7 @@ export function createActions(deps: {
   const evaluatePage = async (
     id: string,
     session: TabSession,
-    operation: PageOperation,
+    operation: PageOperation | PageStateOperation,
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
