@@ -22,7 +22,7 @@ import {
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { KamapathyError, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
-import { httpTimeout, queueNotice } from "../skills/kamapathy/scripts/lib/request.mjs";
+import { httpTimeout, queueNotice, takeNotices } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
@@ -2468,5 +2468,334 @@ describe("client errors and timeouts", () => {
     expect(httpTimeout(undefined, route("POST /tabs/:id/click"))).toBe(45000);
     expect(httpTimeout(undefined, route("POST /tabs/:id/actions"))).toBe(180000);
     expect(httpTimeout(undefined, undefined)).toBe(45000);
+  });
+});
+
+describe("updates", () => {
+  const level3 = { status: "ok", version: "0.2.0", apiLevel: 3 };
+  const INSTALLER = "Kamapathy-0.3.0-mac-arm64.dmg";
+  const latest = {
+    version: "0.3.0",
+    publishedAt: 1760000000000,
+    url: "https://github.com/shayanmohd/kamapathy/releases/tag/v0.3.0",
+    installer: {
+      name: INSTALLER,
+      size: 94371840,
+      url: `https://github.com/shayanmohd/kamapathy/releases/download/v0.3.0/${INSTALLER}`,
+      sha256: "a".repeat(64),
+    },
+    sums: `${"a".repeat(64)}  ${INSTALLER}\n`,
+  };
+  const installer = {
+    path: `/Users/avery/Library/Application Support/Kamapathy/updates/0.3.0/${INSTALLER}`,
+    sha256: "a".repeat(64),
+  };
+  const state = (extra) => ({
+    version: "0.2.0",
+    checks: true,
+    kind: "mac-arm64",
+    checkedAt: 1760000000000,
+    ...extra,
+  });
+  const available = state({ state: "available", latest });
+  const downloading = state({ state: "downloading", latest });
+  const ready = state({ state: "ready", latest, installer });
+  const SETTINGS_STEP =
+    "Next: when your task is done, ask the person to choose Install in Kamapathy's Settings, under Updates. Kamapathy quits to install, which closes agent spaces.";
+  const NOTICE =
+    "notice: update_available: Kamapathy 0.3.0 is out (this is 0.2.0). Finish this task first, then ask the person before you run kamapathy upgrade. Read the Kamapathy skill again after the update.\n";
+  // The update routes, answered from a script: each GET /update takes the next
+  // polled status, so a test proves how many polls ran.
+  function updateApi({ check, download, polls = [], routes = {} }) {
+    const requests = [];
+    const answer = (entry) => {
+      if (!entry) throw new Error("unexpected update request");
+      return Response.json(entry.body, { status: entry.status ?? 200 });
+    };
+    const fetch = vi.fn(async (url, options = {}) => {
+      const method = options.method || "GET";
+      const key = `${method} ${url.pathname}`;
+      requests.push(key);
+      if (key === "POST /update/check") return answer(check);
+      if (key === "POST /update/download") return answer(download);
+      if (key === "GET /update") return answer(polls.shift());
+      if (routes[key]) return Response.json(routes[key]);
+      return Response.json(
+        { error: { code: "route_not_found", message: `No route ${url.pathname}` } },
+        { status: 404 },
+      );
+    });
+    return { fetch, requests };
+  }
+  // The client as an agent runs it: its own process, over the profile's socket.
+  async function cli(args, profileEnv) {
+    const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", ...args], {
+      env: { ...process.env, ...profileEnv },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const status = await new Promise((done) => child.once("close", done));
+    return { status, stdout, stderr };
+  }
+
+  it("upgrade waits for a verified installer and prints its path and next step", async () => {
+    const api = updateApi({
+      check: { body: available },
+      download: { status: 202, body: downloading },
+      polls: [{ body: downloading }, { body: downloading }, { body: ready }],
+    });
+    const stdout = sink();
+    const stderr = sink();
+    expect(await main(["upgrade"], { env, fetch: api.fetch, health: level3, stdout, stderr })).toBe(0);
+    expect(stdout.text()).toBe(
+      [
+        "Kamapathy 0.3.0 is downloaded and checked (this is 0.2.0).",
+        `Installer: ${installer.path}`,
+        SETTINGS_STEP,
+        "Read the Kamapathy skill again once the new version runs.",
+        "",
+      ].join("\n"),
+    );
+    expect(stderr.text()).toBe(`Downloading ${INSTALLER} (94 MB)...\n`);
+    expect(api.requests).toEqual([
+      "POST /update/check",
+      "POST /update/download",
+      "GET /update",
+      "GET /update",
+      "GET /update",
+    ]);
+    // --json prints the status the command ends with.
+    const json = sink();
+    const jsonApi = updateApi({ check: { body: ready }, download: { body: ready } });
+    expect(
+      await main(["upgrade", "--json"], { env, fetch: jsonApi.fetch, health: level3, stdout: json, stderr: sink() }),
+    ).toBe(0);
+    expect(JSON.parse(json.text())).toEqual(ready);
+    // Each install kind names the step the person takes.
+    const steps = {
+      "mac-x64": SETTINGS_STEP,
+      "windows-setup": SETTINGS_STEP,
+      "windows-portable":
+        "Next: when your task is done, ask the person to replace their copy of Kamapathy with this file.",
+      "linux-appimage":
+        "Next: when your task is done, ask the person to replace their copy of Kamapathy with this file.",
+      "linux-deb":
+        "Next: when your task is done, ask the person to install it from Kamapathy's Settings, under Updates, or with sudo apt install.",
+    };
+    for (const [kind, step] of Object.entries(steps)) {
+      const body = { ...ready, kind };
+      const kindApi = updateApi({ check: { body }, download: { body } });
+      const out = sink();
+      expect(
+        await main(["upgrade"], { env, fetch: kindApi.fetch, health: level3, stdout: out, stderr: sink() }),
+        kind,
+      ).toBe(0);
+      expect(out.text().split("\n")[2], kind).toBe(step);
+    }
+    // A failure the status carries has no HTTP status of its own.
+    const failedApi = updateApi({
+      check: { body: available },
+      download: { status: 202, body: downloading },
+      polls: [
+        {
+          body: state({
+            state: "available",
+            latest,
+            error: {
+              code: "update_verify_failed",
+              message: "The downloaded installer did not match its checksum, so it was deleted.",
+              reason: "sums_mismatch",
+              retryable: false,
+              file: INSTALLER,
+            },
+          }),
+        },
+      ],
+    });
+    const failed = sink();
+    expect(
+      await main(["upgrade"], { env, fetch: failedApi.fetch, health: level3, stdout: sink(), stderr: failed }),
+    ).toBe(1);
+    expect(failed.text()).toBe(
+      [
+        `Downloading ${INSTALLER} (94 MB)...`,
+        "Kamapathy: update_verify_failed: The downloaded installer did not match its checksum, so it was deleted.",
+        "",
+      ].join("\n"),
+    );
+    const refusedApi = updateApi({
+      check: {
+        status: 409,
+        body: {
+          error: {
+            code: "update_unsupported",
+            message: "This copy runs from source. Pull the latest code to update it.",
+            reason: "source",
+            platform: "darwin",
+            arch: "arm64",
+          },
+        },
+      },
+    });
+    const refused = sink();
+    expect(
+      await main(["upgrade"], { env, fetch: refusedApi.fetch, health: level3, stdout: sink(), stderr: refused }),
+    ).toBe(1);
+    expect(refused.text()).toBe(
+      "Kamapathy: 409 update_unsupported: This copy runs from source. Pull the latest code to update it.\n",
+    );
+  }, 30000);
+
+  it("upgrade --check and --timeout 0 do not wait", async () => {
+    const api = updateApi({ check: { body: available } });
+    const stdout = sink();
+    const stderr = sink();
+    expect(
+      await main(["upgrade", "--check"], { env, fetch: api.fetch, health: level3, stdout, stderr }),
+    ).toBe(0);
+    expect(stdout.text()).toBe(
+      "Kamapathy 0.3.0 is available (this is 0.2.0). Run kamapathy upgrade, with the person's approval, to download it.\n",
+    );
+    expect(stderr.text()).toBe("");
+    expect(api.requests).toEqual(["POST /update/check"]);
+    const current = updateApi({ check: { body: state({ state: "current" }) } });
+    const up = sink();
+    expect(
+      await main(["upgrade", "--check"], { env, fetch: current.fetch, health: level3, stdout: up, stderr: sink() }),
+    ).toBe(0);
+    expect(up.text()).toBe("Kamapathy 0.2.0 is up to date.\n");
+    expect(current.requests).toEqual(["POST /update/check"]);
+    // --timeout 0 returns as soon as the download is under way.
+    const zero = updateApi({ check: { body: available }, download: { status: 202, body: downloading } });
+    const started = sink();
+    expect(
+      await main(["upgrade", "--timeout", "0"], { env, fetch: zero.fetch, health: level3, stdout: started, stderr: sink() }),
+    ).toBe(0);
+    expect(started.text()).toBe(
+      "Kamapathy is downloading 0.3.0. Run kamapathy upgrade again to wait for it.\n",
+    );
+    expect(zero.requests).toEqual(["POST /update/check", "POST /update/download"]);
+    const unused = vi.fn();
+    for (const value of ["1800001", "x"]) {
+      const bad = sink();
+      expect(
+        await main(["upgrade", "--timeout", value], { env, fetch: unused, health: level3, stdout: sink(), stderr: bad }),
+        value,
+      ).toBe(1);
+      expect(bad.text()).toBe("Kamapathy: --timeout must be an integer from 0 to 1800000.\n");
+    }
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("upgrade and other commands print no update notice", async () => {
+    const { paths, env: profileEnv } = await profile();
+    await fakeKamapathy(paths, {
+      handler: (request, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify(
+            request.url === "/health"
+              ? { status: "ok", version: "0.2.0", apiLevel: 3, update: { version: "0.3.0", state: "available" } }
+              : request.url === "/spaces"
+                ? { spaces: [] }
+                : request.url === "/update/check"
+                  ? state({ state: "current" })
+                  : {
+                      tabId: "tab-1",
+                      url: "https://example.test/",
+                      title: "Example",
+                      text: "Hello",
+                      interactables: [],
+                      truncated: false,
+                    },
+          ),
+        );
+      },
+    });
+    for (const args of [["spaces"], ["snapshot", "tab-1"], ["upgrade", "--check"]]) {
+      const { status, stderr } = await cli(args, profileEnv);
+      expect([args.join(" "), status, stderr]).toEqual([args.join(" "), 0, ""]);
+    }
+    // connect() without a session queues nothing, so no command but health does.
+    takeNotices();
+    const client = await connect({ env: profileEnv });
+    await client.spaces();
+    expect(takeNotices()).toEqual([]);
+  }, 30000);
+
+  it("health and run print one notice: update_available line through session.notice and keep the exit status", async () => {
+    const { paths, env: profileEnv } = await profile();
+    let update = { version: "0.3.0", state: "available" };
+    await fakeKamapathy(paths, {
+      handler: (request, response) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify(
+            request.url === "/health"
+              ? { status: "ok", version: "0.2.0", apiLevel: 3, ...(update ? { update } : {}) }
+              : { spaces: [] },
+          ),
+        );
+      },
+    });
+    expect(await cli(["health"], profileEnv)).toEqual({
+      status: 0,
+      stdout: "ok Kamapathy 0.2.0\n",
+      stderr: NOTICE,
+    });
+    expect(
+      await cli(["run", "-e", 'process.stdout.write("from the script\\n"); await spaces();'], profileEnv),
+    ).toEqual({ status: 0, stdout: "from the script\n", stderr: NOTICE });
+    update = { version: "0.3.0", state: "ready" };
+    expect((await cli(["health"], profileEnv)).stderr).toBe(
+      "notice: update_ready: Kamapathy 0.3.0 is downloaded (this is 0.2.0). Finish this task first, then tell the person they can install it from Settings, under Updates. Read the Kamapathy skill again after the update.\n",
+    );
+    update = null;
+    expect((await cli(["health"], profileEnv)).stderr).toBe("");
+    update = { version: "0.3", state: "available" };
+    expect((await cli(["health"], profileEnv)).stderr).toBe("");
+  }, 40000);
+
+  it("the REPL prints the update notice before the prompt after its first call", async () => {
+    const fetch = vi.fn(async (url) =>
+      url.pathname === "/spaces"
+        ? Response.json({ spaces: [] })
+        : Response.json({ error: { code: "route_not_found", message: "no route" } }, { status: 404 }),
+    );
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let text = "";
+    output.on("data", (chunk) => (text += chunk));
+    const ended = runCli(["repl"], {
+      env,
+      fetch,
+      health: { ...level3, update: { version: "0.3.0", state: "available" } },
+      stdin: input,
+      stdout: output,
+      terminal: true,
+    });
+    await expect.poll(() => text).toContain("Kamapathy scripting session.");
+    expect(text).not.toContain("notice:");
+    input.write("await spaces()\n");
+    await expect.poll(() => text).toContain(NOTICE.trimEnd());
+    input.write("1 + 1\n");
+    await expect.poll(() => text).toContain("2");
+    expect(text.split("notice: update_available").length).toBe(2);
+    input.write(".exit\n");
+    expect(await ended).toBe(0);
+  }, 20000);
+
+  it("never passes update test variables to a started Kamapathy", () => {
+    expect(
+      launchEnvironment({
+        KAMAPATHY_UPDATE_FEED: "http://127.0.0.1:50321",
+        KAMAPATHY_UPDATE_KIND: "linux-appimage",
+        ELECTRON_RUN_AS_NODE: "1",
+        KAMAPATHY_USER_DATA: "/profile",
+        PATH: "/bin",
+      }),
+    ).toEqual({ KAMAPATHY_USER_DATA: "/profile", PATH: "/bin" });
   });
 });

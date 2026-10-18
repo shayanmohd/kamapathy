@@ -4,6 +4,7 @@
 // arguments against the schema before anything is sent.
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { setTimeout as pause } from "node:timers/promises";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatSnapshot } from "./lib/format.mjs";
 import { readUploadFiles, target, uploadRef } from "./lib/input.mjs";
@@ -83,6 +84,25 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
  * @property {number} [maxControls]
  */
 /**
+ * @typedef {object} UpdateRelease The release an update check found.
+ * @property {string} version
+ * @property {number} publishedAt
+ * @property {string} url
+ * @property {{ name: string, size: number, url: string, sha256?: string }} installer
+ */
+/**
+ * @typedef {object} UpdateStatus Kamapathy's update status.
+ * @property {string} version The running Kamapathy's version.
+ * @property {boolean} checks Whether Kamapathy checks for updates daily.
+ * @property {"mac-arm64" | "mac-x64" | "windows-setup" | "windows-portable" | "linux-appimage" | "linux-deb" | "source" | "other"} kind
+ * @property {"unchecked" | "current" | "available" | "downloading" | "ready" | "unsupported"} state
+ * @property {number} [checkedAt] When the last check finished.
+ * @property {UpdateRelease} [latest]
+ * @property {{ receivedBytes: number, totalBytes: number }} [progress]
+ * @property {{ path: string, sha256: string }} [installer] The file the person installs.
+ * @property {{ code: string, message: string, reason?: string, retryable?: boolean, httpStatus?: number, file?: string }} [error]
+ */
+/**
  * @typedef {object} BatchResult
  * @property {true} ok
  * @property {{ index: number, type: string, result: object }[]} results
@@ -100,6 +120,35 @@ const PAGE_FIELDS = [
   "url",
   "title",
 ];
+
+const DOWNLOAD_TIMEOUT =
+  "The download is still running in Kamapathy. Run kamapathy upgrade again to wait for it.";
+
+// The pause between download polls, which the session's signal cuts short.
+async function sleep(ms, signal) {
+  try {
+    await pause(ms, undefined, { signal });
+  } catch {
+    const reason = signal.reason;
+    throw new KamapathyError(
+      reason?.code ?? "interrupted",
+      reason?.message ?? "The call was interrupted.",
+    );
+  }
+}
+
+// A download that stopped: the status carries the failure instead of an HTTP
+// status, so the client raises it.
+function stopped(status) {
+  const error = status.error;
+  if (!error || ["downloading", "ready"].includes(status.state)) return;
+  throw new KamapathyError(error.code, error.message, {
+    reason: error.reason,
+    retryable: error.retryable,
+    httpStatus: error.httpStatus,
+    file: error.file,
+  });
+}
 
 // A synchronous method's check, against the app's level when it is known.
 function checkNow(session, name, args) {
@@ -582,7 +631,8 @@ export class Client {
   }
   /**
    * The running Kamapathy's version and API level, once it was found.
-   * @returns {{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string } | null}
+   * `update` is present while a newer version waits.
+   * @returns {{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string, update?: { version: string, state: "available" | "downloading" | "ready" } } | null}
    */
   get app() {
     return this.#session.app;
@@ -699,6 +749,58 @@ export class Client {
       return new Space(this.#session, found);
     });
   }
+  /**
+   * Kamapathy's update status. Only the person installs an update.
+   * @returns {Promise<UpdateStatus>}
+   */
+  updateStatus() {
+    return this.#call("updateStatus", [], () =>
+      this.#session.request("/update", { budgetMs: 0 }),
+    );
+  }
+  /**
+   * Asks Kamapathy to check GitHub Releases for a newer version; a check
+   * under 60 s old answers from its result.
+   * @returns {Promise<UpdateStatus>}
+   */
+  checkForUpdates() {
+    return this.#call("checkForUpdates", [], () =>
+      this.#session.request("/update/check", {
+        method: "POST",
+        body: {},
+        budgetMs: 15000,
+      }),
+    );
+  }
+  /**
+   * Starts or joins the download of this computer's installer and waits for
+   * it, then leaves installing to the person.
+   * @param {{ timeout?: number, interval?: number }} [options] `timeout` is
+   * 0 to 1800000, 600000 by default, and 0 returns once the download is under
+   * way; `interval` is how often the status is read, 250 to 10000, 1000 by
+   * default.
+   * @returns {Promise<UpdateStatus>}
+   */
+  downloadUpdate(options = {}) {
+    return this.#call("downloadUpdate", [options], async () => {
+      const { timeout = 600000, interval = 1000 } = options;
+      const deadline = Date.now() + timeout;
+      let status = await this.#session.request("/update/download", {
+        method: "POST",
+        body: {},
+        budgetMs: 15000,
+      });
+      for (;;) {
+        stopped(status);
+        if (["ready", "current"].includes(status.state) || timeout === 0)
+          return status;
+        const left = deadline - Date.now();
+        if (left <= 0) throw new KamapathyError("timeout", DOWNLOAD_TIMEOUT);
+        await sleep(Math.min(interval, left), this.#session.signal);
+        status = await this.updateStatus();
+      }
+    });
+  }
 }
 
 /**
@@ -715,6 +817,8 @@ export async function connect({ env, lazy = false, connect, fetch, health, sessi
   const current =
     session ??
     new Session({ env: env || process.env, fetch, connect, health, lazy });
+  // run and the REPL pass their session in, and they announce an update.
+  if (session) session.announceUpdate = true;
   if (!lazy) await current.ready();
   return new Client(current);
 }

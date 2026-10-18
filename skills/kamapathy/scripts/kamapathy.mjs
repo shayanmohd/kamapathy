@@ -33,6 +33,7 @@ import {
 } from "./help.mjs";
 import { startRepl } from "./lib/repl.mjs";
 import { runScript } from "./lib/run.mjs";
+import { megabytes, updateNotice, upgradeLines } from "./lib/updates.mjs";
 import {
   ensureWorkspace,
   prepareWorkspace,
@@ -42,6 +43,7 @@ import {
   API_LEVEL,
   checkBody,
   CLIENT_VERSION,
+  ERRORS,
   findCommand,
   matchRoute,
   outdated,
@@ -49,6 +51,7 @@ import {
 
 export { formatResult, formatSnapshot } from "./lib/format.mjs";
 export { readUploadFiles, target, uploadRef } from "./lib/input.mjs";
+export { updateNotice } from "./lib/updates.mjs";
 export {
   agentPaths,
   checkSocket,
@@ -127,6 +130,64 @@ export const PARSERS = {
     return 0;
   },
   health: () => ({ path: "/health" }),
+  upgrade: async (args, options) => {
+    const stdout = options.stdout || process.stdout;
+    const stderr = options.stderr || process.stderr;
+    let checkOnly = false;
+    let timeout;
+    for (let index = 0; index < args.length; index++)
+      if (args[index] === "--check") checkOnly = true;
+      else if (args[index] === "--timeout")
+        timeout = bounded(args[++index], "--timeout", 0, 1800000);
+      else
+        throw new Error(`Unknown option: ${args[index]}. Run help for usage.`);
+    const client = await connect({
+      env: options.env,
+      fetch: options.fetch,
+      connect: options.connect,
+      health: options.health,
+    });
+    try {
+      let status = await client.checkForUpdates();
+      if (!checkOnly) {
+        const installer = status.latest?.installer;
+        // A download is about to start or to be joined.
+        if (
+          ["available", "downloading"].includes(status.state) &&
+          typeof installer?.name === "string" &&
+          typeof installer?.size === "number"
+        )
+          stderr.write(
+            `Downloading ${line(installer.name)} (${megabytes(installer.size)} MB)...\n`,
+          );
+        status = await client.downloadUpdate(
+          timeout === undefined ? {} : { timeout },
+        );
+      }
+      stdout.write(
+        `${options.json ? JSON.stringify(status) : upgradeLines(status).join("\n")}\n`,
+      );
+      return 0;
+    } catch (error) {
+      // A download or checksum failure has no HTTP status of its own; every
+      // other error prints as any other command's does.
+      if (
+        !(error instanceof KamapathyError) ||
+        error.status !== undefined ||
+        !ERRORS[error.code]?.carriedIn
+      )
+        throw error;
+      const [, ...rest] = formatApiError(error);
+      stderr.write(
+        [
+          `Kamapathy: ${line(error.code)}: ${line(error.message)}`,
+          ...rest,
+          "",
+        ].join("\n"),
+      );
+      return 1;
+    }
+  },
   spaces: () => ({ path: "/spaces" }),
   "space create": (args, { env }) => {
     const isolated = args.includes("--isolated");
@@ -479,6 +540,11 @@ export async function runCli(argv, options = {}) {
     health: options.health,
   });
   await session.ready();
+  // The health command tells the agent about a waiting update.
+  if (name === "health") {
+    const notice = updateNotice(session.app);
+    if (notice) session.notice(notice.key, notice.text);
+  }
   const { since } = findCommand(name);
   if (session.app && since > session.app.apiLevel) {
     const problem = outdated(name, since, session.app);

@@ -68,7 +68,7 @@ Returns `void`. Since API level 2.
 
 The running Kamapathy's version and API level, or null until the client has found it.
 
-Returns `{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string } | null`. Since API level 1.
+Returns `{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string, update?: { version: string, state: "available" | "downloading" | "ready" } } | null`. Since API level 1.
 
 ### `kamapathy.createSpace(name, options?)`
 
@@ -115,6 +115,29 @@ Asks the person to let an agent use one of their spaces and waits for their answ
 | `timeout` | milliseconds from 5000 to 600000 |  | How long to wait for the answer, 600000 by default. |
 
 Returns `Promise<Space>`. Route `POST /space-requests`. Errors: `request_declined`, `request_timeout`, `busy`, `invalid_field`, `automation_stopped`. Since API level 2.
+
+### `kamapathy.updateStatus()`
+
+Reads Kamapathy's update status.
+
+Returns `Promise<UpdateStatus>`. Route `GET /update`. Errors: `update_unsupported`, `automation_stopped`. Since API level 3.
+
+### `kamapathy.checkForUpdates()`
+
+Checks GitHub Releases for a newer Kamapathy.
+
+Returns `Promise<UpdateStatus>`. Route `POST /update/check`. Errors: `update_unsupported`, `update_check_failed`. Since API level 3.
+
+### `kamapathy.downloadUpdate(options?)`
+
+Downloads this computer's installer and waits for it; only the person installs it.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 0 to 1800000 | `600000` | How long to wait for the download, 600000 by default; 0 returns once it starts. |
+| `interval` | milliseconds from 250 to 10000 | `1000` | How often the status is read, 1000 by default. |
+
+Returns `Promise<UpdateStatus>`. Route `POST /update/download`. Errors: `update_unsupported`, `update_check_failed`, `update_download_failed`, `update_verify_failed`, `timeout`. Since API level 3.
 
 ## Space
 
@@ -419,6 +442,10 @@ Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_contro
 ### `health`
 
 Check the connection
+
+### `upgrade [--check] [--timeout <ms>]`
+
+Check for a newer Kamapathy and download its installer for the person to install
 
 ### `spaces`
 

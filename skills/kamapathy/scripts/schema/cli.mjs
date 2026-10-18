@@ -28,6 +28,27 @@ export const COMMANDS = [
   command("health", "Connection", "health", "Check the connection", {
     route: "GET /health",
   }),
+  command(
+    "upgrade",
+    "Connection",
+    "upgrade [--check] [--timeout <ms>]",
+    "Check for a newer Kamapathy and download its installer for the person to install",
+    {
+      flags: [
+        { name: "--check", description: "Only check; download nothing." },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long to wait for the download, 0 to 1800000, 600000 by default; 0 returns once it starts.",
+        },
+      ],
+      route: "POST /update/download",
+      script: "kamapathy.downloadUpdate",
+      examples: ["upgrade --check", "upgrade --timeout 0"],
+      since: 3,
+    },
+  ),
   command("spaces", "Spaces", "spaces", "List accessible spaces", {
     route: "GET /spaces",
     script: "spaces",

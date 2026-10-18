@@ -10,6 +10,7 @@ import {
 } from "../schema/index.mjs";
 import { hardStopCause, KamapathyError } from "./errors.mjs";
 import { discover, IdentityError, socketFetch } from "./transport.mjs";
+import { isVersion, updateNotice } from "./updates.mjs";
 
 export const REQUEST_TIMEOUT_MS = 45000;
 export const BATCH_TIMEOUT_MS = 180000;
@@ -60,6 +61,15 @@ const lost = (error) =>
   ["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes(error?.code) ||
   String(error?.code).startsWith("HPE_");
 
+// The /health body's update, while a reminder applies.
+const updateOf = (health) => {
+  const update = health.update;
+  return isVersion(update?.version) &&
+    ["available", "downloading", "ready"].includes(update?.state)
+    ? { update: { version: update.version, state: update.state } }
+    : {};
+};
+
 const ownFields = (error) =>
   Object.fromEntries(
     Object.entries(error).filter(([key]) => !["name", "stack"].includes(key)),
@@ -71,10 +81,12 @@ export class Session {
   #controller = new AbortController();
   /**
    * @param {{ env?: NodeJS.ProcessEnv, fetch?: Function, connect?: object,
-   * health?: object, lazy?: boolean, run?: boolean, envFileNames?: string[] }}
+   * health?: object, lazy?: boolean, run?: boolean, envFileNames?: string[],
+   * announceUpdate?: boolean }}
    * [options] `fetch` replaces the socket, and with it discovery: the app is
    * then the `health` body given, or level 1. `envFileNames` are left out of
-   * the environment Kamapathy starts with.
+   * the environment Kamapathy starts with. `announceUpdate` queues the update
+   * notice once Kamapathy is found, as run and the REPL do.
    */
   constructor({
     env = process.env,
@@ -84,8 +96,10 @@ export class Session {
     lazy = false,
     run = false,
     envFileNames = [],
+    announceUpdate = false,
   } = {}) {
     this.env = env;
+    this.announceUpdate = announceUpdate;
     this.envFileNames = envFileNames;
     this.lazy = lazy;
     this.run = run;
@@ -104,7 +118,7 @@ export class Session {
   get signal() {
     return this.#controller.signal;
   }
-  /** @returns {{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string } | null} */
+  /** @returns {{ version?: string, apiLevel: number, electron?: string, chromium?: string, node?: string, update?: { version: string, state: string } } | null} */
   get app() {
     if (!this.injected && !this.connection) return null;
     const health = this.health ?? {};
@@ -117,6 +131,7 @@ export class Session {
       ...(versions.electron ? { electron: versions.electron } : {}),
       ...(versions.chromium ? { chromium: versions.chromium } : {}),
       ...(versions.node ? { node: versions.node } : {}),
+      ...updateOf(health),
     };
   }
   // After a run's hard stop, later calls throw a copy and send nothing.
@@ -162,6 +177,10 @@ export class Session {
           ? `This skill copy (${CLIENT_VERSION}) is older than Kamapathy${app.version ? ` ${app.version}` : ""}. Read ${this.health.skill.path}/SKILL.md for the current API.`
           : "Update this skill copy, then read its SKILL.md again.",
       );
+    if (this.announceUpdate) {
+      const notice = updateNotice(app);
+      if (notice) this.notice(notice.key, notice.text);
+    }
   }
   async #find() {
     const allowLaunch = !this.launched && this.env.KAMAPATHY_NO_LAUNCH !== "1";
