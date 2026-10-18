@@ -13,6 +13,7 @@ import { ExtensionChannel } from "./extensions/channel";
 import { chooseFolder, confirmAdd } from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
 import { ExtensionInstaller } from "./extensions/install";
+import { ExtensionPopups } from "./extensions/popup";
 import { ExtensionUpdates } from "./extensions/updates";
 import {
   STORE_PARTITION,
@@ -68,6 +69,8 @@ let extensionChannel: ExtensionChannel | null = null;
 // The spaces and tabs extensions see as windows and tabs. It binds to each
 // window's controller.
 let extensionBridge: ExtensionBridge | null = null;
+// The action popups and the windows extensions open for their own pages.
+let extensionPopups: ExtensionPopups | null = null;
 // Adds extensions the person asked for, one install at a time.
 let extensionInstaller: ExtensionInstaller | null = null;
 // The daily Chrome Web Store check, while the person leaves it on.
@@ -269,6 +272,7 @@ async function openWindow(): Promise<void> {
   const currentController = controller;
   const unbindBridge = extensionBridge?.bind(currentController);
   currentController.subscribe((next) => {
+    extensionPopups?.onState(next);
     extensionUpdates?.setEnabled(next.settings.extensionUpdates);
     if (host && next.settings.extensionDeveloperMode !== host.developerMode)
       void host.setDeveloperMode(next.settings.extensionDeveloperMode);
@@ -443,6 +447,7 @@ else {
       withdrawEndpoint(agent);
     } catch {}
     controller?.dispose();
+    extensionPopups?.dispose();
     void syncAutomation();
   });
   app.on("window-all-closed", () => {
@@ -521,6 +526,35 @@ else {
       host: extensionHost,
       channel: extensionChannel,
     });
+    const bridge = extensionBridge;
+    extensionPopups = new ExtensionPopups({
+      host: extensionHost,
+      window: () => window,
+      // A popup's web links become tabs in a space of the person's.
+      openLink: (url, from) => {
+        try {
+          bridge.openTab(
+            {
+              extensionId: from.extensionId,
+              partition: from.partition,
+              surface: "popup",
+            },
+            url,
+            {
+              windowId: from.spaceId
+                ? bridge.windowIdOf(from.spaceId)
+                : undefined,
+            },
+          );
+        } catch (error) {
+          console.error(
+            "An extension could not open a tab:",
+            error instanceof Error ? error.message : "Unknown error",
+          );
+        }
+      },
+    });
+    bridge.setPopups(extensionPopups);
     extensionInstaller = new ExtensionInstaller({
       host: extensionHost,
       // An in-memory session with no cookies, used by no tab.

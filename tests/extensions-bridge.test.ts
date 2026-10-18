@@ -9,6 +9,8 @@ import {
   tabObject,
   type BridgeTab,
   type BridgeWindow,
+  type ExtensionAction,
+  type ExtensionAnchor,
   type ExtensionEntry,
   type TabModel,
 } from "../shared/extensions";
@@ -28,6 +30,8 @@ import {
 } from "../electron/extensions/bridge";
 import type { ExtensionTabOptions } from "../electron/controller";
 import type { ExtensionHost, SurfaceInfo } from "../electron/extensions/host";
+import type { CheckedManifest } from "../electron/extensions/manifest";
+import type { ExtensionPopups } from "../electron/extensions/popup";
 import type {
   ApiHandler,
   Caller,
@@ -35,14 +39,33 @@ import type {
 } from "../electron/extensions/channel";
 import { extensionBridgeCopy } from "../src/copy";
 
-vi.mock("electron", () => ({
-  ipcMain: {
-    handle: vi.fn(),
-    removeHandler: vi.fn(),
-    on: vi.fn(),
-    removeListener: vi.fn(),
-  },
+// The icon sizes the fake nativeImage reports, by path or data URL.
+const { imageSizes } = vi.hoisted(() => ({
+  imageSizes: new Map<string, number>(),
 }));
+vi.mock("electron", () => {
+  const image = (source: string) => {
+    const size = imageSizes.get(source) ?? 0;
+    return {
+      isEmpty: () => size === 0,
+      getSize: () => ({ width: size, height: size }),
+      toDataURL: () =>
+        source.startsWith("data:") ? source : `data:image/png;base64,${source}`,
+    };
+  };
+  return {
+    ipcMain: {
+      handle: vi.fn(),
+      removeHandler: vi.fn(),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    nativeImage: {
+      createFromPath: vi.fn((path: string) => image(path)),
+      createFromDataURL: vi.fn((url: string) => image(url)),
+    },
+  };
+});
 
 // A distinct valid id per number: its hex digits as the letters a to p.
 function idAt(index: number): string {
@@ -406,8 +429,15 @@ class FakeHost {
     return this.surfaces.get(contents);
   }
   readonly options = new Map<string, string>();
-  manifestOf(id: string): { options?: string } {
-    return { options: this.options.get(id) };
+  readonly manifests = new Map<string, Partial<CheckedManifest>>();
+  manifestOf(id: string): Partial<CheckedManifest> {
+    return { options: this.options.get(id), ...this.manifests.get(id) };
+  }
+  nameOf(id: string): string | undefined {
+    return this.manifests.get(id)?.name;
+  }
+  folderOf(entry: ExtensionEntry): string {
+    return entry.path;
   }
   onEvent(listener: (event: unknown) => void): () => void {
     this.listeners.add(listener);
@@ -494,6 +524,22 @@ class FakeOpener implements ExtensionWindowOpener {
       ),
   );
 }
+
+// The popups the person's clicks reach (task 11), opener included.
+class FakePopups extends FakeOpener {
+  togglePopup = vi.fn(
+    (_request: {
+      extensionId: string;
+      partition: string;
+      spaceId: string;
+      url: string;
+      anchor: ExtensionAnchor;
+    }) => {},
+  );
+  closePopup = vi.fn();
+  shownPopup = vi.fn(() => undefined);
+}
+const ANCHOR: ExtensionAnchor = { x: 900, y: 40, width: 32, height: 32 };
 
 interface Setup {
   bridge: ExtensionBridge;
@@ -1763,5 +1809,435 @@ describe("extension tab and window changes", () => {
     await channel.run("windows", caller, "remove", [own.id]);
     expect(opener.closeWindow).toHaveBeenCalledWith(own.id);
     expect(opener.windows.map((item) => item.windowId)).toEqual([theirs.id]);
+  });
+});
+
+describe("extension action buttons and popups", () => {
+  it("action state per tab with manifest defaults, badges cut to 4 characters and icons over 128 px refused", async () => {
+    const first = tabAt("personal", "https://example.com/one", {
+      title: "One",
+    });
+    const second = tabAt("personal", "https://example.com/two", {
+      title: "Two",
+    });
+    const { bridge, controller, channel, host } = setUp(
+      [spaceAt("personal")],
+      [first, second],
+    );
+    const page = controller.load(first.id);
+    controller.load(second.id);
+    controller.show("personal", first.id);
+    host.manifests.set(ALL, {
+      name: "All tabs",
+      actionTitle: "Count the tabs",
+      popup: "popup.html",
+      actionIcons: {
+        16: "icons/16.png",
+        48: "icons/48.png",
+        256: "icons/256.png",
+      },
+      icons: { 128: "icons/128.png" },
+    });
+    imageSizes.set("/tmp/extension/icons/16.png", 16);
+    imageSizes.set("/tmp/extension/icons/48.png", 48);
+    imageSizes.set("/tmp/extension/icons/128.png", 128);
+    imageSizes.set("/tmp/extension/icons/256.png", 256);
+
+    // The manifest's defaults, with the largest action icon of 128 px or less.
+    expect(bridge.actionState(PERSONAL, ALL)).toEqual({
+      title: "Count the tabs",
+      icon: "data:image/png;base64,/tmp/extension/icons/48.png",
+      badge: "",
+      badgeColor: "#5f6368",
+      popup: `chrome-extension://${ALL}/popup.html`,
+      enabled: true,
+    });
+    // An extension with no action keys falls back to its name.
+    host.manifests.set(NONE, { name: "Nothing" });
+    expect(bridge.actionState(PERSONAL, NONE)).toMatchObject({
+      title: "Nothing",
+      popup: "",
+    });
+    expect(bridge.actionState(PERSONAL, NONE).icon).toBeUndefined();
+
+    const caller = callerFor(ALL, PERSONAL, "worker");
+    const firstId = bridge.numericId(first.id)!;
+    const secondId = bridge.numericId(second.id)!;
+    await channel.run("action", caller, "setTitle", [
+      { title: "On this tab", tabId: firstId },
+    ]);
+    await channel.run("action", caller, "setBadgeText", [
+      { text: "12345", tabId: firstId },
+    ]);
+    await channel.run("action", caller, "setBadgeBackgroundColor", [
+      { color: [255, 0, 0, 255], tabId: firstId },
+    ]);
+    await channel.run("action", caller, "setBadgeTextColor", [
+      { color: "#000000" },
+    ]);
+    await channel.run("action", caller, "setPopup", [
+      { popup: "other.html", tabId: firstId },
+    ]);
+    expect(bridge.actionState(PERSONAL, ALL, firstId)).toMatchObject({
+      title: "On this tab",
+      badge: "12345",
+      badgeColor: "#ff0000",
+      badgeTextColor: "#000000",
+      popup: `chrome-extension://${ALL}/other.html`,
+    });
+    // Another tab keeps the defaults, plus what was set for every tab.
+    expect(bridge.actionState(PERSONAL, ALL, secondId)).toMatchObject({
+      title: "Count the tabs",
+      badge: "",
+      badgeColor: "#5f6368",
+      badgeTextColor: "#000000",
+      popup: `chrome-extension://${ALL}/popup.html`,
+    });
+
+    // The getters read the tab's value, else the default.
+    const ask = (method: string, args: unknown[] = [{}]) =>
+      channel.run("action", caller, method, args);
+    expect(await ask("getTitle", [{ tabId: firstId }])).toBe("On this tab");
+    expect(await ask("getTitle")).toBe("Count the tabs");
+    expect(await ask("getBadgeText", [{ tabId: firstId }])).toBe("12345");
+    expect(await ask("getBadgeText")).toBe("");
+    expect(await ask("getBadgeBackgroundColor", [{ tabId: firstId }])).toEqual([
+      255, 0, 0, 255,
+    ]);
+    expect(await ask("getBadgeTextColor")).toEqual([0, 0, 0, 255]);
+    expect(await ask("getPopup", [{ tabId: secondId }])).toBe(
+      `chrome-extension://${ALL}/popup.html`,
+    );
+    expect(await ask("getUserSettings", [])).toEqual({ isOnToolbar: false });
+    expect(await ask("isEnabled", [firstId])).toBe(true);
+    await ask("disable", [firstId]);
+    expect(await ask("isEnabled", [firstId])).toBe(false);
+    expect(await ask("isEnabled", [secondId])).toBe(true);
+    await ask("enable", [firstId]);
+    expect(await ask("isEnabled", [firstId])).toBe(true);
+
+    // A tab's own values end when it commits another document.
+    page.emit("did-navigate");
+    expect(bridge.actionState(PERSONAL, ALL, firstId)).toMatchObject({
+      title: "Count the tabs",
+      badge: "",
+      badgeColor: "#5f6368",
+      popup: `chrome-extension://${ALL}/popup.html`,
+    });
+
+    // Icons come as PNG data URLs or paths inside the extension.
+    imageSizes.set("data:image/png;base64,small", 32);
+    imageSizes.set("data:image/png;base64,big", 129);
+    await channel.run("action", caller, "setIcon", [
+      { images: { "32": "data:image/png;base64,small" } },
+    ]);
+    expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
+      "data:image/png;base64,small",
+    );
+    await expect(
+      channel.run("action", caller, "setIcon", [
+        { images: { "129": "data:image/png;base64,big" } },
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.iconTooLarge);
+    await expect(
+      channel.run("action", caller, "setIcon", [{ path: "icons/256.png" }]),
+    ).rejects.toThrow(extensionBridgeCopy.iconTooLarge);
+    // The last icon it set stays.
+    expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
+      "data:image/png;base64,small",
+    );
+    await expect(
+      channel.run("action", caller, "setIcon", [{ path: "../other/48.png" }]),
+    ).rejects.toThrow(extensionBridgeCopy.invalid("action.setIcon"));
+    await channel.run("action", caller, "setIcon", [{ path: "icons/16.png" }]);
+    expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
+      "data:image/png;base64,/tmp/extension/icons/16.png",
+    );
+    // Nothing to set puts the manifest's icon back.
+    await channel.run("action", caller, "setIcon", [{}]);
+    expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
+      "data:image/png;base64,/tmp/extension/icons/48.png",
+    );
+
+    // A popup outside the extension is refused, and "" means none.
+    for (const popup of [
+      "https://example.com/popup.html",
+      `chrome-extension://${NONE}/popup.html`,
+    ])
+      await expect(
+        channel.run("action", caller, "setPopup", [{ popup }]),
+      ).rejects.toThrow(extensionBridgeCopy.cantOpen);
+    await channel.run("action", caller, "setPopup", [{ popup: "" }]);
+    expect(bridge.actionState(PERSONAL, ALL).popup).toBe("");
+  });
+
+  it("a click opens the popup or fires onClicked with the tab, and grants activeTab until the tab navigates", async () => {
+    const mine = tabAt("personal", "https://example.com/page", {
+      title: "Page",
+    });
+    const { bridge, controller, channel, host } = setUp(
+      [spaceAt("personal")],
+      [mine],
+    );
+    const contents = controller.load(mine.id);
+    controller.show("personal", mine.id);
+    const popups = new FakePopups();
+    bridge.setPopups(popups as unknown as ExtensionPopups);
+    host.manifests.set(ALL, { name: "All tabs", popup: "popup.html" });
+    host.manifests.set(NONE, { name: "Nothing" });
+
+    // With a popup, the click opens it and nothing else.
+    await bridge.click(ALL, ANCHOR);
+    expect(popups.togglePopup).toHaveBeenCalledWith({
+      extensionId: ALL,
+      partition: PERSONAL,
+      spaceId: "personal",
+      url: `chrome-extension://${ALL}/popup.html`,
+      anchor: ANCHOR,
+    });
+    expect(channel.take(ALL)).toEqual([]);
+    expect(bridge.access(PERSONAL, ALL).activeTabs.has(contents.id)).toBe(true);
+
+    // Without one, the worker hears onClicked with the tab it may now read.
+    await bridge.click(NONE, ANCHOR);
+    expect(popups.togglePopup).toHaveBeenCalledTimes(1);
+    const [clicked] = channel.take(NONE);
+    expect(clicked).toMatchObject({
+      partition: PERSONAL,
+      extensionId: NONE,
+      event: "action.onClicked",
+    });
+    expect(clicked.args[0]).toMatchObject({
+      id: contents.id,
+      url: "https://example.com/page",
+      title: "Page",
+      active: true,
+    });
+
+    // The grant ends when the tab loads another document.
+    contents.emit("did-navigate");
+    expect(bridge.access(PERSONAL, NONE).activeTabs.size).toBe(0);
+    expect(bridge.access(PERSONAL, ALL).activeTabs.size).toBe(0);
+
+    // A disabled button does nothing at all.
+    await channel.run(
+      "action",
+      callerFor(NONE, PERSONAL, "worker"),
+      "disable",
+      [contents.id],
+    );
+    channel.take();
+    await bridge.click(NONE, ANCHOR);
+    expect(channel.take(NONE)).toEqual([]);
+    expect(bridge.access(PERSONAL, NONE).activeTabs.size).toBe(0);
+    // An extension that runs in no session there is not clickable.
+    await bridge.click(idAt(9), ANCHOR);
+    expect(channel.take()).toEqual([]);
+    expect(popups.togglePopup).toHaveBeenCalledTimes(1);
+  });
+
+  it("openPopup works only while the window is focused and the shown space runs the extension", async () => {
+    const mine = tabAt("personal", "https://example.com/page");
+    const isolated = tabAt("isolated", "https://example.com/agent");
+    const apart = tabAt("apart", "https://example.com/apart");
+    const { bridge, controller, channel, host } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("isolated", {
+          kind: "agent",
+          owner: "human",
+          signIns: "separate",
+        }),
+        spaceAt("apart", { signIns: "separate" }),
+      ],
+      [mine, isolated, apart],
+    );
+    controller.load(mine.id);
+    controller.show("personal", mine.id);
+    const popups = new FakePopups();
+    bridge.setPopups(popups as unknown as ExtensionPopups);
+    host.manifests.set(ALL, { name: "All tabs", popup: "popup.html" });
+    host.manifests.set(NONE, { name: "Nothing" });
+    const caller = callerFor(ALL, PERSONAL, "worker");
+    const open = () => channel.run("action", caller, "openPopup", [{}]);
+
+    controller.fakeWindow.focused = false;
+    await expect(open()).rejects.toThrow(extensionBridgeCopy.notFocused);
+    controller.fakeWindow.focused = true;
+
+    // An isolated space runs no extension, and another session is not ours.
+    controller.show("isolated", isolated.id);
+    await expect(open()).rejects.toThrow(extensionBridgeCopy.noSpace);
+    controller.show("apart", apart.id);
+    await expect(open()).rejects.toThrow(extensionBridgeCopy.noSpace);
+    controller.show("personal", mine.id);
+
+    // An extension without a popup has nothing to open.
+    await expect(
+      channel.run("action", callerFor(NONE, PERSONAL, "worker"), "openPopup", [
+        {},
+      ]),
+    ).rejects.toThrow(extensionBridgeCopy.noPopup);
+
+    // Unpinned, it hangs under the puzzle button; pinned, under its own.
+    const puzzle: ExtensionAnchor = { x: 1100, y: 40, width: 32, height: 32 };
+    bridge.setAnchors({ [ALL]: ANCHOR }, puzzle);
+    await open();
+    expect(popups.togglePopup).toHaveBeenLastCalledWith(
+      expect.objectContaining({ extensionId: ALL, anchor: puzzle }),
+    );
+    host.entry(ALL)!.pinned = true;
+    await open();
+    expect(popups.togglePopup).toHaveBeenLastCalledWith(
+      expect.objectContaining({ extensionId: ALL, anchor: ANCHOR }),
+    );
+    // Without any anchor the popup still opens, at the toolbar's end.
+    bridge.setAnchors({}, null);
+    await open();
+    expect(popups.togglePopup).toHaveBeenCalledTimes(3);
+  });
+
+  it("buttons are disabled in isolated and agent-held spaces", async () => {
+    const mine = tabAt("personal", "https://example.com/page");
+    const isolated = tabAt("isolated", "https://example.com/agent");
+    const held = tabAt("held", "https://example.com/held");
+    const { bridge, controller, channel, host } = setUp(
+      [
+        spaceAt("personal"),
+        spaceAt("isolated", {
+          kind: "agent",
+          owner: "agent",
+          signIns: "separate",
+        }),
+        spaceAt("held", { access: "granted" }),
+      ],
+      [mine, isolated, held],
+    );
+    controller.load(mine.id);
+    controller.load(held.id);
+    controller.show("personal", mine.id);
+    const popups = new FakePopups();
+    bridge.setPopups(popups as unknown as ExtensionPopups);
+    for (const id of [ALL, HOSTS, NONE, EVERY])
+      host.manifests.set(id, { name: `Extension ${id.slice(0, 4)}` });
+    host.manifests.set(ALL, { name: "All tabs", popup: "popup.html" });
+
+    expect(bridge.toolbar(controller.state).disabled).toBeUndefined();
+
+    // An isolated space keeps every extension out, and shows defaults.
+    controller.show("isolated", isolated.id);
+    const isolatedBar = bridge.toolbar(controller.state);
+    expect(isolatedBar.disabled).toBe("isolated");
+    expect(isolatedBar.actions.map((action) => action.id)).toEqual([
+      ALL,
+      HOSTS,
+      NONE,
+      EVERY,
+    ]);
+    expect(isolatedBar.actions[0]).toMatchObject({
+      title: "All tabs",
+      badge: "",
+      enabled: true,
+    });
+    await bridge.click(ALL, ANCHOR);
+
+    // A space an agent holds is read-only for extensions.
+    controller.show("held", held.id);
+    expect(bridge.toolbar(controller.state).disabled).toBe("agent");
+    await bridge.click(ALL, ANCHOR);
+    expect(popups.togglePopup).not.toHaveBeenCalled();
+    expect(channel.take()).toEqual([]);
+
+    // Back in the person's own space the click lands.
+    controller.show("personal", mine.id);
+    await bridge.click(ALL, ANCHOR);
+    expect(popups.togglePopup).toHaveBeenCalledTimes(1);
+  });
+
+  it("the toolbar lists pinned extensions first, in pin order, with the shown tab's title, icon and badge", async () => {
+    const mine = tabAt("personal", "https://example.com/page");
+    const second = tabAt("personal", "https://example.com/second");
+    const apart = tabAt("work", "https://example.com/work");
+    const { bridge, controller, channel, host } = setUp(
+      [spaceAt("personal"), spaceAt("work", { signIns: "separate" })],
+      [mine, second, apart],
+    );
+    const contents = controller.load(mine.id);
+    controller.load(second.id);
+    controller.show("personal", mine.id);
+    host.manifests.set(ALL, {
+      name: "All tabs",
+      actionTitle: "Count the tabs",
+      actionIcons: { 48: "icons/48.png" },
+    });
+    host.manifests.set(HOSTS, { name: "One site" });
+    host.manifests.set(NONE, { name: "Nothing" });
+    host.manifests.set(EVERY, { name: "Every site" });
+    imageSizes.set("/tmp/extension/icons/48.png", 48);
+    // extensions.json holds them in this order: ALL, HOSTS, NONE, EVERY.
+    host.entry(NONE)!.pinned = true;
+    host.entry(ALL)!.pinned = true;
+
+    const changes: number[] = [];
+    const off = bridge.onToolbarChange(() => changes.push(1));
+    const bar = bridge.toolbar(controller.state);
+    expect(bar.disabled).toBeUndefined();
+    expect(bar.actions.map((action) => action.id)).toEqual([
+      ALL,
+      NONE,
+      HOSTS,
+      EVERY,
+    ]);
+    expect(bar.actions.map((action) => action.pinned)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+    expect(bar.actions[0]).toEqual<ExtensionAction>({
+      id: ALL,
+      name: "All tabs",
+      title: "Count the tabs",
+      icon: "data:image/png;base64,/tmp/extension/icons/48.png",
+      badge: "",
+      badgeColor: "#5f6368",
+      enabled: true,
+      pinned: true,
+    });
+
+    // The shown tab's own title and badge, cut to four characters.
+    const caller = callerFor(ALL, PERSONAL, "worker");
+    await channel.run("action", caller, "setBadgeText", [
+      { text: "12345", tabId: contents.id },
+    ]);
+    await channel.run("action", caller, "setTitle", [
+      { title: "On this tab", tabId: contents.id },
+    ]);
+    expect(changes).toHaveLength(2);
+    expect(bridge.toolbar(controller.state).actions[0]).toMatchObject({
+      badge: "1234",
+      title: "On this tab",
+    });
+    // Another tab of the same space has its own state.
+    controller.show("personal", second.id);
+    expect(bridge.toolbar(controller.state).actions[0]).toMatchObject({
+      badge: "",
+      title: "Count the tabs",
+    });
+
+    // An extension that is off has no button.
+    host.entry(HOSTS)!.enabled = false;
+    expect(
+      bridge.toolbar(controller.state).actions.map((action) => action.id),
+    ).toEqual([ALL, NONE, EVERY]);
+    // A space with its own sign-ins shows what runs in that session.
+    controller.show("work", apart.id);
+    expect(
+      bridge.toolbar(controller.state).actions.map((action) => action.id),
+    ).toEqual([ALL]);
+
+    off();
+    await channel.run("action", caller, "setBadgeText", [{ text: "7" }]);
+    expect(changes).toHaveLength(2);
   });
 });

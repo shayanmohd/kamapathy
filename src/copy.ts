@@ -227,4 +227,7 @@ export const extensionBridgeCopy = {
   cantClose: "This window can't be closed by an extension.",
   tooManyWindows: "This extension already has 4 windows open.",
   noOptions: "This extension has no options page.",
+  iconTooLarge: "Icons can be at most 128 pixels.",
+  notFocused: "Kamapathy's window isn't in front.",
+  noPopup: "This extension has no popup.",
 } as const;

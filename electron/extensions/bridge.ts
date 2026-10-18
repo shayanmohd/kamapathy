@@ -1,21 +1,29 @@
+import { resolve, sep } from "node:path";
+import { nativeImage } from "electron";
 import type { BrowserWindow, WebContents } from "electron";
 import {
   agentHeld,
+  BADGE_LIMIT,
+  cleanExtensionText,
   coversAllHosts,
   diffModels,
   eventFor,
   extensionIdOf,
+  NAME_LIMIT,
   NEW_TAB_URL,
   PLACEHOLDER_BASE,
   queryTabs,
   runsExtensions,
   tabObject,
+  TITLE_LIMIT,
   windowObject,
   WINDOW_ID_CURRENT,
   WINDOW_ID_NONE,
   type Access,
   type BridgeTab,
   type BridgeWindow,
+  type ExtensionAction,
+  type ExtensionAnchor,
   type ModelChange,
   type SessionModel,
   type TabModel,
@@ -40,6 +48,7 @@ import {
 } from "./channel";
 import type { ExtensionChannel } from "./channel";
 import type { ExtensionHost } from "./host";
+import type { ExtensionPopups } from "./popup";
 import type { ExtensionTabOptions } from "../controller";
 
 // What the bridges need from the window's controller.
@@ -73,6 +82,32 @@ export interface ExtensionWindowInfo {
   url: string;
   focused: boolean;
   bounds: { left: number; top: number; width: number; height: number };
+}
+// What one of an extension's buttons shows for one tab: the manifest's
+// defaults with whatever the extension set over them.
+export interface ActionState {
+  title: string;
+  icon?: string;
+  badge: string;
+  badgeColor: string;
+  badgeTextColor?: string;
+  popup: string;
+  enabled: boolean;
+}
+// The values an extension may set over the defaults, and where they are
+// kept: once for every tab, once per tab.
+interface ActionValues {
+  title: string;
+  icon: string;
+  popup: string;
+  badge: string;
+  badgeColor: Rgba;
+  badgeTextColor: Rgba;
+  enabled: boolean;
+}
+interface ActionRecord {
+  all: Partial<ActionValues>;
+  tabs: Map<number, Partial<ActionValues>>;
 }
 export interface ExtensionWindowOpener {
   openWindow(request: {
@@ -121,6 +156,57 @@ export function allowedExtensionUrl(
   return undefined;
 }
 
+type Rgba = [number, number, number, number];
+function cssColor([red, green, blue, alpha]: Rgba): string {
+  const hex = (value: number) => value.toString(16).padStart(2, "0");
+  return alpha >= 255
+    ? `#${hex(red)}${hex(green)}${hex(blue)}`
+    : `rgba(${red}, ${green}, ${blue}, ${Math.round((alpha / 255) * 100) / 100})`;
+}
+// A badge color as [r, g, b, a], hex or rgb(). An empty string puts
+// Kamapathy's own color back.
+function asRgba(value: unknown, name: string): Rgba | undefined {
+  const invalid = () => new BridgeError(extensionBridgeCopy.invalid(name));
+  const byte = (item: unknown) => {
+    if (typeof item !== "number" || !Number.isFinite(item)) throw invalid();
+    return Math.max(0, Math.min(255, Math.round(item)));
+  };
+  if (Array.isArray(value)) {
+    if (value.length !== 3 && value.length !== 4) throw invalid();
+    const [red, green, blue] = value.map(byte);
+    return [red, green, blue, value.length === 4 ? byte(value[3]) : 255];
+  }
+  if (typeof value !== "string") throw invalid();
+  const text = value.trim().toLowerCase();
+  if (text === "") return undefined;
+  const hex = /^#([0-9a-f]{3,8})$/.exec(text)?.[1];
+  if (hex && (hex.length === 3 || hex.length === 4)) {
+    const digits = Array.from(hex, (digit) => parseInt(digit + digit, 16));
+    return [digits[0], digits[1], digits[2], digits[3] ?? 255];
+  }
+  if (hex && (hex.length === 6 || hex.length === 8)) {
+    const pairs = hex.match(/../g) ?? [];
+    const digits = pairs.map((pair) => parseInt(pair, 16));
+    return [digits[0], digits[1], digits[2], digits[3] ?? 255];
+  }
+  const parts = /^rgba?\(([^)]*)\)$/.exec(text)?.[1]?.split(",");
+  if (!parts || (parts.length !== 3 && parts.length !== 4)) throw invalid();
+  const numbers = parts.map((part) => Number(part.trim()));
+  if (numbers.some((number) => !Number.isFinite(number))) throw invalid();
+  const alpha = numbers.length === 4 ? Math.round(numbers[3] * 255) : 255;
+  return [byte(numbers[0]), byte(numbers[1]), byte(numbers[2]), byte(alpha)];
+}
+// Extensions read their own files only.
+function insideFolder(folder: string, file: string): string | undefined {
+  const root = resolve(folder);
+  const full = resolve(root, file);
+  return full === root || full.startsWith(root + sep) ? full : undefined;
+}
+function imageSide(image: Electron.NativeImage): number {
+  const size = safely(() => image.getSize(), { width: 0, height: 0 });
+  return Math.max(size.width, size.height);
+}
+
 // The window changes that move or resize every space's window.
 const WINDOW_EVENTS = [
   "focus",
@@ -144,6 +230,12 @@ const ZOOM_SETTINGS = {
   defaultZoomFactor: 1,
 } as const;
 const NO_GRANTS: ReadonlySet<number> = new Set();
+// Icons are shown at most this many pixels a side, badge text is kept this
+// long, and these are Kamapathy's own badge colors.
+const ICON_LIMIT = 128;
+const BADGE_STORE_LIMIT = 64;
+const DEFAULT_BADGE_COLOR: Rgba = [95, 99, 104, 255];
+const DEFAULT_BADGE_TEXT_COLOR: Rgba = [255, 255, 255, 255];
 // Spaces shown earlier than this many switches ago no longer count.
 const SHOWN_LIMIT = 32;
 const MAX_EXTENSION_WINDOWS = 4;
@@ -254,22 +346,45 @@ export class ExtensionBridge {
   private readonly grants = new Map<string, Set<number>>();
   private readonly watched = new WeakSet<WebContents>();
   private opener?: ExtensionWindowOpener;
+  private popups?: ExtensionPopups;
   // Spaces in the order they were last shown, newest first.
   private shownOrder: string[] = [];
+  // What each extension set for its button, per partition and tab.
+  private readonly actions = new Map<string, ActionRecord>();
+  // Manifest icons already read, by extension.
+  private readonly icons = new Map<string, string>();
+  // Where the shell draws the buttons, so popups hang under them.
+  private anchors: Record<string, ExtensionAnchor> = {};
+  private puzzle?: ExtensionAnchor;
+  private readonly toolbarListeners = new Set<() => void>();
+  // Pin state last seen, for action.onUserSettingsChanged.
+  private readonly pins = new Map<string, boolean>();
 
   constructor(deps: BridgeDeps) {
     this.deps = deps;
     this.deps.channel.register("tabs", this.onTabs);
     this.deps.channel.register("windows", this.onWindows);
+    this.deps.channel.register("action", this.onAction);
     this.deps.channel.register("runtime", this.onRuntime);
+    this.notePins(false);
     this.deps.host.onEvent((event) => {
-      if (event.type === "unloaded")
+      if (event.type === "unloaded") {
         this.grants.delete(key(event.partition, event.id));
+        this.actions.delete(key(event.partition, event.id));
+      }
       if (event.type === "detached") {
         this.models.delete(event.partition);
         for (const name of [...this.grants.keys()])
           if (name.startsWith(`${event.partition}\u0000`))
             this.grants.delete(name);
+        for (const name of [...this.actions.keys()])
+          if (name.startsWith(`${event.partition}\u0000`))
+            this.actions.delete(name);
+      }
+      if (event.type === "attached") this.notePins(false);
+      if (event.type === "changed") {
+        this.icons.clear();
+        this.notePins(true);
       }
     });
   }
@@ -299,6 +414,150 @@ export class ExtensionBridge {
   // Task 11 builds the extension windows.
   setWindowOpener(opener: ExtensionWindowOpener): void {
     this.opener = opener;
+  }
+
+  // The popups are also where an extension's own windows come from.
+  setPopups(popups: ExtensionPopups): void {
+    this.popups = popups;
+    this.setWindowOpener(popups);
+  }
+
+  // What one button shows: the manifest's defaults, what the extension set
+  // for every tab, then what it set for this one.
+  actionState(
+    partition: string,
+    extensionId: string,
+    numericTabId?: number,
+  ): ActionState {
+    const manifest = this.deps.host.manifestOf(extensionId);
+    const value = <K extends keyof ActionValues>(
+      name: K,
+    ): ActionValues[K] | undefined =>
+      this.actionValue(partition, extensionId, numericTabId, name);
+    const popup = manifest?.popup
+      ? (allowedExtensionUrl(manifest.popup, extensionId) ?? "")
+      : "";
+    const state: ActionState = {
+      title:
+        value("title") ??
+        cleanExtensionText(
+          manifest?.actionTitle ?? manifest?.name ?? "",
+          TITLE_LIMIT,
+        ),
+      badge: value("badge") ?? "",
+      badgeColor: cssColor(value("badgeColor") ?? DEFAULT_BADGE_COLOR),
+      popup: value("popup") ?? popup,
+      enabled: value("enabled") ?? true,
+    };
+    const icon = value("icon") ?? this.manifestIcon(extensionId);
+    if (icon) state.icon = icon;
+    const textColor = value("badgeTextColor");
+    if (textColor) state.badgeTextColor = cssColor(textColor);
+    return state;
+  }
+
+  // The buttons for the space the person is looking at.
+  toolbar(state: BrowserState): {
+    actions: ExtensionAction[];
+    disabled?: "isolated" | "agent";
+  } {
+    const controller = this.controller;
+    const space = state.spaces.find((item) => item.id === state.activeSpaceId);
+    if (!controller || !space) return { actions: [] };
+    const isolated = !runsExtensions(space);
+    const disabled = isolated
+      ? ("isolated" as const)
+      : agentHeld(space)
+        ? ("agent" as const)
+        : undefined;
+    const partition = safely(() => controller.partitionOf(space.id), undefined);
+    const shown = safely(() => controller.shownTab(space.id), undefined);
+    const numericTabId = shown ? this.numericId(shown.id) : undefined;
+    const entries = partition
+      ? this.deps.host
+          .entries()
+          .filter(
+            (entry) =>
+              entry.enabled &&
+              (isolated || this.deps.host.isLoaded(partition, entry.id)),
+          )
+      : [];
+    const actions = [
+      ...entries.filter((entry) => entry.pinned),
+      ...entries.filter((entry) => !entry.pinned),
+    ].map((entry) => {
+      const shape = this.actionState(partition ?? "", entry.id, numericTabId);
+      return {
+        id: entry.id,
+        name: cleanExtensionText(
+          this.deps.host.nameOf(entry.id) ?? entry.id,
+          NAME_LIMIT,
+        ),
+        title: cleanExtensionText(shape.title, TITLE_LIMIT),
+        ...(shape.icon ? { icon: shape.icon } : {}),
+        badge: cleanExtensionText(shape.badge, BADGE_LIMIT),
+        badgeColor: shape.badgeColor,
+        ...(shape.badgeTextColor
+          ? { badgeTextColor: shape.badgeTextColor }
+          : {}),
+        enabled: shape.enabled,
+        pinned: entry.pinned,
+      };
+    });
+    return { actions, ...(disabled ? { disabled } : {}) };
+  }
+
+  // The person clicked a button: its popup, or its worker with the tab.
+  async click(extensionId: string, anchor: ExtensionAnchor): Promise<void> {
+    const controller = this.controller;
+    const space = controller?.state.spaces.find(
+      (item) => item.id === controller.state.activeSpaceId,
+    );
+    if (!controller || !space || !runsExtensions(space) || agentHeld(space))
+      return;
+    const partition = safely(() => controller.partitionOf(space.id), undefined);
+    if (!partition || !this.deps.host.isLoaded(partition, extensionId)) return;
+    const tab = safely(() => controller.shownTab(space.id), undefined);
+    const numericTabId = tab ? this.numericId(tab.id) : undefined;
+    const state = this.actionState(partition, extensionId, numericTabId);
+    if (!state.enabled) return;
+    if (numericTabId !== undefined)
+      this.grantActiveTab(partition, extensionId, numericTabId);
+    if (state.popup) {
+      this.popups?.togglePopup({
+        extensionId,
+        partition,
+        spaceId: space.id,
+        url: state.popup,
+        anchor,
+      });
+      return;
+    }
+    const clicked = this.model(partition)
+      .windows.flatMap((window) => window.tabs)
+      .find((item) => item.tabId === tab?.id);
+    if (!clicked) return;
+    try {
+      this.deps.channel.emit(partition, extensionId, "action.onClicked", [
+        tabObject(clicked, this.access(partition, extensionId)),
+      ]);
+    } catch (error) {
+      logError(`${extensionId} missed its click`, error);
+    }
+  }
+
+  // The shell reports where it draws the buttons.
+  setAnchors(
+    buttons: Record<string, ExtensionAnchor>,
+    puzzle: ExtensionAnchor | null,
+  ): void {
+    this.anchors = { ...buttons };
+    this.puzzle = puzzle ?? undefined;
+  }
+
+  onToolbarChange(listener: () => void): () => void {
+    this.toolbarListeners.add(listener);
+    return () => this.toolbarListeners.delete(listener);
   }
 
   // Only the person's own spaces take an extension's tabs: the named
@@ -435,19 +694,7 @@ export class ExtensionBridge {
     const grants = this.grants.get(name) ?? new Set<number>();
     grants.add(numericTabId);
     this.grants.set(name, grants);
-    const tabId = this.tabIdOf(numericTabId);
-    const contents = tabId
-      ? safely(() => this.controller?.peekWebContents(tabId), undefined)
-      : undefined;
-    if (!contents || this.watched.has(contents)) return;
-    this.watched.add(contents);
-    const id = contents.id;
-    // The grant ends when the tab's main frame loads another document.
-    const end = () => {
-      for (const set of this.grants.values()) set.delete(id);
-    };
-    contents.on("did-navigate", end);
-    contents.once("destroyed", end);
+    this.watchTab(numericTabId);
   }
 
   callerWindowId(caller: Caller): number | undefined {
@@ -462,7 +709,8 @@ export class ExtensionBridge {
       const spaceId = this.deps.host.surfaceOf(contents)?.spaceId;
       return spaceId ? this.windowIdOf(spaceId) : undefined;
     }
-    // Task 11 adds extension windows.
+    if (caller.surface === "window")
+      return this.deps.host.surfaceOf(contents)?.windowId;
     return undefined;
   }
 
@@ -569,6 +817,9 @@ export class ExtensionBridge {
     );
     for (const grants of this.grants.values())
       for (const id of [...grants]) if (!live.has(id)) grants.delete(id);
+    for (const record of this.actions.values())
+      for (const id of [...record.tabs.keys()])
+        if (!live.has(id)) record.tabs.delete(id);
   }
 
   private windowShape(): {
@@ -792,41 +1043,58 @@ export class ExtensionBridge {
     switch (method) {
       case "get": {
         const windowId = asInteger(args[0], "windows.get");
-        return windowObject(
-          this.windowOr(model, windowId),
-          access,
-          populate(args[1], "windows.get"),
-        );
+        const own = this.ownWindow(caller, windowId);
+        return own
+          ? extensionWindow(own)
+          : windowObject(
+              this.windowOr(model, windowId),
+              access,
+              populate(args[1], "windows.get"),
+            );
       }
-      case "getCurrent":
-        return windowObject(
-          this.windowOr(model, this.current(caller, model)),
-          access,
-          populate(args[0], "windows.getCurrent"),
-        );
-      case "getLastFocused":
-        return windowObject(
-          this.windowOr(model, this.lastFocused(caller, model)),
-          access,
-          populate(args[0], "windows.getLastFocused"),
-        );
+      case "getCurrent": {
+        const windowId = this.current(caller, model);
+        const own = this.ownWindow(caller, windowId);
+        return own
+          ? extensionWindow(own)
+          : windowObject(
+              this.windowOr(model, windowId),
+              access,
+              populate(args[0], "windows.getCurrent"),
+            );
+      }
+      case "getLastFocused": {
+        const windowId = this.lastFocused(caller, model);
+        const own = this.ownWindow(caller, windowId);
+        return own
+          ? extensionWindow(own)
+          : windowObject(
+              this.windowOr(model, windowId),
+              access,
+              populate(args[0], "windows.getLastFocused"),
+            );
+      }
       case "getAll": {
         const options = asObject(args[0], "windows.getAll");
         const types = options.windowTypes;
-        if (types !== undefined) {
-          if (
-            !Array.isArray(types) ||
-            !types.every((type) => typeof type === "string")
-          )
-            throw new BridgeError(
-              extensionBridgeCopy.invalid("windows.getAll"),
-            );
-          if (!types.includes("normal")) return [];
-        }
+        if (
+          types !== undefined &&
+          (!Array.isArray(types) ||
+            !types.every((type) => typeof type === "string"))
+        )
+          throw new BridgeError(extensionBridgeCopy.invalid("windows.getAll"));
+        const kinds = types as string[] | undefined;
         const wanted = asBoolean(options.populate, "windows.getAll", false);
-        return model.windows.map((window) =>
-          windowObject(window, access, wanted),
-        );
+        const all: BridgeWindow[] = [];
+        if (!kinds || kinds.includes("normal"))
+          all.push(
+            ...model.windows.map((window) =>
+              windowObject(window, access, wanted),
+            ),
+          );
+        if (!kinds || kinds.includes("popup"))
+          all.push(...this.ownWindows(caller).map(extensionWindow));
+        return all;
       }
       case "create":
         return this.createWindow(caller, args);
@@ -1035,6 +1303,343 @@ export class ExtensionBridge {
     );
   }
 
+  private readonly onAction: ApiHandler = async (caller, method, args) => {
+    const name = `action.${method}`;
+    const invalid = () => new BridgeError(extensionBridgeCopy.invalid(name));
+    const given = () => asObject(args[0], name);
+    const state = (value: unknown) =>
+      this.actionState(
+        caller.partition,
+        caller.extensionId,
+        this.actionTab(caller, value, name),
+      );
+    switch (method) {
+      case "setTitle": {
+        const title = given().title;
+        if (typeof title !== "string") throw invalid();
+        this.writeAction(caller, this.actionTab(caller, given().tabId, name), {
+          title: cleanExtensionText(title, TITLE_LIMIT),
+        });
+        return;
+      }
+      case "getTitle":
+        return state(given().tabId).title;
+      case "setIcon":
+        return this.setActionIcon(caller, given(), name);
+      case "setPopup": {
+        const popup = given().popup;
+        if (typeof popup !== "string") throw invalid();
+        const url =
+          popup === "" ? "" : allowedExtensionUrl(popup, caller.extensionId);
+        if (
+          url === undefined ||
+          (url !== "" && extensionIdOf(url) !== caller.extensionId)
+        )
+          throw new BridgeError(extensionBridgeCopy.cantOpen);
+        this.writeAction(caller, this.actionTab(caller, given().tabId, name), {
+          popup: url,
+        });
+        return;
+      }
+      case "getPopup":
+        return state(given().tabId).popup;
+      case "setBadgeText": {
+        const text = given().text;
+        if (text !== undefined && text !== null && typeof text !== "string")
+          throw invalid();
+        this.writeAction(caller, this.actionTab(caller, given().tabId, name), {
+          badge: cleanExtensionText(text ?? "", BADGE_STORE_LIMIT),
+        });
+        return;
+      }
+      case "getBadgeText":
+        return state(given().tabId).badge;
+      case "setBadgeBackgroundColor":
+      case "setBadgeTextColor": {
+        const color = asRgba(given().color, name);
+        const tabId = this.actionTab(caller, given().tabId, name);
+        this.writeAction(
+          caller,
+          tabId,
+          method === "setBadgeTextColor"
+            ? { badgeTextColor: color }
+            : { badgeColor: color },
+        );
+        return;
+      }
+      case "getBadgeBackgroundColor":
+        return (
+          this.actionValue(
+            caller.partition,
+            caller.extensionId,
+            this.actionTab(caller, given().tabId, name),
+            "badgeColor",
+          ) ?? DEFAULT_BADGE_COLOR
+        );
+      case "getBadgeTextColor":
+        return (
+          this.actionValue(
+            caller.partition,
+            caller.extensionId,
+            this.actionTab(caller, given().tabId, name),
+            "badgeTextColor",
+          ) ?? DEFAULT_BADGE_TEXT_COLOR
+        );
+      case "enable":
+      case "disable":
+        this.writeAction(caller, this.actionTab(caller, args[0], name), {
+          enabled: method === "enable",
+        });
+        return;
+      case "isEnabled":
+        return state(args[0]).enabled;
+      case "getUserSettings":
+        return {
+          isOnToolbar: !!this.deps.host.entry(caller.extensionId)?.pinned,
+        };
+      case "openPopup":
+        return this.openPopup(caller);
+      default:
+        throw new BridgeError(extensionBridgeCopy.notSupported);
+    }
+  };
+
+  // Icons arrive as PNG data URLs from the extension's page, or as paths in
+  // its folder. The largest of at most 128 px wins; nothing puts the
+  // manifest's icon back.
+  private setActionIcon(
+    caller: Caller,
+    given: Record<string, unknown>,
+    name: string,
+  ): void {
+    const invalid = () => new BridgeError(extensionBridgeCopy.invalid(name));
+    const tabId = this.actionTab(caller, given.tabId, name);
+    const found: { side: number; url: string }[] = [];
+    const take = (image: Electron.NativeImage | undefined) => {
+      if (!image || safely(() => image.isEmpty(), true)) throw invalid();
+      const side = imageSide(image);
+      if (side > ICON_LIMIT)
+        throw new BridgeError(extensionBridgeCopy.iconTooLarge);
+      const url = safely(() => image.toDataURL(), "");
+      if (!url) throw invalid();
+      found.push({ side, url });
+    };
+    const listed = (value: unknown) =>
+      typeof value === "string"
+        ? [value]
+        : Object.values(asObject(value, name));
+    if (given.images !== undefined && given.images !== null)
+      for (const item of Object.values(asObject(given.images, name))) {
+        if (typeof item !== "string") throw invalid();
+        take(safely(() => nativeImage.createFromDataURL(item), undefined));
+      }
+    else if (given.path !== undefined && given.path !== null) {
+      const entry = this.deps.host.entry(caller.extensionId);
+      const folder = entry
+        ? safely(() => this.deps.host.folderOf(entry), undefined)
+        : undefined;
+      if (!folder) throw invalid();
+      for (const item of listed(given.path)) {
+        if (typeof item !== "string") throw invalid();
+        const full = insideFolder(folder, item);
+        if (!full) throw invalid();
+        take(safely(() => nativeImage.createFromPath(full), undefined));
+      }
+    }
+    const best = [...found].sort(
+      (first, second) => second.side - first.side,
+    )[0];
+    this.writeAction(caller, tabId, { icon: best?.url });
+  }
+
+  // action.openPopup: only the person's own shown space, in front.
+  private async openPopup(caller: Caller): Promise<void> {
+    const controller = this.bound();
+    if (!safely(() => controller.window.isFocused(), false))
+      throw new BridgeError(extensionBridgeCopy.notFocused);
+    const space = controller.state.spaces.find(
+      (item) => item.id === controller.state.activeSpaceId,
+    );
+    const partition = space
+      ? safely(() => controller.partitionOf(space.id), undefined)
+      : undefined;
+    if (
+      !space ||
+      !runsExtensions(space) ||
+      agentHeld(space) ||
+      partition !== caller.partition ||
+      !this.deps.host.isLoaded(caller.partition, caller.extensionId)
+    )
+      throw new BridgeError(extensionBridgeCopy.noSpace);
+    const tab = safely(() => controller.shownTab(space.id), undefined);
+    const state = this.actionState(
+      caller.partition,
+      caller.extensionId,
+      tab ? this.numericId(tab.id) : undefined,
+    );
+    if (!state.popup) throw new BridgeError(extensionBridgeCopy.noPopup);
+    const popups = this.popups;
+    if (!popups) throw new BridgeError(extensionBridgeCopy.failed);
+    if (popups.shownPopup()?.extensionId === caller.extensionId) return;
+    popups.togglePopup({
+      extensionId: caller.extensionId,
+      partition: caller.partition,
+      spaceId: space.id,
+      url: state.popup,
+      anchor: this.anchorFor(caller.extensionId),
+    });
+  }
+
+  // Its own button when it is pinned, else the puzzle button, else the
+  // toolbar's right end.
+  private anchorFor(extensionId: string): ExtensionAnchor {
+    const own = this.deps.host.entry(extensionId)?.pinned
+      ? this.anchors[extensionId]
+      : undefined;
+    if (own) return own;
+    if (this.puzzle) return this.puzzle;
+    const content = safely(
+      () => this.controller?.window.getContentBounds(),
+      undefined,
+    );
+    return { x: content?.width ?? 0, y: 0, width: 0, height: 0 };
+  }
+
+  private actionValue<K extends keyof ActionValues>(
+    partition: string,
+    extensionId: string,
+    numericTabId: number | undefined,
+    name: K,
+  ): ActionValues[K] | undefined {
+    const record = this.actions.get(key(partition, extensionId));
+    const own =
+      numericTabId === undefined ? undefined : record?.tabs.get(numericTabId);
+    return own?.[name] ?? record?.all[name];
+  }
+
+  private writeAction(
+    caller: Caller,
+    numericTabId: number | undefined,
+    changes: Partial<ActionValues>,
+  ): void {
+    const name = key(caller.partition, caller.extensionId);
+    const record = this.actions.get(name) ?? { all: {}, tabs: new Map() };
+    this.actions.set(name, record);
+    if (numericTabId === undefined) Object.assign(record.all, changes);
+    else {
+      record.tabs.set(
+        numericTabId,
+        Object.assign(record.tabs.get(numericTabId) ?? {}, changes),
+      );
+      this.watchTab(numericTabId);
+    }
+    this.notifyToolbar();
+  }
+
+  // A tab id names a tab of the caller's session; nothing means every tab.
+  private actionTab(
+    caller: Caller,
+    value: unknown,
+    name: string,
+  ): number | undefined {
+    if (value === undefined || value === null) return undefined;
+    const numericTabId = asInteger(value, name);
+    this.tabOr(this.model(caller.partition), numericTabId);
+    return numericTabId;
+  }
+
+  // The manifest's best icon of at most 128 px, read once per extension.
+  private manifestIcon(extensionId: string): string | undefined {
+    const known = this.icons.get(extensionId);
+    if (known !== undefined) return known || undefined;
+    const entry = this.deps.host.entry(extensionId);
+    const manifest = this.deps.host.manifestOf(extensionId);
+    const folder = entry
+      ? safely(() => this.deps.host.folderOf(entry), undefined)
+      : undefined;
+    let found = "";
+    for (const set of [manifest?.actionIcons, manifest?.icons]) {
+      if (found || !set || !folder) continue;
+      const sizes = Object.keys(set)
+        .map(Number)
+        .filter((size) => Number.isFinite(size) && size <= ICON_LIMIT)
+        .sort((first, second) => second - first);
+      for (const size of sizes) {
+        const full = insideFolder(folder, set[size] ?? "");
+        const image = full
+          ? safely(() => nativeImage.createFromPath(full), undefined)
+          : undefined;
+        if (!image || safely(() => image.isEmpty(), true)) continue;
+        if (imageSide(image) > ICON_LIMIT) continue;
+        found = safely(() => image.toDataURL(), "");
+        if (found) break;
+      }
+    }
+    this.icons.set(extensionId, found);
+    return found || undefined;
+  }
+
+  // A pin the person moved reaches the extension and the toolbar.
+  private notePins(announce: boolean): void {
+    const entries = safely(() => this.deps.host.entries(), []);
+    let moved = false;
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      seen.add(entry.id);
+      const before = this.pins.get(entry.id);
+      if (before === entry.pinned) continue;
+      this.pins.set(entry.id, entry.pinned);
+      moved = true;
+      if (before === undefined || !announce) continue;
+      for (const partition of this.deps.host.partitions()) {
+        if (!this.deps.host.isLoaded(partition, entry.id)) continue;
+        try {
+          this.deps.channel.emit(
+            partition,
+            entry.id,
+            "action.onUserSettingsChanged",
+            [{ isOnToolbar: entry.pinned }],
+          );
+        } catch (error) {
+          logError(`${entry.id} missed its pin change`, error);
+        }
+      }
+    }
+    for (const id of [...this.pins.keys()])
+      if (!seen.has(id)) {
+        this.pins.delete(id);
+        moved = true;
+      }
+    if (moved && announce) this.notifyToolbar();
+  }
+
+  private notifyToolbar(): void {
+    for (const listener of [...this.toolbarListeners])
+      try {
+        listener();
+      } catch (error) {
+        logError("A toolbar listener failed", error);
+      }
+  }
+
+  // An activeTab grant and a tab's own button values end when its main frame
+  // loads another document.
+  private watchTab(numericTabId: number): void {
+    const tabId = this.tabIdOf(numericTabId);
+    const contents = tabId
+      ? safely(() => this.controller?.peekWebContents(tabId), undefined)
+      : undefined;
+    if (!contents || this.watched.has(contents)) return;
+    this.watched.add(contents);
+    const id = contents.id;
+    const end = () => {
+      for (const set of this.grants.values()) set.delete(id);
+      for (const record of this.actions.values()) record.tabs.delete(id);
+    };
+    contents.on("did-navigate", end);
+    contents.once("destroyed", end);
+  }
+
   private async createWindow(
     caller: Caller,
     args: unknown[],
@@ -1159,12 +1764,23 @@ export class ExtensionBridge {
   }
 
   private isOwnWindow(caller: Caller, windowId: number): boolean {
+    return !!this.ownWindow(caller, windowId);
+  }
+
+  private ownWindow(
+    caller: Caller,
+    windowId: number,
+  ): ExtensionWindowInfo | undefined {
+    return this.ownWindows(caller).find((item) => item.windowId === windowId);
+  }
+
+  private ownWindows(caller: Caller): ExtensionWindowInfo[] {
     const opener = this.opener;
-    if (!opener) return false;
+    if (!opener) return [];
     return safely(
       () => opener.windowsOf(caller.extensionId, caller.partition),
       [] as ExtensionWindowInfo[],
-    ).some((item) => item.windowId === windowId);
+    );
   }
 
   private boundsOf(
