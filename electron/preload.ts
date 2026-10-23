@@ -62,6 +62,12 @@ const bridge: KamapathyBridge = {
   windowControl: (action) => ipcRenderer.send("kamapathy:window", action),
   importSources: () => invoke("kamapathy:import-sources"),
   importBrowserData: (request) => invoke("kamapathy:import", request),
+  agentSetupStatus: (options) => invoke("kamapathy:agent-setup-status", options),
+  applyAgentSetup: (request) => invoke("kamapathy:agent-setup-apply", request),
+  removeAgentSetup: () => invoke("kamapathy:agent-setup-remove"),
+  copyText: (text) => invoke("kamapathy:copy-text", text),
+  helpSpaceId: () => invoke("kamapathy:help-space"),
+  update: (command) => invoke("kamapathy:update", command),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

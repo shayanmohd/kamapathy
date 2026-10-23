@@ -1,5 +1,6 @@
 import type { ReactNode, RefObject } from "react";
 import {
+  ArrowCircleUp,
   BookmarkSimple,
   ClockCounterClockwise,
   Columns,
@@ -9,6 +10,8 @@ import {
   MagnifyingGlass,
   Password,
   Plus,
+  Question,
+  Robot,
   Stack,
 } from "@phosphor-icons/react";
 import {
@@ -31,6 +34,8 @@ const icons: Record<ToolsMenuAction, ReactNode> = {
   split: <Columns size={16} />,
   find: <MagnifyingGlass size={16} />,
   settings: <GearSix size={16} />,
+  "agent-setup": <Robot size={16} />,
+  help: <Question size={16} />,
 };
 const keys: Partial<Record<ToolsMenuAction, string>> = {
   "new-tab": "mod+t",
@@ -49,6 +54,8 @@ export function ToolsMenu({
   mac,
   isHome,
   onAction,
+  update,
+  onUpdate,
 }: {
   open: boolean;
   onClose: () => void;
@@ -56,6 +63,8 @@ export function ToolsMenu({
   mac: boolean;
   isHome: boolean;
   onAction: (name: ActionName) => void;
+  update: boolean;
+  onUpdate: () => void;
 }) {
   return (
     <Popover
@@ -66,6 +75,22 @@ export function ToolsMenu({
       align="end"
       className="tools-menu"
     >
+      {update && (
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onUpdate();
+            }}
+          >
+            <ArrowCircleUp size={16} />
+            <span>{toolsMenuCopy.update}</span>
+          </button>
+          <hr />
+        </>
+      )}
       {toolsMenuLayout.map((id, index) => {
         if (id === null) return <hr key={`divider-${index}`} />;
         const combo = id === "history" && !mac ? "mod+h" : keys[id];

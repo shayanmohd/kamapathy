@@ -98,6 +98,9 @@ export interface Settings {
   automationEnabled: boolean;
   isolateAgentSpaces: boolean;
   welcomed: boolean;
+  updateChecks: boolean;
+  // What's new lists the notes above this version.
+  seenVersion: string;
 }
 export interface ImportProfile {
   id: string;
@@ -257,6 +260,93 @@ export interface PasswordsBridge {
   neverSaved(): Promise<PasswordResult<NeverSavedOrigin[]>>;
   removeNeverSaved(origin: string): Promise<PasswordResult<{ ok: true }>>;
 }
+export type InstallKind =
+  | "mac-arm64"
+  | "mac-x64"
+  | "windows-setup"
+  | "windows-portable"
+  | "linux-appimage"
+  | "linux-deb"
+  | "source"
+  | "other";
+export interface UpdateRelease {
+  version: string;
+  publishedAt: number;
+  url: string;
+  installer: { name: string; size: number; url: string; sha256?: string };
+  // The release's SHA256SUMS.txt.
+  sums: string;
+}
+export interface UpdateError {
+  code: string;
+  message: string;
+  reason?: string;
+  retryable?: boolean;
+  httpStatus?: number;
+  retryAfterMs?: number;
+  file?: string;
+}
+export interface UpdateState {
+  kind: InstallKind;
+  state:
+    | "unchecked"
+    | "current"
+    | "available"
+    | "downloading"
+    | "ready"
+    | "unsupported";
+  checkedAt?: number;
+  latest?: UpdateRelease;
+  progress?: { receivedBytes: number; totalBytes: number };
+  installer?: { path: string; sha256: string };
+  error?: UpdateError;
+}
+export interface UpdateStatus extends UpdateState {
+  version: string;
+  checks: boolean;
+}
+export interface UpdateReminder {
+  version: string;
+  state: "available" | "downloading" | "ready";
+}
+// What the person's own interface may ask the updater to do.
+export type UpdateCommand =
+  | {
+      command: "check" | "download" | "cancel" | "install" | "show" | "copy-command";
+    }
+  | { command: "notes"; which: "running" | "latest" };
+export interface AgentSetupStatus {
+  supported: boolean;
+  reason?: "desktop_only" | "test_profile";
+  skillFolder: string | null;
+  agents: {
+    id: string;
+    name: string;
+    folder: string;
+    state: "linked" | "available" | "own_copy" | "error";
+    reason?: string;
+    backup?: string;
+  }[];
+  command: {
+    state: "on" | "off" | "error";
+    path: string;
+    onPath: boolean | null;
+    profileFile: string | null;
+    // Kamapathy's PATH lines are in place, so a later Set up keeps them.
+    pathAdded: boolean;
+    reason?: string;
+  };
+  codex: { detected: boolean; allowed: boolean };
+  // Null without a shell probe.
+  node: { found: boolean; version: string | null } | null;
+}
+export interface AgentSetupRequest {
+  agents: string[];
+  replace: string[];
+  command: boolean;
+  path: boolean;
+  codexRule: boolean;
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
@@ -274,6 +364,7 @@ export interface BrowserState {
   platform: "darwin" | "win32" | "linux" | "web";
   version: string;
   automation: { running: boolean };
+  update: UpdateState;
 }
 export type BrowserAction =
   | { type: "tab:create"; url?: string; spaceId?: string; background?: boolean }
@@ -364,4 +455,10 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
+  agentSetupStatus(options?: { probe?: boolean }): Promise<AgentSetupStatus>;
+  applyAgentSetup(request: AgentSetupRequest): Promise<AgentSetupStatus>;
+  removeAgentSetup(): Promise<AgentSetupStatus>;
+  copyText(text: string): Promise<void>;
+  helpSpaceId(): Promise<string>;
+  update(command: UpdateCommand): Promise<UpdateStatus>;
 }

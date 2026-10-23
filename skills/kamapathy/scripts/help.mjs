@@ -136,7 +136,11 @@ function retryText(spec) {
     .join(", or ")}`;
 }
 const statusText = (spec) =>
-  spec.status === null ? "client" : String(spec.status);
+  spec.carriedIn
+    ? `in ${spec.carriedIn}`
+    : spec.status === null
+      ? "client"
+      : String(spec.status);
 
 export function formatEntry(entry) {
   const lines = [entry.signature, entry.summary];

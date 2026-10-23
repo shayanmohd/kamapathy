@@ -32,6 +32,7 @@
     "package:linux": "npm run build && electron-builder --linux --publish never",
     "test:skill": "node scripts/test-skill.mjs",
     "test:native": "node scripts/test-native.mjs",
+    "test:install": "node scripts/test-install.mjs",
     "skill:install": "node scripts/install-skill.mjs"
   },
   "dependencies": {

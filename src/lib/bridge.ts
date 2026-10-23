@@ -392,6 +392,37 @@ export function createPreviewBridge(): KamapathyBridge {
     importBrowserData: async () => {
       throw new Error("Install the desktop app to import from another browser.");
     },
+    agentSetupStatus: async () => ({
+      supported: false,
+      reason: "desktop_only",
+      skillFolder: null,
+      agents: [],
+      command: {
+        state: "off",
+        path: "",
+        onPath: null,
+        profileFile: null,
+        pathAdded: false,
+      },
+      codex: { detected: false, allowed: false },
+      node: null,
+    }),
+    applyAgentSetup: async () => {
+      throw new Error("Agent setup is available in the desktop app.");
+    },
+    removeAgentSetup: async () => {
+      throw new Error("Agent setup is available in the desktop app.");
+    },
+    copyText: async (text) => {
+      await navigator.clipboard?.writeText(text);
+    },
+    helpSpaceId: async () => state.activeSpaceId,
+    // The web preview has no updater; Settings hides Updates there.
+    update: async () => ({
+      ...state.update,
+      version: state.version,
+      checks: state.settings.updateChecks,
+    }),
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

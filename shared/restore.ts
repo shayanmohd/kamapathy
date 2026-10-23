@@ -1,6 +1,13 @@
 import { HOME_URL, initialState, newTab } from "./state";
 import { isWebUrl } from "./url";
-import type { BrowserState, Settings, Space } from "./types";
+import { compareVersions, isVersion } from "./version";
+import type {
+  BrowserState,
+  Settings,
+  Space,
+  UpdateRelease,
+  UpdateState,
+} from "./types";
 
 export function validSettings(value: unknown, base: Settings): Settings {
   if (!value || typeof value !== "object") return base;
@@ -36,6 +43,78 @@ export function validSettings(value: unknown, base: Settings): Settings {
         : base.isolateAgentSpaces,
     welcomed:
       typeof settings.welcomed === "boolean" ? settings.welcomed : base.welcomed,
+    updateChecks:
+      typeof settings.updateChecks === "boolean"
+        ? settings.updateChecks
+        : base.updateChecks,
+    seenVersion: isVersion(settings.seenVersion)
+      ? settings.seenVersion
+      : base.seenVersion,
+  };
+}
+
+const MiB = 1048576;
+
+// The updater checks where saved links point; here they only need to be HTTPS.
+function httpsUrl(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 2048 &&
+    value.startsWith("https://") &&
+    URL.canParse(value)
+  );
+}
+
+function validRelease(value: unknown): UpdateRelease | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const release = value as Partial<UpdateRelease>;
+  const installer = release.installer as
+    Partial<UpdateRelease["installer"]> | undefined;
+  if (
+    !isVersion(release.version) ||
+    typeof release.publishedAt !== "number" ||
+    !Number.isFinite(release.publishedAt) ||
+    !httpsUrl(release.url) ||
+    !httpsUrl(release.sums) ||
+    !installer ||
+    typeof installer !== "object" ||
+    typeof installer.name !== "string" ||
+    !/^[A-Za-z0-9._-]{1,255}$/.test(installer.name) ||
+    typeof installer.size !== "number" ||
+    !Number.isInteger(installer.size) ||
+    installer.size < MiB ||
+    installer.size > 1024 * MiB ||
+    !httpsUrl(installer.url) ||
+    (installer.sha256 !== undefined &&
+      (typeof installer.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(installer.sha256)))
+  )
+    return undefined;
+  const { name, size, url, sha256 } = installer;
+  return {
+    version: release.version,
+    publishedAt: release.publishedAt,
+    url: release.url,
+    installer: { name, size, url, ...(sha256 === undefined ? {} : { sha256 }) },
+    sums: release.sums,
+  };
+}
+
+// The last check's saved result. Each part comes back only when it is exactly
+// what the updater writes, and nothing else in the record ever does.
+export function validUpdateRecord(
+  value: unknown,
+): { checkedAt?: number; latest?: UpdateRelease } | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<UpdateState>;
+  const latest = validRelease(record.latest);
+  return {
+    ...(typeof record.checkedAt === "number" &&
+    Number.isFinite(record.checkedAt) &&
+    record.checkedAt > 0
+      ? { checkedAt: record.checkedAt }
+      : {}),
+    ...(latest ? { latest } : {}),
   };
 }
 
@@ -46,10 +125,21 @@ export function restoreState(
 ): BrowserState {
   let state = initialState(platform);
   state.version = version;
+  state.settings.seenVersion = version;
   try {
     if (!value || typeof value !== "object") return state;
     const saved = value as Partial<BrowserState>;
     state.settings = validSettings(saved.settings, state.settings);
+    // A profile from before What's new has seen none of it, while a fresh one
+    // sees only Welcome. A downgrade resets silently.
+    if (!isVersion(saved.settings?.seenVersion) && state.settings.welcomed)
+      state.settings.seenVersion = "0.0.0";
+    if (
+      isVersion(version) &&
+      compareVersions(state.settings.seenVersion, version) > 0
+    )
+      state.settings.seenVersion = version;
+    state.update = { ...state.update, ...validUpdateRecord(saved.update) };
     const spaceIds = new Set<string>();
     const spaces = Array.isArray(saved.spaces)
       ? saved.spaces
@@ -172,6 +262,7 @@ export function restoreState(
     // Invalid saved data must never leave a partially restored session.
     state = initialState(platform);
     state.version = version;
+    state.settings.seenVersion = version;
   }
   return state;
 }

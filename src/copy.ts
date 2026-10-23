@@ -11,7 +11,24 @@ export const toolsMenuCopy = {
   split: "Split view",
   find: "Find",
   settings: "Settings",
+  "agent-setup": "Set up agents",
+  help: "Help",
+  update: "Update Kamapathy",
 } as const;
+
+// Command palette entries for setup and help.
+export const helpCopy: Record<
+  "agent-setup" | "help" | "report-issue" | "privacy",
+  { title: string; hint: string }
+> = {
+  "agent-setup": {
+    title: "Set up agents",
+    hint: "Give your agents Kamapathy's skill",
+  },
+  help: { title: "Help", hint: "Answers to common questions" },
+  "report-issue": { title: "Report an issue", hint: "Tell us what went wrong" },
+  privacy: { title: "Privacy", hint: "How Kamapathy handles your data" },
+};
 
 export const tabStripCopy = {
   search: "Search tabs",
@@ -243,4 +260,124 @@ export const passwordsCopy = {
     exported: (count: number) =>
       count === 1 ? "Exported 1 password." : `Exported ${count} passwords.`,
   },
+} as const;
+// The Move to Applications offer at start on macOS.
+export const moveCopy = {
+  question: "Move Kamapathy to Applications?",
+  detail:
+    "From Applications it keeps working after you eject the disk image, and agents can start it.",
+  move: "Move to Applications",
+  notNow: "Not now",
+  replace: "Replace Kamapathy in Applications?",
+  replaceButton: "Replace",
+  cancel: "Cancel",
+  failed: "Kamapathy couldn't move itself.",
+  failedDetail:
+    "Drag Kamapathy into the Applications folder, then open it from there.",
+} as const;
+
+export const agentSetupCopy = {
+  title: "Set up agents",
+  intro:
+    "Add Kamapathy's skill to the agents on this computer. Nothing changes until you choose Set up.",
+  checking: "Looking for agents...",
+  agentsHeading: "Agents on this computer",
+  noAgents: "No agents were found on this computer.",
+  ownCopy: "Has its own copy",
+  useOurs: "Use Kamapathy's copy",
+  command: "Add the kamapathy command",
+  pathIn: (file: string) => `Add ~/.local/bin to your PATH in ${file}`,
+  pathWindows: "Add it to your PATH",
+  pathManual: "Add this line to your shell's startup file:",
+  codexRule: "Let Codex run kamapathy without asking",
+  codexWarning:
+    "Codex will use Kamapathy, including your sign-ins and files it uploads, without asking you first.",
+  nodeMissing:
+    "The kamapathy command needs Node.js 22.13 or later from nodejs.org.",
+  nodeTooOld: (version: string) =>
+    `This computer has Node.js ${version}. The kamapathy command needs 22.13 or later.`,
+  setUp: "Set up",
+  working: "Working...",
+  remove: "Remove setup",
+  close: "Close",
+  done: "Restart your agents to load the skill. Open a new terminal window for the kamapathy command.",
+  tryIt: "Try it",
+  firstPrompt:
+    "Use Kamapathy to check this weekend's weather in Lisbon and tell me which site you used.",
+  copy: "Copy",
+  copied: "Copied",
+  copyPath: "Copy path",
+  skillFolder: "Skill folder",
+  hints: {
+    "claude-code": "In Claude Code, type /kamapathy, then your task.",
+    codex: "In Codex, type $kamapathy, then your task.",
+  },
+  genericHint: "Ask your agent to use Kamapathy, then give it your task.",
+  reasons: {
+    command_taken: "Another program already uses ~/.local/bin/kamapathy.",
+    shadowed: "Another kamapathy command comes first on your PATH.",
+    profile_changed:
+      "The PATH lines in your startup file were edited, so Kamapathy left them.",
+    probe_failed: "Kamapathy couldn't read your shell's PATH.",
+    not_writable: "Kamapathy couldn't write there.",
+  } as Record<string, string>,
+  settingsRow: "Agent setup",
+  settingsButton: "Set up...",
+  // Lists the agents set up, or names the command when no agent is.
+  summary: (names: string[], command: boolean) =>
+    !names.length && command
+      ? "Set up for the kamapathy command"
+      : `Set up for ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0]}`,
+  notSetUp: "Not set up yet",
+  desktopOnly: "Available in the desktop app.",
+  testProfile: "Agent setup is off for test profiles.",
+} as const;
+
+export const updatesCopy = {
+  heading: "Updates",
+  switch: "Check for updates",
+  switchNote:
+    "Once a day, Kamapathy asks GitHub for the newest release. It sends no ID or usage data.",
+  unchecked: "Not checked yet.",
+  current: (time: string) => `Kamapathy is up to date. Checked ${time}.`,
+  available: (version: string) => `Kamapathy ${version} is available.`,
+  downloading: (version: string, percent: number) =>
+    `Downloading Kamapathy ${version}... ${percent}%`,
+  ready: (version: string) => `Kamapathy ${version} is ready to install.`,
+  checkFailed: "Couldn't reach GitHub. Try again later.",
+  downloadStopped: "The download stopped. Try again.",
+  verifyFailed: "The download didn't match its checksum, so it was deleted.",
+  cancelled: "Download cancelled.",
+  source: "This copy runs from source. Pull the latest code to update it.",
+  noInstaller: "No installer is published for this computer yet.",
+  checkNow: "Check now",
+  download: "Download",
+  cancel: "Cancel",
+  install: "Install...",
+  releaseNotes: "Release notes",
+  whatsNew: "What's new",
+  installTitle: (version: string) => `Install Kamapathy ${version}`,
+  quitAndOpen: "Quit and open installer",
+  showInFolder: "Show in folder",
+  copyCommand: "Copy command",
+  notNow: "Not now",
+  agentSpaces: (count: number) =>
+    count === 1
+      ? "1 agent space is open. It closes when Kamapathy quits."
+      : `${count} agent spaces are open. They close when Kamapathy quits.`,
+  steps: {
+    portable: "Quit Kamapathy, replace your copy with this file, then open it.",
+    debian: "Quit Kamapathy, then run:",
+    mac: "Drag Kamapathy into Applications and replace the old copy, then open it. If macOS says it can't verify the app, click Open Anyway in System Settings > Privacy & Security.",
+    windows:
+      "Follow the setup, then open Kamapathy. If SmartScreen appears, click More info, then Run anyway.",
+  },
+} as const;
+
+export const whatsNewCopy = {
+  title: (version: string) => `What's new in Kamapathy ${version}`,
+  agents: "For your agents",
+  steps: "After updating",
+  gotIt: "Got it",
+  releaseNotes: "Release notes",
 } as const;

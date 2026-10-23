@@ -12,3 +12,11 @@ artifacts/
 release-stage/
 release-artifacts/
 reviewed-source/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/kamapathy
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/kamapathy

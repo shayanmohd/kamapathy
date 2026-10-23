@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HOME_URL, initialState, newTab } from "../shared/state";
-import { readState, writeState } from "../electron/persistence";
+import type { UpdateRelease } from "../shared/types";
+import { readState, validSettings, writeState } from "../electron/persistence";
 
 const directories: string[] = [];
 function statePath(): string {
@@ -462,5 +463,188 @@ describe("desktop session persistence", () => {
     expect(readState(path, "linux", "0.1.0").settings.automationEnabled).toBe(
       false,
     );
+  });
+
+  it("keeps update checks on unless saved off", () => {
+    const path = statePath();
+    expect(initialState().settings.updateChecks).toBe(true);
+    expect(readState(path, "darwin", "0.2.0").settings.updateChecks).toBe(true);
+    const original = initialState();
+    const { updateChecks: _checks, ...older } = original.settings;
+    writeFileSync(path, JSON.stringify({ ...original, settings: older }));
+    expect(readState(path, "darwin", "0.2.0").settings.updateChecks).toBe(true);
+    original.settings.updateChecks = false;
+    writeState(path, original);
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.updateChecks).toBe(
+      false,
+    );
+    expect(readState(path, "darwin", "0.2.0").settings.updateChecks).toBe(
+      false,
+    );
+    for (const value of ["false", 0, null, {}]) {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...original,
+          settings: { ...original.settings, updateChecks: value },
+        }),
+      );
+      expect(
+        readState(path, "darwin", "0.2.0").settings.updateChecks,
+        JSON.stringify(value),
+      ).toBe(true);
+    }
+  });
+
+  it("sets seenVersion for fresh and older profiles", () => {
+    const path = statePath();
+    // A fresh profile has seen this version, so it shows only Welcome.
+    expect(readState(path, "darwin", "1.4.0").settings.seenVersion).toBe(
+      "1.4.0",
+    );
+    const original = initialState();
+    const { seenVersion: _seen, ...older } = original.settings;
+    const seen = (settings: object) => {
+      writeFileSync(path, JSON.stringify({ ...original, settings }));
+      return readState(path, "darwin", "1.4.0").settings.seenVersion;
+    };
+    // A profile from before What's new has seen none of it.
+    expect(seen({ ...older, welcomed: true })).toBe("0.0.0");
+    expect(seen({ ...older, welcomed: false })).toBe("1.4.0");
+    expect(seen(older)).toBe("1.4.0");
+    expect(seen({ ...older, welcomed: true, seenVersion: "1.2.10" })).toBe(
+      "1.2.10",
+    );
+    expect(seen({ ...older, welcomed: false, seenVersion: "0.9.0" })).toBe(
+      "0.9.0",
+    );
+    expect(seen({ ...older, welcomed: true, seenVersion: "1.4.0" })).toBe(
+      "1.4.0",
+    );
+    // A downgrade resets silently, comparing numbers rather than text.
+    expect(seen({ ...older, welcomed: true, seenVersion: "1.10.0" })).toBe(
+      "1.4.0",
+    );
+    for (const invalid of ["v1.2.0", "1.2", "1.2.3-beta", "", 120, null]) {
+      const label = JSON.stringify(invalid);
+      expect(
+        seen({ ...older, welcomed: true, seenVersion: invalid }),
+        label,
+      ).toBe("0.0.0");
+      expect(
+        seen({ ...older, welcomed: false, seenVersion: invalid }),
+        label,
+      ).toBe("1.4.0");
+    }
+    // Closing Welcome sends only welcomed, which leaves seenVersion alone.
+    const settings = { ...original.settings, seenVersion: "1.4.0" };
+    expect(validSettings({ welcomed: true }, settings)).toEqual({
+      ...settings,
+      welcomed: true,
+    });
+  });
+
+  it("drops a malformed update record", () => {
+    const path = statePath();
+    const folder = "https://github.com/shayanmohd/kamapathy/releases";
+    const latest: UpdateRelease = {
+      version: "0.3.0",
+      publishedAt: Date.parse("2026-10-01T12:00:00Z"),
+      url: `${folder}/tag/v0.3.0`,
+      installer: {
+        name: "Kamapathy-0.3.0-mac-arm64.dmg",
+        size: 2 * 1048576,
+        url: `${folder}/download/v0.3.0/Kamapathy-0.3.0-mac-arm64.dmg`,
+        sha256: "0123456789abcdef".repeat(4),
+      },
+      sums: `${folder}/download/v0.3.0/SHA256SUMS.txt`,
+    };
+    const checkedAt = Date.parse("2026-10-15T08:00:00Z");
+    const none = { kind: "other", state: "unsupported" };
+    const original = initialState("darwin");
+    expect(original.update).toEqual(none);
+    original.update = {
+      kind: "mac-arm64",
+      state: "ready",
+      checkedAt,
+      latest,
+      progress: { receivedBytes: 5, totalBytes: 5 },
+      installer: { path: "/tmp/kamapathy-update.dmg", sha256: "f".repeat(64) },
+      error: { code: "update_check_failed", message: "Offline." },
+    };
+    writeState(path, original);
+    // Only the last check's result is saved, and only it comes back.
+    expect(JSON.parse(readFileSync(path, "utf8")).update).toEqual({
+      checkedAt,
+      latest,
+    });
+    expect(readState(path, "darwin", "0.2.0").update).toEqual({
+      ...none,
+      checkedAt,
+      latest,
+    });
+    const restore = (update: unknown) => {
+      writeFileSync(path, JSON.stringify({ ...original, update }));
+      return readState(path, "darwin", "0.2.0").update;
+    };
+    expect(
+      restore({
+        ...original.update,
+        latest: {
+          ...latest,
+          notes: "Release text",
+          installer: { ...latest.installer, path: "/tmp/elsewhere" },
+        },
+      }),
+    ).toEqual({ ...none, checkedAt, latest });
+    // A release without a digest still counts.
+    const { sha256: _digest, ...plain } = latest.installer;
+    expect(restore({ latest: { ...latest, installer: plain } })).toEqual({
+      ...none,
+      latest: { ...latest, installer: plain },
+    });
+    for (const update of [undefined, null, "ready", 5, true, [latest]])
+      expect(restore(update), JSON.stringify(update)).toEqual(none);
+    for (const time of [String(checkedAt), 0, -1, null, {}])
+      expect(
+        restore({ checkedAt: time, latest }),
+        JSON.stringify(time),
+      ).toEqual({ ...none, latest });
+    const http = (url: string) => url.replace("https:", "http:");
+    const installer = (fields: object) => ({
+      ...latest,
+      installer: { ...latest.installer, ...fields },
+    });
+    for (const release of [
+      "0.3.0",
+      null,
+      { ...latest, version: "v0.3.0" },
+      { ...latest, version: "0.3" },
+      { ...latest, version: undefined },
+      { ...latest, publishedAt: "2026-10-01T12:00:00Z" },
+      { ...latest, url: http(latest.url) },
+      { ...latest, url: "https://" },
+      { ...latest, url: `${folder}/tag/v0.3.0?${"a".repeat(2048)}` },
+      { ...latest, sums: http(latest.sums) },
+      { ...latest, sums: undefined },
+      { ...latest, installer: undefined },
+      { ...latest, installer: "Kamapathy-0.3.0-mac-arm64.dmg" },
+      installer({ url: http(latest.installer.url) }),
+      installer({ sha256: "0123456789abcdef".repeat(4).slice(1) }),
+      installer({ sha256: "0123456789ABCDEF".repeat(4) }),
+      installer({ sha256: null }),
+      installer({ size: 1048575 }),
+      installer({ size: 1073741825 }),
+      installer({ size: 1048576.5 }),
+      installer({ size: "2097152" }),
+      installer({ name: "updates/Kamapathy-0.3.0-mac-arm64.dmg" }),
+      installer({ name: "Kamapathy 0.3.0.dmg" }),
+      installer({ name: "" }),
+      installer({ name: "a".repeat(256) }),
+    ])
+      expect(
+        restore({ checkedAt, latest: release }),
+        JSON.stringify(release)?.slice(0, 200),
+      ).toEqual({ ...none, checkedAt });
   });
 });

@@ -55,6 +55,8 @@ export type TransientRule =
 export interface ErrorSpec {
   status: number | null;
   override?: { status: number; route: string; action: string };
+  /** A code with no status of its own, carried in this route's response. */
+  carriedIn?: string;
   transient: boolean | readonly TransientRule[];
   summary: string;
   fields: readonly string[];

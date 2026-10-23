@@ -1,12 +1,26 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, safeStorage, session, shell, systemPreferences } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, statfs } from "node:fs/promises";
+import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
+import { maybeMoveToApplications } from "./move-to-applications";
 import { readState } from "./persistence";
+import {
+  INSTALLER_KINDS,
+  installKind,
+  repository,
+  updateSource,
+} from "./update-release";
+import {
+  netTransport,
+  realTimers,
+  UpdateFailure,
+  Updater,
+} from "./updates";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
 import { startAutomation } from "./agent/server";
 import { writeCsvFile } from "./passwords/csv";
@@ -15,6 +29,14 @@ import { registerPasswordIpc } from "./passwords/ipc";
 import { createReauth } from "./passwords/reauth";
 import { safeStorageSealer } from "./passwords/seal";
 import { Vault } from "./passwords/vault";
+import {
+  createAgentSetup,
+  parseAgentSetupRequest,
+  SetupError,
+  type AgentSetup,
+} from "./agent/setup/index";
+import type { SetupEnvironment } from "./agent/setup/paths";
+import { execRunner } from "./agent/setup/probe";
 import {
   agentPaths,
   chooseSocketPath,
@@ -29,13 +51,15 @@ import {
   writeLaunchInfo,
 } from "./agent-socket";
 import { isWebUrl } from "../shared/url";
-import { version } from "../package.json";
+import { homepage, version } from "../package.json";
 import type {
   BrowserAction,
   BrowserState,
   ContentBounds,
   ImportOutcome,
   ImportRequest,
+  InstallKind,
+  UpdateCommand,
 } from "../shared/types";
 import { surfaceColor } from "../shared/theme";
 
@@ -63,6 +87,8 @@ let vaultOpenScheduled = false;
 // One import runs at a time, whether it brings another browser's data or a
 // file of saved passwords.
 let importing = false;
+let updater: Updater | null = null;
+let updaterStarted = false;
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -73,6 +99,63 @@ const developmentUrl = externalApplication
   ? process.env.ELECTRON_RENDERER_URL
   : undefined;
 const rendererUrl = developmentUrl || pathToFileURL(rendererFile).href;
+// Set up agents and the skill it gives them, both built once the app is
+// ready.
+let agentSetup: AgentSetup | null = null;
+let bundledSkill: string | null = null;
+let skillRefreshed = false;
+
+function agentSetupEnvironment(): SetupEnvironment {
+  // Development reads the checkout's skill.
+  const skill = externalApplication
+    ? join(moduleDirectory, "../../skills/kamapathy")
+    : join(process.resourcesPath, "skills/kamapathy");
+  const home = homedir();
+  let accountHome = home;
+  let shell = process.env.SHELL || "/bin/sh";
+  // The account's own home ignores HOME, so a test profile changes agents
+  // only under a temporary HOME.
+  try {
+    const account = userInfo();
+    accountHome = account.homedir;
+    shell = account.shell || shell;
+  } catch {}
+  return {
+    platform: process.platform,
+    home,
+    accountHome,
+    env: process.env,
+    testProfile: Boolean(process.env.KAMAPATHY_USER_DATA),
+    bundledSkill: existsSync(join(skill, "SKILL.md")) ? skill : null,
+    version,
+    shell: process.platform === "win32" ? null : shell,
+    run: execRunner,
+  };
+}
+
+// Once per process, after the first window shows. It changes only a setup
+// the person chose.
+function refreshAgentSkill(): void {
+  if (skillRefreshed || !agentSetup) return;
+  skillRefreshed = true;
+  void agentSetup.refresh().catch((error) => {
+    controller?.addActivity(
+      undefined,
+      "Kamapathy could not update the agent skill. Open Set up agents to check it.",
+      "warning",
+    );
+    console.error(
+      "Agent skill refresh failed:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  });
+}
+
+// Electron passes a rejection on as "<name>: <message>" and the bridge removes
+// only "Error: ", so a setup failure travels as a plain Error.
+function plainError(error: unknown): never {
+  throw error instanceof SetupError ? new Error(error.message) : error;
+}
 
 async function exclusive<T>(work: () => Promise<T>): Promise<T> {
   if (importing) {
@@ -139,7 +222,11 @@ async function syncAutomation(): Promise<void> {
           prepareAgentDirectory(agent);
           socketPath = chooseSocketPath(app.getPath("userData"));
           removeStaleSocket(socketPath);
-          automation = await startAutomation(owner, { socketPath });
+          automation = await startAutomation(owner, {
+            socketPath,
+            skillPath: bundledSkill ?? undefined,
+            updates: updater ?? undefined,
+          });
           if (owner === controller) {
             publishEndpoint(agent, automation.endpoint, automation.instance);
             owner.setAutomation(true);
@@ -236,6 +323,7 @@ function createWindow(): void {
   const currentController = controller;
   currentController.subscribe(() => {
     void syncAutomation();
+    updater?.settingsChanged();
   });
   const currentForms =
     vault &&
@@ -243,6 +331,9 @@ function createWindow(): void {
       openManager: () => shortcut("passwords"),
     });
   forms = currentForms;
+  // A window built later shows what the updater already knows. The first one
+  // keeps its saved record, which the updater reads when it starts.
+  if (updater && updaterStarted) currentController.setUpdate(updater.state);
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
@@ -264,6 +355,11 @@ function createWindow(): void {
     currentForms?.dispose();
     currentController.dispose();
   });
+  currentWindow.once("ready-to-show", () => {
+    currentWindow.show();
+    refreshAgentSkill();
+  });
+  currentWindow.on("close", () => currentController.dispose());
   currentWindow.on("closed", () => {
     if (window === currentWindow) {
       window = null;
@@ -459,6 +555,148 @@ function registerIpc(): void {
     downloads: () => app.getPath("downloads"),
     exclusive,
   });
+  // Set up agents.
+  ipcMain.handle(
+    "kamapathy:agent-setup-status",
+    (event, options?: { probe?: unknown }) => {
+      validateSender(event);
+      return agentSetup!.status({ probe: options?.probe === true });
+    },
+  );
+  ipcMain.handle("kamapathy:agent-setup-apply", (event, request: unknown) => {
+    validateSender(event);
+    return agentSetup!.apply(parseAgentSetupRequest(request)).catch(plainError);
+  });
+  ipcMain.handle("kamapathy:agent-setup-remove", (event) => {
+    validateSender(event);
+    return agentSetup!.remove().catch(plainError);
+  });
+  ipcMain.handle("kamapathy:copy-text", (event, text: unknown) => {
+    validateSender(event);
+    if (typeof text !== "string" || text.length > 4096)
+      throw new Error("Invalid text.");
+    clipboard.writeText(text);
+  });
+  // Only the main process knows which space was used last.
+  ipcMain.handle(
+    "kamapathy:help-space",
+    (event) => validateSender(event).incomingSpace().id,
+  );
+  // Opening, installing, cancelling and quitting live only here, never on a
+  // route an agent can reach.
+  ipcMain.handle("kamapathy:update", async (event, command: unknown) => {
+    validateSender(event);
+    const current = updater!;
+    const wanted = updateCommand(command);
+    try {
+      if (wanted.command === "check") await current.check();
+      else if (wanted.command === "download") await current.download();
+      else if (wanted.command === "cancel") await current.cancel();
+      else if (wanted.command === "install") await current.install();
+      else if (wanted.command === "show") current.showFile();
+      else if (wanted.command === "copy-command") current.copyCommand();
+      else if (wanted.command === "notes") await current.openNotes(wanted.which);
+    } catch (error) {
+      // A check or download failure is already part of the status.
+      if (!(error instanceof UpdateFailure)) throw error;
+    }
+    return current.status();
+  });
+}
+
+function updateCommand(value: unknown): UpdateCommand {
+  const wanted = value as { command?: unknown; which?: unknown } | null;
+  if (
+    wanted?.command === "notes" &&
+    (wanted.which === "running" || wanted.which === "latest")
+  )
+    return { command: "notes", which: wanted.which };
+  if (
+    wanted?.command === "check" ||
+    wanted?.command === "download" ||
+    wanted?.command === "cancel" ||
+    wanted?.command === "install" ||
+    wanted?.command === "show" ||
+    wanted?.command === "copy-command"
+  )
+    return { command: wanted.command };
+  throw new Error("Invalid update command.");
+}
+
+// The kind this copy installs, and the releases it reads. A source run may
+// name a test feed and kind; a packaged build ignores both.
+function createUpdater(): Updater {
+  // The development runtime is a renamed Electron, so app.isPackaged alone is
+  // true there too, as electron/move-to-applications.ts explains.
+  const packaged = app.isPackaged && !externalApplication;
+  const named = process.env.KAMAPATHY_UPDATE_KIND as InstallKind | undefined;
+  const kind =
+    !packaged && named && INSTALLER_KINDS.includes(named)
+      ? named
+      : installKind({
+          platform: process.platform,
+          arch: process.arch,
+          translated: app.runningUnderARM64Translation,
+          packaged,
+          env: process.env,
+          execPath: process.execPath,
+        });
+  const repo = repository(homepage);
+  return new Updater({
+    version,
+    kind,
+    source: repo
+      ? updateSource(
+          repo,
+          !packaged ? process.env.KAMAPATHY_UPDATE_FEED : undefined,
+        )
+      : null,
+    directory: join(app.getPath("userData"), "updates"),
+    transport: netTransport(),
+    online: () => net.isOnline(),
+    now: () => Date.now(),
+    timers: realTimers(),
+    statfs: (path) => statfs(path),
+    settings: () => ({
+      updateChecks: controller?.state.settings.updateChecks ?? false,
+    }),
+    saved: () => ({
+      checkedAt: controller?.state.update.checkedAt,
+      latest: controller?.state.update.latest,
+    }),
+    publish: (next) => controller?.setUpdate(next),
+    dispatch: (action) =>
+      controller ? controller.dispatch(action) : Promise.resolve(),
+    helpSpaceId: () => controller!.incomingSpace().id,
+    openPath: (path) => shell.openPath(path),
+    showItemInFolder: (path) => shell.showItemInFolder(path),
+    writeClipboard: (text) => clipboard.writeText(text),
+    quit: () => app.quit(),
+  });
+}
+
+// Help pages open as the person's tab in a personal space no agent can
+// reach. A closed window comes back and shows once it is ready.
+async function openLink(url: string): Promise<void> {
+  try {
+    if (!window) createWindow();
+    else {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    }
+    const owner = controller!;
+    await owner.dispatch({
+      type: "tab:create",
+      url,
+      spaceId: owner.incomingSpace().id,
+    });
+  } catch (error) {
+    console.error(
+      "Help page could not open:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  }
 }
 
 function installMenu(): void {
@@ -469,6 +707,7 @@ function installMenu(): void {
         appName: app.getName(),
         shell: () => window,
         send: shortcut,
+        open: (url) => void openLink(url),
       }),
     ),
   );
@@ -490,6 +729,7 @@ else {
       withdrawEndpoint(agent);
     } catch {}
     controller?.dispose();
+    void updater?.stop();
     void syncAutomation();
     // Times saved logins were last used are written in batches.
     void vault?.flush();
@@ -501,7 +741,17 @@ else {
     if (!window) createWindow();
     else window.show();
   });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
+    if (
+      (await maybeMoveToApplications({
+        app,
+        dialog,
+        platform: process.platform,
+        execPath: process.execPath,
+        defaultApp: externalApplication,
+      })) === "moved"
+    )
+      return;
     if (existsSync(iconPath)) app.dock?.setIcon(iconPath);
     app.setAboutPanelOptions({
       applicationName: "Kamapathy",
@@ -538,8 +788,15 @@ else {
       path: join(app.getPath("userData"), "passwords", "vault.bin"),
       sealer: safeStorageSealer(safeStorage, process.platform),
     });
+    const setupEnvironment = agentSetupEnvironment();
+    bundledSkill = setupEnvironment.bundledSkill;
+    agentSetup = createAgentSetup(setupEnvironment);
     registerIpc();
     installMenu();
+    // Before the window, so the agent service it starts already has it.
+    updater = createUpdater();
     createWindow();
+    updaterStarted = true;
+    void updater.start();
   });
 }

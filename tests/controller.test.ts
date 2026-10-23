@@ -7,6 +7,8 @@ import type { BrowserWindow } from "electron";
 import { dialog, Menu, session, shell, WebContentsView } from "electron";
 import { BrowserController } from "../electron/controller";
 import { inputMarker } from "../electron/agent/input/marker";
+import { writeState } from "../electron/persistence";
+import type { UpdateState } from "../shared/types";
 import {
   agentRules,
   HOME_URL,
@@ -2516,5 +2518,138 @@ describe("agent input and the shell", () => {
     end();
     left.emit("before-mouse-event", {}, { type: "mouseDown" });
     expect(browser.state.activeTabId).toBe(first);
+  });
+});
+
+describe("incoming space", () => {
+  const tabsIn = (browser: BrowserController, spaceId: string) =>
+    browser.state.tabs.filter((tab) => tab.spaceId === spaceId);
+
+  it("help links open in the active personal space, else the one used last, else a new Personal space", async () => {
+    const browser = controller();
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    expect(browser.incomingSpace().id).toBe("work");
+    // A granted personal space is passed over for the one used before it.
+    await browser.dispatch({ type: "space:activate", id: "personal" });
+    browser.grantAccess("personal");
+    expect(browser.incomingSpace().id).toBe("work");
+    // With every personal space granted, a new one takes the link, and
+    // nothing changes the space in front.
+    browser.grantAccess("work");
+    const spaces = browser.state.spaces.length;
+    const created = browser.incomingSpace();
+    expect(created).toMatchObject({
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdBy: "person",
+    });
+    expect(created).not.toHaveProperty("access");
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(tabsIn(browser, created.id)).toEqual([
+      expect.objectContaining({
+        url: HOME_URL,
+        openedBy: "person",
+        managed: false,
+      }),
+    ]);
+    expect(browser.state.activeSpaceId).toBe("personal");
+    // It is used again rather than making another.
+    expect(browser.incomingSpace()).toBe(created);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    // A 31st space is refused with the usual message.
+    browser.grantAccess(created.id);
+    while (browser.state.spaces.length < 30) browser.createAgentSpace("Task");
+    expect(() => browser.incomingSpace()).toThrow(
+      "The maximum of 30 spaces has been reached.",
+    );
+  });
+
+  it("a personal space not used since start comes before a new one", () => {
+    const browser = controller();
+    browser.grantAccess("personal");
+    expect(browser.incomingSpace().id).toBe("work");
+    expect(browser.state.spaces).toHaveLength(2);
+  });
+});
+
+describe("update state", () => {
+  const sample = (
+    progress?: { receivedBytes: number; totalBytes: number },
+    over: Partial<UpdateState> = {},
+  ): UpdateState => ({
+    kind: "mac-arm64",
+    state: "downloading",
+    checkedAt: 5000,
+    latest: {
+      version: "0.3.0",
+      publishedAt: 1000,
+      url: "https://github.com/shayanmohd/kamapathy/releases/tag/v0.3.0",
+      installer: {
+        name: "Kamapathy-0.3.0-mac-arm64.dmg",
+        size: 2097152,
+        url: "https://github.com/shayanmohd/kamapathy/releases/download/v0.3.0/Kamapathy-0.3.0-mac-arm64.dmg",
+      },
+      sums: "https://github.com/shayanmohd/kamapathy/releases/download/v0.3.0/SHA256SUMS.txt",
+    },
+    ...(progress ? { progress } : {}),
+    ...over,
+  });
+
+  it("sends progress at most once a second and saves only new check results", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = controller();
+      const shell = browser.window.webContents as unknown as FakeContents;
+      const sent = () =>
+        shell.send.mock.calls.filter(
+          ([channel]) => channel === "kamapathy:state-changed",
+        );
+      vi.mocked(writeState).mockClear();
+      const first = sent().length;
+      browser.setUpdate(sample({ receivedBytes: 1, totalBytes: 10 }));
+      expect(sent()).toHaveLength(first + 1);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).toHaveBeenCalledTimes(1);
+
+      // Progress alone waits for the trailing send, which carries the last one.
+      vi.mocked(writeState).mockClear();
+      browser.setUpdate(sample({ receivedBytes: 2, totalBytes: 10 }));
+      browser.setUpdate(sample({ receivedBytes: 3, totalBytes: 10 }));
+      expect(sent()).toHaveLength(first + 1);
+      expect(browser.state.update.progress).toEqual({
+        receivedBytes: 3,
+        totalBytes: 10,
+      });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(sent()).toHaveLength(first + 2);
+      expect(sent().at(-1)?.[1].update.progress).toEqual({
+        receivedBytes: 3,
+        totalBytes: 10,
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).not.toHaveBeenCalled();
+
+      // Any other change sends at once, and saves only with a new result.
+      browser.setUpdate(
+        sample(undefined, {
+          state: "ready",
+          installer: { path: "/tmp/installer.dmg", sha256: "a".repeat(64) },
+        }),
+      );
+      expect(sent()).toHaveLength(first + 3);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).not.toHaveBeenCalled();
+      browser.setUpdate(sample(undefined, { state: "available", checkedAt: 9000 }));
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

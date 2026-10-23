@@ -48,6 +48,8 @@ export function writeState(path: string, state: BrowserState): void {
   const activeTabId =
     tabs.find((tab) => tab.id === state.activeTabId)?.id ??
     tabs.find((tab) => tab.spaceId === activeSpaceId)?.id;
+  // Of the update state, only the last check's result outlives a run.
+  const { checkedAt, latest } = state.update;
   const payload = {
     spaces,
     tabs,
@@ -56,6 +58,7 @@ export function writeState(path: string, state: BrowserState): void {
     bookmarks: state.bookmarks,
     history: state.history,
     settings: state.settings,
+    update: { checkedAt, latest },
   };
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp`;

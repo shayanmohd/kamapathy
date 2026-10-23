@@ -1,15 +1,23 @@
 import type { BaseWindow, MenuItemConstructorOptions } from "electron";
+import {
+  AGENT_GUIDE_URL,
+  HELP_URL,
+  ISSUES_URL,
+  PRIVACY_URL,
+} from "../shared/links";
 
 export function menuTemplate({
   darwin,
   appName,
   shell,
   send,
+  open,
 }: {
   darwin: boolean;
   appName: string;
   shell: () => Pick<BaseWindow, "id"> | null;
   send: (name: string) => void;
+  open: (url: string) => void;
 }): MenuItemConstructorOptions[] {
   // Kamapathy's shell and pages take these keys before the menu, so off macOS the
   // menu only shows them. On macOS the menu also gets keys pressed in detached
@@ -24,6 +32,12 @@ export function menuTemplate({
       if (target && target.id === shell()?.id) send(name);
     },
     ...(accelerator ? { accelerator, registerAccelerator: false } : {}),
+  });
+  // Links have no keys, so unlike commands they work from any window; main
+  // brings Kamapathy's window back to show the page.
+  const link = (label: string, url: string): MenuItemConstructorOptions => ({
+    label,
+    click: () => open(url),
   });
   const appMenu: MenuItemConstructorOptions[] = darwin
     ? [
@@ -83,5 +97,18 @@ export function menuTemplate({
       ],
     },
     { role: "windowMenu" },
+    {
+      role: "help",
+      submenu: [
+        link("Kamapathy Help", HELP_URL),
+        command("What's New", "whats-new"),
+        { type: "separator" },
+        command("Set Up Agents…", "agent-setup"),
+        link("Agent Guide", AGENT_GUIDE_URL),
+        { type: "separator" },
+        link("Privacy", PRIVACY_URL),
+        link("Report an Issue", ISSUES_URL),
+      ],
+    },
   ];
 }

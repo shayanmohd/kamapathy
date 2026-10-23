@@ -22,6 +22,11 @@ export const actionNames = [
   "zoom-in",
   "zoom-out",
   "zoom-reset",
+  "agent-setup",
+  "help",
+  "report-issue",
+  "privacy",
+  "whats-new",
 ] as const;
 export type ActionName = (typeof actionNames)[number];
 
@@ -43,5 +48,28 @@ export const toolsMenuLayout = [
   "split",
   "find",
   "settings",
+  "agent-setup",
+  "help",
 ] as const satisfies readonly (ActionName | null)[];
 export type ToolsMenuAction = Exclude<(typeof toolsMenuLayout)[number], null>;
+
+// The command palette's commands in order.
+export const paletteActions = [
+  "new-tab",
+  "split",
+  "space",
+  "spaces",
+  "bookmarks",
+  "history",
+  "downloads",
+  "settings",
+  "screenshot",
+  "devtools",
+  "zoom-in",
+  "zoom-out",
+  "zoom-reset",
+  "agent-setup",
+  "help",
+  "report-issue",
+  "privacy",
+] as const satisfies readonly ActionName[];

@@ -26,6 +26,7 @@ import { createDispatchers } from "./input/dispatch";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
+import { updateRoutes, type UpdateService } from "./routes/update";
 import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
@@ -145,7 +146,7 @@ function testProbe(sessions: TabSessions): TestProbe {
 // connection needs no token.
 export async function startAutomation(
   controller: AutomationController,
-  options: { socketPath: string },
+  options: { socketPath: string; skillPath?: string; updates?: UpdateService },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
   const authority = createAuthority(controller);
@@ -184,6 +185,7 @@ export async function startAutomation(
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
     ...requests.routes,
+    ...updateRoutes({ updates: options.updates }),
   });
   const versions = Object.fromEntries(
     Object.entries({
@@ -193,6 +195,8 @@ export async function startAutomation(
       v8: process.versions.v8,
     }).filter(([, value]) => value !== undefined),
   );
+  // The bundled skill's folder, reported as given; nothing is read from it.
+  const skill = options.skillPath ? { skill: { path: options.skillPath } } : {};
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Kamapathy-Instance", instance);
@@ -212,11 +216,15 @@ export async function startAutomation(
       if (request.method === "GET" && request.url === "/health") {
         if (authority.stopped)
           return fail("automation_stopped", "Automation is disabled.");
+        // Read per request, so it goes when the reminder does.
+        const update = options.updates?.reminder();
         return send(response, 200, {
           status: "ok",
           version: controller.state.version,
           apiLevel: API_LEVEL,
           versions,
+          ...skill,
+          ...(update ? { update } : {}),
         });
       }
       if (authority.stopped)

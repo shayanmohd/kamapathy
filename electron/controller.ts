@@ -40,6 +40,7 @@ import type {
   SpaceColor,
   SpaceRequest,
   Tab,
+  UpdateState,
 } from "../shared/types";
 import { inputMarker } from "./agent/input/marker";
 import { TabRegistry } from "./agent/tab-registry";
@@ -166,12 +167,16 @@ export class BrowserController {
     hidden: true,
   };
   private saveTimer?: NodeJS.Timeout;
+  private updateTimer?: NodeJS.Timeout;
+  private updateSentAt = 0;
   private destroyed = false;
   private runId = randomUUID();
   private lastFind = { text: "", tabId: "" };
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  // Space ids, most recently active first.
+  private recentSpaces: string[];
 
   constructor(
     readonly window: BrowserWindow,
@@ -180,6 +185,7 @@ export class BrowserController {
     private options: ControllerOptions = {},
   ) {
     this.state = state;
+    this.recentSpaces = [state.activeSpaceId];
     // Restored tabs are the person's.
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
@@ -201,12 +207,13 @@ export class BrowserController {
     return () => this.viewListeners.delete(listener);
   }
 
-  private emit(): BrowserState {
+  private emit(options: { save?: boolean } = {}): BrowserState {
     if (this.destroyed) return this.state;
     this.layout();
     if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
       this.window.webContents.send("kamapathy:state-changed", this.state);
     for (const listener of this.listeners) listener(this.state);
+    if (options.save === false) return this.state;
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.persist(), 350);
     return this.state;
@@ -237,6 +244,34 @@ export class BrowserController {
     });
     this.state.activity = this.state.activity.slice(0, 100);
     this.emit();
+  }
+
+  // A download's progress would send hundreds of states a second, so only
+  // the first in each second goes now and the last one follows it. Only a new
+  // check result is worth saving.
+  setUpdate(next: UpdateState): void {
+    const previous = this.state.update;
+    const save =
+      previous.checkedAt !== next.checkedAt ||
+      JSON.stringify(previous.latest) !== JSON.stringify(next.latest);
+    const rest = (value: UpdateState) =>
+      JSON.stringify({ ...value, progress: undefined });
+    const onlyProgress = !save && rest(previous) === rest(next);
+    this.state.update = next;
+    const since = Date.now() - this.updateSentAt;
+    if (onlyProgress && since < 1000) {
+      if (!this.updateTimer)
+        this.updateTimer = setTimeout(() => {
+          this.updateTimer = undefined;
+          this.updateSentAt = Date.now();
+          this.emit({ save: false });
+        }, 1000 - since);
+      return;
+    }
+    clearTimeout(this.updateTimer);
+    this.updateTimer = undefined;
+    this.updateSentAt = Date.now();
+    this.emit({ save });
   }
 
   setAutomation(running: boolean): void {
@@ -1144,6 +1179,10 @@ export class BrowserController {
       this.splitLeadingTabId = tab.id;
     this.state.activeSpaceId = tab.spaceId;
     this.state.activeTabId = tab.id;
+    this.recentSpaces = [
+      tab.spaceId,
+      ...this.recentSpaces.filter((id) => id !== tab.spaceId),
+    ].slice(0, 30);
   }
 
   private destroyTab(id: string): void {
@@ -1230,6 +1269,39 @@ export class BrowserController {
     if (isWebUrl(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
+  }
+
+  /** The personal space no agent can reach, where help links open. */
+  incomingSpace(): Space {
+    const reachable = (space: Space | undefined): space is Space =>
+      space?.kind === "personal" && space.access !== "granted";
+    // The active space, else the one used last, else any the person has
+    // not used since Kamapathy started.
+    const known =
+      [this.state.activeSpaceId, ...this.recentSpaces]
+        .map((id) => this.state.spaces.find((space) => space.id === id))
+        .find(reachable) ?? this.state.spaces.find(reachable);
+    if (known) return known;
+    if (this.state.spaces.length >= 30)
+      throw new Error("The maximum of 30 spaces has been reached.");
+    if (this.state.tabs.length >= 200)
+      throw new Error("The maximum of 200 tabs has been reached.");
+    const space: Space = {
+      id: randomUUID(),
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdAt: Date.now(),
+      createdBy: "person",
+    };
+    this.state.spaces.push(space);
+    const tab = newTab(space.id);
+    this.registry.register(tab, { openedBy: "person", managed: false });
+    this.state.tabs.push(tab);
+    this.emit();
+    return space;
   }
 
   closeTab(
@@ -1972,6 +2044,7 @@ export class BrowserController {
   dispose(): void {
     if (this.destroyed) return;
     clearTimeout(this.saveTimer);
+    clearTimeout(this.updateTimer);
     this.persist();
     this.destroyed = true;
     for (const id of this.views.keys()) this.destroyTab(id);

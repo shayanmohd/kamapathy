@@ -1,15 +1,22 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Monitor,
   Moon,
   Sun,
   TreeEvergreen,
 } from "@phosphor-icons/react";
-import type { BrowserAction, BrowserState, Theme } from "../../shared/types";
+import type {
+  AgentSetupStatus,
+  BrowserAction,
+  BrowserState,
+  Theme,
+} from "../../shared/types";
 import { Modal } from "./ui";
-import { isDesktop } from "../lib/bridge";
-import { settingsCopy } from "../copy";
+import { UpdatesSection } from "./Updates";
+import { bridge, isDesktop } from "../lib/bridge";
+import { agentSetupCopy, settingsCopy } from "../copy";
 import { activityTime } from "../lib/spaces";
+import { setupSummary } from "../lib/setupView";
 import "./Spaces.css";
 
 export function Settings({
@@ -20,16 +27,38 @@ export function Settings({
   focus,
   onImport,
   onPasswords,
+  onAgentSetup,
+  onInstall,
+  onWhatsNew,
 }: {
   open: boolean;
   onClose: () => void;
   state: BrowserState;
   dispatch: (action: BrowserAction) => void;
-  focus?: "agents";
+  focus?: "agents" | "updates";
   onImport: () => void;
   onPasswords: () => void;
+  onAgentSetup: () => void;
+  onInstall: () => void;
+  onWhatsNew: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
+  const updateSwitch = useRef<HTMLButtonElement>(null);
+  // Read again at each opening, without the slower shell probe.
+  const [setup, setSetup] = useState<AgentSetupStatus | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    bridge.agentSetupStatus().then(
+      (next) => {
+        if (alive) setSetup(next);
+      },
+      () => {},
+    );
+    return () => {
+      alive = false;
+    };
+  }, [open]);
   const warning =
     state.settings.automationEnabled && !state.automation.running
       ? state.activity.find((item) => !item.spaceId && item.kind === "warning")
@@ -43,7 +72,13 @@ export function Settings({
       onClose={onClose}
       title="Make Kamapathy yours"
       className="settings-modal"
-      initialFocus={focus === "agents" ? agentSwitch : undefined}
+      initialFocus={
+        focus === "agents"
+          ? agentSwitch
+          : focus === "updates"
+            ? updateSwitch
+            : undefined
+      }
     >
       <section className="settings-section">
         <h3>Appearance</h3>
@@ -251,6 +286,20 @@ export function Settings({
             <span />
           </button>
         </div>
+        <div className="setting-row">
+          <div>
+            <strong>{agentSetupCopy.settingsRow}</strong>
+            <p>{setupSummary(setup)}</p>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!isDesktop}
+            onClick={onAgentSetup}
+          >
+            {agentSetupCopy.settingsButton}
+          </button>
+        </div>
         <p className="agent-connection">
           <span
             className={`connection-status ${state.automation.running ? "online" : ""}`}
@@ -279,6 +328,15 @@ export function Settings({
           <p className="setting-note">{settingsCopy.noActivity}</p>
         )}
       </section>
+      {isDesktop && (
+        <UpdatesSection
+          state={state}
+          dispatch={dispatch}
+          onInstall={onInstall}
+          onWhatsNew={onWhatsNew}
+          switchRef={updateSwitch}
+        />
+      )}
       <div className="settings-about">
         <span className="brand-mark">
           <TreeEvergreen size={23} weight="fill" />

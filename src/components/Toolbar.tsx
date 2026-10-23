@@ -23,6 +23,7 @@ export function Toolbar({
   onToggleBookmark,
   menuRef,
   menuOpen,
+  menuDot,
   onMenu,
 }: {
   tab: Tab | undefined;
@@ -36,6 +37,7 @@ export function Toolbar({
   onToggleBookmark: () => void;
   menuRef: RefObject<HTMLButtonElement | null>;
   menuOpen: boolean;
+  menuDot: boolean;
   onMenu: () => void;
 }) {
   return (
@@ -75,12 +77,14 @@ export function Toolbar({
       />
       <IconButton
         ref={menuRef}
+        className={menuDot ? "has-update" : ""}
         label="Browser menu"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={onMenu}
       >
         <DotsThree size={20} weight="bold" />
+        {menuDot && <span className="menu-dot" aria-hidden="true" />}
       </IconButton>
     </header>
   );

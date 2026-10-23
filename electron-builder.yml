@@ -14,6 +14,11 @@ extraResources:
     to: icon.png
   - from: build/icon.ico
     to: icon.ico
+  - from: skills/kamapathy
+    to: skills/kamapathy
+    filter:
+      - "**/*"
+      - "!**/.DS_Store"
 publish: null
 mac:
   category: public.app-category.productivity
@@ -26,6 +31,9 @@ mac:
     - dmg
     - zip
   artifactName: Kamapathy-${version}-mac-${arch}.${ext}
+  extendInfo:
+    NSCameraUsageDescription: Websites you allow can use the camera.
+    NSMicrophoneUsageDescription: Websites you allow can use the microphone.
 dmg:
   title: Kamapathy
   contents:
@@ -54,7 +62,7 @@ nsis:
 portable:
   artifactName: Kamapathy-${version}-windows-${arch}-portable.${ext}
 linux:
-  executableName: kamapathy
+  executableName: kamapathy-browser
   syncDesktopName: true
   icon: build/icon.png
   category: Network

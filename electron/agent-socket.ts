@@ -142,6 +142,43 @@ export function setAgentAccess(paths: AgentPaths, enabled: boolean): void {
   else if (!existsSync(paths.off)) writePrivate(paths.off, "");
 }
 
+// The stable launcher of a running AppImage or Windows portable build. Their
+// environment variables leak into programs another AppImage or portable app
+// starts, so each is trusted only when it describes this running executable.
+function inside(child: string, parent: string): boolean {
+  const path = relative(parent, child);
+  return Boolean(path) && !path.startsWith("..") && !isAbsolute(path);
+}
+
+export function runningAppImage(options: {
+  env: NodeJS.ProcessEnv;
+  execPath: string;
+  platform?: NodeJS.Platform;
+}): string | undefined {
+  const { env, execPath } = options;
+  const platform = options.platform ?? process.platform;
+  return platform === "linux" &&
+    env.APPIMAGE &&
+    env.APPDIR &&
+    inside(execPath, env.APPDIR)
+    ? env.APPIMAGE
+    : undefined;
+}
+
+export function runningPortable(options: {
+  env: NodeJS.ProcessEnv;
+  execPath: string;
+  platform?: NodeJS.Platform;
+}): string | undefined {
+  const { env, execPath } = options;
+  const platform = options.platform ?? process.platform;
+  return platform === "win32" &&
+    env.PORTABLE_EXECUTABLE_FILE &&
+    env.PORTABLE_EXECUTABLE_APP_FILENAME === win32.basename(execPath, ".exe")
+    ? env.PORTABLE_EXECUTABLE_FILE
+    : undefined;
+}
+
 // What an automatic start runs. The recorded program must still exist after
 // Kamapathy quits: AppImage and the Windows portable build run from temporary
 // copies, so their stable launchers are recorded instead. Only the app folder
@@ -154,29 +191,9 @@ export function launchCommand(options: {
   appPath: string;
   platform?: NodeJS.Platform;
 }): { command: string; args: string[] } {
-  const { env, execPath } = options;
-  const platform = options.platform ?? process.platform;
-  // These variables leak into programs another AppImage or portable app starts,
-  // so each is trusted only when it describes this running executable.
-  const inside = (child: string, parent: string) => {
-    const path = relative(parent, child);
-    return Boolean(path) && !path.startsWith("..") && !isAbsolute(path);
-  };
-  const appImage =
-    platform === "linux" &&
-    env.APPIMAGE &&
-    env.APPDIR &&
-    inside(execPath, env.APPDIR)
-      ? env.APPIMAGE
-      : undefined;
-  const portable =
-    platform === "win32" &&
-    env.PORTABLE_EXECUTABLE_FILE &&
-    env.PORTABLE_EXECUTABLE_APP_FILENAME === win32.basename(execPath, ".exe")
-      ? env.PORTABLE_EXECUTABLE_FILE
-      : undefined;
   return {
-    command: appImage || portable || execPath,
+    command:
+      runningAppImage(options) || runningPortable(options) || options.execPath,
     args: options.defaultApp ? [resolve(options.appPath)] : [],
   };
 }

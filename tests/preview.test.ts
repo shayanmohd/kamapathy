@@ -257,6 +257,44 @@ describe("interactive preview state invariants", () => {
   it("has no thumbnails in the web preview", async () => {
     expect(await create().thumbnails()).toEqual({});
   });
+  it("agent setup is desktop only in the web preview", async () => {
+    const bridge = create();
+    expect(await bridge.agentSetupStatus()).toEqual({
+      supported: false,
+      reason: "desktop_only",
+      skillFolder: null,
+      agents: [],
+      command: {
+        state: "off",
+        path: "",
+        onPath: null,
+        profileFile: null,
+        pathAdded: false,
+      },
+      codex: { detected: false, allowed: false },
+      node: null,
+    });
+    for (const call of [
+      () =>
+        bridge.applyAgentSetup({
+          agents: ["claude-code"],
+          replace: [],
+          command: true,
+          path: false,
+          codexRule: false,
+        }),
+      () => bridge.removeAgentSetup(),
+    ])
+      await expect(call()).rejects.toThrow(
+        "Agent setup is available in the desktop app.",
+      );
+  });
+  it("opens help in the active space in the web preview", async () => {
+    const bridge = create();
+    expect(await bridge.helpSpaceId()).toBe("personal");
+    await bridge.dispatch({ type: "space:activate", id: "work" });
+    expect(await bridge.helpSpaceId()).toBe("work");
+  });
   it("recolours a space in the web preview", async () => {
     const bridge = create();
     const state = await bridge.dispatch({

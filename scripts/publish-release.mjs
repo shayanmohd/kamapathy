@@ -38,9 +38,12 @@ for (const name of targets.keys()) {
   const job = jobs.find((entry) => entry.name === name);
   assert.equal(job?.conclusion, "success", `Missing successful job: ${name}`);
   const linux = name === "Linux x64";
+  // Once releases are signed, the macOS and Windows builds must prove it.
+  const signed = !linux && process.env.KAMAPATHY_SIGNED_RELEASES === "true";
   for (const stepName of [
     "Validate types, behavior, and copy",
     "Compile desktop app",
+    "Test install scripts",
     linux
       ? "Smoke test desktop on Linux"
       : "Smoke test desktop on macOS and Windows",
@@ -51,6 +54,8 @@ for (const name of targets.keys()) {
       ? "Test Kamapathy skill on Linux"
       : "Test Kamapathy skill on macOS and Windows",
     "Package native desktop app",
+    ...(signed ? ["Verify signatures"] : []),
+    "Verify bundled skill",
     "Upload installable artifacts",
   ])
     assert.equal(
