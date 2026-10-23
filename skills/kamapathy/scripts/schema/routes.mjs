@@ -82,6 +82,13 @@ const FIELDS = {
       description:
         "list reads text and controls; outline prints the page's structure instead of its text.",
     },
+    locators: {
+      kind: "boolean",
+      default: false,
+      since: 3,
+      description:
+        "Give each control a locator: a selector that names it alone, which outlives refs.",
+    },
   },
   click: { ...target },
   fill: {

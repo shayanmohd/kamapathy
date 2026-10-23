@@ -1,4 +1,5 @@
 import type { Decision, Invalid, Picked, Query } from "./agent/dom/select";
+import type { SearchAst } from "./agent/selectors";
 
 export interface SnapshotOptions {
   mode: "compact" | "full";
@@ -9,6 +10,7 @@ export interface SnapshotOptions {
   maxChars: number;
   maxControls: number;
   offsets?: { text: number; control: number; line: number };
+  locators?: boolean;
   firstRef: number;
 }
 export interface ElementTarget {
@@ -18,6 +20,8 @@ export interface ElementTarget {
 }
 export type PageOperation =
   | "snapshot"
+  | "elements"
+  | "validate"
   | "target"
   | "click"
   | "fill"
@@ -1684,6 +1688,40 @@ export function pageOperation(
       };
       return entry;
     };
+    // What a locator may be built from: the control's own attributes and a
+    // link's address, for the controls a part printed. A field's value is
+    // never read.
+    const LOCATOR_ATTRIBUTES = [
+      "data-testid",
+      "data-test",
+      "data-qa",
+      "data-cy",
+      "id",
+      "name",
+      "aria-label",
+      "placeholder",
+    ];
+    const locatorSources = (
+      elements: readonly Element[],
+      entries: readonly { ref: string }[],
+    ) => {
+      if (!options.locators) return {};
+      return {
+        locatorSources: elements.map((element, index) => {
+          const attributes: Record<string, string> = {};
+          for (const name of LOCATOR_ATTRIBUTES) {
+            const value = element.getAttribute(name);
+            if (value) attributes[name] = value;
+          }
+          return {
+            ref: entries[index].ref,
+            tag: element.localName,
+            attributes,
+            ...hrefOf(element),
+          };
+        }),
+      };
+    };
     // A control that looks like another visible control, listed or not and in
     // or outside a scoped snapshot, cannot be told apart from it once it is
     // gone, so its ref never follows a redrawn control.
@@ -1953,6 +1991,7 @@ export function pageOperation(
         title: document.title,
         outline: lines.join("\n"),
         interactables,
+        ...locatorSources(printed, interactables),
         ...reboundResult(),
         ...(issued.length ? { issued } : {}),
         ...(past ? { omittedControls: past } : {}),
@@ -2002,6 +2041,7 @@ export function pageOperation(
       title: document.title,
       text,
       interactables,
+      ...locatorSources(chosen, interactables),
       ...reboundResult(),
       ...(issued.length ? { issued } : {}),
       ...(omitted ? { omittedControls: omitted } : {}),
@@ -2111,6 +2151,33 @@ export function pageOperation(
       return failure("The element is not a frame shown in this page.");
     const around = framePath(element);
     return { ok: true, path: around ? `${around}/${index}` : `${index}` };
+  }
+  // The listed controls themselves, for the main process to read their
+  // backend nodes from.
+  if (operation === "elements") {
+    const refs = payload.refs as string[];
+    return refs.map((ref) => registry.elements.get(ref) ?? null);
+  }
+  // Whether each locator candidate names its own control alone. Every match
+  // counts, hidden ones too, so a locator stands only where it is the one
+  // way to this element.
+  if (operation === "validate") {
+    const checks = payload.checks as { ref: string; candidates: SearchAst[] }[];
+    return {
+      ok: true,
+      valid: checks.map((check) => {
+        const element = registry.elements.get(check.ref);
+        if (!element) return check.candidates.map(() => false);
+        return check.candidates.map((ast) => {
+          const found = engineOf().search(ast);
+          return (
+            found.kind === "matches" &&
+            found.matches.length === 1 &&
+            found.matches[0] === element
+          );
+        });
+      }),
+    };
   }
   if (operation === "scroll") {
     const direction = payload.direction as string;

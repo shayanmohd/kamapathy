@@ -4,8 +4,9 @@
 // else; a frame from another origin and two lookalike controls beside them;
 // a page of links of every protocol; a page of more text and controls than
 // one part holds, whose ranked order differs from its page order, nested so
-// its parts repeat ancestors; and a page of every kind of node an outline
-// prints.
+// its parts repeat ancestors; a page of every kind of node an outline
+// prints; and a page of controls whose locators differ in kind, with
+// lookalike controls and duplicate addresses that no locator can name.
 // {{other}} becomes a second origin for the same server, which makes that
 // frame cross origin.
 const paragraph = (number) =>
@@ -141,6 +142,18 @@ dialog{position:static;margin:0;border:0;padding:0}
 <p>Dialog text</p>
 <button id="ok" type="button">OK</button>
 </dialog>`,
+  "/snapshot/locators": `<!doctype html><meta charset="utf-8"><title>Locators</title>
+<style>body{font:14px sans-serif;margin:0}button,input,a{display:block}</style>
+<button id="save" data-testid="save-button" type="button">Save</button>
+<button id="checkout-form" type="button">Checkout</button>
+<button type="button">Ship it</button>
+<button id="item123" type="button">Archive</button>
+<input id=":r12:" aria-label="Note" placeholder="First note">
+<input aria-label="Note" placeholder="Second note">
+<a href="/one" id="link1a2b3c4">Open</a>
+<a href="/two" id="link2a2b3c4">Open</a>
+<a href="/shared" id="rowa1b2c3d4">Shared</a>
+<a href="/shared" id="rowe5f6g7h8">Shared</a>`,
   "/snapshot/links": `<!doctype html><meta charset="utf-8"><title>Every link</title>
 <style>body{font:14px sans-serif;margin:16px}a{display:block}</style>
 <a id="plain" href="http://example.com/catalog">Catalog</a>

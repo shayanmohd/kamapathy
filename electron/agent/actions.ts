@@ -66,6 +66,8 @@ export function remaining(deadline: number): number {
 }
 
 export interface Actions {
+  /** The namespace a page operation of this tab's current page runs under. */
+  namespace(id: string, session: TabSession): string;
   readyContents(
     id: string,
     timeout?: number,
@@ -175,6 +177,12 @@ export function createActions(deps: {
     return { contents, session };
   };
 
+  // Page registries start empty once a tab's refs are retired.
+  const namespaceOf = (id: string, session: TabSession) => {
+    const generation = refs.generation(id);
+    const retired = generation ? `:g${generation}` : "";
+    return `${referenceSession}:${id}:${session.epoch}${retired}`;
+  };
   const evaluatePage = async (
     id: string,
     session: TabSession,
@@ -185,10 +193,7 @@ export function createActions(deps: {
   ) => {
     authorizeTab(id);
     const epoch = session.epoch;
-    // Page registries start empty once a tab's refs are retired.
-    const generation = refs.generation(id);
-    const retired = generation ? `:g${generation}` : "";
-    const namespace = `${referenceSession}:${id}:${epoch}${retired}`;
+    const namespace = namespaceOf(id, session);
     const result = await resolver.run(id, session, operation, payload, {
       deadline,
       namespace,
@@ -224,8 +229,14 @@ export function createActions(deps: {
     }
     return result;
   };
-  // Snapshots carry the scope rules and the header of their own.
-  const snapshots = createSnapshots({ controller, evaluatePage });
+  // Snapshots carry the scope rules, the locators and the header of their
+  // own.
+  const snapshots = createSnapshots({
+    controller,
+    evaluatePage,
+    resolver,
+    namespace: namespaceOf,
+  });
   const nativeInput = async (
     id: string,
     session: TabSession,
@@ -724,5 +735,10 @@ export function createActions(deps: {
     controller.addActivity(tab.spaceId, descriptions[action.type], "info");
     return result;
   };
-  return { readyContents, evaluatePage, executeToolAction };
+  return {
+    namespace: namespaceOf,
+    readyContents,
+    evaluatePage,
+    executeToolAction,
+  };
 }

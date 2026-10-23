@@ -331,6 +331,7 @@ Reads bounded visible text and controls with refs.
 | `header` | true or false | `true` | Name the page, its space and the space's tabs. |
 | `cursor` | string of at most 512 characters |  | The next value of an earlier part, for the part after it. Keep scope, root, selector and format. |
 | `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
+| `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
 Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
@@ -349,6 +350,7 @@ The same compact text the CLI's snapshot command prints.
 | `header` | true or false | `true` | Name the page, its space and the space's tabs. |
 | `cursor` | string of at most 512 characters |  | The next value of an earlier part, for the part after it. Keep scope, root, selector and format. |
 | `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
+| `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
 Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
@@ -571,7 +573,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
-| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
+| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
 | POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |

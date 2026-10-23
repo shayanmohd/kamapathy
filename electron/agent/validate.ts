@@ -151,6 +151,9 @@ export function parseToolAction(
     const format = body.format ?? "list";
     if (format !== "list" && format !== "outline")
       return fail("invalid_field", "format must be list or outline.");
+    const locators = body.locators ?? false;
+    if (typeof locators !== "boolean")
+      return fail("invalid_field", "locators must be true or false.");
     const header = body.header ?? true;
     if (typeof header !== "boolean")
       return fail("invalid_field", "header must be true or false.");
@@ -175,6 +178,7 @@ export function parseToolAction(
       ...("ref" in scoped ? { root: scoped.ref } : {}),
       scope,
       format,
+      locators,
       header,
       // The part to continue. The snapshot path reads what it carries.
       ...(body.cursor === undefined

@@ -13,9 +13,19 @@ import {
   it,
   vi,
 } from "vitest";
+import {
+  findLocators,
+  LOCATOR_GROUP,
+  type LocatorSource,
+} from "../electron/agent/locators";
 import { RefBook } from "../electron/agent/refs";
 import { createResolver, type Resolver } from "../electron/agent/resolve";
 import { parseSelector } from "../electron/agent/selectors";
+import type { AutomationController } from "../electron/agent/server";
+import {
+  createSnapshots,
+  type SnapshotRequest,
+} from "../electron/agent/snapshot";
 import { EventBufferPool } from "../electron/agent/session/event-buffer";
 import { TabSession } from "../electron/agent/session/tab-session";
 import {
@@ -35,6 +45,7 @@ type Control = {
   role?: string;
   label: string;
   href?: string;
+  locator?: string;
 };
 type Offsets = { text: number; control: number; line: number };
 type Listing = {
@@ -45,6 +56,8 @@ type Listing = {
   next?: Offsets;
   omittedControls?: number;
   truncated?: boolean;
+  locatorSources?: LocatorSource[];
+  locatorsIncomplete?: true;
   ok?: false;
   code?: string;
   fields?: Record<string, unknown>;
@@ -563,5 +576,170 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       "Run a script": undefined,
       "A long link": undefined,
     });
+  }, 60000);
+
+  it("prefers test-id locators and skips duplicate hrefs and generated ids", async () => {
+    const opened = await load("/snapshot/locators");
+    const pageUrl = `${origin}/snapshot/locators`;
+    const sent = vi.spyOn(opened, "send");
+    // The page reports what a locator may be built from, for the controls
+    // this part printed and nothing else.
+    const listing = await snapshot({ locators: true });
+    expect(listing.locatorSources?.map((source) => source.ref)).toEqual(
+      listing.interactables.map((control) => control.ref),
+    );
+    expect(listing.locatorSources![0]).toEqual({
+      ref: listing.interactables[0].ref,
+      tag: "button",
+      attributes: { "data-testid": "save-button", id: "save" },
+    });
+    const pass = (budgetMs?: number) =>
+      findLocators({
+        session: opened,
+        resolver,
+        tabId: "tab-1",
+        namespace: "snapshots",
+        sources: listing.locatorSources!,
+        pageUrl,
+        deadline: Date.now() + 15000,
+        step: step(),
+        ...(budgetMs === undefined ? {} : { budgetMs }),
+      });
+    const found = await pass();
+    expect(found.incomplete).toBe(false);
+    const expected = [
+      ["Save", 'css=[data-testid="save-button"]'],
+      ["Checkout", "css=#checkout-form"],
+      ["Ship it", 'role=button[name="Ship it"]'],
+      // A generated id is skipped, so the role names this one.
+      ["Archive", 'role=button[name="Archive"]'],
+      // Two fields of one name fall through to their placeholders.
+      ["Note", 'css=input[placeholder="First note"]'],
+      ["Note", 'css=input[placeholder="Second note"]'],
+      ["Open", "href=/one"],
+      ["Open", "href=/two"],
+      // Two links of one name to one path, with generated ids, have
+      // nothing that names either alone.
+      ["Shared", undefined],
+      ["Shared", undefined],
+    ];
+    expect(
+      listing.interactables.map((control) => [
+        control.label,
+        found.locators.get(control.ref),
+      ]),
+    ).toEqual(expected);
+    // The pass reads the tree once, hands the renderer's accessibility
+    // state back and keeps no objects.
+    expect(
+      sent.mock.calls
+        .map(([method]) => method)
+        .filter((method) => method.startsWith("Accessibility.")),
+    ).toEqual([
+      "Accessibility.getFullAXTree",
+      "Accessibility.enable",
+      "Accessibility.disable",
+    ]);
+    expect(
+      sent.mock.calls.some(
+        ([method, params]) =>
+          method === "Runtime.releaseObjectGroup" &&
+          (params as { objectGroup?: string }).objectGroup === LOCATOR_GROUP,
+      ),
+    ).toBe(true);
+    sent.mockRestore();
+    // A budget already spent ends the pass with what it has.
+    expect(await pass(0)).toEqual({ locators: new Map(), incomplete: true });
+    // Every locator resolves through the resolver to its own control alone.
+    const resolves = async (controls: readonly Control[]) => {
+      for (const control of controls) {
+        if (!control.locator) continue;
+        const scoped = await snapshot(scopeTo(control.locator));
+        expect(
+          scoped.interactables.map((inside) => inside.ref),
+          control.locator,
+        ).toEqual([control.ref]);
+      }
+    };
+    await resolves(
+      listing.interactables.map((control) => ({
+        ...control,
+        locator: found.locators.get(control.ref),
+      })),
+    );
+
+    // The snapshot path puts each locator on its control, in both formats,
+    // and keeps the page's sources to itself.
+    const snapshots = createSnapshots({
+      controller: {} as AutomationController,
+      evaluatePage: (tabId, tabSession, operation, payload, deadline, inner) =>
+        resolver.run(tabId, tabSession, operation, payload, {
+          deadline,
+          namespace: "snapshots",
+          signal: inner?.signal,
+          guard: inner?.guard,
+        }),
+      resolver,
+      namespace: () => "snapshots",
+    });
+    const take = (request: Partial<SnapshotRequest> = {}) =>
+      snapshots.take(
+        "tab-1",
+        opened,
+        {
+          mode: "full",
+          maxChars: 24000,
+          maxControls: 100,
+          scope: "page",
+          format: "list",
+          header: false,
+          locators: true,
+          ...request,
+        },
+        Date.now() + 15000,
+        step(),
+      ) as Promise<Listing>;
+    const taken = await take();
+    expect(taken.locatorSources).toBeUndefined();
+    expect(taken.locatorsIncomplete).toBeUndefined();
+    expect(
+      taken.interactables.map((control) => [control.label, control.locator]),
+    ).toEqual(expected);
+    const shape = await take({ format: "outline" });
+    expect(shape.outline!.replace(/@e\d+/g, "@e").split("\n")).toEqual([
+      'button "Save" @e locator: css=[data-testid="save-button"]',
+      'button "Checkout" @e locator: css=#checkout-form',
+      'button "Ship it" @e locator: role=button[name="Ship it"]',
+      'button "Archive" @e locator: role=button[name="Archive"]',
+      'textbox "Note" @e locator: css=input[placeholder="First note"]',
+      'textbox "Note" @e locator: css=input[placeholder="Second note"]',
+      'link "Open" @e href=/one locator: href=/one',
+      'link "Open" @e href=/two locator: href=/two',
+      'link "Shared" @e href=/shared',
+      'link "Shared" @e href=/shared',
+    ]);
+
+    // A locator outlives the refs: the same page again names the same
+    // controls, and each one resolves to its new ref.
+    await opened.send("Page.reload", {}, step());
+    await vi.waitFor(
+      async () => {
+        const main = await opened.mainFrameId(step());
+        expect(
+          await opened.evaluateInFrame(
+            main,
+            "ready",
+            {},
+            { ...step(), namespace: "internal" },
+          ),
+        ).toEqual({ ok: true, readyState: "complete" });
+      },
+      { timeout: 15000, interval: 100 },
+    );
+    const after = await take();
+    expect(
+      after.interactables.map((control) => [control.label, control.locator]),
+    ).toEqual(expected);
+    await resolves(after.interactables);
   }, 60000);
 });

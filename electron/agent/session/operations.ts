@@ -14,6 +14,8 @@ export const PAGE_SOURCE = `function(operation,payload,namespace){return (${page
 // when they scroll a target into view to measure it.
 export const OPERATIONS: Record<PageOperation, { mutates: boolean }> = {
   snapshot: { mutates: false },
+  elements: { mutates: false },
+  validate: { mutates: false },
   target: { mutates: false },
   click: { mutates: true },
   fill: { mutates: true },

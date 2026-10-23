@@ -4,6 +4,8 @@ import { PAGE_BUDGET } from "../../shared/state";
 import type { OpenedBy } from "../../shared/types";
 import type { Actions } from "./actions";
 import { fail } from "./errors";
+import { findLocators, type LocatorSource } from "./locators";
+import type { Resolver } from "./resolve";
 import type { SearchAst } from "./selectors";
 import type { AutomationController } from "./server";
 import type { TabSession } from "./session/tab-session";
@@ -176,12 +178,34 @@ export function snapshotHeader(
   };
 }
 
+// Each control line of an outline carries its locator at the end: an
+// indented role word, an optional name, and the ref the locator belongs to.
+const CONTROL_LINE = /^ *[a-z][a-z0-9-]*(?: "(?:[^"\\]|\\.)*")? (@e\d+)(?= |$)/;
+
+/** The outline with each control's locator at the end of its line. */
+export function appendLocators(
+  outline: string,
+  locators: ReadonlyMap<string, string>,
+): string {
+  if (!locators.size) return outline;
+  return outline
+    .split("\n")
+    .map((line) => {
+      const found = CONTROL_LINE.exec(line);
+      if (!found) return line;
+      const locator = locators.get(found[1]);
+      return locator === undefined ? line : `${line} locator: ${locator}`;
+    })
+    .join("\n");
+}
+
 export interface SnapshotRequest {
   mode: "compact" | "full";
   maxChars: number;
   maxControls: number;
   scope: "page" | "viewport";
   format: "list" | "outline";
+  locators: boolean;
   header: boolean;
   root?: string;
   selector?: string;
@@ -222,6 +246,8 @@ function nextCursor(
 export function createSnapshots(deps: {
   controller: AutomationController;
   evaluatePage: Actions["evaluatePage"];
+  resolver: Resolver;
+  namespace: Actions["namespace"];
 }): {
   take(
     tabId: string,
@@ -231,7 +257,7 @@ export function createSnapshots(deps: {
     step: Step,
   ): Promise<Record<string, unknown>>;
 } {
-  const { controller, evaluatePage } = deps;
+  const { controller, evaluatePage, resolver, namespace } = deps;
   return {
     async take(tabId, session, request, deadline, step) {
       const hash = optionsHash(request);
@@ -259,6 +285,7 @@ export function createSnapshots(deps: {
           ...(request.root === undefined ? {} : { root: request.root }),
           scope: request.scope,
           format: request.format,
+          ...(request.locators ? { locators: true } : {}),
           offsets: {
             text: state?.t ?? 0,
             control: state?.c ?? 0,
@@ -272,11 +299,44 @@ export function createSnapshots(deps: {
       // A URL change inside the same document shows only in the answer.
       if (state) checkCursorPage(state, { epoch: session.epoch, url });
       const next = nextCursor(result, { epoch: session.epoch, url }, hash);
+      // What a locator may be built from stays in the main process: the
+      // response carries the locators themselves.
+      const sources = result.locatorSources;
+      delete result.locatorSources;
+      let incomplete = false;
+      if (request.locators) {
+        const found = await findLocators({
+          session,
+          resolver,
+          tabId,
+          namespace: namespace(tabId, session),
+          sources: Array.isArray(sources) ? (sources as LocatorSource[]) : [],
+          pageUrl: url,
+          deadline,
+          step,
+        });
+        incomplete = found.incomplete;
+        const listed = Array.isArray(result.interactables)
+          ? result.interactables
+          : [];
+        for (const control of listed) {
+          if (!control || typeof control !== "object") continue;
+          const entry = control as Record<string, unknown>;
+          const locator =
+            typeof entry.ref === "string"
+              ? found.locators.get(entry.ref)
+              : undefined;
+          if (locator !== undefined) entry.locator = locator;
+        }
+        if (typeof result.outline === "string")
+          result.outline = appendLocators(result.outline, found.locators);
+      }
       // The header is read after the page call, which checks the tab again.
       return {
         tabId,
         ...result,
         ...(next === undefined ? {} : { next }),
+        ...(incomplete ? { locatorsIncomplete: true as const } : {}),
         ...(request.header
           ? { header: snapshotHeader(controller, tabId) }
           : {}),
