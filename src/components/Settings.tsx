@@ -8,7 +8,7 @@ import {
 import type { BrowserAction, BrowserState, Theme } from "../../shared/types";
 import { Modal } from "./ui";
 import { isDesktop } from "../lib/bridge";
-import { settingsCopy } from "../copy";
+import { extensionsCopy, settingsCopy } from "../copy";
 import { activityTime } from "../lib/spaces";
 import "./Spaces.css";
 
@@ -19,6 +19,7 @@ export function Settings({
   dispatch,
   focus,
   onImport,
+  onExtensions,
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,6 +27,7 @@ export function Settings({
   dispatch: (action: BrowserAction) => void;
   focus?: "agents";
   onImport: () => void;
+  onExtensions: () => void;
 }) {
   const agentSwitch = useRef<HTMLButtonElement>(null);
   const warning =
@@ -160,6 +162,62 @@ export function Settings({
             {settingsCopy.importButton}
           </button>
         </div>
+      </section>
+      <section className="settings-section">
+        <h3>{extensionsCopy.settingsTitle}</h3>
+        <div className="setting-row">
+          <div>
+            <strong>{extensionsCopy.updates}</strong>
+            <p>{extensionsCopy.updatesHint}</p>
+          </div>
+          <button
+            role="switch"
+            aria-label={extensionsCopy.updates}
+            aria-checked={state.settings.extensionUpdates}
+            className={`toggle ${state.settings.extensionUpdates ? "on" : ""}`}
+            onClick={() =>
+              update({
+                type: "settings:update",
+                settings: {
+                  extensionUpdates: !state.settings.extensionUpdates,
+                },
+              })
+            }
+          >
+            <span />
+          </button>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>{extensionsCopy.developer}</strong>
+            <p>{extensionsCopy.developerHint}</p>
+          </div>
+          <button
+            role="switch"
+            aria-label={extensionsCopy.developer}
+            aria-checked={state.settings.extensionDeveloperMode}
+            className={`toggle ${state.settings.extensionDeveloperMode ? "on" : ""}`}
+            onClick={() =>
+              update({
+                type: "settings:update",
+                settings: {
+                  extensionDeveloperMode:
+                    !state.settings.extensionDeveloperMode,
+                },
+              })
+            }
+          >
+            <span />
+          </button>
+        </div>
+        <button
+          type="button"
+          className="secondary-button extensions-manage"
+          disabled={!isDesktop}
+          onClick={onExtensions}
+        >
+          {extensionsCopy.manage}
+        </button>
       </section>
       <section className="settings-section" aria-labelledby="settings-agents">
         <h3 id="settings-agents">{settingsCopy.agents}</h3>

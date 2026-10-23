@@ -1,3 +1,9 @@
+import type {
+  ExtensionCommand,
+  ExtensionCommandResult,
+  ExtensionsView,
+} from "./extensions";
+
 export type Theme = "system" | "light" | "dark";
 export type SpaceColor = "green" | "blue" | "orange" | "purple";
 export type SignIns = "shared" | "separate";
@@ -242,4 +248,7 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
+  extensions(): Promise<ExtensionsView>;
+  onExtensions(callback: (view: ExtensionsView) => void): () => void;
+  extensionCommand(command: ExtensionCommand): Promise<ExtensionCommandResult>;
 }

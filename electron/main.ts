@@ -10,9 +10,10 @@ import {
 } from "./controller";
 import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
-import { chooseFolder, confirmAdd } from "./extensions/dialogs";
+import { chooseFolder, confirmAdd, confirmRemove } from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
 import { ExtensionInstaller } from "./extensions/install";
+import { registerExtensionIpc, type ExtensionIpc } from "./extensions/ipc";
 import { ExtensionPopups } from "./extensions/popup";
 import { ExtensionUpdates } from "./extensions/updates";
 import {
@@ -75,6 +76,8 @@ let extensionPopups: ExtensionPopups | null = null;
 let extensionInstaller: ExtensionInstaller | null = null;
 // The daily Chrome Web Store check, while the person leaves it on.
 let extensionUpdates: ExtensionUpdates | null = null;
+// The shell's view of the person's extensions, and its commands.
+let extensionIpc: ExtensionIpc | null = null;
 // A window waiting for its extensions; later calls share it.
 let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
@@ -273,6 +276,8 @@ async function openWindow(): Promise<void> {
   const unbindBridge = extensionBridge?.bind(currentController);
   currentController.subscribe((next) => {
     extensionPopups?.onState(next);
+    // The shown tab decides which buttons the toolbar draws.
+    extensionIpc?.push();
     extensionUpdates?.setEnabled(next.settings.extensionUpdates);
     if (host && next.settings.extensionDeveloperMode !== host.developerMode)
       void host.setDeveloperMode(next.settings.extensionDeveloperMode);
@@ -448,6 +453,7 @@ else {
     } catch {}
     controller?.dispose();
     extensionPopups?.dispose();
+    extensionIpc?.dispose();
     void syncAutomation();
   });
   app.on("window-all-closed", () => {
@@ -574,6 +580,24 @@ else {
         (extensionHost?.surfacesOf(id).length ?? 0) > 0,
       confirm: confirmAdd(() => window),
     });
+    const installer = extensionInstaller;
+    const updates = extensionUpdates;
+    extensionIpc = registerExtensionIpc({
+      ipc: ipcMain,
+      validateSender,
+      window: () => window,
+      controller: () => controller,
+      host: extensions,
+      installer,
+      updates,
+      bridge,
+      confirmRemove: confirmRemove(() => window),
+    });
+    const pushExtensions = () => extensionIpc?.push();
+    extensions.onEvent(pushExtensions);
+    installer.onChange(pushExtensions);
+    updates.onChange(pushExtensions);
+    bridge.onToolbarChange(pushExtensions);
     registerIpc();
     installMenu();
     await createWindow();

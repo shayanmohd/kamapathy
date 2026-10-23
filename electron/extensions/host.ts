@@ -1,3 +1,4 @@
+import { nativeImage } from "electron";
 import type { Session, WebContents } from "electron";
 import type { Dirent } from "node:fs";
 import {
@@ -9,7 +10,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   MAX_PINNED,
   compareVersions,
@@ -42,6 +43,10 @@ const SETTINGS_FOLDERS = [
 ];
 // Electron's load errors are shown cut to this length.
 const MESSAGE_LIMIT = 300;
+// The row and button icons: the size the shell draws, and the largest file
+// it reads.
+const ICON_SIZE = 32;
+const ICON_LIMIT = 128;
 const NONE: ReadonlySet<string> = new Set();
 
 export type HostEvent =
@@ -85,6 +90,12 @@ class OtherId extends Error {
 
 const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+// A manifest path may not leave its extension's folder.
+function insideFolder(folder: string, file: string): string | undefined {
+  const root = resolve(folder);
+  const full = resolve(root, file);
+  return full === root || full.startsWith(root + sep) ? full : undefined;
+}
 function logError(context: string, error: unknown): void {
   console.error(`${context}:`, messageOf(error));
 }
@@ -111,6 +122,8 @@ export class ExtensionHost {
   private listeners = new Set<(event: HostEvent) => void>();
   private writing: Promise<void> = Promise.resolve();
   private surfaces = new Map<WebContents, SurfaceInfo>();
+  // Icon data URLs by id, version and folder.
+  private icons = new Map<string, string>();
 
   constructor(options: HostOptions) {
     this.userData = options.userData;
@@ -325,6 +338,41 @@ export class ExtensionHost {
 
   isExtensionSurface(contents: WebContents): boolean {
     return this.surfaces.has(contents);
+  }
+
+  // The icon the shell draws beside an extension's name: the manifest icon
+  // closest to 32 px, read once per build.
+  iconOf(id: string): string | undefined {
+    const entry = this.entry(id);
+    const manifest = this.manifests.get(id);
+    if (!entry || !manifest) return undefined;
+    const key = `${id}:${entry.version}:${entry.path}`;
+    const known = this.icons.get(key);
+    if (known !== undefined) return known || undefined;
+    const folder = this.folderOf(entry);
+    const sizes = Object.keys(manifest.icons)
+      .map(Number)
+      .filter((size) => Number.isFinite(size) && size > 0 && size <= ICON_LIMIT)
+      .sort(
+        (first, second) =>
+          Math.abs(first - ICON_SIZE) - Math.abs(second - ICON_SIZE) ||
+          second - first,
+      );
+    let found = "";
+    for (const size of sizes) {
+      const file = insideFolder(folder, manifest.icons[size] ?? "");
+      if (!file) continue;
+      try {
+        const image = nativeImage.createFromPath(file);
+        if (image.isEmpty()) continue;
+        found = image.toDataURL();
+        if (found) break;
+      } catch (error) {
+        logError(`${id} has an icon Kamapathy can't read`, error);
+      }
+    }
+    this.icons.set(key, found);
+    return found || undefined;
   }
 
   folderOf(entry: ExtensionEntry): string {

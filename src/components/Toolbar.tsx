@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ComponentProps, RefObject } from "react";
 import {
   ArrowClockwise,
   ArrowLeft,
@@ -7,6 +7,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import type { BrowserAction, Tab } from "../../shared/types";
+import { ExtensionActions } from "./ExtensionActions";
 import { Omnibox } from "./Omnibox";
 import { IconButton } from "./ui";
 import "./Toolbar.css";
@@ -17,6 +18,8 @@ export function Toolbar({
   mac,
   agentOwned,
   bookmarked,
+  extensions,
+  store,
   dispatch,
   addressRef,
   onNavigate,
@@ -30,6 +33,8 @@ export function Toolbar({
   mac: boolean;
   agentOwned: boolean;
   bookmarked: boolean;
+  extensions: ComponentProps<typeof ExtensionActions>;
+  store?: ComponentProps<typeof Omnibox>["store"];
   dispatch: (action: BrowserAction) => void;
   addressRef: RefObject<HTMLInputElement | null>;
   onNavigate: (url: string) => void;
@@ -70,9 +75,11 @@ export function Toolbar({
         readOnly={agentOwned}
         inputRef={addressRef}
         bookmarked={bookmarked}
+        store={store}
         onNavigate={onNavigate}
         onToggleBookmark={onToggleBookmark}
       />
+      <ExtensionActions {...extensions} />
       <IconButton
         ref={menuRef}
         label="Browser menu"

@@ -9,20 +9,38 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserWindow, Session, WebContents } from "electron";
+import type {
+  BrowserWindow,
+  IpcMain,
+  IpcMainInvokeEvent,
+  Session,
+  WebContents,
+} from "electron";
 import {
   PDF_VIEWER_EXTENSION_ID,
   restoreExtensions,
+  type ExtensionAnchor,
   type ExtensionEntry,
+  type ExtensionsView,
 } from "../shared/extensions";
 import { initialState } from "../shared/state";
-import { BrowserController } from "../electron/controller";
+import { BrowserController, SHARED_PARTITION } from "../electron/controller";
 import type { CheckedManifest } from "../electron/extensions/manifest";
 import { ExtensionHost, type HostEvent } from "../electron/extensions/host";
 import type { ConsentDetails } from "../electron/extensions/dialogs";
 import { ExtensionInstaller } from "../electron/extensions/install";
+import type { ExtensionBridge } from "../electron/extensions/bridge";
+import { ExtensionUpdates } from "../electron/extensions/updates";
+import { extensionsView } from "../electron/extensions/view";
+import {
+  EXTENSION_COMMAND,
+  EXTENSIONS_CHANGED,
+  EXTENSIONS_CHANNEL,
+  parseExtensionCommand,
+  registerExtensionIpc,
+} from "../electron/extensions/ipc";
 import { idOf, keyPair } from "./extension-builders";
 import {
   EXTENSION_CALL,
@@ -53,6 +71,7 @@ vi.mock("electron", () => ({
   },
   dialog: {},
   shell: {},
+  nativeImage: { createFromPath: (path: string) => fakeImage(path) },
   ipcMain: {
     handle: vi.fn(),
     removeHandler: vi.fn(),
@@ -64,6 +83,16 @@ vi.mock("../electron/persistence", async (original) => ({
   ...(await original<typeof import("../electron/persistence")>()),
   writeState: vi.fn(),
 }));
+
+// Icon files are named after their size, so a mocked image can report it.
+function fakeImage(path: string) {
+  const side = Number(/icon-(\d+)\.png$/.exec(path)?.[1] ?? 0);
+  return {
+    isEmpty: () => !existsSync(path),
+    getSize: () => ({ width: side, height: side }),
+    toDataURL: () => `data:image/png;base64,${basename(path)}`,
+  };
+}
 
 // A distinct valid id per number: its hex digits as the letters a to p.
 function idAt(index: number): string {
@@ -1610,5 +1639,447 @@ describe("extension management", () => {
     expect(host.entry(ids[0])?.pinned).toBe(false);
     expect(host.entry(ids[8])?.pinned).toBe(true);
     expect(saved(userData).extensions.filter((entry) => entry.pinned)).toHaveLength(8);
+  });
+});
+
+describe("the Extensions view and commands", () => {
+  const anchor = { x: 12, y: 40, width: 28, height: 28 };
+
+  function updatesFor(host: ExtensionHost): ExtensionUpdates {
+    return new ExtensionUpdates({
+      host,
+      installer: new ExtensionInstaller({
+        host,
+        fetcher: async () => {
+          throw new Error("no download");
+        },
+        env: { chromeVersion: CHROME, os: "mac", arch: "arm64" },
+        locale: "en-US",
+        confirm: async () => true,
+      }),
+      fetcher: async () => {
+        throw new Error("no download");
+      },
+      env: { chromeVersion: CHROME, os: "mac", arch: "arm64" },
+      pagesOpen: () => false,
+      confirm: async () => true,
+      timers: { set: () => 0, clear: () => {} },
+    });
+  }
+
+  it("builds the Extensions view with sources, update states and the shown space's toolbar", async () => {
+    const folder = join(temporary("kamapathy-folder-"), "tool");
+    const entries = [
+      storeEntry(A, "1.0.0", { pinned: true }),
+      storeEntry(B, "2.0.0", {
+        importedFrom: "Google Chrome",
+        staged: {
+          version: "2.1.0",
+          path: `Extensions/${B}/2.1.0`,
+          review: true,
+          permissions: [],
+          hosts: [],
+        },
+      }),
+      unpackedEntry(C, folder),
+    ];
+    const userData = profile(entries, [], {
+      [A]: {
+        ...manifestFile("Reader", "1.0.0"),
+        permissions: ["tabs"],
+        options_page: "options.html",
+        icons: { 16: "icon-16.png", 32: "icon-32.png", 128: "icon-128.png" },
+      },
+      [B]: {
+        ...manifestFile("Blocker", "2.0.0"),
+        permissions: ["notifications"],
+      },
+      [C]: manifestFile("Tool", "1.0.0"),
+    });
+    for (const size of [16, 32, 128])
+      writeFileSync(join(userData, entries[0].path, `icon-${size}.png`), "png");
+    const host = await hostFor(userData);
+    host.setLoadError(C, extensionRefusalCopy.loadFailed);
+    const installer = new ExtensionInstaller({
+      host,
+      // A download that never answers keeps its id in the queue.
+      fetcher: () => new Promise(() => {}),
+      env: { chromeVersion: CHROME, os: "mac", arch: "arm64" },
+      locale: "en-US",
+      confirm: async () => true,
+    });
+    void installer.installFromStore(D).catch(() => {});
+    const imports = [{ id: E, name: "Imported", status: "adding" as const }];
+    const actions = [
+      {
+        id: A,
+        name: "Reader",
+        title: "Reader",
+        badge: "",
+        badgeColor: "#d32f2f",
+        enabled: true,
+        pinned: true,
+      },
+    ];
+
+    const view = extensionsView({
+      host,
+      installer,
+      updates: updatesFor(host),
+      toolbar: { actions, disabled: "agent" },
+      imports,
+    });
+
+    expect(view.rows).toEqual([
+      {
+        id: A,
+        name: "Reader",
+        version: "1.0.0",
+        source: "webstore",
+        enabled: true,
+        pinned: true,
+        icon: "data:image/png;base64,icon-32.png",
+        lines: ["Read your browsing history"],
+        wontWork: [],
+        hasOptions: true,
+      },
+      {
+        id: B,
+        name: "Blocker",
+        version: "2.0.0",
+        source: "webstore",
+        importedFrom: "Google Chrome",
+        enabled: true,
+        pinned: false,
+        lines: [],
+        wontWork: ["Notifications"],
+        hasOptions: false,
+        update: { state: "review", version: "2.1.0" },
+      },
+      {
+        id: C,
+        name: "Tool",
+        version: "1.0.0",
+        source: "unpacked",
+        enabled: true,
+        pinned: false,
+        lines: [],
+        wontWork: [],
+        hasOptions: false,
+        error: extensionRefusalCopy.loadFailed,
+        needsDeveloperMode: true,
+      },
+    ]);
+    expect(view.actions).toEqual(actions);
+    expect(view.disabled).toBe("agent");
+    expect(view.installing).toEqual([D]);
+    expect(view.imports).toEqual(imports);
+
+    await host.setDeveloperMode(true);
+    expect(
+      extensionsView({
+        host,
+        installer,
+        updates: updatesFor(host),
+        toolbar: { actions: [] },
+        imports: [],
+      }).rows.map((row) => row.needsDeveloperMode),
+    ).toEqual([undefined, undefined, undefined]);
+  });
+
+  it("parses only well-formed extension commands", () => {
+    expect(parseExtensionCommand({ type: "load-unpacked" })).toEqual({
+      type: "load-unpacked",
+    });
+    expect(
+      parseExtensionCommand({ type: "install", input: " https://store/x " }),
+    ).toEqual({ type: "install", input: " https://store/x " });
+    expect(
+      parseExtensionCommand({ type: "enable", id: A, enabled: false }),
+    ).toEqual({ type: "enable", id: A, enabled: false });
+    expect(parseExtensionCommand({ type: "pin", id: A, pinned: true })).toEqual(
+      {
+        type: "pin",
+        id: A,
+        pinned: true,
+      },
+    );
+    for (const type of ["reload", "remove", "options", "review"] as const)
+      expect(parseExtensionCommand({ type, id: B })).toEqual({ type, id: B });
+    expect(parseExtensionCommand({ type: "click", id: A, anchor })).toEqual({
+      type: "click",
+      id: A,
+      anchor,
+    });
+    expect(
+      parseExtensionCommand({
+        type: "anchors",
+        buttons: { [A]: anchor },
+        puzzle: { x: -9999, y: 0, width: 32, height: 32 },
+      }),
+    ).toEqual({
+      type: "anchors",
+      buttons: { [A]: anchor },
+      puzzle: { x: -9999, y: 0, width: 32, height: 32 },
+    });
+    expect(
+      parseExtensionCommand({ type: "anchors", buttons: {}, puzzle: null }),
+    ).toEqual({ type: "anchors", buttons: {}, puzzle: null });
+
+    for (const value of [
+      undefined,
+      null,
+      "enable",
+      [{ type: "enable", id: A, enabled: true }],
+      { type: "nonsense" },
+      { type: "enable", id: "not-an-id", enabled: true },
+      { type: "enable", id: PDF_VIEWER_EXTENSION_ID, enabled: true },
+      { type: "enable", id: A, enabled: "yes" },
+      { type: "enable", id: A },
+      { type: "pin", id: A, pinned: true, extra: 1 },
+      { type: "load-unpacked", id: A },
+      { type: "install", input: 5 },
+      { type: "install", input: "x".repeat(2049) },
+      { type: "install" },
+      { type: "click", id: A },
+      { type: "click", id: A, anchor: { x: 0, y: 0, width: 28 } },
+      { type: "click", id: A, anchor: { ...anchor, height: 100001 } },
+      { type: "click", id: A, anchor: { ...anchor, x: -10001 } },
+      { type: "click", id: A, anchor: { ...anchor, y: Number.NaN } },
+      { type: "click", id: A, anchor: { ...anchor, width: Infinity } },
+      { type: "click", id: A, anchor: { ...anchor, extra: 1 } },
+      { type: "anchors", buttons: { bad: anchor }, puzzle: null },
+      { type: "anchors", buttons: { [A]: { x: 0 } }, puzzle: null },
+      { type: "anchors", buttons: [], puzzle: null },
+      { type: "anchors", buttons: {} },
+    ])
+      expect(() => parseExtensionCommand(value)).toThrow(
+        "Invalid extension command.",
+      );
+  });
+
+  it("runs the shell's commands behind the sender check and pushes one view per tick", async () => {
+    const userData = profile([storeEntry(A), storeEntry(B)], [], {
+      [A]: { ...manifestFile("Reader", "1.0.0"), options_page: "options.html" },
+      [B]: manifestFile("Blocker", "1.0.0"),
+    });
+    const host = await hostFor(userData);
+    await host.attach(SHARED_PARTITION, asSession(sessionOf(SHARED_PARTITION)));
+    await host.attach(
+      "persist:space-work",
+      asSession(sessionOf("persist:space-work")),
+    );
+    const state = initialState("darwin");
+    state.activeSpaceId = "work";
+    state.spaces = state.spaces.map((space) =>
+      space.id === "work" ? { ...space, signIns: "separate" as const } : space,
+    );
+    const controller = {
+      state,
+      partitionOf(spaceId: string): string {
+        const space = state.spaces.find((item) => item.id === spaceId);
+        if (!space) throw new Error("Space was not found.");
+        return space.signIns === "shared"
+          ? SHARED_PARTITION
+          : `persist:space-${space.id}`;
+      },
+    } as unknown as BrowserController;
+    const sent: ExtensionsView[] = [];
+    let live = true;
+    const window = {
+      isDestroyed: () => false,
+      webContents: {
+        send: (channel: string, view: ExtensionsView) => {
+          expect(channel).toBe(EXTENSIONS_CHANGED);
+          sent.push(view);
+        },
+      },
+    } as unknown as BrowserWindow;
+    let trusted = true;
+    let removes = true;
+    const calls = {
+      installFromStore: vi.fn(async (id: string) => ({
+        added: true as const,
+        id,
+        name: "Reader",
+      })),
+      loadUnpacked: vi.fn(async () => ({
+        added: true as const,
+        id: C,
+        name: "Tool",
+      })),
+      reloadUnpacked: vi.fn(async (_id: string) => {}),
+      review: vi.fn(async (_id: string) => true),
+      click: vi.fn(async (_id: string, _anchor: ExtensionAnchor) => {}),
+      setAnchors: vi.fn(),
+      openOptionsPage: vi.fn(),
+      confirmRemove: vi.fn(async (_name: string) => removes),
+    };
+    const handlers = new Map<
+      string,
+      (event: IpcMainInvokeEvent, value?: unknown) => unknown
+    >();
+    const ipc = registerExtensionIpc({
+      ipc: {
+        handle: (channel, listener) =>
+          handlers.set(
+            channel,
+            listener as (event: IpcMainInvokeEvent, value?: unknown) => unknown,
+          ),
+      } as Pick<IpcMain, "handle">,
+      validateSender: () => {
+        if (!trusted)
+          throw new Error(
+            "This operation is available only to the browser interface.",
+          );
+        return controller;
+      },
+      window: () => (live ? window : null),
+      controller: () => controller,
+      host,
+      installer: {
+        installing: () => [],
+        installFromStore: calls.installFromStore,
+        loadUnpacked: calls.loadUnpacked,
+        reloadUnpacked: calls.reloadUnpacked,
+      } as unknown as ExtensionInstaller,
+      updates: {
+        state: () => undefined,
+        review: calls.review,
+      } as unknown as ExtensionUpdates,
+      bridge: {
+        toolbar: () => ({ actions: [] }),
+        click: calls.click,
+        setAnchors: calls.setAnchors,
+        openOptionsPage: calls.openOptionsPage,
+      } as unknown as ExtensionBridge,
+      confirmRemove: calls.confirmRemove,
+    });
+    const call = (channel: string, value?: unknown) =>
+      handlers.get(channel)!({} as IpcMainInvokeEvent, value);
+    const command = (value: unknown) => call(EXTENSION_COMMAND, value);
+
+    const view = (await call(EXTENSIONS_CHANNEL)) as ExtensionsView;
+    expect(view.rows.map((row) => row.name)).toEqual(["Reader", "Blocker"]);
+
+    // Nothing runs for a sender that isn't the browser interface.
+    trusted = false;
+    expect(() => call(EXTENSIONS_CHANNEL)).toThrow(
+      "This operation is available only to the browser interface.",
+    );
+    await expect(command({ type: "pin", id: A, pinned: true })).rejects.toThrow(
+      "This operation is available only to the browser interface.",
+    );
+    expect(host.entry(A)?.pinned).toBe(false);
+    trusted = true;
+
+    await expect(
+      command({ type: "install", input: "nonsense" }),
+    ).rejects.toThrow(extensionInstallCopy.invalidInput);
+    expect(calls.installFromStore).not.toHaveBeenCalled();
+    expect(
+      await command({
+        type: "install",
+        input: `https://chromewebstore.google.com/detail/reader/${A}?hl=en`,
+      }),
+    ).toEqual({ ok: true, id: A, added: true });
+    expect(calls.installFromStore).toHaveBeenCalledWith(A);
+
+    // Load unpacked waits for the person's developer mode.
+    await expect(command({ type: "load-unpacked" })).rejects.toThrow(
+      extensionRemoveCopy.developerModeOff,
+    );
+    expect(calls.loadUnpacked).not.toHaveBeenCalled();
+    state.settings.extensionDeveloperMode = true;
+    expect(await command({ type: "load-unpacked" })).toEqual({
+      ok: true,
+      id: C,
+      added: true,
+    });
+
+    expect(await command({ type: "pin", id: A, pinned: true })).toEqual({
+      ok: true,
+      id: A,
+    });
+    expect(host.entry(A)?.pinned).toBe(true);
+    expect(await command({ type: "enable", id: A, enabled: false })).toEqual({
+      ok: true,
+      id: A,
+    });
+    expect(host.entry(A)?.enabled).toBe(false);
+    expect(await command({ type: "reload", id: A })).toEqual({
+      ok: true,
+      id: A,
+    });
+    expect(calls.reloadUnpacked).toHaveBeenCalledWith(A);
+    expect(await command({ type: "review", id: A })).toEqual({
+      ok: true,
+      id: A,
+    });
+    expect(calls.review).toHaveBeenCalledWith(A);
+    const anchor = { x: 10, y: 44, width: 28, height: 28 };
+    expect(await command({ type: "click", id: A, anchor })).toEqual({
+      ok: true,
+      id: A,
+    });
+    expect(calls.click).toHaveBeenCalledWith(A, anchor);
+    expect(
+      await command({
+        type: "anchors",
+        buttons: { [A]: anchor },
+        puzzle: null,
+      }),
+    ).toEqual({ ok: true });
+    expect(calls.setAnchors).toHaveBeenCalledWith({ [A]: anchor }, null);
+
+    // The options page opens in the space the person is looking at, and in
+    // the shared session when that space runs no extensions.
+    await command({ type: "options", id: A });
+    expect(calls.openOptionsPage).toHaveBeenLastCalledWith(
+      A,
+      "persist:space-work",
+      true,
+    );
+    host.detach("persist:space-work");
+    await command({ type: "options", id: A });
+    expect(calls.openOptionsPage).toHaveBeenLastCalledWith(
+      A,
+      SHARED_PARTITION,
+      true,
+    );
+
+    // Cancelling Remove changes nothing.
+    removes = false;
+    expect(await command({ type: "remove", id: B })).toEqual({ ok: true });
+    expect(calls.confirmRemove).toHaveBeenCalledWith("Blocker");
+    expect(host.entry(B)).toBeTruthy();
+    removes = true;
+    expect(await command({ type: "remove", id: B })).toEqual({
+      ok: true,
+      id: B,
+    });
+    expect(host.entry(B)).toBeUndefined();
+
+    // Every change in a tick reaches the shell as one view.
+    sent.length = 0;
+    ipc.push();
+    ipc.push();
+    ipc.setImports([{ id: E, name: "Imported", status: "adding" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].imports).toEqual([
+      { id: E, name: "Imported", status: "adding" },
+    ]);
+    expect(sent[0].rows.map((row) => row.id)).toEqual([A]);
+
+    // A closed window and a disposed push send nothing.
+    live = false;
+    ipc.push();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    live = true;
+    ipc.push();
+    ipc.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(1);
   });
 });

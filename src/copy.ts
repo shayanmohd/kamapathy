@@ -10,6 +10,7 @@ export const toolsMenuCopy = {
   split: "Split view",
   find: "Find",
   settings: "Settings",
+  extensions: "Extensions",
 } as const;
 
 export const tabStripCopy = {
@@ -230,4 +231,44 @@ export const extensionBridgeCopy = {
   iconTooLarge: "Icons can be at most 128 pixels.",
   notFocused: "Kamapathy's window isn't in front.",
   noPopup: "This extension has no popup.",
+} as const;
+
+export const extensionsCopy = {
+  title: "Extensions",
+  note: "Extensions run in your spaces and in agent spaces that share your sign-ins. They never run in isolated spaces.",
+  storeLabel: "Add from Chrome Web Store",
+  storePlaceholder: "Paste a store link or ID",
+  add: "Add",
+  adding: "Adding...",
+  added: "Added",
+  loadUnpacked: "Load unpacked",
+  sourceStore: "Chrome Web Store",
+  sourceUnpacked: "Unpacked",
+  sourceImported: (browser: string) => `From ${browser}`,
+  can: "It can",
+  wontWork: "Won't work in Kamapathy",
+  pin: "Pin to toolbar",
+  options: "Options",
+  reload: "Reload",
+  remove: "Remove",
+  turnOn: (name: string) => `Turn ${name} on or off`,
+  needsOk: "Needs your OK to update",
+  review: "Review",
+  staged: (version: string) =>
+    `Version ${version} installs when Kamapathy restarts.`,
+  updateFailed: "The last update didn't pass Kamapathy's checks.",
+  needsDeveloperMode: "Turn on developer mode to use this.",
+  empty: "No extensions yet. Add one from the Chrome Web Store.",
+  puzzle: "Extensions",
+  manage: "Manage extensions",
+  isolated: "Extensions don't run in isolated spaces.",
+  agent: "An agent is working here. Take control to use extensions.",
+  chip: "Add to Kamapathy",
+  settingsTitle: "Extensions",
+  updates: "Update extensions automatically",
+  updatesHint: "Checks the Chrome Web Store once a day.",
+  developer: "Developer mode",
+  developerHint: "Load extensions from a folder.",
+  desktopOnly: "This feature is available in the desktop app.",
+  details: (name: string) => `About ${name}`,
 } as const;

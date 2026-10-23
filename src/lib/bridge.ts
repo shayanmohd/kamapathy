@@ -6,6 +6,7 @@ import type {
 import { HOME_URL, id, initialState, newTab } from "../../shared/state";
 import { restoreState } from "../../shared/restore";
 import { hostname, normalizeUrl } from "../../shared/url";
+import { extensionsCopy } from "../copy";
 
 const STORAGE_KEY = "kamapathy-preview-v1";
 export function createPreviewBridge(): KamapathyBridge {
@@ -365,6 +366,16 @@ export function createPreviewBridge(): KamapathyBridge {
     importSources: async () => [],
     importBrowserData: async () => {
       throw new Error("Install the desktop app to import from another browser.");
+    },
+    extensions: async () => ({
+      rows: [],
+      actions: [],
+      installing: [],
+      imports: [],
+    }),
+    onExtensions: () => () => {},
+    extensionCommand: async () => {
+      throw new Error(extensionsCopy.desktopOnly);
     },
   };
 }

@@ -52,3 +52,159 @@
 .omnibox .is-bookmarked {
   color: var(--text);
 }
+/* The person's extension buttons, their menu and the store chip. */
+.extension-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.extension-actions > .icon-button {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+}
+.extension-button img {
+  border-radius: 4px;
+}
+.extension-letter {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
+  background: var(--hairline);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+.extension-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  min-width: 14px;
+  max-width: 28px;
+  padding: 0 2px;
+  border-radius: 4px;
+  background: var(--secondary);
+  color: var(--surface);
+  font-size: 8px;
+  line-height: 11px;
+  text-align: center;
+  overflow: hidden;
+}
+.omnibox-chip {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.omnibox-chip:disabled {
+  background: var(--hairline);
+  color: var(--secondary);
+}
+.extension-menu-note {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.extension-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.extension-menu-row > [role="menuitem"] {
+  flex: 1;
+  min-width: 0;
+}
+.extension-menu-row > [role="menuitem"] > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.extension-menu-row .icon-button {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--secondary);
+}
+.extension-menu-row .is-pinned {
+  color: var(--text);
+}
+/* The Extensions modal: the store field and one row per extension. */
+.extensions-modal {
+  max-width: 580px;
+}
+.extension-store {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+}
+.extension-rows {
+  margin-top: 8px;
+}
+.extension-row {
+  border-bottom: 1px solid var(--hairline);
+  padding: 12px 0;
+}
+.extension-row:last-child {
+  border: 0;
+}
+.extension-row-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.extension-row-head > div {
+  flex: 1;
+  min-width: 0;
+}
+.extension-row-head strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.extension-row-head p {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--secondary);
+}
+.extension-row summary {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+.extension-row h4 {
+  margin-top: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.extension-row details ul {
+  margin-top: 6px;
+  padding-left: 16px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--secondary);
+  list-style: disc;
+}
+.extension-update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+.extension-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.extensions-manage {
+  margin-top: 16px;
+}
