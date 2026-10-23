@@ -2,8 +2,19 @@
 // frame and a tall card in the middle one, so a scrolled viewport holds the
 // middle section, the top of the card and the top of the frame and nothing
 // else; a frame from another origin and two lookalike controls beside them;
-// and a page of links of every protocol. {{other}} becomes a second origin
-// for the same server, which makes that frame cross origin.
+// a page of links of every protocol; and a page of more text and controls
+// than one part holds, whose ranked order differs from its page order.
+// {{other}} becomes a second origin for the same server, which makes that
+// frame cross origin.
+const paragraph = (number) =>
+  `<p>Paragraph ${number}: ${"the quick brown fox jumps over the lazy dog. ".repeat(3)}</p>`;
+const buttons = (name, count) =>
+  Array.from(
+    { length: count },
+    (_unused, index) =>
+      `<button id="${name.toLowerCase()}${index + 1}" type="button">${name} ${index + 1}</button>`,
+  ).join("\n");
+
 export const snapshotPages = {
   "/snapshot/sections": `<!doctype html><meta charset="utf-8"><title>Three sections</title>
 <style>
@@ -42,6 +53,22 @@ button{display:block;margin:0}
 <div style="height:400px"></div>
 <p>Frame far text</p>
 <button id="frameFarButton" type="button">Frame far button</button>`,
+  "/snapshot/parts": `<!doctype html><meta charset="utf-8"><title>More than one part</title>
+<style>
+body{font:14px sans-serif;margin:0}
+p,pre{margin:0}
+button{display:block}
+#bar{position:fixed;left:0;right:0;bottom:0;background:#eee}
+#bar button{display:inline-block}
+#gap{width:900px;overflow:hidden}
+</style>
+${buttons("Near", 4)}
+${[1, 2, 3, 4, 5, 6].map(paragraph).join("\n")}
+<div id="gap"><pre>Gap start${" ".repeat(400)}Gap end</pre></div>
+${[7, 8, 9, 10, 11, 12].map(paragraph).join("\n")}
+<div style="height:1200px"></div>
+${buttons("Far", 6)}
+<div id="bar"><button id="save" type="button">Save draft</button><button id="submit" type="button">Submit</button></div>`,
   "/snapshot/links": `<!doctype html><meta charset="utf-8"><title>Every link</title>
 <style>body{font:14px sans-serif;margin:16px}a{display:block}</style>
 <a id="plain" href="http://example.com/catalog">Catalog</a>

@@ -809,6 +809,131 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts.at(-1)!.code).toContain('"root":"@e1"');
   });
 
+  it("returns next until the page is covered, and refuses a cursor from another snapshot", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const whole = "Every part of this page, and then the rest of it.";
+    // A page that answers from the offsets it is given, as the real one does.
+    page.result = (code: string) => {
+      const marker = ')("snapshot",';
+      const payload = JSON.parse(
+        code.slice(
+          code.indexOf(marker) + marker.length,
+          code.lastIndexOf(',"'),
+        ),
+      );
+      const { text: from, control } = payload.offsets;
+      const text = whole.slice(from, from + payload.maxChars);
+      const left = whole.length > from + payload.maxChars;
+      return {
+        url: "https://example.com/",
+        title: "Example",
+        text,
+        interactables: [],
+        truncated: left,
+        ...(left
+          ? {
+              next: {
+                text: from + payload.maxChars,
+                control: control + 1,
+                line: 0,
+              },
+            }
+          : {}),
+      };
+    };
+    const take = async (body: Record<string, unknown>) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", body);
+      return { status: response.status, body: await response.json() };
+    };
+    const parts: string[] = [];
+    let cursor: string | undefined;
+    let first: string | undefined;
+    for (let part = 0; part < 20; part += 1) {
+      const got = await take({
+        maxChars: 12,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      expect(got.status).toBe(200);
+      parts.push(got.body.text);
+      cursor = got.body.next;
+      first ??= cursor;
+      if (cursor === undefined) break;
+      expect(cursor.startsWith("c1.")).toBe(true);
+      expect(cursor.length).toBeLessThanOrEqual(512);
+    }
+    // The parts cover the page once, and the last one carries no cursor.
+    expect(parts.join("")).toBe(whole);
+    expect(cursor).toBeUndefined();
+    const covered = Array.from(
+      { length: Math.ceil(whole.length / 12) },
+      (_unused, part) => ({ text: part * 12, control: part, line: 0 }),
+    );
+    expect(parts).toHaveLength(covered.length);
+    expect(payloads("snapshot").map((payload) => payload.offsets)).toEqual(
+      covered,
+    );
+    // A cursor is good only for the snapshot that made it.
+    const scripts = page.scripts.length;
+    const other = await take({
+      maxChars: 12,
+      cursor: first!,
+      selector: "#one",
+    });
+    expect(other.status).toBe(400);
+    expect(other.body.error).toEqual({
+      code: "invalid_cursor",
+      message:
+        "This cursor does not continue this snapshot. Ask for the snapshot again without a cursor.",
+    });
+    // The schema bounds the field; the snapshot path reads what it carries.
+    for (const [cursor, code] of [
+      ["", "invalid_field"],
+      [7, "invalid_field"],
+      [`c1.${"x".repeat(513)}`, "invalid_field"],
+      ["c1.", "invalid_cursor"],
+      ["x1.YWJj", "invalid_cursor"],
+      [`c1.${Buffer.from('{"e":0}').toString("base64url")}`, "invalid_cursor"],
+    ] as const) {
+      const refused = await take({ maxChars: 12, cursor });
+      expect(refused.status, String(cursor)).toBe(400);
+      expect(refused.body.error.code, String(cursor)).toBe(code);
+    }
+    // The bounds may change between parts; the scope may not.
+    expect((await take({ maxChars: 400, cursor: first! })).status).toBe(200);
+    expect(
+      (await take({ maxChars: 12, cursor: first!, scope: "viewport" })).status,
+    ).toBe(400);
+    expect(page.scripts).toHaveLength(scripts + 1);
+
+    // A cursor from before a same-document URL change is refused once the
+    // page answers, and one from before a navigation before it is asked.
+    page.result = {
+      url: "https://example.com/next",
+      title: "Example",
+      text: "Hello",
+      interactables: [],
+      truncated: false,
+    };
+    const moved = await take({ maxChars: 12, cursor: first! });
+    expect(moved.status).toBe(409);
+    expect(moved.body.error).toMatchObject({
+      code: "page_changed",
+      message:
+        "The page changed since this cursor's part. Take a snapshot again without a cursor.",
+    });
+    const reached = page.scripts.length;
+    page.emit("did-start-navigation", {
+      url: "https://example.com/next",
+      isSameDocument: false,
+      isMainFrame: true,
+    });
+    const navigated = await take({ maxChars: 12, cursor: first! });
+    expect(navigated.status).toBe(409);
+    expect(navigated.body.error.code).toBe("page_changed");
+    expect(page.scripts).toHaveLength(reached);
+  });
+
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
     const { tab } = await createPage();
     await request(`/tabs/${tab.id}/snapshot`);

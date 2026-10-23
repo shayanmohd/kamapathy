@@ -7,6 +7,7 @@ export interface SnapshotOptions {
   scope?: "page" | "viewport";
   maxChars: number;
   maxControls: number;
+  offsets?: { text: number; control: number; line: number };
   firstRef: number;
 }
 export interface ElementTarget {
@@ -1284,6 +1285,12 @@ export function pageOperation(
     styles = new Map();
     const options = payload as unknown as SnapshotOptions;
     const viewport = options.scope === "viewport";
+    // Where this part starts: a character of the text, a ranked control.
+    const offsets = {
+      text: options.offsets?.text || 0,
+      control: options.offsets?.control || 0,
+      line: options.offsets?.line || 0,
+    };
     let scope: Element = document.body || document.documentElement;
     // A root is a ref; any other form of scope is a selector the main
     // process parsed.
@@ -1451,11 +1458,11 @@ export function pageOperation(
           .concat(clickable)
           .sort((first, second) => order.get(first)! - order.get(second)!)
       : candidates;
-    // When a page has more controls than the budget, list what a person can
-    // act on now: open dialogs and popups, then pinned bars on screen, then
-    // the rest of the screen, then everything else, keeping page order.
-    let chosen = all;
-    if (all.length > options.maxControls) {
+    // Every control is ranked, whether or not they all fit, because a part
+    // takes ranked positions and every part must rank the page alike: open
+    // dialogs and popups, then pinned bars on screen, then the rest of the
+    // screen, then everything else.
+    const ranked = (() => {
       const fallback = new Set(clickable);
       // The nearest fixed or sticky box around an element, if any.
       const pinned = new Map<Element, Element | null>();
@@ -1519,16 +1526,18 @@ export function pageOperation(
                   : 4;
         return tier * 2 + (fallback.has(element) ? 1 : 0);
       };
-      chosen = all
+      return all
         .map((element, index) => ({ element, index, rank: rank(element) }))
         .sort(
           (first, second) =>
             first.rank - second.rank || first.index - second.index,
-        )
-        .slice(0, options.maxControls)
-        .sort((first, second) => first.index - second.index)
-        .map((item) => item.element);
-    }
+        );
+    })();
+    // This part's controls, back in the order a person sees them.
+    const chosen = ranked
+      .slice(offsets.control, offsets.control + options.maxControls)
+      .sort((first, second) => first.index - second.index)
+      .map((item) => item.element);
     const limit = options.mode === "compact" ? 80 : 200;
     let nextRef = options.firstRef;
     // The numbers this snapshot assigned, so the main process knows which
@@ -1671,23 +1680,51 @@ export function pageOperation(
     for (const [ref, print] of prints)
       if (lookalikes.get(keyOf(print))! > 1) registry.fingerprints.delete(ref);
       else registry.fingerprints.set(ref, print);
-    const omitted = all.length - chosen.length;
-    let text = pageText(scope, options.maxChars, viewport);
-    if (options.mode === "compact")
-      text = text
-        .replace(/[\t ]+/g, " ")
-        .replace(/\n\s*\n\s*\n/g, "\n\n")
-        .trim();
+    const omitted = Math.max(0, all.length - offsets.control - chosen.length);
+    const compact = (value: string) =>
+      options.mode === "compact"
+        ? value
+            .replace(/[\t ]+/g, " ")
+            .replace(/\n\s*\n\s*\n/g, "\n\n")
+            .trim()
+        : value;
+    // A part reads past its own end, so the normalization at its last
+    // character is the one the whole text has there. When the margin was
+    // all whitespace, it reads further, up to the whole scope.
+    const wanted = offsets.text + options.maxChars;
+    let readLimit = wanted + 256;
+    let raw = pageText(scope, readLimit, viewport);
+    let normalized = compact(raw);
+    while (raw.length > readLimit && normalized.length < wanted + 1) {
+      readLimit *= 2;
+      raw = pageText(scope, readLimit, viewport);
+      normalized = compact(raw);
+    }
+    const text = normalized.slice(offsets.text, wanted);
+    const textLeft = normalized.length > wanted;
+    // A bound of 0 cannot print its half of the page, so it never asks for
+    // it again; truncated still reports what was left out.
+    const more =
+      (textLeft && options.maxChars > 0) ||
+      (omitted > 0 && options.maxControls > 0);
     return {
       url: location.href,
       title: document.title,
-      text: text.slice(0, options.maxChars),
+      text,
       interactables,
       ...reboundResult(),
       ...(issued.length ? { issued } : {}),
       ...(omitted ? { omittedControls: omitted } : {}),
-      truncated:
-        text.length > options.maxChars || omitted > 0 || optionsTruncated,
+      ...(more
+        ? {
+            next: {
+              text: textLeft ? offsets.text + text.length : normalized.length,
+              control: offsets.control + chosen.length,
+              line: 0,
+            },
+          }
+        : {}),
+      truncated: textLeft || omitted > 0 || optionsTruncated,
     };
   }
   if (operation === "check") {

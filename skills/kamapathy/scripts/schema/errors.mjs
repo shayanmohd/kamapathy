@@ -41,6 +41,13 @@ export const ERRORS = {
     "The selector does not parse, or the page rejects its CSS or XPath.",
     ["selector", "reason", "forms", "hint", "index"],
   ),
+  invalid_cursor: code(
+    400,
+    false,
+    "The cursor is malformed or was made for another scope.",
+    [],
+    3,
+  ),
   invalid_action: code(
     400,
     false,

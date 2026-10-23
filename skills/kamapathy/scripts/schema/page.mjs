@@ -27,11 +27,12 @@ const TARGET = [
   "element_action_failed",
 ];
 const INPUT = ["element_obscured", "input_not_delivered"];
-// What a snapshot's root or scope selector can answer.
+// What a snapshot's root, scope selector or cursor can answer.
 const SCOPE = [
   "invalid_field",
   "invalid_ref",
   "invalid_selector",
+  "invalid_cursor",
   "unknown_ref",
   "stale_ref",
   "cross_origin_frame",

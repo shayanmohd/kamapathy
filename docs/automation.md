@@ -289,7 +289,7 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
-| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
+| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
 | POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
@@ -328,6 +328,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
 | `invalid_key` | 400 | not retryable |  | The key is not one press supports. |
 | `invalid_selector` | 400 | not retryable | `selector`, `reason`, `forms`, `hint`, `index` | The selector does not parse, or the page rejects its CSS or XPath. |
+| `invalid_cursor` | 400 | not retryable |  | The cursor is malformed or was made for another scope. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
 | `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |

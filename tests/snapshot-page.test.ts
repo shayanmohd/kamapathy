@@ -35,10 +35,14 @@ type Control = {
   label: string;
   href?: string;
 };
+type Offsets = { text: number; control: number; line: number };
 type Listing = {
   text: string;
   interactables: Control[];
   rebound?: string[];
+  next?: Offsets;
+  omittedControls?: number;
+  truncated?: boolean;
   ok?: false;
   code?: string;
   fields?: Record<string, unknown>;
@@ -79,7 +83,7 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
   afterAll(async () => {
     await browser?.close();
     for (const site of sites) site.close();
-  });
+  }, 60000);
   const step = () => ({ deadline: Date.now() + 15000 });
   const load = async (path: string, frames = 1) => {
     tab = await browser.newPage();
@@ -254,6 +258,95 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       code: "ambiguous_match",
       fields: { count: 2, visible: 1, hidden: 1 },
     });
+  }, 60000);
+
+  it("covers the page in parts without repeats", async () => {
+    await load("/snapshot/parts");
+    // Every part the page gives for one set of bounds, from its own next.
+    const cover = async (bounds: Record<string, unknown>) => {
+      const parts: Listing[] = [];
+      let offsets: Offsets = { text: 0, control: 0, line: 0 };
+      for (let part = 0; part < 30; part += 1) {
+        const got = await snapshot({ mode: "compact", ...bounds, offsets });
+        parts.push(got);
+        if (!got.next) break;
+        // A part that cannot advance would repeat itself forever.
+        expect(
+          got.next.text > offsets.text || got.next.control > offsets.control,
+          `part ${part}`,
+        ).toBe(true);
+        offsets = got.next;
+      }
+      expect(parts.at(-1)!.next).toBeUndefined();
+      return parts;
+    };
+    const parts = await cover({ maxChars: 500, maxControls: 5 });
+    expect(parts.length).toBeGreaterThan(3);
+    // The whole page, read after the parts so their refs are the page's.
+    const whole = await snapshot({ mode: "compact" });
+    expect(whole.truncated).toBe(false);
+    expect(parts.map((part) => part.text).join("")).toBe(whole.text);
+    // Every control the whole page lists, once, in ranked order instead of
+    // page order, and each part's controls back in page order.
+    const refsOf = (listing: Listing | Listing[]) =>
+      ([] as Listing[])
+        .concat(listing)
+        .flatMap((part) => part.interactables.map((control) => control.ref));
+    expect(refsOf(parts).sort()).toEqual(refsOf(whole).sort());
+    expect(new Set(refsOf(parts)).size).toBe(refsOf(whole).length);
+    expect(refsOf(parts)).not.toEqual(refsOf(whole));
+    const order = refsOf(whole);
+    for (const part of parts) {
+      const inPart = refsOf(part);
+      expect(inPart).toEqual(
+        [...inPart].sort(
+          (first, second) => order.indexOf(first) - order.indexOf(second),
+        ),
+      );
+    }
+    // The action bar at the end of the page is in the first part.
+    expect(parts[0].interactables.map((control) => control.label)).toContain(
+      "Submit",
+    );
+    // A part only ever issues refs inside the block of 100 it reserved.
+    const base = Number(parts[0].interactables[0].ref.slice(2));
+    for (const [index, part] of parts.entries())
+      for (const control of part.interactables) {
+        const number = Number(control.ref.slice(2));
+        expect(number, control.ref).toBeGreaterThanOrEqual(base + index * 100);
+        expect(number, control.ref).toBeLessThan(base + (index + 1) * 100);
+        expect(refs.classify("tab-1", control.ref), control.ref).toBe("live");
+      }
+
+    // One character at a time still advances, by one character.
+    const slow = await snapshot({
+      mode: "compact",
+      maxChars: 1,
+      offsets: { text: 0, control: 0, line: 0 },
+    });
+    expect(slow.text).toBe(whole.text.slice(0, 1));
+    expect(slow.next).toMatchObject({ text: 1 });
+    const second = await snapshot({
+      mode: "compact",
+      maxChars: 1,
+      offsets: slow.next!,
+    });
+    expect(second.text).toBe(whole.text.slice(1, 2));
+    expect(second.next).toMatchObject({ text: 2 });
+    // Bounds of 0 cannot print their half of the page, so they never ask
+    // for it again: the controls cover, the text does not, and the other
+    // way round, and neither leaves a part that cannot advance.
+    const textless = await cover({ maxChars: 0, maxControls: 5 });
+    expect(refsOf(textless).sort()).toEqual(refsOf(whole).sort());
+    expect(textless.every((part) => part.text === "")).toBe(true);
+    expect(textless.at(-1)!.truncated).toBe(true);
+    const controlless = await cover({ maxChars: 500, maxControls: 0 });
+    expect(controlless.map((part) => part.text).join("")).toBe(whole.text);
+    expect(refsOf(controlless)).toEqual([]);
+    expect(controlless[0].omittedControls).toBe(refsOf(whole).length);
+    const neither = await cover({ maxChars: 0, maxControls: 0 });
+    expect(neither).toHaveLength(1);
+    expect(neither[0].truncated).toBe(true);
   }, 60000);
 
   it("lists absolute http, https, mailto and tel links", async () => {

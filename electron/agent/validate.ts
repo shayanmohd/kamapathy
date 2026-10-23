@@ -12,6 +12,7 @@ import {
   selectorError,
   type SearchAst,
 } from "./selectors";
+import { MAX_CURSOR } from "./snapshot";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -171,6 +172,10 @@ export function parseToolAction(
       ...("ref" in scoped ? { root: scoped.ref } : {}),
       scope,
       header,
+      // The part to continue. The snapshot path reads what it carries.
+      ...(body.cursor === undefined
+        ? {}
+        : { cursor: stringField(body, "cursor", MAX_CURSOR) }),
     };
     return { type, payload: options };
   }

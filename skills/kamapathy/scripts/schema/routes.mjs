@@ -67,6 +67,13 @@ const FIELDS = {
       since: 3,
       description: "Name the page, its space and the space's tabs.",
     },
+    cursor: {
+      kind: "string",
+      max: 512,
+      since: 3,
+      description:
+        "The next value of an earlier part, for the part after it. Keep scope, root, selector and format.",
+    },
   },
   click: { ...target },
   fill: {
