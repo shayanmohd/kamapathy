@@ -169,6 +169,13 @@ export const ERRORS = {
     ["url", "reason"],
     2,
   ),
+  reload_would_resubmit: code(
+    409,
+    false,
+    "Reloading would send the page's form again.",
+    ["url"],
+    2,
+  ),
   dialog_open: code(409, false, "A JavaScript dialog is open on the page.", [
     "dialog",
     "started",

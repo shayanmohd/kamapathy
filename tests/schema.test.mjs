@@ -193,7 +193,7 @@ describe("API schema", () => {
       [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort(),
     );
     expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, and navigate.",
+      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, and reload.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -439,11 +439,12 @@ describe("API schema", () => {
       "drag",
       "wait",
       "navigate",
+      "reload",
     ];
     expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, and navigate.",
+        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, and reload.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])

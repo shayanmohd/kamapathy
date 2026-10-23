@@ -1147,7 +1147,7 @@ describe("local automation socket", () => {
     ).toBe(false);
   });
 
-  it("info refuses a tab with no page", async () => {
+  it("reload and info refuse a tab with no page", async () => {
     const { space, tab } = await createPage();
     // Every agent space opens with a tab on the new tab page.
     const blank = controller.state.tabs.find(
@@ -1156,6 +1156,11 @@ describe("local automation socket", () => {
     const response = await request(`/tabs/${blank.id}/info`);
     expect(response.status).toBe(409);
     expect((await response.json()).error).toMatchObject({
+      code: "no_web_page",
+    });
+    const reloaded = await request(`/tabs/${blank.id}/reload`, "POST", {});
+    expect(reloaded.status).toBe(409);
+    expect((await reloaded.json()).error).toMatchObject({
       code: "no_web_page",
     });
   });
@@ -1631,6 +1636,160 @@ describe("local automation socket", () => {
         committed: false,
       },
     });
+  });
+
+  // A reload whose dispatch has reached the page, ready for its events.
+  const reloading = async (
+    tabId: string,
+    body: Record<string, unknown> = {},
+    reloads = 1,
+  ) => {
+    const page = controller.pages.get(tabId)!;
+    const done = request(`/tabs/${tabId}/reload`, "POST", body);
+    void done.catch(() => {});
+    await expect.poll(() => page.reloads.length).toBe(reloads);
+    return { done };
+  };
+  // A document the tracker saw arrive, with the method its request reported.
+  const committed = async (
+    tabId: string,
+    url: string,
+    method = "GET",
+    loads = 1,
+  ) => {
+    const page = controller.pages.get(tabId)!;
+    const { done } = await dispatched(tabId, { url, waitUntil: "commit" }, loads);
+    const frame = mainFrame(page, `loader-${loads + 1}`);
+    frame.start(url);
+    frame.request(url, method);
+    frame.response(200);
+    frame.commit(url);
+    expect((await done).status).toBe(200);
+  };
+
+  it("reload waits for its state and keeps the tab's id and label", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect(typeof tab.label).toBe("string");
+    const { done: reloaded } = await reloading(tab.id, { waitUntil: "load" });
+    expect(page.reloads).toEqual([{ ignoreCache: false }]);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/", "reload");
+    frame.request("https://example.com/");
+    frame.response(200);
+    frame.commit("https://example.com/");
+    frame.lifecycle("DOMContentLoaded");
+    let settled = false;
+    void reloaded.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+    frame.lifecycle("load");
+    const answered = await reloaded;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({
+        id: tab.id,
+        label: tab.label,
+        url: "https://example.com/",
+        managed: true,
+      }),
+      httpStatus: 200,
+      waitUntil: "load",
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent reloaded example.com",
+    });
+  });
+
+  it("reload refuses to resubmit a POST document", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await committed(tab.id, "https://example.com/order", "POST");
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/reload`, "POST", {}),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.error).toEqual({
+      code: "reload_would_resubmit",
+      message:
+        "Reloading this page would send its form again. Navigate to the address instead, or ask the person to confirm.",
+      url: "https://example.com/order",
+    });
+    expect(page.reloads).toEqual([]);
+    // A document the tracker saw arrive from a GET reloads as usual.
+    await committed(tab.id, "https://example.com/list", "GET", 2);
+    const { done } = await reloading(tab.id, { waitUntil: "commit" });
+    const frame = mainFrame(page, "loader-4");
+    frame.start("https://example.com/list", "reload");
+    frame.commit("https://example.com/list");
+    expect((await done).status).toBe(200);
+  });
+
+  it("ignoreCache bypasses the cache under the same waits", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done } = await reloading(tab.id, {
+      waitUntil: "commit",
+      ignoreCache: true,
+    });
+    expect(page.reloads).toEqual([{ ignoreCache: true }]);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/", "reloadBypassingCache");
+    frame.request("https://example.com/");
+    frame.response(200);
+    frame.commit("https://example.com/");
+    const answered = await done;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      httpStatus: 200,
+      waitUntil: "commit",
+    });
+    // No page script runs for it, so the Page scripts switch cannot gate it.
+    expect(page.scripts).toEqual([]);
+    // The batch step takes the same field.
+    const batch = request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "reload", waitUntil: "commit", ignoreCache: true }],
+    });
+    void batch.catch(() => {});
+    await expect.poll(() => page.reloads.length).toBe(2);
+    expect(page.reloads[1]).toEqual({ ignoreCache: true });
+    const stepFrame = mainFrame(page, "loader-3");
+    stepFrame.start("https://example.com/", "reloadBypassingCache");
+    stepFrame.commit("https://example.com/");
+    const ran = await batch;
+    expect(ran.status).toBe(200);
+    expect(await ran.json()).toMatchObject({
+      ok: true,
+      results: [
+        { index: 0, type: "reload", result: { ok: true, waitUntil: "commit" } },
+      ],
+    });
+  });
+
+  it("reload enforces its field ranges", async () => {
+    const { tab } = await createPage();
+    for (const body of [
+      { timeoutMs: 0 },
+      { timeoutMs: 60001 },
+      { ignoreCache: "yes" },
+      { waitUntil: "idle" },
+    ]) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/reload`, "POST", body),
+      );
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field: Object.keys(body)[0],
+      });
+    }
+    expect(controller.contents.reloads).toEqual([]);
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
@@ -2276,6 +2435,7 @@ describe("local automation socket", () => {
       "POST /space-requests": { reason: "Book a table" },
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
+      "POST /tabs/:id/reload": {},
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

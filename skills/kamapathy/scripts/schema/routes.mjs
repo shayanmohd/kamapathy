@@ -141,6 +141,21 @@ const FIELDS = {
       description: "The Referer header to send, exactly as given.",
     },
   },
+  reload: {
+    waitUntil,
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      description: "How long to wait for the state.",
+    },
+    ignoreCache: {
+      kind: "boolean",
+      default: false,
+      description: "Fetch the page and its subresources past the cache.",
+    },
+  },
 };
 
 const route = (method, path, summary, response, body, options = {}) => ({
@@ -357,6 +372,14 @@ export const ROUTES = [
     { follow: true, budget: { field: "timeoutMs" } },
   ),
   route(
+    "POST",
+    "/tabs/:id/reload",
+    "Reloads the page and waits for the new document to reach a state.",
+    "{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }",
+    FIELDS.reload,
+    { follow: true, budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
     "GET",
     "/tabs/:id/info",
     "Reads the viewport, scroll offsets, document size and ready state.",
@@ -522,6 +545,13 @@ export const ACTIONS = [
     type: "navigate",
     summary: "Loads a URL and waits for the new document to reach a state.",
     fields: FIELDS.navigate,
+    since: 2,
+  },
+  {
+    type: "reload",
+    summary:
+      "Reloads the page and waits for the new document to reach a state.",
+    fields: FIELDS.reload,
     since: 2,
   },
 ];

@@ -38,7 +38,8 @@ export type ToolAction = {
     | "scroll"
     | "drag"
     | "wait"
-    | "navigate";
+    | "navigate"
+    | "reload";
   payload: Record<string, unknown>;
 };
 
@@ -120,6 +121,17 @@ export function navigationFields(body: Record<string, unknown>): {
     waitUntil: waitUntilField(body),
     timeoutMs: integerField(body, "timeoutMs", 15000, 1, 60000),
     ...(body.referer === undefined ? {} : { referer: refererField(body) }),
+  };
+}
+export function reloadFields(body: Record<string, unknown>): {
+  waitUntil: WaitUntil;
+  timeoutMs: number;
+  ignoreCache: boolean;
+} {
+  return {
+    waitUntil: waitUntilField(body),
+    timeoutMs: integerField(body, "timeoutMs", 15000, 1, 60000),
+    ignoreCache: booleanField(body, "ignoreCache", false),
   };
 }
 export function targetFields(
@@ -226,6 +238,7 @@ export function parseToolAction(
     };
   }
   if (type === "navigate") return { type, payload: navigationFields(body) };
+  if (type === "reload") return { type, payload: reloadFields(body) };
   if (type === "wait")
     return {
       type,

@@ -288,6 +288,7 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | POST | `/tabs/:id/adopt` | `{}` | Makes a page the agent did not open its own, within the page budget. The page keeps its label. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/navigate` | `url`, `waitUntil?`, `timeoutMs?`, `referer?` | Loads a URL in the tab and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
+| POST | `/tabs/:id/reload` | `waitUntil?`, `timeoutMs?`, `ignoreCache?` | Reloads the page and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
@@ -356,6 +357,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
 | `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
+| `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |

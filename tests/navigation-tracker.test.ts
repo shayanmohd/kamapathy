@@ -195,6 +195,35 @@ describe("the navigation tracker", () => {
     expect(tracker.document).toMatchObject({ method: "POST", httpStatus: 200 });
   });
 
+  it("a reload keeps its own navigation type", () => {
+    const { tracker, feed, events, ends } = track();
+    feed(...load("a", "https://a.test/form", "POST"));
+    for (const [loaderId, type] of [
+      ["b", "reload"],
+      ["c", "reloadBypassingCache"],
+    ]) {
+      feed(started(loaderId, "https://a.test/form", type));
+      expect(tracker.pending).toMatchObject({
+        loaderId,
+        type,
+        url: "https://a.test/form",
+      });
+      expect(events.at(-1)).toMatchObject({
+        type: "started",
+        loaderId,
+        navigationType: type,
+      });
+      feed(
+        request(loaderId, "https://a.test/form", "POST"),
+        response(loaderId, 200),
+        navigated(loaderId, "https://a.test/form"),
+      );
+      expect(tracker.document).toMatchObject({ loaderId, method: "POST" });
+    }
+    expect(tracker.navigation).toBe(3);
+    expect(ends()).toEqual([]);
+  });
+
   it("classifies an abort as download, interrupted, blocked or failed", () => {
     // A download the session reported before the abort, and one reported
     // after it, as Chromium 152 does.

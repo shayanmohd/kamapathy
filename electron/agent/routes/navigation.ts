@@ -4,7 +4,7 @@ import { createPendingGate, type WaitUntil } from "../navigation/await";
 import { createGo } from "../navigation/go";
 import { createTrackers } from "../navigation/trackers";
 import type { AutomationController } from "../server";
-import { navigationFields, type ToolAction } from "../validate";
+import { navigationFields, reloadFields, type ToolAction } from "../validate";
 import { tabView } from "../views";
 
 // The navigation and wait routes, and the batch steps that share their work.
@@ -75,6 +75,15 @@ export function createNavigation(
     timeoutMs: number;
     referer?: string;
   };
+  type ReloadBody = {
+    waitUntil: WaitUntil;
+    timeoutMs: number;
+    ignoreCache: boolean;
+  };
+  // What a batch step waits: its own timeout, cut to the budget the batch
+  // has left, which its timeout error then reports.
+  const cutTo = (timeoutMs: number, run: Run) =>
+    Math.min(timeoutMs, Math.max(0, run.deadline - Date.now()));
   return {
     routes: {
       "POST /tabs/:id/navigate": {
@@ -83,6 +92,14 @@ export function createNavigation(
             response,
             200,
             await go.navigate(tab!.id, navigationFields(body!), run),
+          ),
+      },
+      "POST /tabs/:id/reload": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await go.reload(tab!.id, reloadFields(body!), run),
           ),
       },
       "GET /tabs/:id/info": {
@@ -126,24 +143,25 @@ export function createNavigation(
         },
       },
     },
-    stepTypes: ["navigate"],
+    stepTypes: ["navigate", "reload"],
     step: async (tabId, action, run) => {
-      if (action.type !== "navigate")
-        throw new Error("This batch step has no navigation handler.");
-      const body = action.payload as NavigateBody;
-      // A step waits only as long as the batch's budget has left, and its
-      // timeout error reports the value it was cut to.
-      return go.navigate(
-        tabId,
-        {
-          ...body,
-          timeoutMs: Math.min(
-            body.timeoutMs,
-            Math.max(0, run.deadline - Date.now()),
-          ),
-        },
-        run,
-      );
+      if (action.type === "navigate") {
+        const body = action.payload as NavigateBody;
+        return go.navigate(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      if (action.type === "reload") {
+        const body = action.payload as ReloadBody;
+        return go.reload(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      throw new Error("This batch step has no navigation handler.");
     },
   };
 }
