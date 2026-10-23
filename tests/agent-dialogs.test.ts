@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BACKSTOP_WINDOW_MS,
   createDialogs,
   DIALOG_RECORDS,
   MAX_DIALOG_MESSAGE,
   type DialogRecord,
 } from "../electron/agent/dialogs";
+import type { Expectation } from "../electron/agent/expectations";
 import {
   MAX_REPORT_BYTES,
   MAX_REPORTS_PER_DOCUMENT,
@@ -24,7 +26,12 @@ const URL_HERE = "https://example.com/report";
 
 // The dialog handler over a scripted debugger: one agent tab, its session and
 // the policy the page's reports answer to.
-function setup(options: { queued?: () => string[] } = {}) {
+function setup(
+  options: {
+    queued?: () => string[];
+    onArm?: Parameters<typeof createDialogs>[0]["onArm"];
+  } = {},
+) {
   const controller = new FakeController();
   const space = controller.createAgentSpace("Research");
   const tab = controller.state.tabs.find((item) => item.spaceId === space.id)!;
@@ -47,6 +54,7 @@ function setup(options: { queued?: () => string[] } = {}) {
     controller,
     sessions: { get: (id) => (id === tab.id ? session : undefined) },
     onAnswer: (_tabId, record) => answers.push(record),
+    ...(options.onArm === undefined ? {} : { onArm: options.onArm }),
   });
   const stop = dialogs.attach(session, tab.id);
   session.attach();
@@ -97,6 +105,24 @@ const answered = (
   answer: "accepted" | "dismissed" = "accepted",
   extra: Record<string, unknown> = {},
 ) => ({ type, message: `${type} here`, answer, url: URL_HERE, ...extra });
+// What Chromium reports for a dialog that never reached the handler, as the
+// probe of Verify first 3 recorded it.
+const opening = (
+  type: "alert" | "confirm" | "prompt" | "beforeunload",
+  message: string,
+  defaultPrompt = "",
+) => ({
+  url: URL_HERE,
+  frameId: "main",
+  message,
+  type,
+  hasBrowserHandler: true,
+  defaultPrompt,
+});
+const handled = (cdp: FakeDebugger) =>
+  cdp.sent.filter(
+    (command) => command.method === "Page.handleJavaScriptDialog",
+  );
 
 describe("the dialog handler in agent tabs", () => {
   it("re-adds the script and updates contexts", async () => {
@@ -360,6 +386,205 @@ describe("the dialog handler in agent tabs", () => {
     // Nothing in this path enables the Runtime domain.
     expect(cdp.methods()).not.toContain("Runtime.enable");
     expect(cdp.methods("frame-1")).not.toContain("Runtime.enable");
+  });
+
+  it("answers a bypassing dialog through CDP", async () => {
+    const { controller, cdp, dialogs, tab, tabLog, answers, space } = setup();
+    await settle();
+    cdp.event("Page.javascriptDialogOpening", opening("confirm", "Bypass?"));
+    await settle();
+    // Nothing is armed, so the backstop dismisses it as the handler would.
+    expect(handled(cdp).map((command) => command.params)).toEqual([
+      { accept: false },
+    ]);
+    const record = {
+      type: "confirm",
+      message: "Bypass?",
+      answer: "dismissed",
+      url: URL_HERE,
+      at: Date.now(),
+    };
+    expect(dialogs.records(tab.id)).toEqual([record]);
+    expect(answers).toEqual([record]);
+    expect(tabLog.since(tab.id, 0, ["dialog"]).map(({ data }) => data)).toEqual(
+      [
+        {
+          type: "confirm",
+          message: "Bypass?",
+          answer: "dismissed",
+          url: URL_HERE,
+        },
+      ],
+    );
+    cdp.event("Page.javascriptDialogClosed", { result: false, userInput: "" });
+
+    // The person's own dialogs are theirs: nothing answers or records them.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    await settle();
+    cdp.event("Page.javascriptDialogOpening", opening("confirm", "Theirs?"));
+    await settle();
+    expect(handled(cdp)).toHaveLength(1);
+    expect(dialogs.records(tab.id)).toHaveLength(1);
+  });
+
+  it("the backstop answers alert, confirm and prompt from the policy and records them once, not twice", async () => {
+    const { cdp, dialogs, tab } = setup();
+    await settle();
+    const binding = bindingOf(cdp);
+    dialogs.setPolicy(tab.id, {
+      accept: true,
+      promptText: "Grace",
+      times: 2,
+      lifetimeMs: 60000,
+    });
+    await settle();
+    const answer = async (
+      type: "alert" | "confirm" | "prompt",
+      message: string,
+      defaultPrompt?: string,
+    ) => {
+      cdp.event(
+        "Page.javascriptDialogOpening",
+        opening(type, message, defaultPrompt),
+      );
+      await settle();
+      cdp.event("Page.javascriptDialogClosed", { result: true, userInput: "" });
+      return handled(cdp).at(-1)!.params;
+    };
+    // An alert returns at once, reports accepted and keeps the arm.
+    expect(await answer("alert", "Saved")).toEqual({ accept: true });
+    expect(dialogs.policy(tab.id)?.remaining).toBe(2);
+    expect(await answer("confirm", "Delete this file?")).toEqual({
+      accept: true,
+    });
+    expect(dialogs.policy(tab.id)?.remaining).toBe(1);
+    // An accepted prompt answers with the policy's text, not the page's own.
+    expect(await answer("prompt", "Your name?", "preset")).toEqual({
+      accept: true,
+      promptText: "Grace",
+    });
+    expect(dialogs.policy(tab.id)).toBeNull();
+    expect(dialogs.records(tab.id)).toEqual([
+      {
+        type: "alert",
+        message: "Saved",
+        answer: "accepted",
+        url: URL_HERE,
+        at: Date.now(),
+      },
+      {
+        type: "confirm",
+        message: "Delete this file?",
+        answer: "accepted",
+        url: URL_HERE,
+        at: Date.now(),
+      },
+      {
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "accepted",
+        promptText: "Grace",
+        url: URL_HERE,
+        at: Date.now(),
+      },
+    ]);
+
+    // The handler already reported this one, so the opening Chromium
+    // reports for it is answered without a second record.
+    report(cdp, binding, answered("confirm", "dismissed"));
+    const records = dialogs.records(tab.id).length;
+    const answers = handled(cdp).length;
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("confirm", "confirm here"),
+    );
+    await settle();
+    cdp.event("Page.javascriptDialogClosed", { result: false, userInput: "" });
+    expect(handled(cdp)).toHaveLength(answers + 1);
+    expect(dialogs.records(tab.id)).toHaveLength(records);
+    // Past the window the same message is another dialog.
+    await vi.advanceTimersByTimeAsync(BACKSTOP_WINDOW_MS);
+    cdp.event(
+      "Page.javascriptDialogOpening",
+      opening("confirm", "confirm here"),
+    );
+    await settle();
+    expect(dialogs.records(tab.id)).toHaveLength(records + 1);
+  });
+
+  it("a beforeunload record never spends the policy's times", async () => {
+    const { cdp, dialogs, tab, answers } = setup();
+    await settle();
+    dialogs.setPolicy(tab.id, { accept: true, times: 1, lifetimeMs: 60000 });
+    await settle();
+    // Electron answers a leave guard itself, so Chromium refuses the
+    // backstop's answer; the record still names what Kamapathy accepted.
+    cdp.reply("Page.handleJavaScriptDialog", () => {
+      throw new Error("No dialog is showing");
+    });
+    cdp.event("Page.javascriptDialogOpening", opening("beforeunload", ""));
+    cdp.event("Page.javascriptDialogClosed", { result: false, userInput: "" });
+    await settle();
+    expect(dialogs.records(tab.id)).toEqual([
+      {
+        type: "beforeunload",
+        message: "",
+        answer: "accepted",
+        url: URL_HERE,
+        at: Date.now(),
+      },
+    ]);
+    expect(dialogs.policy(tab.id)?.remaining).toBe(1);
+    expect(answers.map((record) => record.type)).toEqual(["beforeunload"]);
+
+    // A dialog the backstop could not answer stays open: phase 1's
+    // dialog_open holds the tab's page routes and nothing is recorded.
+    cdp.event("Page.javascriptDialogOpening", opening("confirm", "Stuck"));
+    await settle();
+    expect(dialogs.records(tab.id)).toHaveLength(1);
+    expect(dialogs.policy(tab.id)?.remaining).toBe(1);
+    expect(dialogs.records(tab.id).at(-1)!.type).toBe("beforeunload");
+  });
+
+  it("drains while a dialog wait is armed and stops when the arm ends", async () => {
+    let queued: string[] = [];
+    const listeners: ((expectation: Expectation) => (() => void) | void)[] = [];
+    const { dialogs, tab } = setup({
+      queued: () => queued.splice(0),
+      onArm: (listener) => {
+        listeners.push(listener);
+        return () => {};
+      },
+    });
+    await settle();
+    const arm = (event: Expectation["event"]): Expectation => ({
+      id: `arm-${event}`,
+      event,
+      tabId: tab.id,
+      spaceId: tab.spaceId,
+      fromSeq: 0,
+      expiresAt: Date.now() + 10000,
+      timeoutMs: 10000,
+    });
+    // Only a dialog wait needs the drain.
+    expect(listeners[0](arm("popup"))).toBeUndefined();
+    const stop = listeners[0](arm("dialog"));
+    queued = [JSON.stringify(answered("confirm", "dismissed"))];
+    await vi.advanceTimersByTimeAsync(250);
+    expect(dialogs.records(tab.id)).toHaveLength(1);
+    queued = [JSON.stringify(answered("alert"))];
+    await vi.advanceTimersByTimeAsync(250);
+    expect(dialogs.records(tab.id)).toHaveLength(2);
+    // The arm ends, so nothing drains the tab any more.
+    stop!();
+    queued = [JSON.stringify(answered("confirm"))];
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(dialogs.records(tab.id)).toHaveLength(2);
   });
 
   it("keeps the report limits the handler and the server share", () => {

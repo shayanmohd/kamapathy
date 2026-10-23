@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuthority } from "../electron/agent/authority";
+import { createDialogs } from "../electron/agent/dialogs";
 import type { ApiError } from "../electron/agent/errors";
 import { createExpectations } from "../electron/agent/expectations";
 import type { Run } from "../electron/agent/http";
@@ -250,6 +251,53 @@ describe("agent action receipts", () => {
       url: "https://example.com/blocked.zip",
       suggestedFilename: "blocked.zip",
     });
+  });
+
+  it("receipts report the first dialog and count the rest", async () => {
+    const { controller, tabLog, receipts, tab } = setup();
+    // dialogs.ts records what Kamapathy answered; the receipt reads the log.
+    const dialogs = createDialogs({
+      tabLog,
+      controller,
+      sessions: { get: () => undefined },
+    });
+    const url = "https://example.com/";
+    const result = await act(receipts, tab.id, () => {
+      dialogs.record(tab.id, {
+        type: "confirm",
+        message: "Delete this file?",
+        answer: "accepted",
+        url,
+      });
+      dialogs.record(tab.id, {
+        type: "alert",
+        message: "Saved",
+        answer: "accepted",
+        url,
+      });
+      // Section 6's leave guard counts like any other answered dialog.
+      dialogs.record(tab.id, {
+        type: "beforeunload",
+        message: "",
+        answer: "accepted",
+        url,
+      });
+    });
+    expect(result.dialog).toEqual({
+      type: "confirm",
+      message: "Delete this file?",
+      answer: "accepted",
+      url,
+    });
+    expect(result.moreDialogs).toBe(2);
+    // The same three are the last of page.dialogs(), newest last.
+    expect(dialogs.records(tab.id).map((record) => record.type)).toEqual([
+      "confirm",
+      "alert",
+      "beforeunload",
+    ]);
+    // Nothing is reported twice.
+    expect(await act(receipts, tab.id)).toEqual({ ok: true });
   });
 
   it("reporting a popup clears its unseen flag and reading the log leaves it set", async () => {
@@ -607,6 +655,53 @@ describe("agent event expectations", () => {
       owner: "agent",
     });
     expect(expectations.armFor(tab.id, "download")?.id).toBe(held.id);
+  });
+
+  it("a dialog wait resolves with the next answered dialog and ignores one answered before arming", async () => {
+    const { controller, tabLog, expectations, tab } = arming();
+    const url = "https://example.com/";
+    // What server.ts wires: every answered dialog is offered to a live arm.
+    const dialogs = createDialogs({
+      tabLog,
+      controller,
+      sessions: { get: () => undefined },
+      onAnswer: (tabId, record) =>
+        void expectations.deliver(tabId, "dialog", { dialog: record }),
+    });
+    dialogs.record(tab.id, {
+      type: "confirm",
+      message: "Before the arm",
+      answer: "dismissed",
+      url,
+    });
+    const arm = expectations.arm(tab, "dialog", 10000);
+    expect(arm.fromSeq).toBe(1);
+    let settled = false;
+    const waiting = expectations.wait(arm, fakeRun()).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(false);
+    dialogs.record(tab.id, {
+      type: "prompt",
+      message: "Your name?",
+      answer: "accepted",
+      promptText: "Ada",
+      url,
+    });
+    expect(await waiting).toEqual({
+      dialog: {
+        type: "prompt",
+        message: "Your name?",
+        answer: "accepted",
+        promptText: "Ada",
+        url,
+        at: Date.now(),
+      },
+    });
+    // One event uses the arm up.
+    expect(expectations.count()).toBe(0);
   });
 
   it("an armed download covers a popup the tab opened after arming, and not one it opened before", async () => {

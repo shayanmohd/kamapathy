@@ -6,18 +6,24 @@ import {
   dialogQueueSource,
   MAX_REPORT_BYTES,
 } from "./dom/dialog-handler";
+import type { Expectation } from "./expectations";
 import { SessionLostError } from "./session/errors";
 import type { TabSession } from "./session/tab-session";
 import type { TabSessions } from "./session/tab-sessions";
-import type { Step } from "./session/types";
+import type { DialogInfo, Step } from "./session/types";
 import type { AutomationController } from "./server";
 import type { DialogData, TabLog } from "./tab-log";
 
 export const DIALOG_RECORDS = 20;
 export const MAX_PROMPT_TEXT = 4096;
 export const MAX_DIALOG_MESSAGE = 2000;
+/** How long a reported dialog keeps the backstop from recording it again. */
+export const BACKSTOP_WINDOW_MS = 250;
 const MAX_DIALOG_URL = 2048;
 const SETUP_TIMEOUT_MS = 15000;
+// How often, and for how long, a drain runs while a dialog wait is armed.
+const DRAIN_EVERY_MS = 250;
+const DRAIN_TIMEOUT_MS = 5000;
 const TYPES: readonly DialogData["type"][] = [
   "alert",
   "confirm",
@@ -53,6 +59,14 @@ export interface Dialogs {
   record(tabId: string, record: Omit<DialogRecord, "at">): void;
   /** Collects the reports a context without the binding queued. */
   drain(tabId: string, step: Step): Promise<void>;
+  /** The backstop: answers an opening the handler never saw, from the same
+   *  policy. Returns the record it made, or undefined when the person has
+   *  control, the answer failed or another path reported the dialog. */
+  backstop(
+    tabId: string,
+    dialog: DialogInfo,
+    url?: string,
+  ): Promise<DialogRecord | undefined>;
   clear(
     tabId: string,
     reason: "takeover" | "release" | "access_off" | "policy",
@@ -95,6 +109,10 @@ export function createDialogs(deps: {
   >;
   sessions: Pick<TabSessions, "get">;
   onAnswer?(tabId: string, record: DialogRecord): void;
+  /** Expectations.onArm, which starts the drain a dialog wait needs. */
+  onArm?(
+    listener: (expectation: Expectation) => (() => void) | void,
+  ): () => void;
   now?(): number;
   random?(bytes: number): string;
 }): Dialogs {
@@ -104,6 +122,9 @@ export function createDialogs(deps: {
     deps.random ?? ((bytes: number) => randomBytes(bytes).toString("hex"));
   const live = new Map<string, Live>();
   const logs = new Map<string, DialogRecord[]>();
+  // What the page and Kamapathy itself reported lately, so the backstop
+  // never records the same dialog a second time.
+  const reported = new Map<string, { key: string; at: number }[]>();
   const clean = (value: string, max: number) =>
     cleanAgentText(value).slice(0, max);
   const view = (armed?: Armed): DialogPolicyView | null =>
@@ -181,7 +202,7 @@ export function createDialogs(deps: {
   };
   // One answered dialog: the tab's own log for page.dialogs(), the tab log
   // for receipts and waits, and the arm it used up.
-  const append = (tabId: string, record: DialogData) => {
+  const append = (tabId: string, record: DialogData): DialogRecord => {
     const full: DialogRecord = { ...record, at: now() };
     const log = logs.get(tabId) ?? [];
     log.push(full);
@@ -202,6 +223,75 @@ export function createDialogs(deps: {
       if (armed.remaining <= 0) revert(entry);
     }
     deps.onAnswer?.(tabId, full);
+    return full;
+  };
+  // A dialog another path answered, keyed by type and message for the
+  // backstop's 250 ms window.
+  const keyOf = (type: string, message: string) => `${type}\u0000${message}`;
+  const keep = (tabId: string, at: number) => {
+    const kept = (reported.get(tabId) ?? []).filter(
+      (item) => item.at > at - BACKSTOP_WINDOW_MS,
+    );
+    reported.set(tabId, kept);
+    return kept;
+  };
+  const note = (tabId: string, record: DialogData) => {
+    const at = now();
+    keep(tabId, at).push({ key: keyOf(record.type, record.message), at });
+  };
+  const noted = (tabId: string, type: string, message: string) =>
+    keep(tabId, now()).some((item) => item.key === keyOf(type, message));
+  const pageUrl = (entry: Live) => {
+    try {
+      return entry.session.contents.getURL();
+    } catch {
+      return "";
+    }
+  };
+  // One dialog Chromium reported because the handler never saw it. It is
+  // answered from the policy the handler uses, and it spends the arm the
+  // same way, so a page cannot win more accepts by going around the handler.
+  const backstop = async (
+    tabId: string,
+    dialog: DialogInfo,
+    url?: string,
+  ): Promise<DialogRecord | undefined> => {
+    const entry = live.get(tabId);
+    if (!entry || entry.stopped) return undefined;
+    // The person's dialogs stay the person's: Electron shows and answers them.
+    if (!controller.agentControlled(tabId)) return undefined;
+    // A leave guard belongs to section 6: it is always accepted and never
+    // spends the policy.
+    const guard = dialog.type === "beforeunload";
+    const armed = guard ? undefined : armedFor(tabId);
+    const accept = guard || armed !== undefined;
+    const promptText =
+      dialog.type === "prompt" && accept
+        ? (armed?.promptText ?? dialog.defaultValue ?? "")
+        : undefined;
+    const sent = await entry.session
+      .handleDialog(accept, promptText)
+      .then(() => true)
+      .catch(() => false);
+    // Chromium refuses an answer for a dialog that is no longer open, such
+    // as a leave guard Electron answered itself; the record still names what
+    // Kamapathy accepted. One that is still open was never answered, so
+    // phase 1's dialog_open holds this tab's page routes instead.
+    if (!sent && entry.session.dialog() === dialog) return undefined;
+    const message = guard ? "" : clean(dialog.message, MAX_DIALOG_MESSAGE);
+    if (noted(tabId, dialog.type, message)) return undefined;
+    return append(tabId, {
+      type: dialog.type,
+      message,
+      ...(dialog.defaultValue === undefined
+        ? {}
+        : { defaultValue: clean(dialog.defaultValue, MAX_DIALOG_MESSAGE) }),
+      answer: accept ? "accepted" : "dismissed",
+      ...(promptText === undefined
+        ? {}
+        : { promptText: clean(promptText, MAX_PROMPT_TEXT) }),
+      url: clean(url ?? pageUrl(entry), MAX_DIALOG_URL),
+    });
   };
   // A page can forge a report, so one is taken only when every field is the
   // kind it must be.
@@ -222,7 +312,7 @@ export function createDialogs(deps: {
     if (answer !== "accepted" && answer !== "dismissed") return;
     if (defaultValue !== undefined && typeof defaultValue !== "string") return;
     if (promptText !== undefined && typeof promptText !== "string") return;
-    append(tabId, {
+    const data: DialogData = {
       type: type as DialogData["type"],
       message: clean(message, MAX_DIALOG_MESSAGE),
       ...(defaultValue === undefined
@@ -233,7 +323,9 @@ export function createDialogs(deps: {
         ? {}
         : { promptText: clean(promptText, MAX_PROMPT_TEXT) }),
       url: clean(url, MAX_DIALOG_URL),
-    });
+    };
+    note(tabId, data);
+    append(tabId, data);
   };
   // Takeover, a hold, Stop and agent access off all show up here as the tab
   // leaving the agent. This listener is registered before the one that
@@ -259,7 +351,7 @@ export function createDialogs(deps: {
     if (live.get(tabId) === entry) live.delete(tabId);
   };
 
-  return {
+  const api: Dialogs = {
     attach(session, tabId) {
       // A tab that attaches again leaves nothing of its last session behind.
       live.get(tabId)?.end?.();
@@ -289,6 +381,18 @@ export function createDialogs(deps: {
         session.on("Runtime.bindingCalled", (event) => {
           const { name, payload } = event.params as Record<string, unknown>;
           if (name === entry.binding) take(tabId, payload);
+        }),
+        // A dialog the handler never saw reaches Chromium, which holds the
+        // page until something answers it.
+        session.on("Page.javascriptDialogOpening", (event) => {
+          const dialog = session.dialog();
+          if (!dialog) return;
+          const { url } = event.params as Record<string, unknown>;
+          void backstop(
+            tabId,
+            dialog,
+            typeof url === "string" ? url : undefined,
+          );
         }),
         session.on("releasing", end),
         session.on("closed", end),
@@ -330,8 +434,10 @@ export function createDialogs(deps: {
     records: (tabId) =>
       (logs.get(tabId) ?? []).map((record) => ({ ...record })),
     record(tabId, record) {
+      note(tabId, record);
       append(tabId, record);
     },
+    backstop,
     async drain(tabId, step) {
       const entry = live.get(tabId);
       const session = sessions.get(tabId);
@@ -379,6 +485,28 @@ export function createDialogs(deps: {
         live.delete(tabId);
       }
       logs.delete(tabId);
+      reported.delete(tabId);
     },
   };
+
+  // A report a context without the binding queued reaches a dialog wait only
+  // when something drains the tab, so one drain runs every 250 ms while an
+  // arm is live.
+  deps.onArm?.((expectation) => {
+    if (expectation.event !== "dialog") return undefined;
+    let running = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      await api.drain(expectation.tabId, {
+        deadline: now() + DRAIN_TIMEOUT_MS,
+      });
+      if (running) timer = setTimeout(tick, DRAIN_EVERY_MS);
+    };
+    timer = setTimeout(tick, DRAIN_EVERY_MS);
+    return () => {
+      running = false;
+      if (timer) clearTimeout(timer);
+    };
+  });
+  return api;
 }

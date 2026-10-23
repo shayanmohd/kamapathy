@@ -195,7 +195,16 @@ export async function startAutomation(
     authority,
     sessions,
   });
-  const dialogs = createDialogs({ tabLog, controller, sessions });
+  const dialogs = createDialogs({
+    tabLog,
+    controller,
+    sessions,
+    // An answered dialog resolves a live dialog wait with the record itself.
+    onAnswer: (tabId, record) => {
+      expectations.deliver(tabId, "dialog", { dialog: record });
+    },
+    onArm: expectations.onArm,
+  });
   // Every agent tab answers its own dialogs, so the person never sees a
   // dialog box from a page an agent drives.
   const dialogStops = new Set<() => void>();

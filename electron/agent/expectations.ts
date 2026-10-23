@@ -84,6 +84,11 @@ export interface Expectations {
   ): boolean;
   /** The arm that covers this tab, counting popups it opened after arming. */
   armFor(tabId: string, event: ExpectationEvent): Expectation | undefined;
+  /** Runs while an arm is live, for the report drain a dialog wait needs.
+   *  The listener's return value stops when the arm ends or takes its event. */
+  onArm(
+    listener: (expectation: Expectation) => (() => void) | void,
+  ): () => void;
   end(id: string, reason: ExpectationEnd): void;
   endTab(tabId: string, reason: ExpectationEnd): void;
   endSpace(spaceId: string, reason: ExpectationEnd): void;
@@ -120,6 +125,8 @@ interface Live {
     resolve(result: ExpectationResult): void;
     reject(error: unknown): void;
   };
+  /** What the arm listeners started, stopped once, with the arm. */
+  stop?(): void;
 }
 
 // What each agent tab waits for. An arm records the tab's log position, so
@@ -138,6 +145,21 @@ export function createExpectations(deps: {
   const { tabLog, controller, authority, sessions } = deps;
   const now = deps.now ?? Date.now;
   const arms = new Map<string, Live>();
+  const armListeners = new Set<
+    (expectation: Expectation) => (() => void) | void
+  >();
+  // Whatever runs for an arm stops when it ends or takes its event.
+  const stopWork = (live: Live) => {
+    const stop = live.stop;
+    delete live.stop;
+    stop?.();
+  };
+  const drop = (id: string) => {
+    const live = arms.get(id);
+    if (!live) return;
+    arms.delete(id);
+    stopWork(live);
+  };
   const tabOf = (tabId: string) =>
     controller.state.tabs.find((tab) => tab.id === tabId);
   const timedOut = ({ event, timeoutMs }: Expectation) =>
@@ -191,7 +213,7 @@ export function createExpectations(deps: {
     const at = now();
     for (const [id, live] of arms)
       if (!live.result && !live.waiter && live.expectation.expiresAt <= at)
-        arms.delete(id);
+        drop(id);
   };
   // The tab's own arm for this event, while it still waits for one.
   const armOf = (tabId: string, event: ExpectationEvent) => {
@@ -264,7 +286,17 @@ export function createExpectations(deps: {
         expiresAt: now() + timeoutMs,
         timeoutMs,
       };
-      arms.set(expectation.id, { expectation });
+      const live: Live = { expectation };
+      arms.set(expectation.id, live);
+      const stops: (() => void)[] = [];
+      for (const listener of armListeners) {
+        const stop = listener(expectation);
+        if (stop) stops.push(stop);
+      }
+      if (stops.length)
+        live.stop = () => {
+          for (const stop of stops) stop();
+        };
       return expectation;
     },
     get(id) {
@@ -277,7 +309,7 @@ export function createExpectations(deps: {
         if (!live) return reject(expectationNotFound());
         // An event that arrived before the wait did is answered at once.
         if (live.result) {
-          arms.delete(expectation.id);
+          drop(expectation.id);
           return resolve(live.result);
         }
         if (live.waiter)
@@ -302,12 +334,12 @@ export function createExpectations(deps: {
         const waiter = {
           resolve: (result: ExpectationResult) => {
             stop();
-            arms.delete(expectation.id);
+            drop(expectation.id);
             resolve(result);
           },
           reject: (error: unknown) => {
             stop();
-            arms.delete(expectation.id);
+            drop(expectation.id);
             reject(error);
           },
         };
@@ -342,16 +374,21 @@ export function createExpectations(deps: {
       const live = findArm(tabId, event);
       if (!live) return false;
       live.result = result;
+      stopWork(live);
       // A reported popup is seen, so the run's end never names it again.
       if ("popup" in result) controller.markSeen(result.popup.id);
       live.waiter?.resolve(result);
       return true;
     },
     armFor: (tabId, event) => findArm(tabId, event)?.expectation,
+    onArm(listener) {
+      armListeners.add(listener);
+      return () => armListeners.delete(listener);
+    },
     end(id, reason) {
       const live = arms.get(id);
       if (!live) return;
-      arms.delete(id);
+      drop(id);
       live.waiter?.reject(endError(reason, live.expectation));
     },
     endTab(tabId, reason) {

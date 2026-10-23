@@ -1790,6 +1790,75 @@ describe("local automation socket", () => {
       expect(answer.status).toBe(404);
   });
 
+  it("answers a bypassing dialog from the policy, resolves a dialog wait with it, and still fails a page route when one stays open after the backstop fails", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const opening = (type: string, message: string) => ({
+      url: "https://example.com/",
+      frameId: "main",
+      message,
+      type,
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    const answers = () =>
+      page.debugger.sent.filter(
+        (command) => command.method === "Page.handleJavaScriptDialog",
+      );
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "dialog",
+    });
+    expect(armed.status).toBe(201);
+    const { expectation } = await armed.json();
+    const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
+    // A dialog that never reached the page's handler is answered from the
+    // same policy, so no dialog ever stays open.
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      opening("confirm", "Bypass?"),
+    );
+    await expect.poll(() => answers().length).toBe(1);
+    expect(answers()[0].params).toEqual({ accept: false });
+    page.emitProtocol("Page.javascriptDialogClosed", {
+      result: false,
+      userInput: "",
+    });
+    const record = {
+      type: "confirm",
+      message: "Bypass?",
+      answer: "dismissed",
+      url: "https://example.com/",
+      at: expect.any(Number),
+    };
+    const answered = await waiting;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({ dialog: record });
+    const log = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await log.json()).toEqual({ policy: null, dialogs: [record] });
+
+    // A dialog the backstop cannot answer stays open, so phase 1's
+    // dialog_open holds this tab's page routes until the person closes it.
+    page.debugger.reply("Page.handleJavaScriptDialog", () => {
+      throw new Error("No dialog is showing");
+    });
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      opening("alert", "Stuck"),
+    );
+    await expect.poll(() => answers().length).toBe(2);
+    const refused = await request(`/tabs/${tab.id}/snapshot`);
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "dialog_open",
+      dialog: { type: "alert", message: "Stuck" },
+      started: false,
+    });
+    // Nothing answered it, so nothing records it either.
+    expect(
+      (await (await request(`/tabs/${tab.id}/dialogs`)).json()).dialogs,
+    ).toEqual([record]);
+  });
+
   it("the dialog-policy route validates accept, promptText, times and lifetimeMs, DELETE resets, and the dialogs route answers the policy with its records", async () => {
     const { tab } = await createPage();
     const policy = `/tabs/${tab.id}/dialog-policy`;
