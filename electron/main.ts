@@ -377,6 +377,21 @@ else {
     const url = argv.find((argument) => isWebUrl(argument));
     if (url) void controller?.dispatch({ type: "tab:create", url });
   });
+  // A page's sign-in belongs to its own tab, which answers it in the prompt
+  // bar; one without a page has nobody to ask.
+  app.on("login", (event, contents, _details, _authInfo, callback) => {
+    if (contents) return;
+    event.preventDefault();
+    if (controller) controller.prompts.appLogin(callback);
+    else callback();
+  });
+  app.on("select-client-certificate", (event, contents, url, list, callback) => {
+    // Without this Electron sends the first certificate in the store.
+    event.preventDefault();
+    if (controller)
+      controller.prompts.selectClientCertificate(contents, url, list, callback);
+    else callback();
+  });
   app.on("before-quit", () => {
     quitting = true;
     // Closing the service may not finish before exit; stop advertising it now.

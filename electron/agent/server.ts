@@ -78,7 +78,13 @@ export interface AutomationController {
    *  sink it reports refusals to, and what it drops when a space ends. */
   readonly prompts: Pick<
     PromptCenter,
-    "routeStarted" | "routeEnded" | "setReceipts" | "clearSpace" | "clearAll"
+    | "routeStarted"
+    | "routeEnded"
+    | "setReceipts"
+    | "setHTTPCredentials"
+    | "clearCredentials"
+    | "clearSpace"
+    | "clearAll"
   >;
   /** Gives the person control until they answer; returns the hold's id. */
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
@@ -445,6 +451,8 @@ export async function startAutomation(
         // the server stops.
         for (const tab of controller.state.tabs) receipts.forget(tab.id);
         controller.prompts.setReceipts(null);
+        // No space keeps an agent's stored sign-ins once the server stops.
+        controller.prompts.clearCredentials();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

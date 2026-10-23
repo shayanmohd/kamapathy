@@ -5,6 +5,7 @@ import { createReceipts } from "../electron/agent/receipts";
 import { createTabLog } from "../electron/agent/tab-log";
 import {
   createPromptCenter,
+  CREDENTIAL_ORIGINS,
   PROMPT_LIMIT,
   type PromptCenter,
   type PromptHost,
@@ -743,5 +744,372 @@ describe("the prompt center", () => {
       response,
     );
     expect(response).toHaveBeenCalledExactlyOnceWith({ confirmed: false });
+  });
+
+  // A server challenge, as Electron's login event delivers it. Chromium 152
+  // carries isRequestForNavigation and firstAuthAttempt (phase 6 Verify
+  // first 8); a challenge without them is read as a first navigation.
+  const challenge = (
+    center: PromptCenter,
+    target: FakeContents,
+    options: {
+      url?: string;
+      host?: string;
+      port?: number;
+      realm?: string;
+      proxy?: boolean;
+      navigation?: boolean;
+      first?: boolean;
+    } = {},
+  ) => {
+    const callback = vi.fn();
+    const taken = center.tabLogin(
+      target as unknown as WebContents,
+      {
+        url: options.url ?? target.url,
+        isMainFrame: true,
+        ...(options.navigation === undefined
+          ? {}
+          : { isRequestForNavigation: options.navigation }),
+        ...(options.first === undefined
+          ? {}
+          : { firstAuthAttempt: options.first }),
+      },
+      {
+        isProxy: options.proxy ?? false,
+        scheme: "basic",
+        host: options.host ?? "example.com",
+        port: options.port ?? 443,
+        realm: options.realm ?? "Members",
+      },
+      callback,
+    );
+    return { callback, taken };
+  };
+  const certificate = (fingerprint: string, subjectName: string) =>
+    ({
+      fingerprint,
+      subjectName,
+      issuerName: "Example CA",
+      validExpiry: 1800000000,
+    }) as unknown as Electron.Certificate;
+
+  it("agent credentials apply once to their origin", () => {
+    const { controller, center, space, page } = setup();
+    center.setHTTPCredentials(space.id, {
+      origin: "https://example.com",
+      username: "person",
+      password: "secret",
+    });
+    // The first navigation challenge from that origin is answered with them.
+    const first = challenge(center, page, { navigation: true });
+    expect(first.taken).toBe(true);
+    expect(first.callback).toHaveBeenCalledExactlyOnceWith("person", "secret");
+    expect(center.prompts()).toEqual([]);
+    expect(space.owner).toBe("agent");
+    // The arm is spent, so a repeat goes to the person.
+    const again = challenge(center, page, { navigation: true });
+    expect(again.callback).not.toHaveBeenCalled();
+    expect(center.prompts()).toMatchObject([
+      {
+        kind: "http_sign_in",
+        signIn: {
+          host: "example.com",
+          realm: "Members",
+          proxy: false,
+          retry: false,
+        },
+      },
+    ]);
+    expect(JSON.stringify(controller.state)).not.toContain("secret");
+    center.answer({ id: center.prompts()[0].id, allow: false });
+    // Storing again rearms it, and a same-origin subresource challenge counts.
+    center.setHTTPCredentials(space.id, {
+      origin: "https://example.com",
+      username: "person",
+      password: "secret",
+    });
+    const image = challenge(center, page, {
+      url: "https://example.com/members/photo.png",
+      navigation: false,
+    });
+    expect(image.callback).toHaveBeenCalledExactlyOnceWith("person", "secret");
+    // A challenge Chromium is repeating asks the person, stored or not.
+    center.setHTTPCredentials(space.id, {
+      origin: "https://example.com",
+      username: "person",
+      password: "secret",
+    });
+    const repeat = challenge(center, page, { navigation: true, first: false });
+    expect(repeat.callback).not.toHaveBeenCalled();
+    expect(center.prompts()).toMatchObject([{ signIn: { retry: true } }]);
+  });
+
+  it("keeps eight origins per space, dropping the oldest, and forgets them with the space", () => {
+    const { center, space, page } = setup();
+    for (let index = 0; index <= CREDENTIAL_ORIGINS; index += 1)
+      center.setHTTPCredentials(space.id, {
+        origin: `https://shop${index}.example`,
+        username: "person",
+        password: `secret-${index}`,
+      });
+    const stored = (index: number) =>
+      challenge(center, page, {
+        url: `https://shop${index}.example/orders`,
+        host: `shop${index}.example`,
+        navigation: true,
+      });
+    // The ninth origin pushed the first one out.
+    expect(stored(0).callback).not.toHaveBeenCalled();
+    center.answer({ id: center.prompts()[0].id, allow: false });
+    expect(stored(CREDENTIAL_ORIGINS).callback).toHaveBeenCalledExactlyOnceWith(
+      "person",
+      `secret-${CREDENTIAL_ORIGINS}`,
+    );
+    // The space's own clear drops the rest, and so does the space ending.
+    center.setHTTPCredentials(space.id, null);
+    expect(stored(1).callback).not.toHaveBeenCalled();
+    center.answer({ id: center.prompts()[0].id, allow: false });
+    center.setHTTPCredentials(space.id, {
+      origin: "https://shop1.example",
+      username: "person",
+      password: "secret-1",
+    });
+    center.clearSpace(space.id);
+    expect(stored(1).callback).not.toHaveBeenCalled();
+  });
+
+  it("cancels cross-origin subresource challenges", () => {
+    const { center, space, page } = setup();
+    center.setHTTPCredentials(space.id, {
+      origin: "https://cdn.example",
+      username: "person",
+      password: "secret",
+    });
+    // Nothing is answered and nothing is shown: Electron's default cancels it.
+    const cross = challenge(center, page, {
+      url: "https://cdn.example/pic.png",
+      host: "cdn.example",
+      navigation: false,
+    });
+    expect(cross.taken).toBe(false);
+    expect(cross.callback).not.toHaveBeenCalled();
+    expect(center.prompts()).toEqual([]);
+    // The page's own host still asks.
+    const same = challenge(center, page, {
+      url: "https://example.com/pic.png",
+      navigation: false,
+    });
+    expect(same.taken).toBe(true);
+    expect(center.prompts()).toMatchObject([{ kind: "http_sign_in" }]);
+  });
+
+  it("a navigation challenge in an agent tab holds with reason http_auth and prompt http_sign_in, and a proxy challenge with prompt proxy_sign_in even when credentials exist", () => {
+    const { controller, center, space, tab, page } = setup();
+    center.setHTTPCredentials(space.id, {
+      origin: "https://example.com",
+      username: "agent",
+      password: "stored",
+    });
+    const proxy = challenge(center, page, {
+      proxy: true,
+      host: "proxy.example",
+      port: 3128,
+      realm: "Office proxy",
+      navigation: true,
+    });
+    expect(proxy.taken).toBe(true);
+    expect(proxy.callback).not.toHaveBeenCalled();
+    expect(controller.state.prompts).toEqual([
+      {
+        id: expect.any(String),
+        spaceId: space.id,
+        tabId: tab.id,
+        kind: "proxy_sign_in",
+        at: expect.any(Number),
+        agent: true,
+        signIn: {
+          host: "proxy.example",
+          realm: "Office proxy",
+          proxy: true,
+          retry: false,
+        },
+      },
+    ]);
+    expect(space).toMatchObject({
+      owner: "human",
+      control: {
+        reason: "http_auth",
+        prompt: "proxy_sign_in",
+        hold: expect.any(String),
+      },
+    });
+    center.answer({
+      id: controller.state.prompts[0].id,
+      allow: true,
+      credentials: { username: "person", password: "hunter2" },
+    });
+    expect(proxy.callback).toHaveBeenCalledExactlyOnceWith("person", "hunter2");
+    // Answering the last held request hands control back.
+    expect(space.owner).toBe("agent");
+    expect(controller.state.sitePermissions).toEqual([]);
+    // The site's own challenge still uses the stored credentials.
+    const site = challenge(center, page, { navigation: true });
+    expect(site.callback).toHaveBeenCalledExactlyOnceWith("agent", "stored");
+    // Without them a navigation challenge holds for the person.
+    const held = challenge(center, page, { navigation: true });
+    expect(held.callback).not.toHaveBeenCalled();
+    expect(space).toMatchObject({
+      control: { reason: "http_auth", prompt: "http_sign_in" },
+    });
+    expect(center.prompts()).toMatchObject([{ kind: "http_sign_in" }]);
+    // A challenge whose page navigates away is cancelled, and control returns.
+    page.navigate("https://example.com/next");
+    expect(held.callback).toHaveBeenCalledExactlyOnceWith();
+    expect(center.prompts()).toEqual([]);
+    expect(space.owner).toBe("agent");
+  });
+
+  it("a wrong password asks again with retry set and the credentials never enter BrowserState", () => {
+    const { controller, center, space, page } = setup();
+    const first = challenge(center, page, { navigation: true, first: true });
+    expect(center.prompts()).toMatchObject([
+      { kind: "http_sign_in", signIn: { retry: false } },
+    ]);
+    center.answer({
+      id: center.prompts()[0].id,
+      allow: true,
+      credentials: { username: "person", password: "wrong" },
+    });
+    expect(first.callback).toHaveBeenCalledExactlyOnceWith("person", "wrong");
+    // Chromium asks again, and the person is told so.
+    const retry = challenge(center, page, { navigation: true, first: false });
+    expect(center.prompts()).toMatchObject([
+      { kind: "http_sign_in", signIn: { host: "example.com", retry: true } },
+    ]);
+    expect(JSON.stringify(controller.state)).not.toContain("wrong");
+    expect(center.prompts()[0]).not.toHaveProperty("credentials");
+    expect(controller.activity).toEqual([]);
+    // Block, and an Allow carrying nothing, cancel the challenge.
+    center.answer({ id: center.prompts()[0].id, allow: false });
+    expect(retry.callback).toHaveBeenCalledExactlyOnceWith();
+    const empty = challenge(center, page, { navigation: true });
+    center.answer({ id: center.prompts()[0].id, allow: true });
+    expect(empty.callback).toHaveBeenCalledExactlyOnceWith();
+    expect(space.owner).toBe("agent");
+  });
+
+  it("never selects a certificate", () => {
+    const { controller, center, space, tab, page, pageIn } = setup();
+    const list = [
+      certificate("aa:bb", "Person A"),
+      certificate("cc:dd", "Person B"),
+    ];
+    const first = vi.fn();
+    center.selectClientCertificate(
+      page as unknown as WebContents,
+      "https://example.com/area",
+      list,
+      first,
+    );
+    expect(first).not.toHaveBeenCalled();
+    expect(controller.state.prompts).toEqual([
+      {
+        id: expect.any(String),
+        spaceId: space.id,
+        tabId: tab.id,
+        kind: "client_certificate",
+        origin: "https://example.com",
+        at: expect.any(Number),
+        agent: true,
+        certificates: [
+          {
+            id: "aa:bb",
+            subject: "Person A",
+            issuer: "Example CA",
+            expires: 1800000000,
+          },
+          {
+            id: "cc:dd",
+            subject: "Person B",
+            issuer: "Example CA",
+            expires: 1800000000,
+          },
+        ],
+      },
+    ]);
+    expect(space).toMatchObject({
+      owner: "human",
+      control: {
+        reason: "client_certificate",
+        prompt: "client_certificate",
+        hold: expect.any(String),
+      },
+    });
+    // Don't send sends nothing.
+    center.answer({ id: controller.state.prompts[0].id, allow: false });
+    expect(first).toHaveBeenCalledExactlyOnceWith();
+    expect(space.owner).toBe("agent");
+    // Only the one the person picked is sent, and an unknown id sends nothing.
+    const second = vi.fn();
+    center.selectClientCertificate(
+      page as unknown as WebContents,
+      "https://example.com/area",
+      list,
+      second,
+    );
+    center.answer({
+      id: center.prompts()[0].id,
+      allow: true,
+      certificateId: "cc:dd",
+    });
+    expect(second).toHaveBeenCalledExactlyOnceWith(list[1]);
+    const third = vi.fn();
+    center.selectClientCertificate(
+      page as unknown as WebContents,
+      "https://example.com/area",
+      list,
+      third,
+    );
+    center.answer({
+      id: center.prompts()[0].id,
+      allow: true,
+      certificateId: "ee:ff",
+    });
+    expect(third).toHaveBeenCalledExactlyOnceWith();
+    // No page and no certificate to choose from both send nothing, silently.
+    const none = vi.fn();
+    center.selectClientCertificate(
+      null,
+      "https://example.com/area",
+      list,
+      none,
+    );
+    expect(none).toHaveBeenCalledExactlyOnceWith();
+    const empty = vi.fn();
+    center.selectClientCertificate(
+      page as unknown as WebContents,
+      "https://example.com/area",
+      [],
+      empty,
+    );
+    expect(empty).toHaveBeenCalledExactlyOnceWith();
+    expect(center.prompts()).toEqual([]);
+    // The person's own space asks too, without holding anything.
+    const mine = pageIn("personal", "https://example.com/");
+    const own = vi.fn();
+    center.selectClientCertificate(
+      mine.page as unknown as WebContents,
+      "https://example.com/area",
+      list,
+      own,
+    );
+    expect(center.prompts()).toMatchObject([
+      { spaceId: "personal", kind: "client_certificate", agent: false },
+    ]);
+    expect(
+      controller.state.spaces.find((item) => item.id === "personal"),
+    ).not.toHaveProperty("control");
+    expect(own).not.toHaveBeenCalled();
   });
 });

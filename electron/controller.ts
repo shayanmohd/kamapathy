@@ -685,6 +685,12 @@ export class BrowserController {
     this.bindShortcuts(contents);
     // The Bluetooth chooser is the page's own event, not the session's.
     this.prompts.attachBluetooth(contents);
+    // A server or proxy asked for a name and password. Electron's default
+    // cancels every challenge the prompt center does not take.
+    contents.on("login", (event, details, authInfo, callback) => {
+      if (this.prompts.tabLogin(contents, details, authInfo, callback))
+        event.preventDefault();
+    });
     const activateFocusedPane = () => {
       if (
         !isCurrentView() ||

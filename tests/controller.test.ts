@@ -497,6 +497,77 @@ describe("native browser lifecycle", () => {
     expect(partition.setDevicePermissionHandler).toHaveBeenLastCalledWith(null);
   });
 
+  it("a certificate request without a page sends nothing and a sign-in without a page is cancelled", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs[0];
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/");
+    // A page's challenge reaches the bar through the tab's own login event.
+    const callback = vi.fn();
+    const event = { preventDefault: vi.fn() };
+    page.emit(
+      "login",
+      event,
+      {
+        url: "https://example.com/area",
+        isMainFrame: true,
+        isRequestForNavigation: true,
+        firstAuthAttempt: true,
+      },
+      {
+        isProxy: false,
+        scheme: "basic",
+        host: "example.com",
+        port: 443,
+        realm: "Members",
+      },
+      callback,
+    );
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+    expect(browser.state.prompts).toMatchObject([
+      {
+        spaceId: "personal",
+        tabId: tab.id,
+        kind: "http_sign_in",
+        agent: false,
+        signIn: {
+          host: "example.com",
+          realm: "Members",
+          proxy: false,
+          retry: false,
+        },
+      },
+    ]);
+    browser.prompts.answer({
+      id: browser.state.prompts[0].id,
+      allow: true,
+      credentials: { username: "person", password: "hunter2" },
+    });
+    expect(callback).toHaveBeenCalledExactlyOnceWith("person", "hunter2");
+    // What the person typed is never written down.
+    expect(JSON.stringify(browser.state)).not.toContain("hunter2");
+    expect(browser.state.sitePermissions).toEqual([]);
+    // A request with no page gets nobody to ask and nothing to send.
+    const certificate = vi.fn();
+    browser.prompts.selectClientCertificate(
+      null,
+      "https://example.com/area",
+      [],
+      certificate,
+    );
+    expect(certificate).toHaveBeenCalledExactlyOnceWith();
+    const signIn = vi.fn();
+    browser.prompts.appLogin(signIn);
+    expect(signIn).toHaveBeenCalledExactlyOnceWith();
+    expect(browser.state.prompts).toEqual([]);
+  });
+
   it("rejects a pending permission when the requesting space is deleted", async () => {
     const browser = controller();
     browser.state.spaces[1].signIns = "separate";

@@ -25,6 +25,7 @@ import { REQUEST_WINDOW_MS } from "./agent/receipts";
 
 export type { DeviceKind };
 export const PROMPT_LIMIT = 8; // held prompts per space
+export const CREDENTIAL_ORIGINS = 8; // origins an agent space may store
 export const SITE_PERMISSIONS = 1000; // saved decisions kept
 // The most of a site's own words any prompt shows.
 const ORIGIN_TEXT = 120;
@@ -33,6 +34,13 @@ const ORIGIN_TEXT = 120;
 // or Bluetooth request is pending, so those two are refused instead of asked
 // (phase 6 Verify first 7).
 const CHOOSABLE: readonly DeviceKind[] = ["usb", "hid"];
+
+/** What an agent space answers one server challenge from one origin with. */
+export interface HttpCredentials {
+  origin: string;
+  username: string;
+  password: string;
+}
 
 export interface PromptHost {
   readonly state: BrowserState;
@@ -79,6 +87,41 @@ export interface PromptCenter {
     permission: PermissionKey;
   }): void;
   clearSitePermissions(): void;
+  /** A tab's login event. True when Kamapathy answered or held it, so the
+   *  caller calls preventDefault. False leaves Electron's own default, which
+   *  cancels the challenge. */
+  tabLogin(
+    contents: WebContents | null,
+    details: {
+      url: string;
+      isMainFrame?: boolean;
+      isRequestForNavigation?: boolean;
+      firstAuthAttempt?: boolean;
+    },
+    authInfo: {
+      isProxy: boolean;
+      scheme: string;
+      host: string;
+      port: number;
+      realm: string;
+    },
+    callback: (username?: string, password?: string) => void,
+  ): boolean;
+  /** app login, for requests with no WebContents: cancelled. */
+  appLogin(callback: (username?: string, password?: string) => void): void;
+  selectClientCertificate(
+    contents: WebContents | null,
+    url: string,
+    list: Electron.Certificate[],
+    callback: (certificate?: Electron.Certificate) => void,
+  ): void;
+  /** Memory only, never returned, logged or persisted. */
+  setHTTPCredentials(
+    spaceId: string,
+    credentials: HttpCredentials | null,
+  ): void;
+  /** Every space's credentials: the agent server stopped. */
+  clearCredentials(): void;
   /** A space closed, its access ended, or agent access went off. */
   clearSpace(spaceId: string): void;
   clearAll(): void;
@@ -149,6 +192,12 @@ export function createPromptCenter(
     kind: DeviceKind;
     deviceId: string;
   }[] = [];
+  // What a space may answer one challenge with, per origin in the order they
+  // were stored. Memory only: nothing here is published, logged or written.
+  const credentials = new Map<
+    string,
+    Map<string, { username: string; password: string }>
+  >();
   let receipts: PromptReceipts | null = null;
 
   const publish = () => {
@@ -285,6 +334,10 @@ export function createPromptCenter(
   const originOf = (url: string | undefined): string | undefined => {
     if (!url || !isWebUrl(url)) return undefined;
     return new URL(url).origin;
+  };
+  const hostOf = (url: string | undefined): string | undefined => {
+    const origin = originOf(url);
+    return origin ? new URL(origin).hostname : undefined;
   };
 
   const onRequest = (
@@ -635,6 +688,185 @@ export function createPromptCenter(
     };
   };
 
+  // One request only the person can answer, shown in the bar and, in a space
+  // an agent drives, holding it until they answer. False when the space
+  // already holds as many requests as it may.
+  const raise = (
+    space: Space,
+    tab: Tab,
+    contents: WebContents,
+    kind: PromptKind,
+    reason: HoldReason,
+    fields: Partial<PendingPrompt>,
+    answer: (allow: boolean, choice?: PromptAnswer) => void,
+    origin: string,
+  ): boolean => {
+    const agent = driving(space, tab);
+    let pending = 0;
+    for (const item of waiting.values())
+      if (item.prompt.spaceId === space.id) pending += 1;
+    if (pending >= PROMPT_LIMIT) return false;
+    const prompt: PendingPrompt = {
+      id: randomUUID(),
+      spaceId: space.id,
+      tabId: tab.id,
+      kind,
+      at: now(),
+      agent,
+      ...fields,
+    };
+    if (agent && !holds.has(space.id))
+      holds.set(space.id, host.holdForPerson(space.id, reason, kind));
+    const onNavigation = (
+      event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+    ) => {
+      if (event.isMainFrame && !event.isSameDocument) end(prompt.id, false);
+    };
+    const onGone = () => end(prompt.id, false);
+    contents.on("did-start-navigation", onNavigation);
+    contents.once("destroyed", onGone);
+    waiting.set(prompt.id, {
+      prompt,
+      origin,
+      keys: [],
+      answer,
+      held: agent,
+      drop() {
+        contents.removeListener("did-start-navigation", onNavigation);
+        contents.removeListener("destroyed", onGone);
+      },
+    });
+    publish();
+    return true;
+  };
+
+  // A server or proxy asked for a name and password. Only the person answers
+  // one, unless the space stored credentials for exactly this origin.
+  const tabLogin: PromptCenter["tabLogin"] = (
+    contents,
+    details,
+    authInfo,
+    callback,
+  ) => {
+    let answered = false;
+    // Electron reads a callback with no name and password as a cancellation.
+    const settle = (username?: string, password?: string) => {
+      if (answered) return;
+      answered = true;
+      if (username === undefined) callback();
+      else callback(username, password);
+    };
+    const tab = host.tabOf(contents);
+    const space = host.spaceOf(contents);
+    if (!contents || contents.isDestroyed() || !tab || !space) return false;
+    // A challenge missing Chromium's own fields is read as a navigation,
+    // which is the one the person is shown (phase 6 Verify first 8).
+    const navigation = details.isRequestForNavigation !== false;
+    // Something the page merely loaded, from another host, is a third
+    // party's business and is cancelled without asking.
+    if (
+      !authInfo.isProxy &&
+      !navigation &&
+      authInfo.host !== hostOf(contents.getURL())
+    )
+      return false;
+    const kind: PromptKind = authInfo.isProxy
+      ? "proxy_sign_in"
+      : "http_sign_in";
+    const origin = originOf(details.url) ?? "";
+    const stored = credentials.get(space.id);
+    // Stored credentials answer one challenge from their own origin, in a
+    // tab the agent has. A repeat, and every proxy, goes to the person.
+    if (
+      !authInfo.isProxy &&
+      details.firstAuthAttempt !== false &&
+      origin &&
+      stored?.has(origin) &&
+      host.agentControlled(tab.id)
+    ) {
+      const found = stored.get(origin)!;
+      stored.delete(origin);
+      settle(found.username, found.password);
+      return true;
+    }
+    return raise(
+      space,
+      tab,
+      contents,
+      kind,
+      "http_auth",
+      {
+        signIn: {
+          host: words(authInfo.host),
+          ...(authInfo.realm ? { realm: words(authInfo.realm) } : {}),
+          proxy: authInfo.isProxy,
+          retry: details.firstAuthAttempt === false,
+        },
+      },
+      (allow, choice) => {
+        const given = allow ? choice?.credentials : undefined;
+        if (
+          !given ||
+          typeof given.username !== "string" ||
+          typeof given.password !== "string"
+        ) {
+          settle();
+          return;
+        }
+        settle(given.username, given.password);
+      },
+      origin,
+    );
+  };
+
+  // A site asked for a certificate. Kamapathy never picks one.
+  const selectClientCertificate: PromptCenter["selectClientCertificate"] = (
+    contents,
+    url,
+    list,
+    callback,
+  ) => {
+    let answered = false;
+    // Nothing sent is a callback with no certificate at all.
+    const settle = (certificate?: Electron.Certificate) => {
+      if (answered) return;
+      answered = true;
+      if (certificate) callback(certificate);
+      else callback();
+    };
+    const tab = host.tabOf(contents);
+    const space = host.spaceOf(contents);
+    if (!contents || contents.isDestroyed() || !tab || !space || !list.length) {
+      settle();
+      return;
+    }
+    const origin = originOf(url) ?? originOf(contents.getURL());
+    const raised = raise(
+      space,
+      tab,
+      contents,
+      "client_certificate",
+      "client_certificate",
+      {
+        ...(origin ? { origin: words(origin) } : {}),
+        certificates: list.map((item) => ({
+          id: item.fingerprint,
+          subject: words(item.subjectName),
+          issuer: words(item.issuerName),
+          expires: item.validExpiry,
+        })),
+      },
+      (allow, choice) =>
+        settle(
+          allow
+            ? list.find((item) => item.fingerprint === choice?.certificateId)
+            : undefined,
+        ),
+      origin ?? "",
+    );
+    if (!raised) settle();
+  };
+
   const forget = (spaceId: string | undefined) => {
     for (const [id, item] of [...waiting]) {
       if (spaceId !== undefined && item.prompt.spaceId !== spaceId) continue;
@@ -653,6 +885,8 @@ export function createPromptCenter(
     for (let index = grants.length - 1; index >= 0; index -= 1)
       if (spaceId === undefined || grants[index].spaceId === spaceId)
         grants.splice(index, 1);
+    if (spaceId === undefined) credentials.clear();
+    else credentials.delete(spaceId);
   };
 
   return {
@@ -725,6 +959,31 @@ export function createPromptCenter(
         if (record.open === 0 && windows.get(tabId) === record)
           windows.delete(tabId);
       }, REQUEST_WINDOW_MS);
+    },
+    tabLogin,
+    appLogin(callback) {
+      // A request with no page gets nobody to ask.
+      callback();
+    },
+    selectClientCertificate,
+    setHTTPCredentials(spaceId, given) {
+      if (!given) {
+        credentials.delete(spaceId);
+        return;
+      }
+      const stored = credentials.get(spaceId) ?? new Map();
+      credentials.set(spaceId, stored);
+      // Storing an origin again arms it again, and a ninth drops the oldest.
+      stored.delete(given.origin);
+      stored.set(given.origin, {
+        username: given.username,
+        password: given.password,
+      });
+      for (const origin of [...stored.keys()].slice(0, -CREDENTIAL_ORIGINS))
+        stored.delete(origin);
+    },
+    clearCredentials() {
+      credentials.clear();
     },
     setReceipts(sink) {
       receipts = sink;
