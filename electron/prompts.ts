@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { Session, WebContents } from "electron";
+import type { Session, WebContents, WebFrameMain } from "electron";
 import { cleanAgentText } from "../shared/agent-text";
 import { agentRules } from "../shared/state";
 import {
+  DEVICE_KINDS,
   HOLDABLE,
   permissionKeysFor,
   permissionWords,
   promptKindFor,
+  type DeviceKind,
   type PermissionKey,
   type PromptKind,
 } from "../shared/permissions";
@@ -21,16 +23,24 @@ import type {
 import { isWebUrl } from "../shared/url";
 import { REQUEST_WINDOW_MS } from "./agent/receipts";
 
+export type { DeviceKind };
 export const PROMPT_LIMIT = 8; // held prompts per space
 export const SITE_PERMISSIONS = 1000; // saved decisions kept
 // The most of a site's own words any prompt shows.
 const ORIGIN_TEXT = 120;
+// The chooser kinds Kamapathy opens. Electron 44.2.0 emits no
+// select-serial-port and blocks the main process for the whole time a serial
+// or Bluetooth request is pending, so those two are refused instead of asked
+// (phase 6 Verify first 7).
+const CHOOSABLE: readonly DeviceKind[] = ["usb", "hid"];
 
 export interface PromptHost {
   readonly state: BrowserState;
   spaceOf(contents: WebContents | null): Space | undefined;
   tabOf(contents: WebContents | null): Tab | undefined;
   agentControlled(tabId: string): boolean;
+  /** webContents.fromFrame, which only the main process can call. */
+  contentsForFrame(frame: WebFrameMain | null): WebContents | null;
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
   releaseHold(holdId: string): void;
   addActivity(
@@ -47,8 +57,13 @@ export interface PromptReceipts {
   ): boolean;
 }
 export interface PromptCenter {
-  /** Installs the permission handlers on a partition's session. */
+  /** Installs the permission and device handlers on a partition's session. */
   attachSession(browsingSession: Session): () => void;
+  /** Installs the device handlers on a partition's session; part of
+   *  attachSession's disposer, exported for the tests. */
+  attachDevices(browsingSession: Session): () => void;
+  /** Installs the Bluetooth chooser, which a page's contents owns. */
+  attachBluetooth(contents: WebContents): void;
   /** The receipt wrapper's signals, from electron/agent/receipts.ts. */
   routeStarted(tabId: string): void;
   routeEnded(tabId: string): void;
@@ -75,7 +90,7 @@ interface Waiting {
   prompt: PendingPrompt;
   origin: string;
   keys: PermissionKey[];
-  answer(allow: boolean): void;
+  answer(allow: boolean, choice?: PromptAnswer): void;
   // Whether it counts against the space's hold.
   held: boolean;
   drop(): void;
@@ -96,6 +111,12 @@ const once = (callback: (allow: boolean) => void) => {
     callback(allow);
   };
 };
+// One device row the bar shows, with the id Electron answers the chooser by.
+interface Device {
+  id: string;
+  name: string;
+  electronId: string;
+}
 const words = (value: string) => cleanAgentText(value).slice(0, ORIGIN_TEXT);
 
 // Every request only the person can answer goes through here. A saved
@@ -114,6 +135,20 @@ export function createPromptCenter(
   // reach the state or the disk and die with the space.
   const kept = new Map<string, boolean>();
   const windows = new Map<string, Window>();
+  // The device list and page behind each waiting chooser, by prompt id.
+  const choosers = new Map<
+    string,
+    { kind: DeviceKind; contents: WebContents; devices: Device[] }
+  >();
+  // One device a person connected, for this app run only. The partition is
+  // what Electron asks about later, since its device handler names no page.
+  const grants: {
+    browsingSession: Session;
+    spaceId: string;
+    origin: string;
+    kind: DeviceKind;
+    deviceId: string;
+  }[] = [];
   let receipts: PromptReceipts | null = null;
 
   const publish = () => {
@@ -192,7 +227,12 @@ export function createPromptCenter(
     holds.delete(spaceId);
     host.releaseHold(hold);
   };
-  const end = (id: string, allow: boolean, save = false) => {
+  const end = (
+    id: string,
+    allow: boolean,
+    save = false,
+    choice?: PromptAnswer,
+  ) => {
     const item = waiting.get(id);
     if (!item) return;
     waiting.delete(id);
@@ -201,7 +241,7 @@ export function createPromptCenter(
       (entry) => entry.id === item.prompt.spaceId,
     );
     if (save && space) remember(space, item.origin, item.keys, allow);
-    item.answer(allow);
+    item.answer(allow, choice);
     release(item.prompt.spaceId);
     publish();
   };
@@ -340,6 +380,13 @@ export function createPromptCenter(
     origin: string,
     details: { mediaType?: string },
   ) => {
+    // A device chooser asks here before it opens. Kamapathy lets the kinds
+    // it can show through to the chooser, where the person decides, and
+    // answers no for the rest, which cancels the request with no prompt.
+    if (DEVICE_KINDS.includes(permission as DeviceKind)) {
+      if (!CHOOSABLE.includes(permission as DeviceKind)) return false;
+      return Boolean(host.tabOf(contents) && host.spaceOf(contents));
+    }
     const space = host.spaceOf(contents);
     const keys = permissionKeysFor(permission, {
       mediaType: details.mediaType,
@@ -347,6 +394,245 @@ export function createPromptCenter(
     const web = originOf(origin);
     if (!space || !keys || !web) return false;
     return decided(space, web, keys) === true;
+  };
+
+  const usbRow = (device: Electron.USBDevice): Device => ({
+    id: `${device.vendorId}:${device.productId}:${device.deviceId}`,
+    name: words(device.productName || "USB device"),
+    electronId: device.deviceId,
+  });
+  const hidRow = (device: Electron.HIDDevice): Device => ({
+    id: device.deviceId,
+    name: words(device.name || "Device"),
+    electronId: device.deviceId,
+  });
+  const bluetoothRow = (device: Electron.BluetoothDevice): Device => ({
+    id: device.deviceId,
+    name: words(device.deviceName || "Bluetooth device"),
+    electronId: device.deviceId,
+  });
+
+  // A site asked for a device. The person always chooses, in an agent tab as
+  // in their own, and exactly the device they pick is granted.
+  const openChooser = (
+    kind: DeviceKind,
+    browsingSession: Session | null,
+    contents: WebContents | null,
+    devices: Device[],
+    choose: (deviceId: string) => void,
+  ) => {
+    let chosen = false;
+    const answerChooser = (deviceId: string) => {
+      if (chosen) return;
+      chosen = true;
+      choose(deviceId);
+    };
+    const tab = host.tabOf(contents);
+    const space = host.spaceOf(contents);
+    if (!contents || contents.isDestroyed() || !tab || !space) {
+      answerChooser("");
+      return;
+    }
+    const origin = originOf(contents.getURL());
+    if (!origin) {
+      answerChooser("");
+      return;
+    }
+    const agent = driving(space, tab);
+    let pending = 0;
+    for (const item of waiting.values())
+      if (item.prompt.spaceId === space.id) pending += 1;
+    if (!CHOOSABLE.includes(kind) || pending >= PROMPT_LIMIT) {
+      refuse(space, tab, origin, kind, agent, () => answerChooser(""));
+      return;
+    }
+    const live = [...devices];
+    const prompt: PendingPrompt = {
+      id: randomUUID(),
+      spaceId: space.id,
+      tabId: tab.id,
+      kind,
+      origin: words(origin),
+      at: now(),
+      agent,
+      devices: live.map(({ id, name }) => ({ id, name })),
+    };
+    if (agent && !holds.has(space.id))
+      holds.set(space.id, host.holdForPerson(space.id, "device", kind));
+    const onNavigation = (
+      event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+    ) => {
+      if (event.isMainFrame && !event.isSameDocument) end(prompt.id, false);
+    };
+    const onGone = () => end(prompt.id, false);
+    contents.on("did-start-navigation", onNavigation);
+    contents.once("destroyed", onGone);
+    waiting.set(prompt.id, {
+      prompt,
+      origin,
+      keys: [],
+      answer(allow, choice) {
+        // A device that left the list while the person read it is gone.
+        const picked = allow
+          ? live.find((device) => device.id === choice?.deviceId)
+          : undefined;
+        if (!picked) {
+          answerChooser("");
+          return;
+        }
+        if (browsingSession)
+          grants.push({
+            browsingSession,
+            spaceId: space.id,
+            origin,
+            kind,
+            deviceId: picked.electronId,
+          });
+        answerChooser(picked.electronId);
+      },
+      held: agent,
+      drop() {
+        choosers.delete(prompt.id);
+        contents.removeListener("did-start-navigation", onNavigation);
+        contents.removeListener("destroyed", onGone);
+      },
+    });
+    choosers.set(prompt.id, { kind, contents, devices: live });
+    publish();
+  };
+  // A device appeared or went away while a chooser waited, so the bar's list
+  // follows it.
+  const updateDevices = (
+    kind: DeviceKind,
+    contents: WebContents | null,
+    device: Device,
+    added: boolean,
+  ) => {
+    for (const [id, chooser] of choosers) {
+      if (chooser.kind !== kind) continue;
+      if (contents && chooser.contents !== contents) continue;
+      const rest = chooser.devices.filter((item) => item.id !== device.id);
+      if (added) rest.push(device);
+      chooser.devices.splice(0, chooser.devices.length, ...rest);
+      const item = waiting.get(id);
+      if (item)
+        item.prompt.devices = chooser.devices.map(({ id: row, name }) => ({
+          id: row,
+          name,
+        }));
+    }
+    publish();
+  };
+  // Whether a device the page already knows may be used: only one this
+  // partition and origin were granted in this run, and no prompt here.
+  const mayUseDevice = (
+    browsingSession: Session,
+    details: { deviceType: string; origin: string; device: unknown },
+  ) => {
+    const origin = originOf(details.origin);
+    const device = details.device as { deviceId?: unknown };
+    if (!origin || typeof device?.deviceId !== "string") return false;
+    return grants.some(
+      (grant) =>
+        grant.browsingSession === browsingSession &&
+        grant.origin === origin &&
+        grant.kind === details.deviceType &&
+        grant.deviceId === device.deviceId,
+    );
+  };
+  const attachDevices = (browsingSession: Session) => {
+    let live = true;
+    const onUsb = (
+      event: Electron.Event,
+      details: { deviceList: Electron.USBDevice[]; frame: WebFrameMain | null },
+      callback: (deviceId?: string) => void,
+    ) => {
+      event.preventDefault();
+      if (!live) {
+        callback("");
+        return;
+      }
+      openChooser(
+        "usb",
+        browsingSession,
+        host.contentsForFrame(details.frame),
+        details.deviceList.map(usbRow),
+        callback,
+      );
+    };
+    const onHid = (
+      event: Electron.Event,
+      details: { deviceList: Electron.HIDDevice[]; frame: WebFrameMain | null },
+      callback: (deviceId?: string | null) => void,
+    ) => {
+      event.preventDefault();
+      if (!live) {
+        callback("");
+        return;
+      }
+      openChooser(
+        "hid",
+        browsingSession,
+        host.contentsForFrame(details.frame),
+        details.deviceList.map(hidRow),
+        callback,
+      );
+    };
+    const onUsbAdded = (
+      _event: Electron.Event,
+      device: Electron.USBDevice,
+      contents: WebContents,
+    ) => updateDevices("usb", contents, usbRow(device), true);
+    const onUsbRemoved = (
+      _event: Electron.Event,
+      device: Electron.USBDevice,
+      contents: WebContents,
+    ) => updateDevices("usb", contents, usbRow(device), false);
+    const onHidAdded = (
+      _event: Electron.Event,
+      details: { device: Electron.HIDDevice; frame: WebFrameMain | null },
+    ) =>
+      updateDevices(
+        "hid",
+        host.contentsForFrame(details.frame),
+        hidRow(details.device),
+        true,
+      );
+    const onHidRemoved = (
+      _event: Electron.Event,
+      details: { device: Electron.HIDDevice; frame: WebFrameMain | null },
+    ) =>
+      updateDevices(
+        "hid",
+        host.contentsForFrame(details.frame),
+        hidRow(details.device),
+        false,
+      );
+    browsingSession.on("select-usb-device", onUsb);
+    browsingSession.on("select-hid-device", onHid);
+    browsingSession.on("usb-device-added", onUsbAdded);
+    browsingSession.on("usb-device-removed", onUsbRemoved);
+    browsingSession.on("hid-device-added", onHidAdded);
+    browsingSession.on("hid-device-removed", onHidRemoved);
+    browsingSession.setDevicePermissionHandler((details) =>
+      live ? mayUseDevice(browsingSession, details) : false,
+    );
+    // Kamapathy has no pairing screen, and the design grants only the
+    // chooser, so every pairing request is refused.
+    browsingSession.setBluetoothPairingHandler((_details, response) =>
+      response({ confirmed: false }),
+    );
+    return () => {
+      live = false;
+      browsingSession.removeListener("select-usb-device", onUsb);
+      browsingSession.removeListener("select-hid-device", onHid);
+      browsingSession.removeListener("usb-device-added", onUsbAdded);
+      browsingSession.removeListener("usb-device-removed", onUsbRemoved);
+      browsingSession.removeListener("hid-device-added", onHidAdded);
+      browsingSession.removeListener("hid-device-removed", onHidRemoved);
+      browsingSession.setDevicePermissionHandler(null);
+      browsingSession.setBluetoothPairingHandler(null);
+    };
   };
 
   const forget = (spaceId: string | undefined) => {
@@ -364,11 +650,15 @@ export function createPromptCenter(
     for (const key of [...kept.keys()])
       if (spaceId === undefined || key.startsWith(`${spaceId}|`))
         kept.delete(key);
+    for (let index = grants.length - 1; index >= 0; index -= 1)
+      if (spaceId === undefined || grants[index].spaceId === spaceId)
+        grants.splice(index, 1);
   };
 
   return {
     attachSession(browsingSession) {
       let live = true;
+      const detachDevices = attachDevices(browsingSession);
       browsingSession.setPermissionCheckHandler((...args) =>
         live ? onCheck(...args) : false,
       );
@@ -391,11 +681,26 @@ export function createPromptCenter(
       );
       return () => {
         live = false;
+        detachDevices();
         browsingSession.setPermissionCheckHandler(() => false);
         browsingSession.setPermissionRequestHandler(
           (_contents, _permission, callback) => callback(false),
         );
       };
+    },
+    attachDevices,
+    attachBluetooth(contents) {
+      contents.on("select-bluetooth-device", (event, devices, callback) => {
+        // Without this Chromium picks the first device it finds.
+        event.preventDefault();
+        openChooser(
+          "bluetooth",
+          null,
+          contents,
+          devices.map(bluetoothRow),
+          callback,
+        );
+      });
     },
     routeStarted(tabId) {
       let record = windows.get(tabId);
@@ -426,7 +731,7 @@ export function createPromptCenter(
     },
     answer(answer) {
       if (typeof answer?.id !== "string") return;
-      end(answer.id, answer.allow === true, true);
+      end(answer.id, answer.allow === true, true, answer);
     },
     prompts() {
       return [...waiting.values()].map((item) => item.prompt);

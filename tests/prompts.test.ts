@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session, WebContents } from "electron";
 import { createReceipts } from "../electron/agent/receipts";
@@ -14,8 +15,17 @@ import { FakeContents, FakeController } from "./fake-automation";
 
 type Callback = (allow: boolean) => void;
 type Details = Record<string, unknown>;
-// The two handlers a partition's session hands the prompt center.
-class FakeSession {
+// The handlers and events a partition's session hands the prompt center.
+class FakeSession extends EventEmitter {
+  devicePermission?: (details: {
+    deviceType: string;
+    origin: string;
+    device: Record<string, unknown>;
+  }) => boolean;
+  pairing?: (
+    details: Record<string, unknown>,
+    response: (answer: { confirmed: boolean }) => void,
+  ) => void;
   request!: (
     contents: WebContents | null,
     permission: string,
@@ -34,7 +44,22 @@ class FakeSession {
   setPermissionCheckHandler(handler: FakeSession["check"]) {
     this.check = handler;
   }
+  setDevicePermissionHandler(handler: FakeSession["devicePermission"]) {
+    this.devicePermission = handler ?? undefined;
+  }
+  setBluetoothPairingHandler(handler: FakeSession["pairing"]) {
+    this.pairing = handler ?? undefined;
+  }
 }
+
+// Electron's device shapes, trimmed to the fields the center reads.
+const usbDevice = (deviceId: string, productName?: string) => ({
+  deviceId,
+  vendorId: 1256,
+  productId: 26720,
+  productName,
+});
+const hidDevice = (deviceId: string, name?: string) => ({ deviceId, name });
 
 const centers: PromptCenter[] = [];
 afterEach(() => {
@@ -61,6 +86,9 @@ function setup() {
         : undefined;
     },
     agentControlled: (tabId) => controller.agentControlled(tabId),
+    // The controller resolves a frame with webContents.fromFrame; the fake
+    // pages stand in for their own frames.
+    contentsForFrame: (frame) => (frame as unknown as WebContents) ?? null,
     holdForPerson: (spaceId, reason, prompt) =>
       controller.holdForPerson(spaceId, reason, prompt),
     releaseHold: (holdId) => controller.releaseHold(holdId),
@@ -113,11 +141,61 @@ function setup() {
     });
     return callback;
   };
+  // A chooser event, as Electron emits it: usb and hid on the session, and
+  // bluetooth on the page's own contents.
+  const chooseUsb = (
+    devices: ReturnType<typeof usbDevice>[],
+    target: FakeContents = page,
+  ) => {
+    const callback = vi.fn();
+    session.emit(
+      "select-usb-device",
+      { preventDefault: vi.fn() },
+      { deviceList: devices, frame: target },
+      callback,
+    );
+    return callback;
+  };
+  const chooseHid = (
+    devices: ReturnType<typeof hidDevice>[],
+    target: FakeContents = page,
+  ) => {
+    const callback = vi.fn();
+    session.emit(
+      "select-hid-device",
+      { preventDefault: vi.fn() },
+      { deviceList: devices, frame: target },
+      callback,
+    );
+    return callback;
+  };
+  // The controller installs the Bluetooth chooser on each page it wires.
+  const wired = new Set<FakeContents>();
+  const chooseBluetooth = (
+    devices: { deviceId: string; deviceName?: string }[],
+    target: FakeContents = page,
+  ) => {
+    if (!wired.has(target)) {
+      center.attachBluetooth(target as unknown as WebContents);
+      wired.add(target);
+    }
+    const callback = vi.fn();
+    target.emit(
+      "select-bluetooth-device",
+      { preventDefault: vi.fn() },
+      devices,
+      callback,
+    );
+    return callback;
+  };
   return {
     controller,
     center,
     session,
     detach,
+    chooseUsb,
+    chooseHid,
+    chooseBluetooth,
     receipts,
     space,
     tab,
@@ -451,5 +529,219 @@ describe("the prompt center", () => {
         {},
       ),
     ).toBe(false);
+  });
+
+  it("grants only the chosen USB device", () => {
+    const { controller, center, session, space, tab, chooseUsb } = setup();
+    const callback = chooseUsb([
+      usbDevice("dev-a", "Phone"),
+      usbDevice("dev-b"),
+    ]);
+    expect(callback).not.toHaveBeenCalled();
+    expect(controller.state.prompts).toEqual([
+      {
+        id: expect.any(String),
+        spaceId: space.id,
+        tabId: tab.id,
+        kind: "usb",
+        origin: "https://example.com",
+        at: expect.any(Number),
+        agent: true,
+        devices: [
+          { id: "1256:26720:dev-a", name: "Phone" },
+          { id: "1256:26720:dev-b", name: "USB device" },
+        ],
+      },
+    ]);
+    expect(space).toMatchObject({
+      owner: "human",
+      control: { reason: "device", prompt: "usb" },
+    });
+    center.answer({
+      id: controller.state.prompts[0].id,
+      allow: true,
+      deviceId: "1256:26720:dev-b",
+    });
+    // Exactly the chosen device, by Electron's own id.
+    expect(callback).toHaveBeenCalledExactlyOnceWith("dev-b");
+    expect(space.owner).toBe("agent");
+    const mayUse = (device: Record<string, unknown>) =>
+      session.devicePermission!({
+        deviceType: "usb",
+        origin: "https://example.com",
+        device,
+      });
+    expect(mayUse(usbDevice("dev-b"))).toBe(true);
+    expect(mayUse(usbDevice("dev-a"))).toBe(false);
+    expect(
+      session.devicePermission!({
+        deviceType: "usb",
+        origin: "https://other.example",
+        device: usbDevice("dev-b"),
+      }),
+    ).toBe(false);
+    // The grant is this run's only, is never written down, and the next
+    // request asks again.
+    expect(controller.state.sitePermissions).toEqual([]);
+    expect(chooseUsb([usbDevice("dev-b")])).not.toHaveBeenCalled();
+    center.clearSpace(space.id);
+    expect(mayUse(usbDevice("dev-b"))).toBe(false);
+  });
+
+  it("a device request in an agent tab holds with reason device and prompt usb, hid, serial or bluetooth, inside the window or not", async () => {
+    const {
+      controller,
+      center,
+      receipts,
+      session,
+      space,
+      tab,
+      page,
+      chooseUsb,
+      chooseHid,
+      chooseBluetooth,
+    } = setup();
+    // No route is running, and the chooser still goes to the person.
+    chooseUsb([usbDevice("dev-a", "Phone")]);
+    expect(center.prompts()).toMatchObject([{ kind: "usb", agent: true }]);
+    expect(space).toMatchObject({
+      owner: "human",
+      control: { reason: "device", prompt: "usb" },
+    });
+    // Inside a route's window it holds the same way.
+    const result = await receipts.with(tab.id, async () => {
+      chooseHid([hidDevice("hid-a")]);
+      return {};
+    });
+    expect(result).toEqual({});
+    expect(center.prompts()).toMatchObject([
+      { kind: "usb" },
+      { kind: "hid", devices: [{ id: "hid-a", name: "Device" }] },
+    ]);
+    // A chooser opens only for a page Kamapathy knows, and serial never
+    // opens one at all.
+    const contents = page as unknown as WebContents;
+    expect(session.check(contents, "usb", "https://example.com/", {})).toBe(
+      true,
+    );
+    expect(session.check(contents, "hid", "https://example.com/", {})).toBe(
+      true,
+    );
+    expect(session.check(contents, "serial", "https://example.com/", {})).toBe(
+      false,
+    );
+    expect(session.check(null, "usb", "https://example.com/", {})).toBe(false);
+    // Bluetooth is refused, and the agent reads it in the next receipt.
+    const refused = await receipts.with(tab.id, async () => {
+      expect(
+        chooseBluetooth([{ deviceId: "bt-a", deviceName: "Speaker" }]),
+      ).toHaveBeenCalledExactlyOnceWith("");
+      return {};
+    });
+    expect(refused).toEqual({
+      deniedRequests: [
+        { origin: "https://example.com", permission: "bluetooth" },
+      ],
+    });
+    expect(controller.activity).toEqual([
+      {
+        spaceId: space.id,
+        message: "A site's request for a Bluetooth device was refused.",
+        kind: "warning",
+      },
+    ]);
+  });
+
+  it("the device list updates while the prompt waits and a device that disappears cannot be chosen", () => {
+    const { center, session, space, page, chooseUsb, chooseHid } = setup();
+    const callback = chooseUsb([usbDevice("dev-a", "Phone")]);
+    session.emit("usb-device-added", {}, usbDevice("dev-b", "Reader"), page);
+    expect(center.prompts()[0].devices).toEqual([
+      { id: "1256:26720:dev-a", name: "Phone" },
+      { id: "1256:26720:dev-b", name: "Reader" },
+    ]);
+    session.emit("usb-device-removed", {}, usbDevice("dev-a", "Phone"), page);
+    expect(center.prompts()[0].devices).toEqual([
+      { id: "1256:26720:dev-b", name: "Reader" },
+    ]);
+    // The device that went away cannot be connected any more.
+    center.answer({
+      id: center.prompts()[0].id,
+      allow: true,
+      deviceId: "1256:26720:dev-a",
+    });
+    expect(callback).toHaveBeenCalledExactlyOnceWith("");
+    expect(
+      session.devicePermission!({
+        deviceType: "usb",
+        origin: "https://example.com",
+        device: usbDevice("dev-a"),
+      }),
+    ).toBe(false);
+    expect(space.owner).toBe("agent");
+    // HID updates name the frame instead of the page.
+    const hid = chooseHid([hidDevice("hid-a", "Pad")]);
+    session.emit(
+      "hid-device-added",
+      {},
+      {
+        device: hidDevice("hid-b", "Dial"),
+        frame: page,
+      },
+    );
+    expect(center.prompts()[0].devices).toEqual([
+      { id: "hid-a", name: "Pad" },
+      { id: "hid-b", name: "Dial" },
+    ]);
+    session.emit(
+      "hid-device-removed",
+      {},
+      {
+        device: hidDevice("hid-b", "Dial"),
+        frame: page,
+      },
+    );
+    expect(center.prompts()[0].devices).toEqual([{ id: "hid-a", name: "Pad" }]);
+    center.answer({
+      id: center.prompts()[0].id,
+      allow: true,
+      deviceId: "hid-a",
+    });
+    expect(hid).toHaveBeenCalledExactlyOnceWith("hid-a");
+  });
+
+  it("Block answers an empty choice, and a Bluetooth pairing request is refused", () => {
+    const { controller, center, session, space, pageIn, chooseUsb } = setup();
+    const blocked = chooseUsb([usbDevice("dev-a", "Phone")]);
+    center.answer({ id: center.prompts()[0].id, allow: false });
+    expect(blocked).toHaveBeenCalledExactlyOnceWith("");
+    expect(space.owner).toBe("agent");
+    expect(
+      session.devicePermission!({
+        deviceType: "usb",
+        origin: "https://example.com",
+        device: usbDevice("dev-a"),
+      }),
+    ).toBe(false);
+    // Allow without a device is a Block too.
+    const empty = chooseUsb([usbDevice("dev-a", "Phone")]);
+    center.answer({ id: center.prompts()[0].id, allow: true });
+    expect(empty).toHaveBeenCalledExactlyOnceWith("");
+    // The person's own space asks without holding anything.
+    const mine = pageIn("personal", "https://example.com/");
+    chooseUsb([usbDevice("dev-a", "Phone")], mine.page);
+    expect(center.prompts()).toMatchObject([
+      { spaceId: "personal", kind: "usb", agent: false },
+    ]);
+    expect(
+      controller.state.spaces.find((item) => item.id === "personal"),
+    ).not.toHaveProperty("control");
+    // Kamapathy has no pairing screen, so pairing is always refused.
+    const response = vi.fn();
+    session.pairing!(
+      { deviceId: "bt-a", pairingKind: "confirm", frame: null },
+      response,
+    );
+    expect(response).toHaveBeenCalledExactlyOnceWith({ confirmed: false });
   });
 });

@@ -18,6 +18,8 @@ publish: null
 mac:
   category: public.app-category.productivity
   icon: build/icon.icns
+  extendInfo:
+    NSBluetoothAlwaysUsageDescription: Kamapathy asks you before a site connects to a Bluetooth device.
   darkModeSupport: true
   identity: "-"
   hardenedRuntime: false

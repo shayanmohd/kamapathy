@@ -26,6 +26,11 @@ vi.mock("electron", () => ({
       return sessions.get(partition)!;
     }),
   },
+  webContents: {
+    fromFrame: vi.fn(
+      (frame: { contents?: FakeContents } | null) => frame?.contents ?? null,
+    ),
+  },
   dialog: { showMessageBox: vi.fn(), showSaveDialog: vi.fn() },
   shell: { showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) },
 }));
@@ -37,6 +42,8 @@ vi.mock("../electron/persistence", async (original) => ({
 class FakeSession extends EventEmitter {
   setPermissionCheckHandler = vi.fn();
   setPermissionRequestHandler = vi.fn();
+  setDevicePermissionHandler = vi.fn();
+  setBluetoothPairingHandler = vi.fn();
   clearStorageData = vi.fn(async () => {});
   clearCache = vi.fn(async () => {});
 }
@@ -427,6 +434,67 @@ describe("native browser lifecycle", () => {
     expect(browser.state.sitePermissions).toHaveLength(1);
     await browser.dispatch({ type: "site-permission:clear" });
     expect(browser.state.sitePermissions).toEqual([]);
+  });
+
+  it("installs the device handlers per partition and asks the person which device to connect", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs[0];
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/");
+    const partition = session.fromPartition(
+      "persist:space-personal",
+    ) as unknown as FakeSession;
+    expect(partition.setDevicePermissionHandler).toHaveBeenCalled();
+    expect(partition.setBluetoothPairingHandler).toHaveBeenCalled();
+    expect(partition.listenerCount("select-usb-device")).toBe(1);
+    expect(partition.listenerCount("select-hid-device")).toBe(1);
+    expect(partition.listenerCount("usb-device-added")).toBe(1);
+    // The Bluetooth chooser belongs to the page, not to the partition.
+    expect(page.listenerCount("select-bluetooth-device")).toBe(1);
+    const callback = vi.fn();
+    partition.emit(
+      "select-usb-device",
+      { preventDefault: vi.fn() },
+      {
+        deviceList: [
+          { deviceId: "dev-a", vendorId: 1, productId: 2, productName: "Phone" },
+        ],
+        frame: { contents: page },
+      },
+      callback,
+    );
+    expect(browser.state.prompts).toMatchObject([
+      {
+        spaceId: "personal",
+        tabId: tab.id,
+        kind: "usb",
+        devices: [{ id: "1:2:dev-a", name: "Phone" }],
+      },
+    ]);
+    browser.prompts.answer({
+      id: browser.state.prompts[0].id,
+      allow: true,
+      deviceId: "1:2:dev-a",
+    });
+    expect(callback).toHaveBeenCalledExactlyOnceWith("dev-a");
+    const mayUse = partition.setDevicePermissionHandler.mock.lastCall![0];
+    expect(
+      mayUse({
+        deviceType: "usb",
+        origin: "https://example.com",
+        device: { deviceId: "dev-a" },
+      }),
+    ).toBe(true);
+    // A device is granted for this run only, and nothing is written down.
+    expect(browser.state.sitePermissions).toEqual([]);
+    browser.dispose();
+    expect(partition.listenerCount("select-usb-device")).toBe(0);
+    expect(partition.setDevicePermissionHandler).toHaveBeenLastCalledWith(null);
   });
 
   it("rejects a pending permission when the requesting space is deleted", async () => {

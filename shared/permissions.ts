@@ -35,6 +35,14 @@ export const HOLDABLE: readonly PermissionKey[] = [
   "microphone",
   "midi",
 ];
+/** The device choosers a site can open. */
+export type DeviceKind = "usb" | "hid" | "serial" | "bluetooth";
+export const DEVICE_KINDS: readonly DeviceKind[] = [
+  "usb",
+  "hid",
+  "serial",
+  "bluetooth",
+];
 export type PromptKind =
   | "location"
   | "notifications"
@@ -134,4 +142,9 @@ const WORDS: Record<PromptKind, string> = {
 /** The words activity lines and the bar use: "location", "camera and microphone". */
 export function permissionWords(kind: PromptKind): string {
   return WORDS[kind] ?? kind;
+}
+
+/** The words a device prompt uses: "a USB device", "a Bluetooth device". */
+export function deviceWords(kind: DeviceKind): string {
+  return WORDS[kind];
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEVICE_KINDS,
+  deviceWords,
   HOLDABLE,
   isPermissionKey,
   PERMISSION_KEYS,
@@ -107,5 +109,13 @@ describe("permissions", () => {
       "midi",
     ]);
     for (const key of HOLDABLE) expect(isPermissionKey(key)).toBe(true);
+    // The four device choosers and the words their prompts use.
+    expect(DEVICE_KINDS).toEqual(["usb", "hid", "serial", "bluetooth"]);
+    expect(deviceWords("usb")).toBe("a USB device");
+    expect(deviceWords("bluetooth")).toBe("a Bluetooth device");
+    for (const kind of DEVICE_KINDS) {
+      expect(deviceWords(kind)).toBeTruthy();
+      expect(isPermissionKey(kind)).toBe(false);
+    }
   });
 });

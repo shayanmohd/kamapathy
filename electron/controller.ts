@@ -4,6 +4,7 @@ import {
   nativeTheme,
   session,
   shell,
+  webContents,
   WebContentsView,
 } from "electron";
 import type { NativeImage, Session, WebContents } from "electron";
@@ -180,6 +181,13 @@ export class BrowserController {
       spaceOf: (contents) => this.spaceOf(contents),
       tabOf: (contents) => this.tabOf(contents),
       agentControlled: (tabId) => this.agentControlled(tabId),
+      contentsForFrame: (frame) => {
+        try {
+          return frame ? (webContents.fromFrame(frame) ?? null) : null;
+        } catch {
+          return null;
+        }
+      },
       holdForPerson: (spaceId, reason, prompt) =>
         this.holdForPerson(spaceId, reason, prompt),
       releaseHold: (holdId) => this.releaseHold(holdId),
@@ -675,6 +683,8 @@ export class BrowserController {
       this.views.get(tab.id) === view &&
       this.state.tabs.includes(tab);
     this.bindShortcuts(contents);
+    // The Bluetooth chooser is the page's own event, not the session's.
+    this.prompts.attachBluetooth(contents);
     const activateFocusedPane = () => {
       if (
         !isCurrentView() ||
