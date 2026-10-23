@@ -221,6 +221,9 @@ function createWindow(): void {
   currentController.subscribe(() => {
     void syncAutomation();
   });
+  // The tray, the Dock menu and the badge follow the same state the window
+  // shows.
+  currentController.subscribe(() => background.update());
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
