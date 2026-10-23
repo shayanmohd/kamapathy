@@ -287,7 +287,7 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | DELETE | `/tabs/:id` |  | Closes a page the agent manages. Its label is retired, and a blank page with the next label replaces a space's last page. Returns `{ ok: true, closed?: label, replacement?: TabView }`. |
 | POST | `/tabs/:id/adopt` | `{}` | Makes a page the agent did not open its own, within the page budget. The page keeps its label. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
-| POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
+| POST | `/tabs/:id/navigate` | `url`, `waitUntil?`, `timeoutMs?`, `referer?` | Loads a URL in the tab and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
@@ -354,6 +354,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
 | `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
@@ -368,6 +369,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
 | `element_action_failed` | 422 | not retryable |  | The page refused the action. |
+| `navigation_failed` | 422 | retryable when netError is ERR_INTERNET_DISCONNECTED or ERR_NETWORK_CHANGED or ERR_NETWORK_IO_SUSPENDED or ERR_NAME_RESOLUTION_FAILED or ERR_CONNECTION_REFUSED or ERR_CONNECTION_TIMED_OUT | `url`, `netError`, `errorCode`, `httpStatus`, `blockedUrl` | The navigation ended without loading a document. |
+| `navigation_download` | 422 | not retryable | `url`, `armed` | The address is a download, not a page. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
@@ -383,6 +386,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |

@@ -186,12 +186,14 @@ describe("API schema", () => {
     }
     // Batch step types: the ones the server parses, which it lists when a
     // step has another.
-    const union = read("electron/agent/validate.ts").match(/type: ([^;]+);/)[1];
+    const union = read("electron/agent/validate.ts").match(
+      /type:\s*([^;]+);/,
+    )[1];
     expect(ACTIONS.map((item) => item.type).sort()).toEqual(
       [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort(),
     );
     expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
+      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, and navigate.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -436,11 +438,12 @@ describe("API schema", () => {
       "scroll",
       "drag",
       "wait",
+      "navigate",
     ];
     expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
+        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, and navigate.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])

@@ -155,6 +155,13 @@ export const ERRORS = {
     ["reason"],
   ),
   page_changed: code(409, false, "The page navigated during the operation."),
+  navigation_interrupted: code(
+    409,
+    false,
+    "A newer main-frame navigation replaced the one this request started.",
+    ["url", "by"],
+    2,
+  ),
   navigation_blocked: code(
     409,
     false,
@@ -194,6 +201,32 @@ export const ERRORS = {
   files_too_large: code(413, false, "The upload files total more than 16 MiB."),
   content_type: code(415, false, "The request body is not JSON."),
   element_action_failed: code(422, false, "The page refused the action."),
+  navigation_failed: code(
+    422,
+    [
+      {
+        field: "netError",
+        values: [
+          "ERR_INTERNET_DISCONNECTED",
+          "ERR_NETWORK_CHANGED",
+          "ERR_NETWORK_IO_SUSPENDED",
+          "ERR_NAME_RESOLUTION_FAILED",
+          "ERR_CONNECTION_REFUSED",
+          "ERR_CONNECTION_TIMED_OUT",
+        ],
+      },
+    ],
+    "The navigation ended without loading a document.",
+    ["url", "netError", "errorCode", "httpStatus", "blockedUrl"],
+    2,
+  ),
+  navigation_download: code(
+    422,
+    false,
+    "The address is a download, not a page.",
+    ["url", "armed"],
+    2,
+  ),
   drag_out_of_view: code(
     422,
     false,
@@ -251,6 +284,13 @@ export const ERRORS = {
     false,
     "The person did not answer a request for a space in time. Asking again interrupts them.",
     ["awaited", "timeoutMs"],
+    2,
+  ),
+  navigation_timeout: code(
+    504,
+    true,
+    "The navigation did not reach the requested state before the timeout.",
+    ["awaited", "timeoutMs", "committed", "url", "readyState"],
     2,
   ),
   wait_timeout: {

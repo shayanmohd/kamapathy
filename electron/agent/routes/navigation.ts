@@ -1,7 +1,10 @@
 import { remaining } from "../actions";
 import { send, type Run, type RouteDeps, type RouteImpl } from "../http";
+import { createPendingGate, type WaitUntil } from "../navigation/await";
+import { createGo } from "../navigation/go";
+import { createTrackers } from "../navigation/trackers";
 import type { AutomationController } from "../server";
-import type { ToolAction } from "../validate";
+import { navigationFields, type ToolAction } from "../validate";
 import { tabView } from "../views";
 
 // The navigation and wait routes, and the batch steps that share their work.
@@ -54,14 +57,34 @@ export function watchLeaveGuard(
   };
 }
 
-export function createNavigation({
-  controller,
-  authority: { authorizeTab },
-  actions: { readyContents, evaluatePage },
-  sessions,
-}: Omit<RouteDeps, "navigation">): Navigation {
+export function createNavigation(
+  deps: Omit<RouteDeps, "navigation">,
+): Navigation {
+  const { controller, sessions } = deps;
+  const { authorizeTab } = deps.authority;
+  const { readyContents, evaluatePage } = deps.actions;
+  // One tracker per live tab session, and one gate for every tab's pending
+  // navigations and waits.
+  const trackers = createTrackers({ controller, sessions });
+  const gate = createPendingGate();
+  const go = createGo({ ...deps, trackers, gate });
+  // The body a navigate route or step takes, already validated.
+  type NavigateBody = {
+    url: string;
+    waitUntil: WaitUntil;
+    timeoutMs: number;
+    referer?: string;
+  };
   return {
     routes: {
+      "POST /tabs/:id/navigate": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await go.navigate(tab!.id, navigationFields(body!), run),
+          ),
+      },
       "GET /tabs/:id/info": {
         handler: async ({ response, tab, run }) => {
           const view = () => {
@@ -103,9 +126,24 @@ export function createNavigation({
         },
       },
     },
-    stepTypes: [],
-    step: async () => {
-      throw new Error("This batch step has no navigation handler.");
+    stepTypes: ["navigate"],
+    step: async (tabId, action, run) => {
+      if (action.type !== "navigate")
+        throw new Error("This batch step has no navigation handler.");
+      const body = action.payload as NavigateBody;
+      // A step waits only as long as the batch's budget has left, and its
+      // timeout error reports the value it was cut to.
+      return go.navigate(
+        tabId,
+        {
+          ...body,
+          timeoutMs: Math.min(
+            body.timeoutMs,
+            Math.max(0, run.deadline - Date.now()),
+          ),
+        },
+        run,
+      );
     },
   };
 }

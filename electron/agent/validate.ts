@@ -7,6 +7,7 @@ import {
 import type { SnapshotOptions } from "../automation-dom";
 import { ApiError, fail } from "./errors";
 import type { Route } from "./http";
+import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -29,7 +30,15 @@ export const PRESS_KEYS: Record<
   Space: { key: " ", code: "Space", keyCode: 32, text: " " },
 };
 export type ToolAction = {
-  type: "snapshot" | "click" | "fill" | "press" | "scroll" | "drag" | "wait";
+  type:
+    | "snapshot"
+    | "click"
+    | "fill"
+    | "press"
+    | "scroll"
+    | "drag"
+    | "wait"
+    | "navigate";
   payload: Record<string, unknown>;
 };
 
@@ -52,6 +61,66 @@ export function integerField(
       `${name} must be an integer from ${minimum} to ${maximum}.`,
     );
   return value;
+}
+export function booleanField(
+  body: Record<string, unknown>,
+  name: string,
+  fallback: boolean,
+): boolean {
+  const value = body[name] === undefined ? fallback : body[name];
+  if (typeof value !== "boolean")
+    return fail("invalid_field", `${name} must be true or false.`, {
+      field: name,
+    });
+  return value;
+}
+// The schema's wording for a list of accepted values.
+const either = (values: readonly string[]) =>
+  values.length < 3
+    ? values.join(" or ")
+    : `${values.slice(0, -1).join(", ")}, or ${values.at(-1)}`;
+export function enumField<T extends string>(
+  body: Record<string, unknown>,
+  name: string,
+  values: readonly T[],
+  fallback: T,
+): T {
+  const value = body[name] === undefined ? fallback : body[name];
+  if (typeof value !== "string" || !values.includes(value as T))
+    return fail("invalid_field", `${name} must be ${either(values)}.`, {
+      field: name,
+    });
+  return value as T;
+}
+export function waitUntilField(
+  body: Record<string, unknown>,
+  fallback: WaitUntil = "load",
+): WaitUntil {
+  return enumField(body, "waitUntil", WAIT_UNTIL, fallback);
+}
+// The Referer header an agent may send, kept exactly as given.
+export function refererField(body: Record<string, unknown>): string {
+  const value = stringField(body, "referer", 8192);
+  if (!isWebUrl(value))
+    return fail(
+      "invalid_field",
+      "referer must be a complete HTTP or HTTPS URL without embedded credentials.",
+      { field: "referer" },
+    );
+  return value;
+}
+export function navigationFields(body: Record<string, unknown>): {
+  url: string;
+  waitUntil: WaitUntil;
+  timeoutMs: number;
+  referer?: string;
+} {
+  return {
+    url: urlField(body),
+    waitUntil: waitUntilField(body),
+    timeoutMs: integerField(body, "timeoutMs", 15000, 1, 60000),
+    ...(body.referer === undefined ? {} : { referer: refererField(body) }),
+  };
 }
 export function targetFields(
   body: Record<string, unknown>,
@@ -156,6 +225,7 @@ export function parseToolAction(
       payload: { source: endpoint("source"), target: endpoint("target") },
     };
   }
+  if (type === "navigate") return { type, payload: navigationFields(body) };
   if (type === "wait")
     return {
       type,

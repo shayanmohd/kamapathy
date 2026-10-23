@@ -19,6 +19,15 @@ const url = {
   required: true,
   description: "A complete http or https URL.",
 };
+// How far a navigation or a load-state wait waits.
+const waitUntil = {
+  kind: "enum",
+  values: ["commit", "domcontentloaded", "load", "networkidle"],
+  default: "load",
+  since: 2,
+  description:
+    "commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -112,6 +121,24 @@ const FIELDS = {
       max: 15000,
       default: 5000,
       description: "How long to wait.",
+    },
+  },
+  navigate: {
+    url,
+    waitUntil,
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      since: 2,
+      description: "How long to wait for the state.",
+    },
+    referer: {
+      kind: "url",
+      max: 8192,
+      since: 2,
+      description: "The Referer header to send, exactly as given.",
     },
   },
 };
@@ -324,10 +351,10 @@ export const ROUTES = [
   route(
     "POST",
     "/tabs/:id/navigate",
-    "Loads a URL in the tab.",
-    "{ tab: TabView }",
-    { url },
-    { follow: true },
+    "Loads a URL in the tab and waits for the new document to reach a state.",
+    "{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }",
+    FIELDS.navigate,
+    { follow: true, budget: { field: "timeoutMs" } },
   ),
   route(
     "GET",
@@ -490,6 +517,12 @@ export const ACTIONS = [
     summary: "Waits for a visible element, text, or both.",
     fields: FIELDS.wait,
     since: 1,
+  },
+  {
+    type: "navigate",
+    summary: "Loads a URL and waits for the new document to reach a state.",
+    fields: FIELDS.navigate,
+    since: 2,
   },
 ];
 

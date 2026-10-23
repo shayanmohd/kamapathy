@@ -707,7 +707,8 @@ export function createActions(deps: {
       }
     }
     authorizeTab(id);
-    const descriptions = {
+    // The step types this runs; the navigation steps log their own lines.
+    const descriptions: Record<string, string> = {
       snapshot: "Agent read a page snapshot",
       click: "Agent clicked an element",
       fill: "Agent filled a field",

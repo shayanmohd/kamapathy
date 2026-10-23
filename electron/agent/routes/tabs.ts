@@ -8,12 +8,7 @@ import {
   type RouteImpl,
 } from "../http";
 import type { TabSession } from "../session/tab-session";
-import {
-  parseToolAction,
-  stringField,
-  uploadFields,
-  urlField,
-} from "../validate";
+import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
 import { checkPageBudget } from "./spaces";
 
@@ -92,22 +87,6 @@ export function tabRoutes({
         controller.addActivity(tab!.spaceId, "Agent released a page", "info");
         return send(response, 200, {
           tab: tabView(released, controller.shownTab(tab!.spaceId)),
-        });
-      },
-    },
-    "POST /tabs/:id/navigate": {
-      handler: async ({ response, body, tab, run }) => {
-        const url = urlField(body!);
-        run.dispatch.dispatched = true;
-        await controller.dispatch({ type: "tab:navigate", id: tab!.id, url });
-        const updated = authorizeTab(tab!.id);
-        controller.addActivity(
-          tab!.spaceId,
-          `Agent navigated to ${new URL(url).hostname}`,
-          "info",
-        );
-        return send(response, 200, {
-          tab: tabView(updated, controller.shownTab(updated.spaceId)),
         });
       },
     },

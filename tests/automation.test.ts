@@ -410,13 +410,14 @@ describe("local automation socket", () => {
     expect(
       (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
     ).toBe(200);
-    expect(
-      (
-        await request(`/tabs/${tab.id}/navigate`, "POST", {
-          url: "https://example.com/next",
-        })
-      ).status,
-    ).toBe(200);
+    const { done } = await dispatched(tab.id, {
+      url: "https://example.com/next",
+      waitUntil: "commit",
+    });
+    const frame = mainFrame(controller.contents, "loader-2");
+    frame.start("https://example.com/next");
+    frame.commit("https://example.com/next");
+    expect((await done).status).toBe(200);
   });
 
   it("takes control back after its own handoff and treats a repeated resume as a no-op", async () => {
@@ -1174,6 +1175,462 @@ describe("local automation socket", () => {
     // A guard after the operation belongs to the next one.
     controller.leaveGuard(tab.id);
     expect(watchLeaveGuard(controller, tab.id).stop()).toEqual({});
+  });
+
+  // Chromium's main-frame navigation events for one document of a page.
+  const mainFrame = (page: FakeContents, loaderId: string) => ({
+    start: (url: string, navigationType = "differentDocument") =>
+      page.emitProtocol("Page.frameStartedNavigating", {
+        frameId: "main",
+        loaderId,
+        url,
+        navigationType,
+      }),
+    request: (url: string, method = "GET") =>
+      page.emitProtocol("Network.requestWillBeSent", {
+        requestId: loaderId,
+        loaderId,
+        documentURL: url,
+        request: { url, method, headers: {} },
+        type: "Document",
+      }),
+    response: (status: number) =>
+      page.emitProtocol("Network.responseReceived", {
+        requestId: loaderId,
+        loaderId,
+        response: { status },
+        type: "Document",
+      }),
+    failed: (errorText: string) =>
+      page.emitProtocol("Network.loadingFailed", {
+        requestId: loaderId,
+        errorText,
+        type: "Document",
+      }),
+    commit: (url: string) =>
+      page.emitProtocol("Page.frameNavigated", {
+        frame: {
+          id: "main",
+          loaderId,
+          url,
+          securityOrigin: new URL(url).origin,
+          mimeType: "text/html",
+        },
+        type: "Navigation",
+      }),
+    lifecycle: (name: string) =>
+      page.emitProtocol("Page.lifecycleEvent", {
+        frameId: "main",
+        loaderId,
+        name,
+        timestamp: 1,
+      }),
+    stop: () =>
+      page.emitProtocol("Page.frameStoppedLoading", { frameId: "main" }),
+  });
+  // A navigate whose load has reached the page, ready for its events.
+  const dispatched = async (
+    tabId: string,
+    body: Record<string, unknown>,
+    loads = 1,
+  ) => {
+    const page = controller.pages.get(tabId)!;
+    const done = request(`/tabs/${tabId}/navigate`, "POST", body);
+    void done.catch(() => {});
+    await expect.poll(() => page.loads.length).toBe(loads);
+    return { done };
+  };
+  const failure = async (response: Response) => ({
+    status: response.status,
+    error: (await response.json()).error as Record<string, unknown>,
+  });
+
+  it("navigate waits for the state it was asked for and answers the tab", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done: committing } = await dispatched(tab.id, {
+      url: "https://example.com/next",
+      waitUntil: "commit",
+    });
+    expect(page.loads[0]).toEqual({ url: "https://example.com/next" });
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/next");
+    first.request("https://example.com/next");
+    first.response(200);
+    first.commit("https://example.com/next");
+    const answered = await committing;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({
+        id: tab.id,
+        url: "https://example.com/next",
+        managed: true,
+      }),
+      httpStatus: 200,
+      waitUntil: "commit",
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent navigated to example.com",
+    });
+    // load waits for the load event, and the referer is sent as given.
+    const { done: loading } = await dispatched(
+      tab.id,
+      {
+        url: "https://example.com/last",
+        waitUntil: "load",
+        referer: "https://ref.example/a?b=c",
+      },
+      2,
+    );
+    expect(page.loads[1]).toEqual({
+      url: "https://example.com/last",
+      options: {
+        httpReferrer: {
+          url: "https://ref.example/a?b=c",
+          policy: "unsafe-url",
+        },
+      },
+    });
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/last");
+    second.request("https://example.com/last");
+    second.response(201);
+    second.commit("https://example.com/last");
+    second.lifecycle("DOMContentLoaded");
+    let settled = false;
+    void loading.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+    second.lifecycle("load");
+    const loaded = await loading;
+    expect(loaded.status).toBe(200);
+    expect(await loaded.json()).toMatchObject({
+      ok: true,
+      httpStatus: 201,
+      waitUntil: "load",
+    });
+  });
+
+  it("navigate enforces its field ranges", async () => {
+    const { tab } = await createPage();
+    const refuse = async (body: Record<string, unknown>) => {
+      const response = await request(`/tabs/${tab.id}/navigate`, "POST", {
+        url: "https://example.com/",
+        ...body,
+      });
+      return failure(response);
+    };
+    for (const body of [
+      { timeoutMs: 0 },
+      { timeoutMs: 60001 },
+      { waitUntil: "idle" },
+    ]) {
+      const { status, error } = await refuse(body);
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field: Object.keys(body)[0],
+      });
+    }
+    for (const referer of [
+      "ftp://example.com/",
+      "https://user:pw@example.com/",
+    ]) {
+      const { status, error } = await refuse({ referer });
+      expect(status, referer).toBe(400);
+      expect(error, referer).toMatchObject({
+        code: "invalid_field",
+        field: "referer",
+      });
+    }
+    expect(controller.contents.loads).toEqual([]);
+  });
+
+  it("navigate classifies an abort", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    let loader = 1;
+    let loads = 0;
+    const attempt = async (
+      drive: (frame: ReturnType<typeof mainFrame>) => void,
+    ) => {
+      const url = `https://example.com/${++loader}`;
+      const { done } = await dispatched(
+        tab.id,
+        { url, waitUntil: "commit", timeoutMs: 5000 },
+        ++loads,
+      );
+      drive(mainFrame(page, `loader-${loader}`));
+      return { url, ...(await failure(await done)) };
+    };
+    const download = await attempt((frame) => {
+      frame.start(`https://example.com/2`);
+      frame.request(`https://example.com/2`);
+      frame.response(200);
+      frame.failed("net::ERR_ABORTED");
+      frame.stop();
+      controller.startDownload(tab.id);
+    });
+    expect(download.status).toBe(422);
+    expect(download.error).toMatchObject({
+      code: "navigation_download",
+      url: download.url,
+      armed: false,
+      dispatched: true,
+    });
+    const interrupted = await attempt((frame) => {
+      frame.start(`https://example.com/3`);
+      mainFrame(page, "loader-other").start("https://example.com/newer");
+    });
+    expect(interrupted.status).toBe(409);
+    expect(interrupted.error).toMatchObject({
+      code: "navigation_interrupted",
+      url: interrupted.url,
+      by: "https://example.com/newer",
+    });
+    const blocked = await attempt((frame) => {
+      frame.start(`https://example.com/4`);
+      controller.blockRedirect(tab.id, "file:///etc/passwd");
+      frame.stop();
+    });
+    expect(blocked.status).toBe(422);
+    expect(blocked.error).toMatchObject({
+      code: "navigation_failed",
+      url: blocked.url,
+      blockedUrl: "file:///etc/passwd",
+      netError: "ERR_BLOCKED_BY_CLIENT",
+    });
+    expect(blocked.error.retryable).toBeUndefined();
+    const refused = await attempt((frame) => {
+      frame.start(`https://example.com/5`);
+      frame.request(`https://example.com/5`);
+      frame.failed("net::ERR_CONNECTION_REFUSED");
+    });
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "navigation_failed",
+      netError: "ERR_CONNECTION_REFUSED",
+      retryable: true,
+    });
+    expect(refused.error.dispatched).toBeUndefined();
+  });
+
+  it("a navigation timeout reports what it reached", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done: committed } = await dispatched(tab.id, {
+      url: "https://example.com/slow",
+      waitUntil: "load",
+      timeoutMs: 150,
+    });
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/slow");
+    frame.request("https://example.com/slow");
+    frame.response(200);
+    frame.commit("https://example.com/slow");
+    const timeout = await failure(await committed);
+    expect(timeout.status).toBe(504);
+    expect(timeout.error).toEqual({
+      code: "navigation_timeout",
+      message:
+        "Navigation to example.com did not reach load within 150 ms. It committed at https://example.com/slow with readyState loading. Continue there, or call waitForLoadState.",
+      awaited: "load",
+      timeoutMs: 150,
+      committed: true,
+      url: "https://example.com/slow",
+      readyState: "loading",
+      dispatched: true,
+    });
+    // A navigation that never commits says so instead.
+    const { done: gone } = await dispatched(
+      tab.id,
+      { url: "https://example.com/gone", waitUntil: "commit", timeoutMs: 150 },
+      2,
+    );
+    const never = await failure(await gone);
+    expect(never.status).toBe(504);
+    expect(never.error).toMatchObject({
+      code: "navigation_timeout",
+      message:
+        "Navigation to example.com did not reach commit within 150 ms. It never committed. Check the address and connection.",
+      committed: false,
+      url: "https://example.com/gone",
+    });
+    expect(never.error.readyState).toBeUndefined();
+  });
+
+  it("navigate still answers tab, and POST /tabs/:id/wait keeps its contract", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done: pending } = await dispatched(tab.id, {
+      url: "https://example.com/next",
+    });
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/next");
+    frame.commit("https://example.com/next");
+    frame.lifecycle("load");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    const body = await answered.json();
+    expect(body.tab).toMatchObject({
+      id: tab.id,
+      url: "https://example.com/next",
+      managed: true,
+    });
+    expect(body.waitUntil).toBe("load");
+    // The legacy wait route keeps its body, defaults and 408.
+    const wait = ROUTES.find(
+      (route) => routeKey(route) === "POST /tabs/:id/wait",
+    )!;
+    expect(wait.body!.timeoutMs).toMatchObject({ default: 5000, max: 15000 });
+    const over = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Done",
+      timeoutMs: 15001,
+    });
+    expect(over.status).toBe(400);
+    const timedOut = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Done",
+      timeoutMs: 0,
+    });
+    expect(timedOut.status).toBe(408);
+    expect((await timedOut.json()).error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "condition",
+      timeoutMs: 0,
+    });
+  });
+
+  it("a fifth pending navigation or wait answers 429 busy", async () => {
+    const { tab } = await createPage();
+    for (let held = 1; held <= 4; held++)
+      await dispatched(
+        tab.id,
+        {
+          url: `https://example.com/${held}`,
+          waitUntil: "load",
+          timeoutMs: 60000,
+        },
+        held,
+      );
+    const fifth = await failure(
+      await request(`/tabs/${tab.id}/navigate`, "POST", {
+        url: "https://example.com/5",
+      }),
+    );
+    expect(fifth.status).toBe(429);
+    expect(fifth.error).toEqual({
+      code: "busy",
+      message:
+        "This page already has 4 navigations or waits in flight. Wait for one to finish.",
+      scope: "tab",
+      retryAfterMs: 250,
+      retryable: true,
+    });
+    expect(controller.pages.get(tab.id)!.loads).toHaveLength(4);
+  });
+
+  it("a takeover ends a navigation wait within 100 ms", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const { done: pending } = await dispatched(tab.id, {
+      url: "https://example.com/slow",
+      waitUntil: "load",
+      timeoutMs: 60000,
+    });
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/slow");
+    frame.commit("https://example.com/slow");
+    const started = Date.now();
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const taken = await failure(await pending);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(taken.status).toBe(409);
+    expect(taken.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+      message:
+        "The person took over this space. Stop, and resume only when they ask you to.",
+    });
+  });
+
+  it("a navigation wait yields its space lane", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done: pending } = await dispatched(tab.id, {
+      url: "https://example.com/slow",
+      waitUntil: "load",
+      timeoutMs: 60000,
+    });
+    mainFrame(page, "loader-2").start("https://example.com/slow");
+    const snapshot = await request(`/tabs/${tab.id}/snapshot`);
+    expect(snapshot.status).toBe(200);
+    expect((await snapshot.json()).text).toBe("Hello from the agent page");
+    const frame = mainFrame(page, "loader-2");
+    frame.commit("https://example.com/slow");
+    frame.lifecycle("load");
+    expect((await pending).status).toBe(200);
+  });
+
+  it("runs a navigate step in a batch under its own timeout", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const batch = request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "navigate", url: "https://example.com/next" },
+        { type: "snapshot" },
+      ],
+    });
+    void batch.catch(() => {});
+    await expect.poll(() => page.loads.length).toBe(1);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/next");
+    frame.request("https://example.com/next");
+    frame.response(200);
+    frame.commit("https://example.com/next");
+    frame.lifecycle("load");
+    const answered = await batch;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      results: [
+        {
+          index: 0,
+          type: "navigate",
+          result: { ok: true, httpStatus: 200, waitUntil: "load" },
+        },
+        { index: 1, type: "snapshot" },
+      ],
+    });
+    // A step that never reaches its state fails the batch, reporting the
+    // timeout it ran under.
+    const slow = request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "navigate", url: "https://example.com/slow", timeoutMs: 150 },
+      ],
+    });
+    void slow.catch(() => {});
+    await expect.poll(() => page.loads.length).toBe(2);
+    mainFrame(page, "loader-3").start("https://example.com/slow");
+    const timedOut = await slow;
+    expect(timedOut.status).toBe(504);
+    expect(await timedOut.json()).toMatchObject({
+      ok: false,
+      failedIndex: 0,
+      error: {
+        code: "navigation_timeout",
+        awaited: "load",
+        timeoutMs: 150,
+        committed: false,
+      },
+    });
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
