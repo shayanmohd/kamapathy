@@ -46,8 +46,28 @@ body.flip-y #ring {
   border-radius: 50%;
   box-sizing: border-box;
 }
+/* The ring plays once where the press landed, for the same 300 ms the main
+   process waits before taking the class back, so the next press plays it
+   again. */
 body.press #ring {
   display: block;
+  animation: press 300ms ease-out forwards;
+}
+@keyframes press {
+  from {
+    opacity: 0.85;
+    transform: scale(0.35);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.press #ring {
+    animation: none;
+    opacity: 0.85;
+  }
 }
 #pill {
   display: none;

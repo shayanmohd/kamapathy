@@ -5,6 +5,9 @@ import { WebContentsView } from "electron";
 import {
   CURSOR,
   CursorOverlay,
+  GLIDE,
+  PERSON_HIDE_MS,
+  PRESS_RING_MS,
   type CursorHost,
   type CursorMetrics,
   type CursorUpdate,
@@ -39,6 +42,7 @@ class FakeContents extends EventEmitter {
     this.updates.push(update);
     return this.measure(update);
   });
+  focus = vi.fn();
   isDestroyed = () => this.destroyed;
   getURL = () => this.url;
   getZoomFactor = () => this.zoomFactor;
@@ -50,12 +54,16 @@ class FakeView {
   constructor(public webContents = new FakeContents()) {}
   visible = false;
   bounds = { x: 0, y: 0, width: 0, height: 0 };
+  // Every rect the view was given, so a glide can be read back frame by
+  // frame.
+  history: (typeof this.bounds)[] = [];
   setBackgroundColor = vi.fn();
   setVisible(value: boolean) {
     this.visible = value;
   }
   setBounds(value: typeof this.bounds) {
     this.bounds = value;
+    this.history.push(value);
   }
   getVisible() {
     return this.visible;
@@ -66,8 +74,55 @@ class FakeView {
 }
 
 const PAGE = { x: 200, y: 80, width: 1000, height: 700 };
+
+// The clock the overlay glides on, stepped by hand so no test waits.
+function clockOf() {
+  let at = 1000;
+  let next = 1;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  return {
+    now: () => at,
+    schedule(run: () => void, ms: number) {
+      const id = next++;
+      timers.set(id, { at: at + ms, run });
+      return { id, unref() {} };
+    },
+    cancel(timer: unknown) {
+      timers.delete((timer as { id: number }).id);
+    },
+    pending: () => timers.size,
+    // Runs every timer due by then, earliest first, with the clock at its
+    // own time, as a real one would.
+    advance(ms: number) {
+      const until = at + ms;
+      for (;;) {
+        let due: number | undefined;
+        let soonest = Infinity;
+        for (const [id, timer] of timers)
+          if (timer.at <= until && timer.at < soonest) {
+            soonest = timer.at;
+            due = id;
+          }
+        if (due === undefined) break;
+        const timer = timers.get(due)!;
+        timers.delete(due);
+        at = timer.at;
+        timer.run();
+      }
+      at = until;
+    },
+  };
+}
+let clock = clockOf();
+
 // Everything the overlay awaits is already resolved, so one turn is enough.
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+// One turn, then the clock long enough for any glide to end.
+const settle = async () => {
+  await flush();
+  clock.advance(GLIDE.maxMs);
+  await flush();
+};
 
 function setup() {
   const page = new FakeView();
@@ -101,12 +156,16 @@ function setup() {
   };
   const overlay = new CursorOverlay(host, {
     page: { file: "/app/src/cursor/index.html" },
+    now: clock.now,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
   });
   const cursor = () => contentView.addChildView.mock.calls[0]?.[0] as FakeView;
   return { contentView, cursor, overlay, page, rules, views };
 }
 
 beforeEach(() => {
+  clock = clockOf();
   vi.mocked(WebContentsView).mockClear();
 });
 
@@ -267,5 +326,161 @@ describe("agent cursor overlay", () => {
     expect(closing.contentView.addChildView).not.toHaveBeenCalled();
     expect(() => closing.overlay.raise()).not.toThrow();
     expect(() => closing.overlay.dispose()).not.toThrow();
+  });
+
+  it("glides scale with distance and reduced motion jumps", async () => {
+    const { cursor, overlay } = setup();
+    // The first point has nowhere to glide from, so it is placed at once.
+    overlay.point("tab-1", { type: "move", x: 100, y: 200 });
+    await settle();
+    const view = cursor();
+    const first = view.getBounds();
+    expect(view.getVisible()).toBe(true);
+
+    // 100 px along: 80 ms plus 0.35 ms a pixel, stepped every 16 ms.
+    view.history.length = 0;
+    overlay.point("tab-1", { type: "move", x: 200, y: 200 });
+    await flush();
+    expect(view.history[0]).toEqual(first);
+    let frames = 0;
+    while (clock.pending() > 0 && frames < 40) {
+      clock.advance(GLIDE.frameMs);
+      frames += 1;
+    }
+    expect(frames).toBe(
+      Math.ceil((GLIDE.baseMs + GLIDE.perPixelMs * 100) / GLIDE.frameMs),
+    );
+    expect(view.getBounds()).toEqual({ ...first, x: first.x + 100 });
+    const along = view.history.map((rect) => rect.x);
+    const steps = along.slice(1).map((x, index) => x - along[index]);
+    expect(steps[0]).toBeGreaterThan(0);
+    // Ease out: each step covers less ground than the one before it, and
+    // the cursor never travels backwards.
+    expect(steps.slice(1).every((step, index) => step <= steps[index])).toBe(
+      true,
+    );
+    expect(steps.every((step) => step >= 0)).toBe(true);
+    expect(steps[0]).toBeGreaterThan(steps.at(-1)!);
+
+    // A move of about a thousand pixels stops at the cap.
+    overlay.point("tab-1", { type: "move", x: 20, y: 20 });
+    await settle();
+    overlay.point("tab-1", { type: "move", x: 980, y: 680 });
+    await flush();
+    frames = 0;
+    while (clock.pending() > 0 && frames < 40) {
+      clock.advance(GLIDE.frameMs);
+      frames += 1;
+    }
+    expect(frames).toBe(Math.ceil(GLIDE.maxMs / GLIDE.frameMs));
+
+    // A point part way through a glide becomes the new target from where
+    // the cursor stands, never a jump back.
+    overlay.point("tab-1", { type: "move", x: 100, y: 200 });
+    await settle();
+    view.history.length = 0;
+    overlay.point("tab-1", { type: "move", x: 400, y: 200 });
+    await flush();
+    clock.advance(GLIDE.frameMs * 2);
+    const midway = view.getBounds().x;
+    expect(midway).toBeGreaterThan(PAGE.x + 100 - CURSOR.tip.x);
+    overlay.point("tab-1", { type: "move", x: 600, y: 200 });
+    await flush();
+    expect(view.getBounds().x).toBe(midway);
+    frames = 0;
+    while (clock.pending() > 0 && frames < 40) {
+      clock.advance(GLIDE.frameMs);
+      frames += 1;
+    }
+    expect(view.getBounds().x).toBe(PAGE.x + 600 - CURSOR.tip.x);
+    const onward = view.history.map((rect) => rect.x);
+    expect(onward.slice(1).every((x, index) => x >= onward[index])).toBe(true);
+
+    // A press plays its ring for 300 ms and then lets it go.
+    overlay.point("tab-1", { type: "press", x: 400, y: 200 });
+    await settle();
+    expect(view.webContents.updates.at(-1)).toMatchObject({ press: true });
+    clock.advance(PRESS_RING_MS);
+    await flush();
+    expect(view.webContents.updates.at(-1)).toEqual({
+      label: "",
+      press: false,
+      flipX: false,
+      flipY: false,
+    });
+
+    // A page that asks for less motion is given one placement.
+    const still = setup();
+    still.overlay.point("tab-1", { type: "move", x: 100, y: 200 });
+    await settle();
+    const jumping = still.cursor();
+    jumping.webContents.measure = () => ({
+      width: 160,
+      height: 54,
+      reducedMotion: true,
+    });
+    jumping.history.length = 0;
+    still.overlay.point(
+      "tab-1",
+      { type: "move", x: 400, y: 260 },
+      "Pick a time",
+    );
+    await settle();
+    expect(jumping.history).toEqual([
+      {
+        x: PAGE.x + 400 - CURSOR.tip.x,
+        y: PAGE.y + 260 - CURSOR.tip.y,
+        width: 160,
+        height: 54,
+      },
+    ]);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it("the person's pointer hides it until a later point", async () => {
+    const { cursor, overlay, page } = setup();
+    const show = async () => {
+      overlay.point("tab-1", { type: "move", x: 300, y: 200 });
+      await settle();
+    };
+    await show();
+    const view = cursor();
+    const touch = (type: string) => {
+      const event = { preventDefault: vi.fn() };
+      view.webContents.emit("before-mouse-event", event, { type });
+      return event;
+    };
+    for (const type of ["mouseEnter", "mouseMove", "mouseDown"]) {
+      await show();
+      expect(view.getVisible()).toBe(true);
+      expect(touch(type).preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.getVisible()).toBe(false);
+      clock.advance(PERSON_HIDE_MS);
+    }
+
+    // The person's own pointer owns the spot for a second: points there are
+    // kept but nothing is drawn.
+    await show();
+    touch("mouseEnter");
+    overlay.point("tab-1", { type: "move", x: 320, y: 220 });
+    await settle();
+    expect(view.getVisible()).toBe(false);
+    clock.advance(PERSON_HIDE_MS);
+    overlay.point("tab-1", { type: "move", x: 340, y: 240 });
+    await settle();
+    expect(view.getVisible()).toBe(true);
+    expect(view.getBounds()).toMatchObject({
+      x: PAGE.x + 340 - CURSOR.tip.x,
+      y: PAGE.y + 240 - CURSOR.tip.y,
+    });
+
+    // Scrolling past is not reaching for the cursor.
+    expect(touch("mouseWheel").preventDefault).not.toHaveBeenCalled();
+    expect(view.getVisible()).toBe(true);
+
+    // A stray click must never leave the person typing into the overlay.
+    view.webContents.emit("focus");
+    expect(view.getVisible()).toBe(false);
+    expect(page.webContents.focus).toHaveBeenCalledTimes(1);
   });
 });

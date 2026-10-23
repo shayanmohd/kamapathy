@@ -11,6 +11,19 @@ export const CURSOR = {
   pill: { x: 30, y: 30, height: 24, maxWidth: 240 },
 } as const;
 
+// How the cursor travels to a new point. A probe asked for 16 ms frames and
+// got 17 to 22 ms, so each frame is placed from the clock, not its number.
+export const GLIDE = {
+  baseMs: 80,
+  perPixelMs: 0.35,
+  maxMs: 220,
+  frameMs: 16,
+} as const;
+/** How long a press plays its ring at the tip. */
+export const PRESS_RING_MS = 300;
+/** How long the person's own pointer keeps the cursor away. */
+export const PERSON_HIDE_MS = 1000;
+
 export interface CursorPoint {
   type: "move" | "press" | "release";
   x: number;
@@ -64,6 +77,15 @@ interface Placement {
   flipX: boolean;
   flipY: boolean;
 }
+interface Timer {
+  unref?(): void;
+}
+interface CursorOptions {
+  page?: { url?: string; file?: string };
+  now?(): number;
+  schedule?(run: () => void, ms: number): Timer;
+  cancel?(timer: unknown): void;
+}
 // The arrow on its own, until the page reports what a label measures.
 const BARE: CursorMetrics = {
   width: CURSOR.size,
@@ -116,6 +138,21 @@ function place(recorded: Recorded, size: CursorMetrics): Placement {
   };
 }
 
+// A glide stays inside the page view its point was taken in, as the
+// placement does, so no frame of it can reach the toolbar or the agent bar.
+function within(
+  bounds: Rectangle,
+  rect: Rectangle,
+  at: { x: number; y: number },
+): { x: number; y: number } {
+  return {
+    x: Math.round(clamp(at.x, bounds.x, bounds.x + bounds.width - rect.width)),
+    y: Math.round(
+      clamp(at.y, bounds.y, bounds.y + bounds.height - rect.height),
+    ),
+  };
+}
+
 function zoomOf(view: WebContentsView): number {
   const zoom = view.webContents.getZoomFactor();
   // A page that reports nothing is drawn as it was written.
@@ -134,11 +171,35 @@ export class CursorOverlay {
   private again = false;
   private sizes = new Map<string, CursorMetrics>();
   private closed = false;
+  // Where the cursor stands, so the next point glides from there.
+  private drawn?: { x: number; y: number };
+  private frame?: Timer;
+  private ringTimer?: Timer;
+  // When the person's own pointer last touched the cursor.
+  private person = -Infinity;
+  // The tab of the last point, kept past a hide so a stray focus can be
+  // handed back to the page below.
+  private lastTab?: string;
+  private now: () => number;
+  private start: (run: () => void, ms: number) => Timer;
+  private stop: (timer: Timer) => void;
 
   constructor(
     private host: CursorHost,
-    private options: { page?: { url?: string; file?: string } } = {},
-  ) {}
+    private options: CursorOptions = {},
+  ) {
+    this.now = options.now ?? (() => Date.now());
+    this.start =
+      options.schedule ??
+      ((run, ms) => {
+        const timer = setTimeout(run, ms) as unknown as Timer;
+        // A cursor in flight never holds the process open.
+        timer.unref?.();
+        return timer;
+      });
+    this.stop =
+      options.cancel ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
+  }
 
   /** A point an agent just dispatched, with the space's active label. Never throws. */
   point(tabId: string, point: CursorPoint, label = ""): void {
@@ -156,6 +217,10 @@ export class CursorOverlay {
         bounds: view.getBounds(),
         zoom: zoomOf(view),
       };
+      this.lastTab = tabId;
+      // The person's own pointer owns the spot for a second: the point is
+      // kept, so one that comes after that draws, but nothing is drawn now.
+      if (this.now() - this.person < PERSON_HIDE_MS) return;
       this.schedule();
     } catch {
       // A page or a window that went away draws nothing.
@@ -166,6 +231,9 @@ export class CursorOverlay {
   /** Hides the cursor and forgets its point. */
   hide(): void {
     this.recorded = undefined;
+    this.drawn = undefined;
+    this.stopGlide();
+    this.stopRing();
     try {
       this.view?.setVisible(false);
     } catch {
@@ -204,6 +272,9 @@ export class CursorOverlay {
   dispose(): void {
     this.closed = true;
     this.recorded = undefined;
+    this.drawn = undefined;
+    this.stopGlide();
+    this.stopRing();
     const view = this.view;
     this.view = undefined;
     if (!view) return;
@@ -253,7 +324,8 @@ export class CursorOverlay {
     await this.loaded;
     const press = recorded.point.type === "press";
     const known = this.sizes.get(recorded.label);
-    let placement = place(recorded, known ?? BARE);
+    let metrics = known ?? BARE;
+    let placement = place(recorded, metrics);
     const update = {
       label: recorded.label,
       press,
@@ -268,6 +340,7 @@ export class CursorOverlay {
       if (this.recorded !== recorded || this.closed) return;
       if (this.sizes.size >= SIZES) this.sizes.clear();
       this.sizes.set(recorded.label, size);
+      metrics = size;
       const measured = place(recorded, size);
       // The pill may have to turn once its real width is known.
       if (
@@ -286,8 +359,96 @@ export class CursorOverlay {
       this.hide();
       return;
     }
-    view.setBounds(placement.rect);
+    this.glide(view, placement.rect, recorded.bounds, metrics.reducedMotion);
+    if (press)
+      this.playRing(view, recorded, {
+        ...update,
+        flipX: placement.flipX,
+        flipY: placement.flipY,
+      });
+    else this.stopRing();
+  }
+
+  // The cursor glides to its point over a time that grows with the distance,
+  // so the person can follow where it went; a page that asks for less motion
+  // is placed once instead.
+  private glide(
+    view: WebContentsView,
+    rect: Rectangle,
+    bounds: Rectangle,
+    jump: boolean,
+  ): void {
+    this.stopGlide();
+    const from = this.drawn;
+    const distance = from ? Math.hypot(rect.x - from.x, rect.y - from.y) : 0;
+    if (!from || jump || distance < 1) {
+      this.draw(view, rect);
+      return;
+    }
+    const duration = Math.min(
+      GLIDE.maxMs,
+      GLIDE.baseMs + GLIDE.perPixelMs * distance,
+    );
+    const started = this.now();
+    const step = () => {
+      this.frame = undefined;
+      try {
+        const part = clamp((this.now() - started) / duration, 0, 1);
+        if (part >= 1) {
+          this.draw(view, rect);
+          return;
+        }
+        // Ease out, so the cursor slows into the point it is naming.
+        const eased = 1 - (1 - part) ** 3;
+        this.draw(view, {
+          ...rect,
+          ...within(bounds, rect, {
+            x: from.x + (rect.x - from.x) * eased,
+            y: from.y + (rect.y - from.y) * eased,
+          }),
+        });
+        this.frame = this.start(step, GLIDE.frameMs);
+      } catch {
+        // A view that went away mid-glide draws nothing more.
+        this.hide();
+      }
+    };
+    // The label the cursor is carrying is shown at once, and travels with it.
+    this.draw(view, { ...rect, ...within(bounds, rect, from) });
+    this.frame = this.start(step, GLIDE.frameMs);
+  }
+
+  private draw(view: WebContentsView, rect: Rectangle): void {
+    view.setBounds(rect);
+    this.drawn = { x: rect.x, y: rect.y };
     view.setVisible(true);
+  }
+
+  // The page animates the ring for its own time; the flag is taken back
+  // after it, so the next press plays it again.
+  private playRing(
+    view: WebContentsView,
+    recorded: Recorded,
+    update: CursorUpdate,
+  ): void {
+    this.stopRing();
+    this.ringTimer = this.start(() => {
+      this.ringTimer = undefined;
+      if (this.recorded !== recorded || this.closed) return;
+      this.send(view, { ...update, press: false }).catch(() => this.hide());
+    }, PRESS_RING_MS);
+  }
+
+  private stopGlide(): void {
+    const frame = this.frame;
+    this.frame = undefined;
+    if (frame) this.stop(frame);
+  }
+
+  private stopRing(): void {
+    const ring = this.ringTimer;
+    this.ringTimer = undefined;
+    if (ring) this.stop(ring);
   }
 
   private async send(
@@ -322,6 +483,28 @@ export class CursorOverlay {
     // Nothing but the file it loads can ever run in this view.
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
     contents.on("will-navigate", (event) => event.preventDefault());
+    // The person's own pointer wins: reaching the cursor takes it away for
+    // a second, and a stray click never leaves them typing into it.
+    contents.on("before-mouse-event", (event, mouse) => {
+      if (
+        mouse.type !== "mouseEnter" &&
+        mouse.type !== "mouseMove" &&
+        mouse.type !== "mouseDown"
+      )
+        return;
+      event.preventDefault();
+      this.person = this.now();
+      this.hide();
+    });
+    contents.on("focus", () => {
+      const tabId = this.recorded?.tabId ?? this.lastTab;
+      this.hide();
+      try {
+        if (tabId) this.host.view(tabId)?.webContents.focus();
+      } catch {
+        // A page that went away keeps no focus.
+      }
+    });
     const page = this.options.page ?? cursorPage();
     this.loaded = (
       page.url ? contents.loadURL(page.url) : contents.loadFile(page.file ?? "")

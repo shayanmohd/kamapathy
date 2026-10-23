@@ -26,13 +26,21 @@ const SIZE = 44;
 const PILL = { x: 30, y: 30, height: 24 };
 
 const pill = document.getElementById("pill")!;
+const ring = document.getElementById("ring")!;
 
 window.kamapathyCursor = (update) => {
   const label = typeof update?.label === "string" ? update.label : "";
   pill.textContent = label;
   const classes = document.body.classList;
   classes.toggle("label", label !== "");
-  classes.toggle("press", update?.press === true);
+  const press = update?.press === true;
+  // A press landing while a ring is still playing starts it over, which a
+  // class that never left would not do.
+  if (press && classes.contains("press")) {
+    classes.remove("press");
+    void ring.getBoundingClientRect().width;
+  }
+  classes.toggle("press", press);
   classes.toggle("flip-x", update?.flipX === true);
   classes.toggle("flip-y", update?.flipY === true);
   const width = label ? pill.getBoundingClientRect().width : 0;
