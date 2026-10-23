@@ -176,6 +176,13 @@ export const ERRORS = {
     ["url"],
     2,
   ),
+  url_opened_in_popup: code(
+    409,
+    false,
+    "The URL opened in a popup this page opened.",
+    ["lastUrl", "popup"],
+    2,
+  ),
   dialog_open: code(409, false, "A JavaScript dialog is open on the page.", [
     "dialog",
     "started",
@@ -304,6 +311,8 @@ export const ERRORS = {
     ...code(504, true, "The condition was not met before the timeout.", [
       "awaited",
       "timeoutMs",
+      "expected",
+      "lastUrl",
     ]),
     override: { status: 408, route: "POST /tabs/:id/wait", action: "wait" },
   },

@@ -28,6 +28,23 @@ const waitUntil = {
   description:
     "commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window.",
 };
+// A URL glob. The main process matches it without backtracking, so a script
+// that needs a RegExp or a predicate watches this page's commits instead.
+const urlGlob = {
+  kind: "string",
+  max: 2048,
+  since: 2,
+  description:
+    "A glob for the whole URL: * inside a path segment, ** across segments, {a,b} for one alternative, a backslash for a literal character.",
+};
+// How long a wait waits for its condition.
+const waitTimeout = {
+  kind: "ms",
+  max: 60000,
+  default: 10000,
+  since: 2,
+  description: "How long to wait. 0 checks once.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -155,6 +172,11 @@ const FIELDS = {
       default: false,
       description: "Fetch the page and its subresources past the cache.",
     },
+  },
+  "wait-for-url": {
+    url: { ...urlGlob, required: true },
+    waitUntil,
+    timeoutMs: waitTimeout,
   },
 };
 
@@ -380,6 +402,26 @@ export const ROUTES = [
     { follow: true, budget: { field: "timeoutMs" }, since: 2 },
   ),
   route(
+    "POST",
+    "/tabs/:id/wait-for-url",
+    "Waits for this page's URL to match a glob, or reports its commits so a script can match them itself.",
+    "{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }",
+    {
+      url: urlGlob,
+      waitUntil,
+      after: {
+        kind: "integer",
+        min: 0,
+        max: 2147483647,
+        since: 2,
+        description:
+          "A navigation count from an earlier answer. Without a url, the wait ends once a later commit exists.",
+      },
+      timeoutMs: waitTimeout,
+    },
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
     "GET",
     "/tabs/:id/info",
     "Reads the viewport, scroll offsets, document size and ready state.",
@@ -552,6 +594,12 @@ export const ACTIONS = [
     summary:
       "Reloads the page and waits for the new document to reach a state.",
     fields: FIELDS.reload,
+    since: 2,
+  },
+  {
+    type: "wait-for-url",
+    summary: "Waits for this page's URL to match a glob.",
+    fields: FIELDS["wait-for-url"],
     since: 2,
   },
 ];

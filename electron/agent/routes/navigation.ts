@@ -3,8 +3,14 @@ import { send, type Run, type RouteDeps, type RouteImpl } from "../http";
 import { createPendingGate, type WaitUntil } from "../navigation/await";
 import { createGo } from "../navigation/go";
 import { createTrackers } from "../navigation/trackers";
+import { createWaits, type UrlWaitBody } from "../navigation/waits";
 import type { AutomationController } from "../server";
-import { navigationFields, reloadFields, type ToolAction } from "../validate";
+import {
+  navigationFields,
+  reloadFields,
+  waitForUrlFields,
+  type ToolAction,
+} from "../validate";
 import { tabView } from "../views";
 
 // The navigation and wait routes, and the batch steps that share their work.
@@ -68,6 +74,7 @@ export function createNavigation(
   const trackers = createTrackers({ controller, sessions });
   const gate = createPendingGate();
   const go = createGo({ ...deps, trackers, gate });
+  const waits = createWaits({ ...deps, trackers, gate });
   // The body a navigate route or step takes, already validated.
   type NavigateBody = {
     url: string;
@@ -100,6 +107,14 @@ export function createNavigation(
             response,
             200,
             await go.reload(tab!.id, reloadFields(body!), run),
+          ),
+      },
+      "POST /tabs/:id/wait-for-url": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await waits.url(tab!.id, waitForUrlFields(body!), run),
           ),
       },
       "GET /tabs/:id/info": {
@@ -143,7 +158,7 @@ export function createNavigation(
         },
       },
     },
-    stepTypes: ["navigate", "reload"],
+    stepTypes: ["navigate", "reload", "wait-for-url"],
     step: async (tabId, action, run) => {
       if (action.type === "navigate") {
         const body = action.payload as NavigateBody;
@@ -156,6 +171,14 @@ export function createNavigation(
       if (action.type === "reload") {
         const body = action.payload as ReloadBody;
         return go.reload(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      if (action.type === "wait-for-url") {
+        const body = action.payload as unknown as UrlWaitBody;
+        return waits.url(
           tabId,
           { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
           run,

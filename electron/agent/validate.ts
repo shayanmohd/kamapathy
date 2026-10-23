@@ -8,6 +8,8 @@ import type { SnapshotOptions } from "../automation-dom";
 import { ApiError, fail } from "./errors";
 import type { Route } from "./http";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
+import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
+import type { UrlWaitBody } from "./navigation/waits";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -39,7 +41,8 @@ export type ToolAction = {
     | "drag"
     | "wait"
     | "navigate"
-    | "reload";
+    | "reload"
+    | "wait-for-url";
   payload: Record<string, unknown>;
 };
 
@@ -132,6 +135,34 @@ export function reloadFields(body: Record<string, unknown>): {
     waitUntil: waitUntilField(body),
     timeoutMs: integerField(body, "timeoutMs", 15000, 1, 60000),
     ignoreCache: booleanField(body, "ignoreCache", false),
+  };
+}
+// The URL wait serves two modes: a glob to match, or a navigation count to
+// watch from. One body never asks for both.
+export function waitForUrlFields(body: Record<string, unknown>): UrlWaitBody {
+  const hasGlob = body.url !== undefined;
+  const watching = body.after !== undefined;
+  if (hasGlob && watching)
+    return fail(
+      "invalid_field",
+      "Give url to match a glob, or after to watch this page's commits, not both.",
+      { field: "after" },
+    );
+  if (!hasGlob && body.waitUntil !== undefined)
+    return fail(
+      "invalid_field",
+      "waitUntil needs a url to match. Watching commits returns as soon as one arrives.",
+      { field: "waitUntil" },
+    );
+  return {
+    ...(hasGlob
+      ? { glob: compileUrlGlob(stringField(body, "url", MAX_GLOB), "url") }
+      : {}),
+    waitUntil: waitUntilField(body),
+    ...(watching
+      ? { after: integerField(body, "after", 0, 0, 2147483647) }
+      : {}),
+    timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
 export function targetFields(
@@ -239,6 +270,16 @@ export function parseToolAction(
   }
   if (type === "navigate") return { type, payload: navigationFields(body) };
   if (type === "reload") return { type, payload: reloadFields(body) };
+  if (type === "wait-for-url") {
+    const fields = waitForUrlFields(body);
+    // A step matches a glob; watching commits belongs to the route, which a
+    // client loop calls with its own matcher.
+    if (!fields.glob)
+      return fail("invalid_field", "A wait-for-url step needs a url glob.", {
+        field: "url",
+      });
+    return { type, payload: { ...fields } };
+  }
   if (type === "wait")
     return {
       type,

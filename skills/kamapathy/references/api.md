@@ -561,6 +561,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/navigate` | `url`, `waitUntil?`, `timeoutMs?`, `referer?` | Loads a URL in the tab and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
 | POST | `/tabs/:id/reload` | `waitUntil?`, `timeoutMs?`, `ignoreCache?` | Reloads the page and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
+| POST | `/tabs/:id/wait-for-url` | `url?`, `waitUntil?`, `after?`, `timeoutMs?` | Waits for this page's URL to match a glob, or reports its commits so a script can match them itself. Returns `{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
@@ -614,6 +615,7 @@ Show the commands, or help on one
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
 | `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
 | `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
+| `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |
@@ -645,7 +647,7 @@ Show the commands, or help on one
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |
 | `request_too_large` | client | not retryable |  | The encoded request is larger than its route accepts. |

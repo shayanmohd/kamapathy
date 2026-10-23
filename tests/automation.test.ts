@@ -1792,6 +1792,317 @@ describe("local automation socket", () => {
     expect(controller.contents.reloads).toEqual([]);
   });
 
+  const sleep = (milliseconds: number) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds));
+  // A URL wait and its answer.
+  const waitForUrl = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/wait-for-url`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // A URL wait that is listening, so the page's own events reach it.
+  const waiting = async (tabId: string, body: Record<string, unknown>) => {
+    const done = waitForUrl(tabId, body);
+    await sleep(25);
+    return { done };
+  };
+
+  it("match mode tests the URL at entry and on every commit", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // The page is already at https://example.com/, so this glob answers at once.
+    const entry = await waitForUrl(tab.id, {
+      url: "https://example.com/*",
+      waitUntil: "commit",
+    });
+    expect(entry.status).toBe(200);
+    expect(await entry.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, managed: true }),
+      url: "https://example.com/",
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent observed a page condition",
+    });
+    // A glob that matches only the second commit answers on that commit.
+    const { done: pending } = await waiting(tab.id, {
+      url: "https://example.com/step/{two,three}",
+      waitUntil: "commit",
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/step/one");
+    first.commit("https://example.com/step/one");
+    await sleep(150);
+    expect(settled).toBe(false);
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/step/two");
+    second.commit("https://example.com/step/two");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      url: "https://example.com/step/two",
+    });
+    // The batch step takes the same glob.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "wait-for-url", url: "https://example.com/step/*", waitUntil: "commit" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(await batch.json()).toMatchObject({
+      ok: true,
+      results: [
+        {
+          index: 0,
+          type: "wait-for-url",
+          result: { ok: true, url: "https://example.com/step/two" },
+        },
+      ],
+    });
+  });
+
+  it("match mode then waits for the load state within the same deadline", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { done: pending } = await waiting(tab.id, {
+      url: "https://example.com/done",
+      waitUntil: "load",
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/done");
+    frame.commit("https://example.com/done");
+    await sleep(150);
+    // The URL matched, so only the load event is still missing.
+    expect(settled).toBe(false);
+    frame.lifecycle("load");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      url: "https://example.com/done",
+    });
+    // A load state that runs out after the match is the load state's timeout.
+    const { done: slow } = await waiting(tab.id, {
+      url: "https://example.com/slow",
+      waitUntil: "load",
+      timeoutMs: 300,
+    });
+    const next = mainFrame(page, "loader-3");
+    next.start("https://example.com/slow");
+    next.commit("https://example.com/slow");
+    const timedOut = await failure(await slow);
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toMatchObject({
+      code: "wait_timeout",
+      message:
+        "The page did not reach load within 300 ms. It is at https://example.com/slow with readyState loading.",
+      awaited: "load_state",
+      timeoutMs: 300,
+      state: "load",
+      url: "https://example.com/slow",
+      readyState: "loading",
+    });
+  });
+
+  it("a match in a popup from this page ends the wait", async () => {
+    const { tab } = await createPage();
+    // The popup opens while the wait runs, so it is a candidate.
+    const { done: pending } = await waiting(tab.id, {
+      url: "https://pay.example/**",
+      waitUntil: "commit",
+      timeoutMs: 5000,
+    });
+    const popup = controller.openPopup(tab.id, "https://pay.example/checkout");
+    const failed = await failure(await pending);
+    expect(failed.status).toBe(409);
+    expect(failed.error).toEqual({
+      code: "url_opened_in_popup",
+      message: `${tab.label} stayed at https://example.com/, but popup ${popup.label} opened from it at https://pay.example/checkout. The action already happened, so do not repeat it. Continue in ${popup.label}.`,
+      lastUrl: "https://example.com/",
+      popup: {
+        id: popup.id,
+        label: popup.label,
+        url: "https://pay.example/checkout",
+      },
+    });
+  });
+
+  it("watch mode answers the commit log and the popups", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const first = await waitForUrl(tab.id, {});
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      url: "https://example.com/",
+      navigation: 0,
+      committed: [],
+      popups: [],
+    });
+    // With after it waits for a later commit, then lists it.
+    const { done: pending } = await waiting(tab.id, {
+      after: 0,
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await sleep(150);
+    expect(settled).toBe(false);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/a");
+    frame.commit("https://example.com/a");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      url: "https://example.com/a",
+      navigation: 1,
+      committed: [{ navigation: 1, url: "https://example.com/a" }],
+      popups: [],
+    });
+    // 34 more commits push the oldest out of the log of 32.
+    for (let step = 2; step <= 35; step += 1) {
+      const later = mainFrame(page, `loader-${step + 1}`);
+      later.start(`https://example.com/${step}`);
+      later.commit(`https://example.com/${step}`);
+    }
+    const kept = await (await waitForUrl(tab.id, { after: 34 })).json();
+    expect(kept).toMatchObject({
+      navigation: 35,
+      committed: [{ navigation: 35, url: "https://example.com/35" }],
+    });
+    expect(kept.missed).toBeUndefined();
+    const dropped = await (await waitForUrl(tab.id, { after: 1 })).json();
+    expect(dropped.missed).toBe(true);
+    expect(dropped.committed).toHaveLength(32);
+    expect(dropped.committed[0]).toEqual({
+      navigation: 4,
+      url: "https://example.com/4",
+    });
+    expect(dropped.committed.at(-1)).toEqual({
+      navigation: 35,
+      url: "https://example.com/35",
+    });
+  });
+
+  it("a URL wait times out with its fields", async () => {
+    const { tab } = await createPage();
+    const timedOut = await failure(
+      await waitForUrl(tab.id, {
+        url: "https://example.com/never",
+        waitUntil: "commit",
+        timeoutMs: 150,
+      }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toEqual({
+      code: "wait_timeout",
+      message:
+        "The page did not reach a URL matching https://example.com/never within 150 ms. It is at https://example.com/.",
+      awaited: "url",
+      timeoutMs: 150,
+      expected: "https://example.com/never",
+      lastUrl: "https://example.com/",
+      retryable: true,
+    });
+    // Zero checks once: a match answers, anything else times out at once.
+    const once = await waitForUrl(tab.id, {
+      url: "https://example.com/",
+      waitUntil: "commit",
+      timeoutMs: 0,
+    });
+    expect(once.status).toBe(200);
+    const missed = await failure(
+      await waitForUrl(tab.id, { url: "https://other.example/", timeoutMs: 0 }),
+    );
+    expect(missed.status).toBe(504);
+    expect(missed.error).toMatchObject({ awaited: "url", timeoutMs: 0 });
+  });
+
+  it("a malformed glob and a bad field are refused before the lane", async () => {
+    const { tab } = await createPage();
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/wait-for-url`, "POST", body));
+    const nested = await refuse({ url: "https://a.test/{a,{b}}" });
+    expect(nested.status).toBe(400);
+    expect(nested.error).toMatchObject({
+      code: "invalid_field",
+      field: "url",
+      message: "Braces in a URL glob hold one level of alternatives, such as {a,b}.",
+    });
+    const trailing = await refuse({ url: "https://a.test/a\\" });
+    expect(trailing.error).toMatchObject({
+      code: "invalid_field",
+      field: "url",
+      message: "A URL glob cannot end with a backslash.",
+    });
+    for (const [body, field] of [
+      [{ timeoutMs: 60001 }, "timeoutMs"],
+      [{ url: "https://a.test/*", after: 1 }, "after"],
+      [{ waitUntil: "load" }, "waitUntil"],
+      [{ after: -1 }, "after"],
+    ] as const) {
+      const { status, error } = await refuse(body);
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    // A step takes a glob only, so watch mode's field is not one of its own.
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "wait-for-url", after: 1 }],
+      }),
+    );
+    expect(step.status).toBe(400);
+    expect(step.error).toMatchObject({ code: "unknown_field", field: "after" });
+    // Nothing reached the page.
+    expect(controller.contents.scripts).toEqual([]);
+  });
+
+  it("a URL wait yields its lane and ends on a takeover", async () => {
+    const { space, tab } = await createPage();
+    const { done: pending } = await waiting(tab.id, {
+      url: "https://example.com/never",
+      waitUntil: "commit",
+      timeoutMs: 60000,
+    });
+    // The wait sleeps outside its space lane, so another request runs.
+    const snapshot = await request(`/tabs/${tab.id}/snapshot`);
+    expect(snapshot.status).toBe(200);
+    expect((await snapshot.json()).text).toBe("Hello from the agent page");
+    const started = Date.now();
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const taken = await failure(await pending);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(taken.status).toBe(409);
+    expect(taken.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+    });
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -2436,6 +2747,7 @@ describe("local automation socket", () => {
       "POST /spaces/:id/tabs": { url: "https://example.com/" },
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
       "POST /tabs/:id/reload": {},
+      "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },
