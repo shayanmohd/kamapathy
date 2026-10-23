@@ -565,6 +565,30 @@ export const ROUTES = [
     { lane: "none", since: 2 },
   ),
   route(
+    "POST",
+    "/downloads/:id/wait",
+    "Waits until the download stops running, outside the space's queue. Ask again to keep waiting.",
+    "{ download: { id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure } }",
+    {
+      timeoutMs: {
+        kind: "ms",
+        min: 1,
+        max: 60000,
+        default: 30000,
+        description: "How long to wait for the download to finish.",
+      },
+    },
+    { lane: "none", budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "GET",
+    "/downloads/:id/content",
+    "Reads a finished download's bytes over the socket. The connection drops if the space leaves the agent while it streams.",
+    "application/octet-stream with Content-Length, Cache-Control: no-store and X-Content-Type-Options: nosniff",
+    null,
+    { lane: "none", budget: 60000, since: 2 },
+  ),
+  route(
     "GET",
     "/tabs/:id/popups",
     "Lists the open pages this page opened, with the ones nothing has reported yet marked unseen.",

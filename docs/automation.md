@@ -309,6 +309,8 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | GET | `/downloads/:id` |  | Reads one held download and how far it has come. Returns `{ download: { id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure } }`. |
 | POST | `/downloads/:id/cancel` | `{}` | Stops a download that is still running. A finished one is left as it is. Returns `{ download: { id, state, receivedBytes, totalBytes, failure } }`. |
 | DELETE | `/downloads/:id` |  | Deletes the download's bytes from the browser's profile. Returns `{ ok: true }`. |
+| POST | `/downloads/:id/wait` | `timeoutMs?` | Waits until the download stops running, outside the space's queue. Ask again to keep waiting. Returns `{ download: { id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure } }`. |
+| GET | `/downloads/:id/content` |  | Reads a finished download's bytes over the socket. The connection drops if the space leaves the agent while it streams. Returns `application/octet-stream with Content-Length, Cache-Control: no-store and X-Content-Type-Options: nosniff`. |
 | GET | `/tabs/:id/popups` |  | Lists the open pages this page opened, with the ones nothing has reported yet marked unseen. Returns `{ popups: [{ id, label, url, openedAt, unseen? }] }`. |
 <!-- /generated:routes -->
 
@@ -361,6 +363,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
 | `expectation_pending` | 409 | not retryable | `event`, `expectationId` | The page already waits for that event. |
 | `download_limit` | 409 | not retryable | `limit` | The space already holds its most downloads. Delete one before arming another. |
+| `download_not_finished` | 409 | not retryable | `state`, `receivedBytes`, `totalBytes` | The download is still running, so it has no bytes to read yet. |
+| `download_failed` | 409 | not retryable | `failure` | The download was cancelled or broke off, so it has no bytes to read. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
 | `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
@@ -397,6 +401,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
+| `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |

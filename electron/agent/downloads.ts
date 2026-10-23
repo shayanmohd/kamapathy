@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { Tab } from "../../shared/types";
 import { activeSpace } from "./authority";
-import { fail } from "./errors";
+import { ApiError, fail } from "./errors";
 import type { Expectations } from "./expectations";
+import type { Run } from "./http";
 import type { AutomationController } from "./server";
 import type { TabLog } from "./tab-log";
 
@@ -16,7 +18,27 @@ export const DOWNLOAD_TTL_MS = 3_600_000;
 export const ARM_LIFETIME_MS = 60_000;
 /** The folder under the profile that every held download lives in. */
 export const DOWNLOAD_FOLDER = "agent-downloads";
+/** Byte streams running at once, across every space. */
+export const STREAM_LIMIT = 4;
+/** How long a wait runs when the request names no timeout. */
+export const WAIT_POLL_MS = 30_000;
+/** How much of a download is read, and ownership rechecked, at a time. */
+export const DOWNLOAD_CHUNK_BYTES = 1024 * 1024;
 const MAX_FILENAME = 200;
+
+// One budget for every byte stream, so four readers are all the socket
+// serves at once. Undefined means the budget is full.
+let streams = 0;
+function takeStreamSlot(): (() => void) | undefined {
+  if (streams >= STREAM_LIMIT) return undefined;
+  streams += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    streams -= 1;
+  };
+}
 
 export type DownloadState =
   "progressing" | "completed" | "cancelled" | "interrupted";
@@ -102,6 +124,22 @@ export interface Downloads {
   lastDecision(
     tabId: string,
   ): { armed: boolean; downloadId?: string } | undefined;
+  /** Resolves once the state leaves "progressing", or at the deadline.
+   *  Answers undefined once the client has gone, which needs no body. */
+  wait(
+    id: string,
+    timeoutMs: number,
+    run: Run,
+  ): Promise<AgentDownload | undefined>;
+  /** A read handle for a finished download. Throws the 409 codes otherwise. */
+  open(id: string): {
+    bytes: number;
+    read(
+      onChunk: (chunk: Buffer) => boolean | void | Promise<boolean | void>,
+    ): Promise<void>;
+  };
+  /** A stream slot, or undefined when four are open. */
+  takeStreamSlot(): (() => void) | undefined;
 }
 
 // A held download: its record, the Electron item while it runs, whether the
@@ -112,6 +150,12 @@ interface Held {
   folder: string;
   tooLarge?: boolean;
   timer?: ReturnType<typeof setTimeout>;
+  waiters?: Set<Waiter>;
+}
+// A long poll listening for the end of one download.
+interface Waiter {
+  resolve(record: AgentDownload): void;
+  reject(error: unknown): void;
 }
 
 /** The name a download is saved under: a base name, without control
@@ -170,6 +214,14 @@ export function createDownloads(deps: {
   };
   const limitReached = (spaceId: string) =>
     count(spaceId) >= SPACE_DOWNLOAD_LIMIT;
+  const notFound = () =>
+    new ApiError("download_not_found", "No held download has this ID.");
+  // Every wait on a download that has stopped running answers with its
+  // record, whether it completed, was cancelled or broke off.
+  const wake = (entry: Held) => {
+    if (entry.record.state === "progressing" || !entry.waiters) return;
+    for (const waiter of [...entry.waiters]) waiter.resolve(entry.record);
+  };
   // The one-shot arm this download belongs to: the same tab, the same URL
   // when the arm names one, while the agent still has the tab.
   const oneShotFor = (tabId: string, url: string) => {
@@ -201,6 +253,8 @@ export function createDownloads(deps: {
     if (!entry) return;
     held.delete(id);
     if (entry.timer) clearTimeout(entry.timer);
+    // A download whose bytes are going is gone, not finished.
+    for (const waiter of [...(entry.waiters ?? [])]) waiter.reject(notFound());
     if (entry.record.state === "progressing")
       try {
         entry.item?.cancel();
@@ -291,6 +345,7 @@ export function createDownloads(deps: {
         record.totalBytes = item.getTotalBytes();
         if (state === "interrupted") record.state = "interrupted";
         enforceCap(entry);
+        wake(entry);
       });
       item.once("done", (_event, state) => {
         // A download deleted while it ran keeps nothing: its own cancel
@@ -320,6 +375,7 @@ export function createDownloads(deps: {
             "success",
           );
         entry.timer = setTimeout(() => downloads.remove(id), DOWNLOAD_TTL_MS);
+        wake(entry);
       });
       enforceCap(entry);
       decisions.set(tab.id, { armed: true, downloadId: id });
@@ -359,8 +415,7 @@ export function createDownloads(deps: {
         .sort((first, second) => second.startedAt - first.startedAt),
     cancel(id) {
       const entry = held.get(id);
-      if (!entry)
-        return fail("download_not_found", "No held download has this ID.");
+      if (!entry) throw notFound();
       // Once it has finished there is nothing to stop.
       if (entry.record.state === "progressing")
         try {
@@ -389,6 +444,112 @@ export function createDownloads(deps: {
     },
     count,
     lastDecision: (tabId) => decisions.get(tabId),
+    wait(id, timeoutMs, run) {
+      return new Promise<AgentDownload | undefined>((resolve, reject) => {
+        const entry = held.get(id);
+        if (!entry) return reject(notFound());
+        // One that has already stopped answers at once.
+        if (entry.record.state !== "progressing") return resolve(entry.record);
+        if (run.signal.aborted) return resolve(undefined);
+        const waiters = (entry.waiters ??= new Set());
+        const stop = () => {
+          clearTimeout(timer);
+          run.signal.removeEventListener("abort", dropped);
+          waiters.delete(waiter);
+        };
+        const waiter: Waiter = {
+          resolve: (record) => {
+            stop();
+            resolve(record);
+          },
+          reject: (error) => {
+            stop();
+            reject(error);
+          },
+        };
+        // The client went away, so there is nothing to answer.
+        const dropped = () => {
+          stop();
+          resolve(undefined);
+        };
+        // The deadline names the bytes so far, so a client can simply ask
+        // again; the download itself keeps running.
+        const timer = setTimeout(() => {
+          const { receivedBytes, totalBytes } = entry.record;
+          waiter.reject(
+            new ApiError(
+              "download_timeout",
+              `This download is still running after ${timeoutMs} ms. Ask again to keep waiting.`,
+              {
+                awaited: "download",
+                downloadId: id,
+                receivedBytes,
+                totalBytes,
+                timeoutMs,
+              },
+            ),
+          );
+        }, timeoutMs);
+        run.signal.addEventListener("abort", dropped);
+        waiters.add(waiter);
+      });
+    },
+    open(id) {
+      const entry = held.get(id);
+      if (!entry) throw notFound();
+      const { record } = entry;
+      if (record.state === "progressing")
+        fail(
+          "download_not_finished",
+          "This download is still running. Wait for it before reading its bytes.",
+          {
+            state: record.state,
+            receivedBytes: record.receivedBytes,
+            totalBytes: record.totalBytes,
+          },
+        );
+      const failure = record.failure ?? record.state;
+      if (record.state !== "completed")
+        fail(
+          "download_failed",
+          `This download ended as ${failure}, so it has no bytes to read.`,
+          { failure },
+        );
+      const stat = statSync(record.path, { throwIfNoEntry: false });
+      if (!stat) throw notFound();
+      const bytes = stat.size;
+      return {
+        bytes,
+        // A MiB at a time, so the reader can check after each one that the
+        // space is still the agent's. A download deleted meanwhile stops
+        // the read the same way.
+        async read(onChunk) {
+          const file = await openFile(record.path, "r");
+          try {
+            let position = 0;
+            while (position < bytes) {
+              if (held.get(id) !== entry) return;
+              const buffer = Buffer.allocUnsafe(
+                Math.min(DOWNLOAD_CHUNK_BYTES, bytes - position),
+              );
+              const { bytesRead } = await file.read(
+                buffer,
+                0,
+                buffer.length,
+                position,
+              );
+              if (!bytesRead) return;
+              position += bytesRead;
+              if ((await onChunk(buffer.subarray(0, bytesRead))) === false)
+                return;
+            }
+          } finally {
+            await file.close();
+          }
+        },
+      };
+    },
+    takeStreamSlot,
   };
 
   // A space that closes, or whose access ends, keeps nothing: its files go

@@ -6,6 +6,7 @@ import {
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { SnapshotOptions } from "../automation-dom";
 import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
+import { WAIT_POLL_MS } from "./downloads";
 import { ApiError, fail } from "./errors";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
@@ -271,6 +272,11 @@ export function dialogPolicyFields(
     times: integerField(body, "times", 1, 1, 20),
     lifetimeMs: integerField(body, "lifetimeMs", 60000, 1000, 600000),
   };
+}
+export function downloadWaitFields(body: Record<string, unknown>): {
+  timeoutMs: number;
+} {
+  return { timeoutMs: integerField(body, "timeoutMs", WAIT_POLL_MS, 1, 60000) };
 }
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);

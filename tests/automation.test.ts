@@ -1,5 +1,5 @@
-import { statSync } from "node:fs";
-import { request as httpRequest } from "node:http";
+import { statSync, writeFileSync } from "node:fs";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { takeWaitSlot } from "../electron/agent/expectations";
 import {
@@ -64,6 +64,28 @@ describe("local automation socket", () => {
       );
       client.once("error", reject);
       client.flushHeaders();
+    });
+  // A byte stream the client does not read, so the handler stays open on
+  // its first chunk and keeps its stream slot.
+  const stall = (path: string) =>
+    new Promise<{
+      response: IncomingMessage;
+      client: ReturnType<typeof httpRequest>;
+    }>((resolve, reject) => {
+      const client = httpRequest(
+        {
+          socketPath: socket.path,
+          path,
+          agent: false,
+          headers: { Host: "kamapathy" },
+        },
+        (response) => {
+          response.pause();
+          resolve({ response, client });
+        },
+      );
+      client.once("error", reject);
+      client.end();
     });
   const createSpace = async () =>
     (await (await request("/spaces", "POST", { name: "Research" })).json())
@@ -2209,6 +2231,7 @@ describe("local automation socket", () => {
       "POST /expectations/:id/wait": {},
       "POST /tabs/:id/dialog-policy": { accept: false },
       "POST /downloads/:id/cancel": {},
+      "POST /downloads/:id/wait": { timeoutMs: 1000 },
     };
     // A wait names its arm, and a cancel its download, not a space or a tab.
     const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
@@ -2612,6 +2635,116 @@ describe("local automation socket", () => {
     expect(
       (await (await request(`/spaces/${space.id}/downloads`)).json()).downloads,
     ).toEqual([]);
+  });
+
+  it("the content route answers 409 download_not_finished, 409 download_failed and 429 busy past four streams, and the wait route 429 busy past the shared wait cap", async () => {
+    const { tab } = await createPage();
+    // An armed download of this tab, as the controller's handler delivers it.
+    const capture = async (filename: string) => {
+      expect(
+        (
+          await request(`/tabs/${tab.id}/expectations`, "POST", {
+            event: "download",
+          })
+        ).status,
+      ).toBe(201);
+      const item = new FakeDownloadItem({ filename });
+      const decision = controller.startDownload(tab.id, item);
+      expect(decision.captured).toBe(true);
+      return { id: (decision as { id: string }).id, item };
+    };
+    const { id, item } = await capture("report.bin");
+    item.progress(5);
+    const running = await request(`/downloads/${id}/content`);
+    expect(running.status).toBe(409);
+    expect(await running.json()).toEqual({
+      error: {
+        code: "download_not_finished",
+        message: expect.stringContaining("still running"),
+        state: "progressing",
+        receivedBytes: 5,
+        totalBytes: 0,
+      },
+    });
+    item.finish("interrupted", 5);
+    const failed = await request(`/downloads/${id}/content`);
+    expect(failed.status).toBe(409);
+    expect((await failed.json()).error).toMatchObject({
+      code: "download_failed",
+      failure: "interrupted",
+    });
+
+    // Four byte streams are all the socket serves at once.
+    const payload = Buffer.alloc(2 * 1024 * 1024, 7);
+    const open: Awaited<ReturnType<typeof stall>>[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const stream = await capture(`file-${index}.bin`);
+      writeFileSync(stream.item.savePath, payload);
+      stream.item.finish("completed", payload.length);
+      open.push(await stall(`/downloads/${stream.id}/content`));
+    }
+    const refused = await request(`/downloads/${id}/content`);
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("4"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    // The first stream carries the whole file and names no file of this
+    // machine.
+    const first = open[0].response;
+    expect(first.statusCode).toBe(200);
+    expect(first.headers["content-type"]).toBe("application/octet-stream");
+    expect(first.headers["content-length"]).toBe(String(payload.length));
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.headers["x-content-type-options"]).toBe("nosniff");
+    expect(Object.keys(first.headers)).not.toContain("content-disposition");
+    const chunks: Buffer[] = [];
+    first.on("data", (chunk: Buffer) => chunks.push(chunk));
+    first.resume();
+    await new Promise((resolve) => first.once("end", resolve));
+    expect(Buffer.concat(chunks).equals(payload)).toBe(true);
+    // A client that goes away mid-stream gives its slot back.
+    for (const stream of open.slice(1)) stream.client.destroy();
+    await expect
+      .poll(async () => (await request(`/downloads/${id}/content`)).status)
+      .toBe(409);
+
+    // A download wait takes one of the sixteen slots every long poll shares.
+    const releases: (() => void)[] = [];
+    for (let release = takeWaitSlot(); release; release = takeWaitSlot())
+      releases.push(release);
+    const busy = await request(`/downloads/${id}/wait`, "POST", {});
+    expect(busy.status).toBe(429);
+    expect(await busy.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("16"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    for (const release of releases) release();
+    // One that has already stopped answers its wait at once.
+    const answered = await request(`/downloads/${id}/wait`, "POST", {
+      timeoutMs: 1000,
+    });
+    expect(answered.status).toBe(200);
+    expect((await answered.json()).download).toMatchObject({
+      id,
+      state: "interrupted",
+      failure: "interrupted",
+    });
+    const invalid = await request(`/downloads/${id}/wait`, "POST", {
+      timeoutMs: 0,
+    });
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()).error).toMatchObject({
+      code: "invalid_field",
+    });
   });
 
 });

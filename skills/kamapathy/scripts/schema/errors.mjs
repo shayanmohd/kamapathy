@@ -167,6 +167,20 @@ export const ERRORS = {
     ["limit"],
     2,
   ),
+  download_not_finished: code(
+    409,
+    false,
+    "The download is still running, so it has no bytes to read yet.",
+    ["state", "receivedBytes", "totalBytes"],
+    2,
+  ),
+  download_failed: code(
+    409,
+    false,
+    "The download was cancelled or broke off, so it has no bytes to read.",
+    ["failure"],
+    2,
+  ),
   tab_limit: code(409, false, "The space already has its most tabs."),
   space_limit: code(409, false, "The API already manages its most spaces."),
   screenshot_unavailable: code(
@@ -279,6 +293,13 @@ export const ERRORS = {
     false,
     "No popup, download, file chooser or dialog arrived before the arm ran out.",
     ["awaited", "event", "timeoutMs"],
+    2,
+  ),
+  download_timeout: code(
+    504,
+    true,
+    "The download is still running. Asking again keeps waiting for it.",
+    ["awaited", "downloadId", "receivedBytes", "totalBytes", "timeoutMs"],
     2,
   ),
   wait_timeout: {
