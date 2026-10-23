@@ -43,6 +43,7 @@ import type {
   SpaceRequest,
   Tab,
 } from "../shared/types";
+import { CursorOverlay, type CursorPoint } from "./agent/cursor";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
 
@@ -170,6 +171,7 @@ export class BrowserController {
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  private overlay: CursorOverlay;
 
   constructor(
     readonly window: BrowserWindow,
@@ -181,6 +183,11 @@ export class BrowserController {
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
     nativeTheme.themeSource = state.settings.theme;
+    this.overlay = new CursorOverlay({
+      window,
+      view: (tabId) => this.views.get(tabId),
+      shows: (tabId) => this.cursorShows(tabId),
+    });
     this.bindShortcuts(window.webContents);
     window.on("resize", () => this.layout());
     this.layout();
@@ -363,6 +370,37 @@ export class BrowserController {
         });
       }
     }
+    this.overlay.refresh();
+  }
+
+  // Where the agent's cursor may show: over the page the person is looking
+  // at, in a space an agent is working in, with the window in front of them.
+  // A view lent to the capture window is not on this window's screen; the
+  // capture host adds that check here.
+  private cursorShows(tabId: string): boolean {
+    // The window test a capture needs is this one: it exists, it is on
+    // screen and it is not minimized.
+    if (this.destroyed || !this.canCapturePage() || this.frozen) return false;
+    if (!this.state.settings.automationEnabled) return false;
+    const area = this.contentArea();
+    if (area.hidden || area.width <= 0 || area.height <= 0) return false;
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    const space =
+      tab && this.state.spaces.find((item) => item.id === tab.spaceId);
+    if (
+      !space ||
+      space.id !== this.state.activeSpaceId ||
+      !agentRules(space) ||
+      space.access === "ended" ||
+      space.owner !== "agent"
+    )
+      return false;
+    return this.views.get(tabId)?.getVisible() === true;
+  }
+
+  /** The agent dispatched input at this point. Never throws. */
+  reportPointer(tabId: string, point: CursorPoint, label?: string): void {
+    this.overlay.point(tabId, point, label);
   }
 
   private getSpace(id: string): Space {
@@ -833,6 +871,8 @@ export class BrowserController {
         });
     this.views.set(tab.id, view);
     this.window.contentView.addChildView(view);
+    // A page view joins the window on top, so the cursor goes back above it.
+    this.overlay.raise();
     // An agent page is made at the size the content area has now, so a page
     // the person is not looking at reports the viewport it will have when
     // they are, and a first reveal does not reflow it. Without an area to
@@ -2047,6 +2087,7 @@ export class BrowserController {
     clearTimeout(this.saveTimer);
     this.persist();
     this.destroyed = true;
+    this.overlay.dispose();
     for (const id of this.views.keys()) this.destroyTab(id);
     for (const cleanup of this.sessionCleanups.values()) cleanup();
     this.sessionCleanups.clear();

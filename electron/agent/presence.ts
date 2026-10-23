@@ -1,5 +1,6 @@
 import type { AgentTask, Space } from "../../shared/types";
 import type { Authority } from "./authority";
+import type { CursorPoint } from "./cursor";
 import type { AutomationController } from "./server";
 
 // What the person sees of an agent's work in a space: its status, how its
@@ -25,6 +26,8 @@ export interface AgentPresence {
   labelStart(spaceId: string, label?: string): void;
   /** It ended: the label stays visible for five seconds. */
   labelEnd(spaceId: string): void;
+  /** Section 5's dispatcher reports every pointer event here. Never awaits or throws. */
+  pointer(tabId: string, point: CursorPoint): void;
   /** Reveals the route's page before its first page step. Never throws. */
   follow(
     tabId: string,
@@ -163,6 +166,20 @@ export function createPresence({
       // running ends its own label.
       if (!label?.active) return;
       write(spaceId, { label: { text: label.text, active: false, at: now() } });
+    },
+    pointer(tabId, point) {
+      try {
+        const tab = controller.state.tabs.find((item) => item.id === tabId);
+        // The cursor carries the label of the action it is drawing.
+        const label = tab && spaceOf(tab.spaceId)?.task?.label;
+        controller.reportPointer(
+          tabId,
+          point,
+          label?.active ? label.text : undefined,
+        );
+      } catch {
+        // Drawing the cursor never costs an action its result.
+      }
     },
     async follow(tabId, step) {
       // A request whose client is gone reveals nothing.

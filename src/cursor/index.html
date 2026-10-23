@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'"
+    />
+    <title>Agent cursor</title>
+    <link rel="stylesheet" href="./cursor.css" />
+  </head>
+  <body>
+    <span id="ring"></span>
+    <svg id="arrow" viewBox="0 0 28 28" aria-hidden="true">
+      <path
+        d="M14 14 L14 24.5 L17 21.7 L19 26 L21 25.2 L19 20.9 L23.2 20.9 Z"
+      />
+    </svg>
+    <span id="pill"></span>
+    <script type="module" src="./cursor.ts"></script>
+  </body>
+</html>

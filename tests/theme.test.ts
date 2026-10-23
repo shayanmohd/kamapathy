@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { surfaceColor } from "../shared/theme";
+import { accentColor, surfaceColor } from "../shared/theme";
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 function tokens(selector: string): Record<string, string> {
@@ -116,6 +116,36 @@ describe("agent text", () => {
       uses.filter(
         ({ element, live }) => live || !["p", "span"].includes(element),
       ),
+    ).toEqual([]);
+  });
+});
+
+describe("agent cursor", () => {
+  it("the cursor uses the accent tokens", () => {
+    expect(accentColor.light).toBe(tokens(":root").accent);
+    expect(accentColor.dark).toBe(tokens(':root[data-theme="dark"]').accent);
+    // The cursor page is outside the shell, so it carries the same two
+    // palettes itself and follows the system theme.
+    const cursorCss = readFileSync(
+      new URL("../src/cursor/cursor.css", import.meta.url),
+      "utf8",
+    );
+    const palette: string[] = [
+      accentColor.light,
+      accentColor.dark,
+      surfaceColor.light,
+      surfaceColor.dark,
+    ];
+    const colours = cursorCss.match(/#[0-9a-f]{3,8}\b/gi) ?? [];
+    expect(colours.length).toBeGreaterThan(0);
+    expect(colours.filter((colour) => !palette.includes(colour))).toEqual([]);
+    expect(cursorCss).toContain("prefers-color-scheme: dark");
+    const used = [...cursorCss.matchAll(/var\(--([a-z-]+)\)/g)].map(
+      (match) => match[1],
+    );
+    expect(used).toContain("accent");
+    expect(
+      used.filter((name) => !["accent", "surface"].includes(name)),
     ).toEqual([]);
   });
 });

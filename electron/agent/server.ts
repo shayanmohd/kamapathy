@@ -14,6 +14,7 @@ import type {
 } from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
+import type { CursorPoint } from "./cursor";
 import { activeSpace, createAuthority } from "./authority";
 import { envelope, fail } from "./errors";
 import {
@@ -80,6 +81,8 @@ export interface AutomationController {
    * active space, the window and keyboard focus never change.
    */
   showAgentTab(tabId: string): Promise<void>;
+  /** Draws the agent's cursor at a point it just dispatched. Never throws. */
+  reportPointer(tabId: string, point: CursorPoint, label?: string): void;
   /** A managed agent tab in the background; a blank page without url. */
   openAgentTab(spaceId: string, url?: string): Tab;
   /** Retires the tab's label; a space left empty gets a blank tab. */

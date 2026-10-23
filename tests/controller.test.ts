@@ -72,6 +72,16 @@ class FakeContents extends EventEmitter {
   focus = () => this.emit("focus");
   isDestroyed = () => this.destroyed;
   getURL = () => this.url;
+  // Only the cursor page is loaded from a file, and only it is scripted.
+  loadFile = vi.fn(async (file: string) => {
+    this.url = `file://${file}`;
+  });
+  executeJavaScript = vi.fn(async () => ({
+    width: 44,
+    height: 44,
+    reducedMotion: false,
+  }));
+  getZoomFactor = () => 1.2 ** this.zoom;
   getZoomLevel = () => this.zoom;
   setZoomLevel = (value: number) => {
     this.zoom = value;
@@ -117,6 +127,7 @@ class FakeView {
   setBounds(value: typeof this.bounds) {
     this.bounds = value;
   }
+  setBackgroundColor = vi.fn();
   setBorderRadius = vi.fn();
   getVisible() {
     return this.visible;
@@ -181,10 +192,25 @@ function preferencesOf(page: FakeContents) {
 function windowOf(browser: BrowserController) {
   return (
     browser as unknown as {
-      window: { contentView: { removeChildView: ReturnType<typeof vi.fn> } };
+      window: {
+        contentView: {
+          addChildView: ReturnType<typeof vi.fn>;
+          removeChildView: ReturnType<typeof vi.fn>;
+        };
+      };
     }
   ).window;
 }
+// The cursor's view is the only one that loads a local file.
+function overlayViews() {
+  return vi
+    .mocked(WebContentsView)
+    .mock.results.map((result) => result.value as FakeView)
+    .filter((view) => view.webContents.loadFile.mock.calls.length > 0);
+}
+const overlayView = () => overlayViews()[0];
+// Everything the overlay awaits is already resolved, so one turn is enough.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 type OpenDecision =
   | { action: "deny" }
   | {
@@ -2537,5 +2563,118 @@ describe("agent task state", () => {
       width: 1200,
       height: 800,
     });
+  });
+});
+
+describe("agent cursor", () => {
+  it("the cursor overlay is created once, raised above each new page view and disposed with the controller", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.openAgentTab(space.id, "https://example.com/");
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    const window = windowOf(browser);
+    const added = () =>
+      window.contentView.addChildView.mock.calls.map(([view]) => view);
+    browser.reportPointer(tab.id, { type: "move", x: 100, y: 50 });
+    await settle();
+    const overlay = overlayView();
+    expect(overlay.getVisible()).toBe(true);
+    expect(added().filter((view) => view === overlay)).toHaveLength(1);
+    // A page view made later joins the window above the cursor, so the
+    // overlay is added again over it.
+    browser.openAgentTab(space.id, "https://example.com/two");
+    expect(added().at(-1)).toBe(overlay);
+    expect(added().filter((view) => view === overlay)).toHaveLength(2);
+    expect(overlayViews()).toHaveLength(1);
+    // Every layout re-checks the rules: the page view moved, so the place
+    // the cursor had is no longer the point the agent acted on.
+    browser.setContentBounds({
+      x: 200,
+      y: 80,
+      width: 900,
+      height: 700,
+      hidden: false,
+    });
+    expect(overlay.getVisible()).toBe(false);
+    browser.dispose();
+    expect(window.contentView.removeChildView).toHaveBeenCalledWith(overlay);
+    expect(overlay.webContents.isDestroyed()).toBe(true);
+  });
+
+  it("reportPointer shows the cursor only for the shown tab of an agent-owned space", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.openAgentTab(space.id, "https://example.com/");
+    const background = browser.openAgentTab(
+      space.id,
+      "https://example.com/two",
+    );
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    const point = async (id: string) => {
+      browser.reportPointer(
+        id,
+        { type: "press", x: 100, y: 50 },
+        "Pick a time",
+      );
+      await settle();
+      return overlayView().getVisible();
+    };
+    expect(await point(tab.id)).toBe(true);
+    expect(overlayView().getBounds()).toMatchObject({
+      x: 200 + 100 - 14,
+      y: 80 + 50 - 14,
+    });
+    // A page of the same space that the person is not looking at.
+    expect(await point(background.id)).toBe(false);
+    expect(await point(tab.id)).toBe(true);
+    // The person's own page, even while they are looking at it.
+    const own = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    await browser.dispatch({ type: "tab:activate", id: own.id });
+    expect(await point(own.id)).toBe(false);
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    expect(await point(tab.id)).toBe(true);
+    // The person has control of the agent's space.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    // The change hides it where it stands, without waiting for a point.
+    expect(overlayView().getVisible()).toBe(false);
+    expect(await point(tab.id)).toBe(false);
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+    expect(await point(tab.id)).toBe(true);
+    // Agent access off is the hard stop.
+    await browser.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: false },
+    });
+    expect(overlayView().getVisible()).toBe(false);
+    expect(await point(tab.id)).toBe(false);
+    await browser.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: true },
+    });
+    expect(await point(tab.id)).toBe(true);
+    // A space whose access ended is no agent's any more.
+    browser.endAccess(space.id, { by: "agent", reason: "finished" });
+    expect(await point(tab.id)).toBe(false);
+    // Nothing an agent reports can cost it its action.
+    expect(() =>
+      browser.reportPointer("missing", { type: "move", x: 1, y: 1 }),
+    ).not.toThrow();
+    browser.dispose();
+    expect(() =>
+      browser.reportPointer(tab.id, { type: "move", x: 1, y: 1 }),
+    ).not.toThrow();
   });
 });

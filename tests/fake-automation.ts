@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
+import type { CursorPoint } from "../electron/agent/cursor";
 import type { AutomationController } from "../electron/agent/server";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
@@ -241,6 +242,11 @@ export class FakeController implements AutomationController {
     }
     for (let frame = 0; frame < this.frames; frame += 1)
       await new Promise((resolve) => setImmediate(resolve));
+  }
+  // Every point reported for the agent's cursor, with the label it carried.
+  pointers: { tabId: string; point: CursorPoint; label?: string }[] = [];
+  reportPointer(tabId: string, point: CursorPoint, label?: string) {
+    this.pointers.push({ tabId, point, ...(label ? { label } : {}) });
   }
   // Also recorded in calls, as the tab:create it replaces.
   openAgentTab(spaceId: string, url?: string): Tab {

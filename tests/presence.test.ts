@@ -462,6 +462,39 @@ describe("agent presence", () => {
     }
   });
 
+  it("a pointer report carries the action's label and never throws", () => {
+    const space = agentSpace();
+    const tab = controller.openAgentTab(space.id, "https://example.com/");
+    const drawn = vi.spyOn(controller, "reportPointer");
+    presence.labelStart(space.id, labelText("Open the first result"));
+    presence.pointer(tab.id, { type: "press", x: 120, y: 48 });
+    expect(drawn).toHaveBeenLastCalledWith(
+      tab.id,
+      { type: "press", x: 120, y: 48 },
+      "Open the first result",
+    );
+    // A label the action has finished with stays in the bar, not on the
+    // cursor, so only a running one rides along.
+    presence.labelEnd(space.id);
+    presence.pointer(tab.id, { type: "move", x: 130, y: 50 });
+    expect(drawn).toHaveBeenLastCalledWith(
+      tab.id,
+      { type: "move", x: 130, y: 50 },
+      undefined,
+    );
+    // Nothing here may cost an action its result: a tab that has gone and a
+    // cursor that throws are both swallowed.
+    expect(() =>
+      presence.pointer("missing", { type: "move", x: 1, y: 1 }),
+    ).not.toThrow();
+    drawn.mockImplementationOnce(() => {
+      throw new Error("Object has been destroyed");
+    });
+    expect(() =>
+      presence.pointer(tab.id, { type: "release", x: 130, y: 50 }),
+    ).not.toThrow();
+  });
+
   it("a label on an observation route is unknown_field, and an over-long or blank label anywhere in a batch is invalid_field with field, expected and index before any step runs", () => {
     const space = agentSpace();
     // Section 11's body check refuses a label where no field declares one,

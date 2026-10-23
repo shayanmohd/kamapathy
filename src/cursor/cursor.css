@@ -1,0 +1,83 @@
+/* The page is its own view, so it carries the two palettes itself and
+   follows the system theme, which tracks the person's choice. */
+:root {
+  --accent: #2f6b4f;
+  --surface: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #5fae88;
+    --surface: #1c1c1c;
+  }
+}
+html,
+body {
+  margin: 0;
+  background: transparent;
+}
+/* The arrow and the press ring sit in the same box, whose centre is the
+   tip, so a flip only moves the box to the other edge of the view. */
+#arrow,
+#ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+}
+body.flip-x #arrow,
+body.flip-x #ring {
+  left: auto;
+  right: 0;
+}
+body.flip-y #arrow,
+body.flip-y #ring {
+  top: auto;
+  bottom: 0;
+}
+#arrow path {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 1.5px;
+}
+#ring {
+  display: none;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+body.press #ring {
+  display: block;
+}
+#pill {
+  display: none;
+  position: absolute;
+  left: 30px;
+  top: 30px;
+  box-sizing: border-box;
+  height: 24px;
+  max-width: 240px;
+  padding: 0 8px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--surface);
+  font:
+    12px/24px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+}
+body.label #pill {
+  display: block;
+}
+body.flip-x #pill {
+  left: auto;
+  right: 30px;
+}
+body.flip-y #pill {
+  top: auto;
+  bottom: 30px;
+}

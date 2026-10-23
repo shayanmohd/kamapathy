@@ -24,6 +24,14 @@ export default defineConfig({
   renderer: {
     root: ".",
     plugins: [react()],
-    build: { rollupOptions: { input: resolve("index.html") } },
+    build: {
+      rollupOptions: {
+        // The agent cursor is a page of its own, loaded into its own view.
+        input: {
+          shell: resolve("index.html"),
+          cursor: resolve("src/cursor/index.html"),
+        },
+      },
+    },
   },
 });
