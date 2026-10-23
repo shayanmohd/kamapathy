@@ -2458,4 +2458,24 @@ describe("local automation socket", () => {
       expect((await response.json()).error.code).toBe("pdf_unreadable");
     }
   });
+
+  it("reads a PDF without holding its space, so another read there starts", async () => {
+    const releases: (() => void)[] = [];
+    const { extractor, calls } = fakeExtractor(
+      () =>
+        new Promise<PdfPages>((resolve) => {
+          releases.push(() => resolve(PDF_PAGES));
+        }),
+    );
+    await restartWithPdf(extractor);
+    const { tab } = await pdfTab();
+    const first = settled(request(`/tabs/${tab.id}/pdf/text`, "POST", {}));
+    await expect.poll(() => calls.length).toBe(1);
+    // The second read reaches the extractor while the first still waits.
+    const second = settled(request(`/tabs/${tab.id}/pdf/text`, "POST", {}));
+    await expect.poll(() => calls.length).toBe(2);
+    for (const release of releases) release();
+    expect(await first).toEqual({ status: 200 });
+    expect(await second).toEqual({ status: 200 });
+  });
 });
