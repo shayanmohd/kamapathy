@@ -5,6 +5,7 @@ export interface SnapshotOptions {
   selector?: string;
   root?: string;
   scope?: "page" | "viewport";
+  format?: "list" | "outline";
   maxChars: number;
   maxControls: number;
   offsets?: { text: number; control: number; line: number };
@@ -32,13 +33,14 @@ export type PageOperation =
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
-// selector engine travels the same way, as an argument, so operations that
-// resolve no selector work without it.
+// selector engine and the outline builder travel the same way, as arguments,
+// so operations that resolve no selector and read no outline work without them.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
   namespace: string,
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
+  outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -1281,10 +1283,50 @@ export function pageOperation(
     if (!hit || !within(host!, hit))
       return failure("Another element covers the target.", "element_obscured");
   };
+  // The boxes a run of text draws, which say whether it is rendered at all
+  // and whether the viewport shows it.
+  const textRects = (node: Text) => {
+    const range = docOf(node).createRange();
+    range.selectNodeContents(node);
+    return Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+  };
+  // A text node's rendered text, read as pageText reads it.
+  const textOf = (node: Text) => {
+    const parent = node.parentElement;
+    return !parent ||
+      parent.closest("script,style,noscript,template,input,textarea,select") ||
+      (html(parent) && parent.isContentEditable) ||
+      !visible(parent, true) ||
+      iconName(node, parent) ||
+      !textRects(node).length
+      ? ""
+      : node.textContent || "";
+  };
+  const textOnScreen = (node: Text) =>
+    textRects(node).some((rect) =>
+      onScreenBox(placedRect(docOf(node), rect)),
+    );
+  // The open dialogs and popups inside a scope, outermost first and only.
+  const popupRootsIn = (root: Element) => {
+    const roots: Element[] = [];
+    const take = (element: Element) => {
+      if (!element.matches(popup) || !visible(element)) return false;
+      roots.push(element);
+      return true;
+    };
+    if (take(root)) return roots;
+    walk(root, (node) => {
+      if (node.nodeType === 1 && take(node as Element)) return false;
+    });
+    return roots;
+  };
   if (operation === "snapshot") {
     styles = new Map();
     const options = payload as unknown as SnapshotOptions;
     const viewport = options.scope === "viewport";
+    const outline = options.format === "outline";
     // Where this part starts: a character of the text, a ranked control.
     const offsets = {
       text: options.offsets?.text || 0,
@@ -1461,8 +1503,9 @@ export function pageOperation(
     // Every control is ranked, whether or not they all fit, because a part
     // takes ranked positions and every part must rank the page alike: open
     // dialogs and popups, then pinned bars on screen, then the rest of the
-    // screen, then everything else.
-    const ranked = (() => {
+    // screen, then everything else. An outline prints in page order, so it
+    // ranks nothing.
+    const rankControls = () => {
       const fallback = new Set(clickable);
       // The nearest fixed or sticky box around an element, if any.
       const pinned = new Map<Element, Element | null>();
@@ -1532,12 +1575,7 @@ export function pageOperation(
           (first, second) =>
             first.rank - second.rank || first.index - second.index,
         );
-    })();
-    // This part's controls, back in the order a person sees them.
-    const chosen = ranked
-      .slice(offsets.control, offsets.control + options.maxControls)
-      .sort((first, second) => first.index - second.index)
-      .map((item) => item.element);
+    };
     const limit = options.mode === "compact" ? 80 : 200;
     let nextRef = options.firstRef;
     // The numbers this snapshot assigned, so the main process knows which
@@ -1546,15 +1584,32 @@ export function pageOperation(
     let remainingOptions = 100;
     let optionsTruncated = false;
     const prints = new Map<string, Fingerprint>();
-    const interactables = chosen.map((element, index) => {
-      let ref = registry.refs.get(element);
-      if (!ref || registry.elements.get(ref) !== element) {
-        const number = nextRef++;
-        issued.push(number);
-        ref = `@e${number}`;
-        registry.refs.set(element, ref);
-        registry.elements.set(ref, element);
-      }
+    // The ref a control already holds, or the next number of this
+    // snapshot's block, which only a line that is kept takes.
+    const refAt = (element: Element) => {
+      const held = registry.refs.get(element);
+      if (held && registry.elements.get(held) === element)
+        return { ref: held, keep: () => {} };
+      const number = nextRef;
+      const ref = `@e${number}`;
+      return {
+        ref,
+        keep: () => {
+          nextRef = number + 1;
+          issued.push(number);
+          registry.refs.set(element, ref);
+          registry.elements.set(ref, element);
+        },
+      };
+    };
+    const refFor = (element: Element) => {
+      const made = refAt(element);
+      made.keep();
+      return made.ref;
+    };
+    // What a listing says about one control, in both formats.
+    const entryFor = (element: Element, index: number) => {
+      const ref = refFor(element);
       const label = labelOf(element);
       const hidden = secret(element);
       const value = valueOf(element);
@@ -1628,58 +1683,293 @@ export function pageOperation(
           : {}),
       };
       return entry;
-    });
+    };
     // A control that looks like another visible control, listed or not and in
     // or outside a scoped snapshot, cannot be told apart from it once it is
     // gone, so its ref never follows a redrawn control.
-    const kindOf = (print: Pick<Fingerprint, "tag" | "role" | "type">) =>
-      JSON.stringify([print.tag, print.role, print.type]);
-    const keyOf = (print: Omit<Fingerprint, "selector" | "frame" | "url">) =>
-      JSON.stringify([
-        print.tag,
-        print.role,
-        print.type,
-        print.label,
-        print.group,
-        print.context,
-      ]);
-    const lookalikes = new Map<string, number>();
-    const kinds = new Set<string>();
-    const names = new Set<string>();
-    for (const print of prints.values()) {
-      lookalikes.set(keyOf(print), (lookalikes.get(keyOf(print)) || 0) + 1);
-      kinds.add(kindOf(print));
-      names.add(kindOf(print) + print.label);
-    }
-    const others = new Set(
-      scoped || viewport
-        ? Array.from(document.querySelectorAll(query)).filter(
-            (element) => isControl(element) && visible(element),
+    const keepFingerprints = (listedNow: readonly Element[]) => {
+      const kindOf = (print: Pick<Fingerprint, "tag" | "role" | "type">) =>
+        JSON.stringify([print.tag, print.role, print.type]);
+      const keyOf = (print: Omit<Fingerprint, "selector" | "frame" | "url">) =>
+        JSON.stringify([
+          print.tag,
+          print.role,
+          print.type,
+          print.label,
+          print.group,
+          print.context,
+        ]);
+      const lookalikes = new Map<string, number>();
+      const kinds = new Set<string>();
+      const names = new Set<string>();
+      for (const print of prints.values()) {
+        lookalikes.set(keyOf(print), (lookalikes.get(keyOf(print)) || 0) + 1);
+        kinds.add(kindOf(print));
+        names.add(kindOf(print) + print.label);
+      }
+      const others = new Set(
+        scoped || viewport
+          ? Array.from(document.querySelectorAll(query)).filter(
+              (element) => isControl(element) && visible(element),
+            )
+          : [],
+      );
+      for (const element of all) others.add(element);
+      for (const element of listedNow) others.delete(element);
+      for (const element of others) {
+        const print = {
+          tag: element.localName,
+          role: element.getAttribute("role") || "",
+          type: element.getAttribute("type") || "",
+          label: "",
+          group: "",
+          context: "",
+        };
+        if (!kinds.has(kindOf(print))) continue;
+        print.label = labelOf(element);
+        if (!names.has(kindOf(print) + print.label)) continue;
+        print.group = groupOf(element);
+        print.context = contextOf(element);
+        const count = lookalikes.get(keyOf(print));
+        if (count) lookalikes.set(keyOf(print), count + 1);
+      }
+      for (const [ref, print] of prints)
+        if (lookalikes.get(keyOf(print))! > 1)
+          registry.fingerprints.delete(ref);
+        else registry.fingerprints.set(ref, print);
+    };
+    if (outline) {
+      const items = outlineBuilder!({
+        scope,
+        walk,
+        visible,
+        controls: new Set(all),
+        inView: (element) => !viewport || drawnOnScreen(element),
+        textInView: (node) => !viewport || textOnScreen(node),
+        roleOf,
+        labelOf,
+        frameDocument,
+        opaqueFrame,
+        popupRoots: () => popupRootsIn(scope),
+        textOf,
+      });
+      const kids: number[][] = items.map(() => []);
+      for (const [at, item] of items.entries())
+        if (item.parent >= 0) kids[item.parent].push(at);
+      // Text runs on for as many lines as it needs, each a JSON string of
+      // at most 400 characters.
+      const chunksOf = (value: string) => {
+        const chunks: string[] = [];
+        for (let at = 0; at < value.length; ) {
+          let size = Math.min(398, value.length - at);
+          while (
+            size > 1 &&
+            JSON.stringify(value.slice(at, at + size)).length > 400
           )
-        : [],
-    );
-    for (const element of all) others.add(element);
-    for (const element of chosen) others.delete(element);
-    for (const element of others) {
-      const print = {
-        tag: element.localName,
-        role: element.getAttribute("role") || "",
-        type: element.getAttribute("type") || "",
-        label: "",
-        group: "",
-        context: "",
+            size -= 1;
+          chunks.push(value.slice(at, at + size));
+          at += size;
+        }
+        return chunks.length ? chunks : [""];
       };
-      if (!kinds.has(kindOf(print))) continue;
-      print.label = labelOf(element);
-      if (!names.has(kindOf(print) + print.label)) continue;
-      print.group = groupOf(element);
-      print.context = contextOf(element);
-      const count = lookalikes.get(keyOf(print));
-      if (count) lookalikes.set(keyOf(print), count + 1);
+      type Planned = { item: number; depth: number; chunk?: string };
+      const plan: Planned[] = [];
+      for (const [at, item] of items.entries())
+        if (item.text === undefined) plan.push({ item: at, depth: item.depth });
+        else
+          for (const chunk of chunksOf(item.text))
+            plan.push({ item: at, depth: item.depth, chunk });
+      // Control and frame lines are the ones maxControls bounds.
+      const counts = (line: Planned) =>
+        line.chunk === undefined &&
+        (items[line.item].control || items[line.item].frame);
+      // No control character and no newline a page wrote reaches a line.
+      const oneLine = (value: string) =>
+        value
+          .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      // One line: the role, the name, a ref for controls and frames, then
+      // the same words the text format prints after a control.
+      const render = (line: Planned) => {
+        const item = items[line.item];
+        const blank = () => {};
+        if (line.chunk !== undefined)
+          return { text: JSON.stringify(line.chunk), keep: blank };
+        const element = item.element!;
+        const name = (item.name || "").slice(0, limit);
+        const words = [oneLine(item.role || "") || element.localName];
+        if (name) words.push(JSON.stringify(name));
+        const listed = item.control || item.frame;
+        const made = listed ? refAt(element) : undefined;
+        if (made) words.push(made.ref);
+        if (item.role === "option" && !listed) {
+          const choice = element as HTMLOptionElement;
+          const select = item.parent >= 0 ? items[item.parent].element : null;
+          if (choice.value !== (item.name || ""))
+            words.push(
+              `value=${JSON.stringify(oneLine(choice.value).slice(0, limit))}`,
+            );
+          if (choice.disabled || !!choice.closest("optgroup")?.disabled)
+            words.push("[disabled]");
+          if (choice.selected && !(select && secret(select)))
+            words.push("[selected]");
+          return { text: words.join(" "), keep: blank };
+        }
+        if (disabledElement(element)) words.push("[disabled]");
+        const state = stateOf(element);
+        if (state.checked !== undefined)
+          words.push(
+            state.checked === "mixed"
+              ? "[mixed]"
+              : state.checked
+                ? "[checked]"
+                : "[unchecked]",
+          );
+        if (state.selected) words.push("[selected]");
+        if (state.expanded !== undefined)
+          words.push(state.expanded ? "[expanded]" : "[collapsed]");
+        if (state.pressed !== undefined)
+          words.push(
+            state.pressed === "mixed"
+              ? "[partly pressed]"
+              : state.pressed
+                ? "[pressed]"
+                : "[not pressed]",
+          );
+        const value = valueOf(element) || "";
+        if (
+          value &&
+          !(
+            element.getAttribute("role") === "combobox" &&
+            value === (item.name || "")
+          )
+        )
+          words.push(
+            secret(element)
+              ? "(value hidden)"
+              : `value=${JSON.stringify(value.slice(0, limit))}${value.length > limit ? " (truncated)" : ""}`,
+          );
+        const group = groupOf(element);
+        if (group) words.push(`group ${JSON.stringify(group.slice(0, limit))}`);
+        if (item.level !== undefined) words.push(`level=${item.level}`);
+        const { href } = hrefOf(element);
+        if (href) {
+          const link = element as HTMLAnchorElement;
+          words.push(
+            `href=${oneLine(
+              link.origin === location.origin
+                ? `${link.pathname}${link.search}${link.hash}`
+                : href,
+            )}`,
+          );
+        }
+        if (inputElement(element) && element.type === "file")
+          words.push(
+            `file upload: ${element.multiple ? "multiple" : "single"}${
+              element.accept
+                ? `; accepts ${oneLine(element.accept.slice(0, 256))}`
+                : ""
+            }${visible(element) ? "" : "; hidden input in visible form"}`,
+          );
+        if (opaqueFrame(element)) words.push("(not read)");
+        let cut = false;
+        if (selectElement(element)) {
+          const shown = kids[line.item].filter(
+            (kid) => items[kid].role === "option",
+          ).length;
+          cut = shown < element.options.length;
+          if (cut) words.push("(more options)");
+        }
+        return {
+          text: words.join(" "),
+          keep: made ? made.keep : blank,
+          ...(listed ? { element } : {}),
+          cut,
+        };
+      };
+      const start = Math.min(offsets.line, plan.length);
+      const lines: string[] = [];
+      const printed: Element[] = [];
+      let used = 0;
+      let taken = 0;
+      let cutOptions = false;
+      const keepLine = (
+        line: Planned,
+        made: {
+          text: string;
+          keep: () => void;
+          element?: Element;
+          cut?: boolean;
+        },
+      ) => {
+        made.keep();
+        lines.push("  ".repeat(line.depth) + made.text);
+        used += line.depth * 2 + made.text.length + 1;
+        if (made.cut) cutOptions = true;
+        if (made.element && !printed.includes(made.element))
+          printed.push(made.element);
+      };
+      // A continued part first places the printed elements around its first
+      // line, which cost characters but are not progress.
+      if (start > 0 && start < plan.length) {
+        const chain: number[] = [];
+        for (
+          let parent = items[plan[start].item].parent;
+          parent >= 0;
+          parent = items[parent].parent
+        )
+          chain.unshift(parent);
+        for (const parent of chain) {
+          const line = { item: parent, depth: items[parent].depth };
+          keepLine(line, render(line));
+        }
+      }
+      // Lines are added while they fit, and a part always adds one.
+      let at = start;
+      for (; at < plan.length; at += 1) {
+        const line = plan[at];
+        const first = at === start;
+        if (!first && counts(line) && taken >= options.maxControls) break;
+        const made = render(line);
+        if (
+          !first &&
+          used + line.depth * 2 + made.text.length + 1 > options.maxChars
+        )
+          break;
+        keepLine(line, made);
+        if (counts(line)) taken += 1;
+      }
+      const left = at < plan.length;
+      let past = 0;
+      for (let rest = at; rest < plan.length; rest += 1)
+        if (counts(plan[rest])) past += 1;
+      const interactables = printed.map((element, index) =>
+        entryFor(element, index),
+      );
+      keepFingerprints(printed);
+      return {
+        url: location.href,
+        title: document.title,
+        outline: lines.join("\n"),
+        interactables,
+        ...reboundResult(),
+        ...(issued.length ? { issued } : {}),
+        ...(past ? { omittedControls: past } : {}),
+        ...(left ? { next: { text: 0, control: 0, line: at } } : {}),
+        truncated: left || optionsTruncated || cutOptions,
+      };
     }
-    for (const [ref, print] of prints)
-      if (lookalikes.get(keyOf(print))! > 1) registry.fingerprints.delete(ref);
-      else registry.fingerprints.set(ref, print);
+    // This part's controls, back in the order a person sees them.
+    const ranked = rankControls();
+    const chosen = ranked
+      .slice(offsets.control, offsets.control + options.maxControls)
+      .sort((first, second) => first.index - second.index)
+      .map((item) => item.element);
+    const interactables = chosen.map((element, index) =>
+      entryFor(element, index),
+    );
+    keepFingerprints(chosen);
     const omitted = Math.max(0, all.length - offsets.control - chosen.length);
     const compact = (value: string) =>
       options.mode === "compact"

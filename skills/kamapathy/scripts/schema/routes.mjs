@@ -74,6 +74,14 @@ const FIELDS = {
       description:
         "The next value of an earlier part, for the part after it. Keep scope, root, selector and format.",
     },
+    format: {
+      kind: "enum",
+      values: ["list", "outline"],
+      default: "list",
+      since: 3,
+      description:
+        "list reads text and controls; outline prints the page's structure instead of its text.",
+    },
   },
   click: { ...target },
   fill: {

@@ -148,6 +148,9 @@ export function parseToolAction(
     const scope = body.scope ?? "page";
     if (scope !== "page" && scope !== "viewport")
       return fail("invalid_field", "scope must be page or viewport.");
+    const format = body.format ?? "list";
+    if (format !== "list" && format !== "outline")
+      return fail("invalid_field", "format must be list or outline.");
     const header = body.header ?? true;
     if (typeof header !== "boolean")
       return fail("invalid_field", "header must be true or false.");
@@ -171,6 +174,7 @@ export function parseToolAction(
         : {}),
       ...("ref" in scoped ? { root: scoped.ref } : {}),
       scope,
+      format,
       header,
       // The part to continue. The snapshot path reads what it carries.
       ...(body.cursor === undefined

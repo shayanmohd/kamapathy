@@ -32,12 +32,14 @@ const VIEWPORT = { width: 900, height: 600 };
 type Control = {
   ref: string;
   tag: string;
+  role?: string;
   label: string;
   href?: string;
 };
 type Offsets = { text: number; control: number; line: number };
 type Listing = {
   text: string;
+  outline?: string;
   interactables: Control[];
   rebound?: string[];
   next?: Offsets;
@@ -206,6 +208,17 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       "Frame far button",
     ])
       expect(labels, label).not.toContain(label);
+    // An outline of the same scope keeps the same part of the page.
+    const shape = await snapshot({ scope: "viewport", format: "outline" });
+    expect(shape.outline).toContain('button "Middle button"');
+    expect(shape.outline).toContain('"Middle section text"');
+    for (const gone of [
+      "Top section text",
+      "Bottom section text",
+      "Frame far text",
+      "Frame far button",
+    ])
+      expect(shape.outline, gone).not.toContain(gone);
     // A root keeps only the part of its own subtree that is on screen.
     const rooted = await snapshot({ scope: "viewport", root: card });
     expect(rooted.text).toContain("Card top text");
@@ -258,6 +271,35 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       code: "ambiguous_match",
       fields: { count: 2, visible: 1, hidden: 1 },
     });
+    // An outline gives every frame a ref, and that ref reads its document.
+    const outlined = await snapshot({ format: "outline" });
+    const frameOf = (label: string) =>
+      outlined.interactables.find(
+        (control) => control.tag === "iframe" && control.label === label,
+      )!;
+    const inner = frameOf("Inner notes");
+    const outer = frameOf("Other origin");
+    // A frame of this origin carries its document's lines beneath it.
+    expect(outlined.outline!.replace(/ @e\d+/g, " @e")).toContain(
+      [
+        'iframe "Inner notes" @e',
+        '  "Frame near text"',
+        '  button "Frame button" @e',
+        '  "Frame far text"',
+        '  button "Frame far button" @e',
+      ].join("\n"),
+    );
+    expect(outlined.outline).toContain(
+      `iframe "Other origin" ${outer.ref} (not read)`,
+    );
+    const document = await snapshot({ format: "outline", root: inner.ref });
+    expect(document.outline).toContain('"Frame near text"');
+    expect(document.outline).toContain('button "Frame button" @e');
+    expect(document.outline).toContain('"Frame far text"');
+    // A control ref reads its own subtree.
+    expect(await snapshot({ format: "outline", root: middle })).toMatchObject({
+      outline: `button "Middle button" ${middle}`,
+    });
   }, 60000);
 
   it("covers the page in parts without repeats", async () => {
@@ -272,7 +314,9 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
         if (!got.next) break;
         // A part that cannot advance would repeat itself forever.
         expect(
-          got.next.text > offsets.text || got.next.control > offsets.control,
+          got.next.text > offsets.text ||
+            got.next.control > offsets.control ||
+            got.next.line > offsets.line,
           `part ${part}`,
         ).toBe(true);
         offsets = got.next;
@@ -347,6 +391,159 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
     const neither = await cover({ maxChars: 0, maxControls: 0 });
     expect(neither).toHaveLength(1);
     expect(neither[0].truncated).toBe(true);
+
+    // An outline advances by line: every line is printed once, after the
+    // ancestors a continued part repeats to place it.
+    const outlines = await cover({
+      format: "outline",
+      maxChars: 300,
+      maxControls: 3,
+    });
+    expect(outlines.length).toBeGreaterThan(3);
+    const wholeOutline = (
+      await snapshot({
+        mode: "compact",
+        format: "outline",
+      })
+    ).outline!.split("\n");
+    let from = 0;
+    let repeated = 0;
+    for (const [index, part] of outlines.entries()) {
+      const printed = part.outline!.split("\n");
+      const to = part.next ? part.next.line : wholeOutline.length;
+      expect(to, `part ${index}`).toBeGreaterThan(from);
+      const fresh = wholeOutline.slice(from, to);
+      expect(
+        printed.slice(printed.length - fresh.length),
+        `part ${index}`,
+      ).toEqual(fresh);
+      // Whatever opens a part instead repeats a line from an earlier one.
+      for (const before of printed.slice(0, printed.length - fresh.length))
+        expect(wholeOutline.slice(0, from), `part ${index}`).toContain(before);
+      repeated += printed.length - fresh.length;
+      from = to;
+    }
+    expect(from).toBe(wholeOutline.length);
+    expect(repeated).toBeGreaterThan(0);
+    // Bounds of 0 still advance one line per part.
+    let line: Offsets = { text: 0, control: 0, line: 0 };
+    for (let part = 0; part < 4; part += 1) {
+      const got = await snapshot({
+        mode: "compact",
+        format: "outline",
+        maxChars: 0,
+        maxControls: 0,
+        offsets: line,
+      });
+      expect(got.next!.line, `part ${part}`).toBe(line.line + 1);
+      line = got.next!;
+    }
+  }, 60000);
+
+  it("prints the outline with structure, href and an open dialog first", async () => {
+    await load("/snapshot/outline");
+    // The form on its own first, so the whole shape of a part, with the
+    // refs it issued in print order, is one assertion.
+    const form = await snapshot({ format: "outline", ...scopeTo("#order") });
+    const issued = form.interactables.map((control) => control.ref);
+    expect(form.outline).toBe(
+      [
+        'form "Order"',
+        '  group "Delivery"',
+        `    radio "Pickup" ${issued[0]} [checked] group "Delivery"`,
+        `    radio "Courier" ${issued[1]} [unchecked] group "Delivery"`,
+        `  textbox "Password" ${issued[2]} (value hidden)`,
+        `  combobox "Tier" ${issued[3]} value="pro"`,
+        '    option "Free"',
+        '    option "Pro" value="pro" [selected]',
+        `  button "Papers" ${issued[4]} file upload: multiple; accepts .pdf`,
+        `  button "Save" ${issued[5]}`,
+      ].join("\n"),
+    );
+    expect(form.text).toBeUndefined();
+    expect(form.truncated).toBe(false);
+    // The refs of one part run through its own block, in print order.
+    const numbers = issued.map((ref) => Number(ref.slice(2)));
+    expect(numbers).toHaveLength(6);
+    expect(numbers).toEqual(numbers.map((_unused, at) => numbers[0] + at));
+
+    const whole = await snapshot({ format: "outline" });
+    const lines = whole.outline!.split("\n");
+    // An open dialog comes first, with the rest of the page after it.
+    expect(lines.slice(0, 3)).toEqual([
+      'dialog "Confirm"',
+      '  "Dialog text"',
+      `  button "OK" ${refFor(whole, "OK")}`,
+    ]);
+    // Refs appear on control and frame lines only, in listing order.
+    expect(
+      Array.from(whole.outline!.matchAll(/@e\d+/g)).map((found) => found[0]),
+    ).toEqual(whole.interactables.map((control) => control.ref));
+    // Refs vary with what the page issued before, so the lines are compared
+    // without them, each between the newlines around its own line.
+    const shown = `\n${whole.outline!.replace(/ @e\d+/g, " @e")}\n`;
+    for (const line of [
+      "\nbanner\n",
+      '\n  link "Plans" @e href=/plans?tier=pro#faq\n',
+      '\n  link "Pricing elsewhere" @e href=http://other.example/pricing\n',
+      '\nnavigation "Sections"\n',
+      "\n  list\n",
+      "\n    listitem\n",
+      '\n      link "One" @e href=/one\n',
+      '\n    listitem "Just text"\n',
+      "\nmain\n",
+      '\n  heading "Plans" level=2\n',
+      '\n  region "Pictures"\n',
+      '\n    img "Company logo"\n',
+      "\n    canvas\n",
+      '\n  "Plain section text"\n',
+      '\n  table "Prices"\n',
+      "\n    row\n",
+      '\n      columnheader "Plan"\n',
+      '\n      columnheader "Price"\n',
+      '\n      cell "Pro"\n',
+      '\n      cell "9"\n',
+      // An unnamed form is transparent, so its field sits under main.
+      '\n  textbox "Loose field" @e\n',
+      '\n    button "More" @e [collapsed]\n',
+      // A page that names nothing leaves the name out; the value stays.
+      '\n  textbox @e value="Editable note"\n',
+      "\ncomplementary\n",
+      '\n  "Aside text"\n',
+      "\nsearch\n",
+      '\n  searchbox "Find" @e\n',
+      "\ncontentinfo\n",
+      '\n  "Footer text"\n',
+    ])
+      expect(shown, line).toContain(line);
+    // An unnamed image and an empty list and listitem print nothing.
+    expect(lines.filter((line) => line.trim().startsWith("img "))).toHaveLength(
+      1,
+    );
+    expect(lines.filter((line) => line.trim() === "list")).toHaveLength(1);
+    expect(lines.filter((line) => line.trim() === "listitem")).toHaveLength(1);
+    // Long text continues on the next line, in JSON strings.
+    const long = lines.findIndex((line) => line.startsWith('  "Long text'));
+    expect(long).toBeGreaterThan(0);
+    for (const line of lines.slice(long, long + 2))
+      expect(line.trim().length).toBeLessThanOrEqual(400);
+    expect(
+      lines
+        .slice(long, long + 2)
+        .map((line) => JSON.parse(line.trim()) as string)
+        .join(""),
+    ).toBe("Long text about the plans. ".repeat(20).trim());
+    expect(lines[long + 2].startsWith('  "')).toBe(false);
+
+    // A select prints its options, up to today's budget of 20.
+    const many = await snapshot({ format: "outline", ...scopeTo("#many") });
+    const chosen = many.outline!.split("\n");
+    expect(chosen[0]).toBe(
+      `combobox "Size" ${many.interactables[0].ref} value="s1" (more options)`,
+    );
+    expect(chosen[1]).toBe('  option "Size 1" value="s1" [selected]');
+    expect(chosen).toHaveLength(21);
+    expect(many.truncated).toBe(true);
   }, 60000);
 
   it("lists absolute http, https, mailto and tel links", async () => {

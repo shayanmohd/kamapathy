@@ -181,6 +181,7 @@ export interface SnapshotRequest {
   maxChars: number;
   maxControls: number;
   scope: "page" | "viewport";
+  format: "list" | "outline";
   header: boolean;
   root?: string;
   selector?: string;
@@ -257,6 +258,7 @@ export function createSnapshots(deps: {
           ...(request.query === undefined ? {} : { query: request.query }),
           ...(request.root === undefined ? {} : { root: request.root }),
           scope: request.scope,
+          format: request.format,
           offsets: {
             text: state?.t ?? 0,
             control: state?.c ?? 0,

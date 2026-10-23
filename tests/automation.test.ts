@@ -934,6 +934,93 @@ describe("local automation socket", () => {
     expect(page.scripts).toHaveLength(reached);
   });
 
+  it("returns an outline instead of text, with its own parts and cursors", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const lines = [
+      "main",
+      '  heading "Plans" level=2',
+      '  button "Save" @e1',
+      '  "Terms apply"',
+    ];
+    // A page that answers an outline request from the line it is given.
+    page.result = (code: string) => {
+      const marker = ')("snapshot",';
+      const payload = JSON.parse(
+        code.slice(
+          code.indexOf(marker) + marker.length,
+          code.lastIndexOf(',"'),
+        ),
+      );
+      const shared = { url: "https://example.com/", title: "Example" };
+      if (payload.format !== "outline") {
+        const whole = "Plain text, and more of it.";
+        const from = payload.offsets.text;
+        const left = from + payload.maxChars < whole.length;
+        return {
+          ...shared,
+          text: whole.slice(from, from + payload.maxChars),
+          interactables: [],
+          truncated: left,
+          ...(left
+            ? { next: { text: from + payload.maxChars, control: 0, line: 0 } }
+            : {}),
+        };
+      }
+      const from = payload.offsets.line;
+      const shown = lines.slice(from, from + 2);
+      const left = from + shown.length < lines.length;
+      return {
+        ...shared,
+        outline: shown.join("\n"),
+        interactables: shown
+          .filter((line) => line.includes("@e"))
+          .map(() => ({ ref: "@e1", tag: "button", label: "Save" })),
+        truncated: left,
+        ...(left
+          ? { next: { text: 0, control: 0, line: from + shown.length } }
+          : {}),
+      };
+    };
+    const take = async (body: Record<string, unknown>) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", body);
+      return { status: response.status, body: await response.json() };
+    };
+    const first = await take({ format: "outline" });
+    expect(first.status).toBe(200);
+    expect(page.scripts.at(-1)!.code).toContain('"format":"outline"');
+    expect(first.body.outline).toBe(lines.slice(0, 2).join("\n"));
+    expect(first.body.text).toBeUndefined();
+    expect(first.body.interactables).toEqual([]);
+    expect(first.body.next).toMatch(/^c1\./);
+    const second = await take({ format: "outline", cursor: first.body.next });
+    expect(second.status).toBe(200);
+    expect(second.body.outline).toBe(lines.slice(2).join("\n"));
+    expect(second.body.interactables).toEqual([
+      { ref: "@e1", tag: "button", label: "Save" },
+    ]);
+    expect(second.body.next).toBeUndefined();
+    expect(payloads("snapshot").map((payload) => payload.offsets)).toEqual([
+      { text: 0, control: 0, line: 0 },
+      { text: 0, control: 0, line: 2 },
+    ]);
+    // A cursor belongs to the format that made it, either way round.
+    const list = await take({ maxChars: 12 });
+    expect(list.status).toBe(200);
+    expect(list.body.text).toBe("Plain text, ");
+    expect(list.body.next).toMatch(/^c1\./);
+    for (const [body, code] of [
+      [{ cursor: first.body.next }, "invalid_cursor"],
+      [{ format: "list", cursor: first.body.next }, "invalid_cursor"],
+      [{ format: "outline", cursor: list.body.next }, "invalid_cursor"],
+      [{ format: "tree" }, "invalid_field"],
+    ] as const) {
+      const refused = await take(body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.body.error.code, JSON.stringify(body)).toBe(code);
+    }
+  });
+
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
     const { tab } = await createPage();
     await request(`/tabs/${tab.id}/snapshot`);
