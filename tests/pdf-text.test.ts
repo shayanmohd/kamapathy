@@ -1,9 +1,11 @@
+import { utilityProcess } from "electron";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiError } from "../electron/agent/errors";
 import {
   cMapDirectory,
   createExtractor,
   EXTRACTION_LIMIT,
+  forkPdfWorker,
 } from "../electron/agent/pdf/extract";
 import {
   pageText,
@@ -186,6 +188,23 @@ describe("pdf extraction", () => {
     truncated: true,
     nextPage: 2,
   };
+
+  it("the worker's own process", () => {
+    const fork = vi.mocked(utilityProcess.fork);
+    fork.mockReturnValue(new FakeChild() as never);
+    forkPdfWorker();
+    const [entry, args, options] = fork.mock.calls[0];
+    expect(entry.endsWith("/pdf-worker.js")).toBe(true);
+    expect(args).toEqual([]);
+    // Electron keeps the parent's environment when env is empty, and reads
+    // a heap cap only through --js-flags.
+    expect(options).toEqual({
+      serviceName: "Kamapathy PDF reader",
+      stdio: "ignore",
+      env: { KAMAPATHY_PDF: "1" },
+      execArgv: ["--js-flags=--max-old-space-size=1024"],
+    });
+  });
 
   it("worker killed at the deadline", async () => {
     const child = new FakeChild();

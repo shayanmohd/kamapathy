@@ -109,8 +109,11 @@ export function forkPdfWorker(): PdfChild {
   return utilityProcess.fork(entry, [], {
     serviceName: "Kamapathy PDF reader",
     stdio: "ignore",
-    env: {},
-    execArgv: ["--max-old-space-size=1024"],
+    // An empty env leaves the person's own environment in the process, so
+    // the reader gets one marker of its own instead. Electron reads a heap
+    // cap only from --js-flags.
+    env: { KAMAPATHY_PDF: "1" },
+    execArgv: ["--js-flags=--max-old-space-size=1024"],
   });
 }
 
