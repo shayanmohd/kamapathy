@@ -1400,6 +1400,36 @@ describe("extension tab and window changes", () => {
     expect(controller.dispatch).not.toHaveBeenCalled();
     expect(controller.openExtensionTab).not.toHaveBeenCalled();
 
+    // An agent-held space window takes no change, and the size, place and
+    // state of the window every space shares stay the person's.
+    for (const windowId of [
+      bridge.windowIdOf("robot")!,
+      bridge.windowIdOf("granted")!,
+    ])
+      for (const changes of [
+        { width: 900 },
+        { state: "maximized" },
+        { drawAttention: true },
+      ])
+        await expect(
+          channel.run("windows", caller, "update", [windowId, changes]),
+        ).rejects.toThrow(extensionBridgeCopy.agentTab);
+    for (const changes of [{ left: 10 }, { state: "maximized" }])
+      await expect(
+        channel.run("windows", caller, "update", [
+          bridge.windowIdOf("personal"),
+          changes,
+        ]),
+      ).rejects.toThrow(extensionBridgeCopy.notSupported);
+    // drawAttention is ignored on a window of the person's.
+    await expect(
+      channel.run("windows", caller, "update", [
+        bridge.windowIdOf("personal"),
+        { drawAttention: true },
+      ]),
+    ).resolves.toMatchObject({ id: bridge.windowIdOf("personal") });
+    expect(controller.dispatch).not.toHaveBeenCalled();
+
     for (const url of [
       "javascript:alert(1)",
       "file:///etc/hosts",
