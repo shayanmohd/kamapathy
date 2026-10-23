@@ -176,7 +176,7 @@ On Windows:
 powershell -NoProfile -Command "irm https://kamapathy.app/install.ps1 | iex"
 ```
 
-Both take `--dir <folder>` and `--no-open`, the Linux script takes `--deb` for the Debian package, and the Windows script takes `-NoRun` to verify the installer without running it.
+The macOS and Linux script takes `--dir <folder>`, `--no-open` and, on Linux, `--deb` for the Debian package. The Windows script takes `-NoRun` to verify the installer without running it.
 
 <details>
 <summary><strong>Opening it the first time</strong>: this preview isn't signed with a paid certificate yet</summary>

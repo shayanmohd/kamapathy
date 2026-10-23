@@ -167,6 +167,34 @@ describe("distribution files", () => {
       ).toBe("");
   });
 
+  it("offers each install script only the options it takes", () => {
+    const taken = {
+      posix: [
+        ...read("skills/kamapathy/scripts/install.sh").matchAll(
+          /^\s+(--[a-z-]+)\)/gm,
+        ),
+      ].map((match) => match[1]),
+      windows: [
+        ...read("skills/kamapathy/scripts/install.ps1").matchAll(
+          /\[switch\]\$(\w+)/g,
+        ),
+      ].map((match) => `-${match[1]}`),
+    };
+    const every = [...taken.posix, ...taken.windows];
+    expect(every.length).toBeGreaterThan(1);
+    // A README sentence that offers install options offers them for one
+    // script, so neither script is given an option it rejects.
+    for (const sentence of read("README.md").split(/\n|(?<=\.)\s/)) {
+      const offered = [...sentence.matchAll(/`(--?[\w-]+)/g)]
+        .map((match) => match[1])
+        .filter((option) => every.includes(option));
+      if (!offered.length) continue;
+      expect(/Windows/.test(sentence) ? taken.windows : taken.posix).toEqual(
+        expect.arrayContaining(offered),
+      );
+    }
+  });
+
   it("check-bundled-skill finds a changed, missing or extra file", async () => {
     const folder = mkdtempSync(join(tmpdir(), "kamapathy-bundled-"));
     try {
