@@ -3,6 +3,7 @@ import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BackgroundService } from "./background";
 import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
@@ -49,6 +50,19 @@ let automationSyncing = false;
 // never saved as their choice, which would also stop agents from starting Kamapathy.
 let automationFailed = false;
 let quitting = false;
+// Closing the window keeps agents working, so the window and the application
+// no longer end together.
+const background = new BackgroundService({
+  window: () => window,
+  controller: () => controller,
+  serviceRunning: () => !!automation,
+  quitting: () => quitting,
+  show: () => {
+    if (!window) createWindow();
+    else background.leaveBackground();
+  },
+  agent,
+});
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -218,7 +232,16 @@ function createWindow(): void {
     event.preventDefault(),
   );
   currentWindow.once("ready-to-show", () => currentWindow.show());
-  currentWindow.on("close", () => currentController.dispose());
+  currentWindow.on("close", (event) => {
+    // The person's pages close either way; with agents at work the window
+    // only goes away.
+    if (background.hidesOnClose()) {
+      event.preventDefault();
+      background.enterBackground();
+      return;
+    }
+    currentController.dispose();
+  });
   currentWindow.on("closed", () => {
     if (window === currentWindow) {
       window = null;
@@ -363,7 +386,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", (_event, argv) => {
     if (!window) createWindow();
-    if (window?.isMinimized()) window.restore();
+    else background.leaveBackground();
     window?.focus();
     const url = argv.find((argument) => isWebUrl(argument));
     if (url) void controller?.dispatch({ type: "tab:create", url });
@@ -382,7 +405,7 @@ else {
   });
   app.on("activate", () => {
     if (!window) createWindow();
-    else window.show();
+    else background.leaveBackground();
   });
   void app.whenReady().then(() => {
     if (existsSync(iconPath)) app.dock?.setIcon(iconPath);

@@ -169,6 +169,7 @@ export class BrowserController {
   private lastFind = { text: "", tabId: "" };
   private splitLeadingTabId: string | null = null;
   private frozen = false;
+  private background = false;
   private captures = new Map<string, string>();
 
   constructor(
@@ -332,10 +333,13 @@ export class BrowserController {
     const { activeTabId, splitTabId } = this.state;
     const ids = [activeTabId, splitTabId].filter((id): id is string => !!id);
     const area = this.contentArea();
-    for (const id of ids) {
-      const tab = this.state.tabs.find((item) => item.id === id);
-      if (tab && isWebUrl(tab.url)) this.ensureView(tab);
-    }
+    // While the window is hidden the person's pages stay closed; agents make
+    // the pages they work in themselves.
+    if (!this.background)
+      for (const id of ids) {
+        const tab = this.state.tabs.find((item) => item.id === id);
+        if (tab && isWebUrl(tab.url)) this.ensureView(tab);
+      }
     for (const [id, view] of this.views) {
       const tab = this.state.tabs.find((item) => item.id === id);
       const visible =
@@ -688,6 +692,47 @@ export class BrowserController {
   unfreeze(): void {
     if (!this.frozen) return;
     this.frozen = false;
+    this.layout();
+  }
+
+  // Closing the window keeps agents working, so the person's own pages close
+  // as a real close would: nothing of theirs runs unseen, and each of their
+  // spaces keeps what the next start would give it. Spaces an agent may use
+  // keep their tabs and their pages.
+  enterBackground(): void {
+    if (this.destroyed) return;
+    this.background = true;
+    for (const space of this.state.spaces) {
+      if (agentRules(space)) continue;
+      const tabs = this.state.tabs.filter((tab) => tab.spaceId === space.id);
+      for (const tab of tabs) {
+        this.destroyTab(tab.id);
+        // A page closed mid-load reports no end of its own.
+        tab.loading = false;
+      }
+      if (this.state.settings.restoreSession) continue;
+      for (const tab of tabs) this.registry.retire(tab, "person");
+      const replacement = newTab(space.id);
+      this.registry.register(replacement, {
+        openedBy: "person",
+        managed: false,
+      });
+      this.state.tabs = this.state.tabs.filter(
+        (tab) => tab.spaceId !== space.id,
+      );
+      this.state.tabs.push(replacement);
+      this.lastActive.delete(space.id);
+      if (this.state.activeSpaceId === space.id)
+        this.state.activeTabId = replacement.id;
+    }
+    this.emit();
+  }
+
+  // The window is visible again. The pages it shows are laid out, and the
+  // person's others are made again as they open them.
+  leaveBackground(): void {
+    if (this.destroyed) return;
+    this.background = false;
     this.layout();
   }
 

@@ -2491,6 +2491,80 @@ describe("agent task state", () => {
     }
   });
 
+  it("entering the background destroys only ungranted personal views and leaving it lays out again", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    browser.grantAccess("work");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: "work",
+      url: "https://example.org/",
+      background: true,
+    });
+    const grantedTab = browser.state.tabs.at(-1)!;
+    const own = browser.state.tabs.find((tab) => tab.spaceId === "personal")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.net/",
+    });
+    const state = await browser.dispatch({
+      type: "tab:create",
+      spaceId: "personal",
+      url: "https://example.com/two",
+      background: true,
+    });
+    const second = state.tabs.at(-1)!;
+    const ownPage = contents(browser, own.id);
+    const secondPage = contents(browser, second.id);
+    const agentPage = contents(browser, agentTab.id);
+    const grantedPage = contents(browser, grantedTab.id);
+    expect(browser.state.activeTabId).toBe(own.id);
+    browser.enterBackground();
+    // Only the person's own pages go.
+    expect(ownPage.isDestroyed()).toBe(true);
+    expect(secondPage.isDestroyed()).toBe(true);
+    expect(agentPage.isDestroyed()).toBe(false);
+    expect(grantedPage.isDestroyed()).toBe(false);
+    expect(viewFor(agentPage).getVisible()).toBe(false);
+    // Restore tabs is on, so their tabs stay as the next start would have
+    // them and the page the person was looking at is made again on the way
+    // back.
+    expect(browser.state.tabs.filter((tab) => tab.spaceId === "personal")).toEqual([
+      expect.objectContaining({ id: own.id, loading: false }),
+      expect.objectContaining({ id: second.id }),
+    ]);
+    expect(browser.peekWebContents(own.id)).toBeUndefined();
+    browser.leaveBackground();
+    const again = browser.peekWebContents(own.id) as unknown as FakeContents;
+    expect(again).toBeTruthy();
+    expect(again).not.toBe(ownPage);
+    expect(viewFor(again).getVisible()).toBe(true);
+    // With Restore tabs off the person's spaces keep one new tab, their old
+    // ones retire as theirs, and what the space shows still exists.
+    const closed: string[] = [];
+    const stop = browser.registry.on((event) => {
+      if (event.type === "closed")
+        closed.push(`${event.tabId}:${event.closedBy}`);
+    });
+    browser.state.settings.restoreSession = false;
+    browser.enterBackground();
+    stop();
+    expect(closed.sort()).toEqual(
+      [`${own.id}:person`, `${second.id}:person`].sort(),
+    );
+    const personal = browser.state.tabs.filter(
+      (tab) => tab.spaceId === "personal",
+    );
+    expect(personal).toHaveLength(1);
+    expect(personal[0].url).toBe(HOME_URL);
+    expect(browser.state.activeTabId).toBe(personal[0].id);
+    expect(browser.shownTab("personal")?.id).toBe(personal[0].id);
+    expect(browser.state.tabs.filter((tab) => tab.spaceId === "work")).toHaveLength(2);
+    expect(agentPage.isDestroyed()).toBe(false);
+  });
+
   it("agent views are created at the content area size and other views keep 1200 by 800", async () => {
     const browser = controller();
     const area = { x: 200, y: 80, width: 1000, height: 700 };
