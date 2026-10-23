@@ -6,6 +6,7 @@ import type { BrowserState } from "../shared/types";
 import {
   ExtensionPopups,
   extensionWindowBounds,
+  POPUP_DISMISS_GRACE,
   popupBounds,
   type PopupDeps,
   type Rect,
@@ -185,6 +186,8 @@ interface Setup {
     url: string;
     from: { extensionId: string; partition: string; spaceId?: string };
   }[];
+  // Moves the clock the popups read.
+  tick(ms: number): void;
 }
 function setUp(): Setup {
   const host = new FakeHost();
@@ -192,8 +195,10 @@ function setUp(): Setup {
   main.bounds = { ...CONTENT };
   const made: FakeWindow[] = [];
   const opened: Setup["opened"] = [];
+  let now = 1000;
   const deps: PopupDeps = {
     host: host as unknown as ExtensionHost,
+    now: () => now,
     window: () => main as unknown as BrowserWindow,
     openLink: (url, from) => opened.push({ url, from }),
     screen: {
@@ -208,7 +213,16 @@ function setUp(): Setup {
       return window as unknown as BrowserWindow;
     },
   };
-  return { popups: new ExtensionPopups(deps), host, main, made, opened };
+  return {
+    popups: new ExtensionPopups(deps),
+    host,
+    main,
+    made,
+    opened,
+    tick: (ms) => {
+      now += ms;
+    },
+  };
 }
 const popupRequest = (extensionId = ONE, spaceId = "personal") => ({
   extensionId,
@@ -307,7 +321,7 @@ describe("extension popups and windows", () => {
   });
 
   it("keeps one popup open and closes it on blur, Escape, a second click, a tab or space switch and unload", () => {
-    const { popups, host, main, made } = setUp();
+    const { popups, host, main, made, tick } = setUp();
     popups.onState(stateWith("personal", "tab-1"));
     popups.togglePopup(popupRequest());
     expect(popups.shownPopup()).toEqual({ extensionId: ONE });
@@ -326,6 +340,8 @@ describe("extension popups and windows", () => {
     made[2].emit("blur");
     expect(made[2].destroyed).toBe(true);
     expect(popups.shownPopup()).toBeUndefined();
+    // Past the click that blurred it, the same button opens it again.
+    tick(POPUP_DISMISS_GRACE);
 
     popups.togglePopup(popupRequest());
     expect(made[3].webContents.press("Escape")).toBe(true);
@@ -361,6 +377,36 @@ describe("extension popups and windows", () => {
     main.emit("closed");
     expect(made[7].destroyed).toBe(true);
     expect(made).toHaveLength(8);
+  });
+
+  it("takes the click that blurred the popup as the second click, not a new one", () => {
+    const { popups, made, tick } = setUp();
+    popups.onState(stateWith("personal", "tab-1"));
+    popups.togglePopup(popupRequest());
+    // Clicking the button blurs the popup first; the click follows.
+    made[0].emit("blur");
+    expect(popups.shownPopup()).toBeUndefined();
+    popups.togglePopup(popupRequest());
+    expect(made).toHaveLength(1);
+    expect(popups.shownPopup()).toBeUndefined();
+
+    // Only that one click: the next one opens the popup again.
+    popups.togglePopup(popupRequest());
+    expect(popups.shownPopup()).toEqual({ extensionId: ONE });
+
+    // A click on another extension's button is never that click.
+    made[1].emit("blur");
+    popups.togglePopup(popupRequest(TWO));
+    expect(popups.shownPopup()).toEqual({ extensionId: TWO });
+    popups.closePopup();
+
+    // Nor is a click long after the person dismissed the popup.
+    popups.togglePopup(popupRequest());
+    made[3].emit("blur");
+    tick(POPUP_DISMISS_GRACE);
+    popups.togglePopup(popupRequest());
+    expect(popups.shownPopup()).toEqual({ extensionId: ONE });
+    expect(made).toHaveLength(5);
   });
 
   it("opens popup links as tabs in the target personal space and cancels other navigation away from its origin", () => {

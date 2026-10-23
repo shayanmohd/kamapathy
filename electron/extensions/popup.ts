@@ -26,6 +26,9 @@ export const EXTENSION_WINDOW = {
 } as const;
 // The gap between a button and the popup under it.
 const POPUP_GAP = 4;
+// A click on the button blurs the popup before the click itself arrives, so
+// for this long after that blur the click counts as the one that closed it.
+export const POPUP_DISMISS_GRACE = 250;
 
 export interface Rect {
   x: number;
@@ -136,6 +139,7 @@ export interface PopupDeps {
   createWindow?: (
     options: Electron.BrowserWindowConstructorOptions,
   ) => BrowserWindow;
+  now?: () => number;
 }
 
 interface OpenPopup {
@@ -166,6 +170,8 @@ export class ExtensionPopups implements ExtensionWindowOpener {
   private readonly windows = new Map<number, OpenWindow>();
   private popup?: OpenPopup;
   private seen?: { spaceId: string; tabId: string };
+  // The popup a blur just closed, for the click that caused that blur.
+  private dismissed?: { extensionId: string; partition: string; at: number };
 
   constructor(deps: PopupDeps) {
     this.deps = deps;
@@ -185,11 +191,22 @@ export class ExtensionPopups implements ExtensionWindowOpener {
     anchor: ExtensionAnchor;
   }): void {
     const shown = this.popup;
+    // Whatever this click is, it is not the one that caused the last blur.
+    const dismissed = this.dismissed;
+    this.dismissed = undefined;
     this.closePopup();
     if (
       shown &&
       shown.extensionId === request.extensionId &&
       shown.partition === request.partition
+    )
+      return;
+    if (
+      !shown &&
+      dismissed &&
+      dismissed.extensionId === request.extensionId &&
+      dismissed.partition === request.partition &&
+      this.now() - dismissed.at < POPUP_DISMISS_GRACE
     )
       return;
     const main = this.deps.window();
@@ -253,7 +270,13 @@ export class ExtensionPopups implements ExtensionWindowOpener {
       this.closePopup();
     });
     window.on("blur", () => {
-      if (this.popup === open) this.closePopup();
+      if (this.popup !== open) return;
+      this.dismissed = {
+        extensionId: open.extensionId,
+        partition: open.partition,
+        at: this.now(),
+      };
+      this.closePopup();
     });
     window.once("closed", () => {
       offMain();
@@ -424,6 +447,10 @@ export class ExtensionPopups implements ExtensionWindowOpener {
     this.closePopup();
     for (const open of [...this.windows.values()])
       this.closeWindow(open.windowId);
+  }
+
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
   }
 
   private closeSession(partition: string): void {
