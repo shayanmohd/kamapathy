@@ -575,7 +575,8 @@ Show the commands, or help on one
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
-| GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
+| GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}. Returns `image/png`. |
+| POST | `/tabs/:id/screenshot` | `fullPage?`, `clip?`, `scale?`, `timeoutMs?` | Captures the viewport, the whole page or a clip as PNG, at CSS or device scale. Returns `image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio`. |
 | POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
 | POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound? }`. |
 | POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound? }`. |
@@ -619,7 +620,7 @@ Show the commands, or help on one
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
-| `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
+| `screenshot_unavailable` | 409 | not retryable |  | Retired from API level 3: screenshots work with the window hidden or minimized. |
 | `empty_screenshot` | 409 | retryable |  | The page has not rendered yet. |
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
@@ -643,6 +644,8 @@ Show the commands, or help on one
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
+| `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
+| `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `busy` | 429 | retryable | `scope`, `retryAfterMs` | Too many requests are waiting. |
 | `upload_busy` | 429 | retryable |  | Another file transfer is in progress. |
 | `operation_failed` | 500 | not retryable |  | The browser could not complete the operation. |

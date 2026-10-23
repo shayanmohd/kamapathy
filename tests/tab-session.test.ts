@@ -5,9 +5,10 @@ import { runInNewContext } from "node:vm";
 import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageOperation } from "../electron/automation-dom";
-import { errorBody, toApiError } from "../electron/agent/errors";
+import { ApiError, errorBody, toApiError } from "../electron/agent/errors";
 import type { AutomationController } from "../electron/agent/server";
 import {
+  CaptureFailedError,
   CdpTimeoutError,
   ContextLostError,
   DialogOpenError,
@@ -86,6 +87,25 @@ const soon = (sessionId?: string) => ({
   deadline: Date.now() + 10000,
   sessionId,
 });
+
+// A capture request like the screenshot route's.
+const CLIP = { x: 0, y: 0, width: 1280, height: 800, scale: 0.5 };
+const shoot = (
+  session: TabSession,
+  options: { deadline?: number; guard?: () => void } = {},
+) =>
+  session.captureScreenshot(
+    { clip: CLIP, captureBeyondViewport: false },
+    {
+      deadline: options.deadline ?? Date.now() + 10000,
+      ...(options.guard ? { guard: options.guard } : {}),
+    },
+  );
+// How many of a method's commands a session is still waiting on.
+const pendingCount = (session: TabSession, method = "Page.captureScreenshot") =>
+  [
+    ...(session as unknown as { pending: Set<{ method: string }> }).pending,
+  ].filter((entry) => entry.method === method).length;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -801,6 +821,137 @@ describe("TabSession", () => {
     ).resolves.toEqual({});
   });
 
+  it("captures on the page session with fromSurface and fails fast with screenshot_failed when the main frame navigates, the renderer goes away or the session detaches, dropping the pending command", async () => {
+    const { session, cdp, host } = await ready();
+    cdp.reply("Page.captureScreenshot", () => ({
+      data: Buffer.from("png-bytes").toString("base64"),
+    }));
+    await expect(
+      session.captureScreenshot(
+        { clip: CLIP, captureBeyondViewport: true },
+        { deadline: Date.now() + 10000 },
+      ),
+    ).resolves.toEqual(Buffer.from("png-bytes"));
+    expect(cdp.sent.at(-1)).toEqual({
+      method: "Page.captureScreenshot",
+      params: {
+        format: "png",
+        clip: CLIP,
+        captureBeyondViewport: true,
+        fromSurface: true,
+      },
+    });
+    // A new document in the main frame leaves the capture without a reply.
+    // Only captures fail with it; other commands keep waiting.
+    cdp.holdReplies = true;
+    const reading = track(session.send("Runtime.evaluate", {}, soon()));
+    const navigated = track(shoot(session));
+    await settle();
+    host.emit("did-start-navigation", {
+      isMainFrame: false,
+      isSameDocument: false,
+    });
+    host.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: true,
+    });
+    await settle();
+    expect(navigated.settled).toBe(false);
+    host.navigate("https://example.com/next");
+    await settle();
+    expect(navigated.error).toBeInstanceOf(CaptureFailedError);
+    expect(navigated.error).toMatchObject({ reason: "navigation" });
+    expect(reading.settled).toBe(false);
+    expect(pendingCount(session)).toBe(0);
+    expect(pendingCount(session, "Runtime.evaluate")).toBe(1);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(reading.settled).toBe(true);
+    // A renderer that goes away answers only after about 11 s; the session
+    // fails the capture at once instead.
+    cdp.holdReplies = true;
+    const crashed = track(shoot(session));
+    await settle();
+    host.crash();
+    await settle();
+    expect(crashed.error).toBeInstanceOf(CaptureFailedError);
+    expect(crashed.error).toMatchObject({ reason: "crashed" });
+    expect(pendingCount(session)).toBe(0);
+    cdp.holdReplies = false;
+    host.navigate("https://example.com/again");
+    await settle();
+    expect(session.state).toBe("ready");
+    // A lost debugger ends it too.
+    cdp.holdReplies = true;
+    const detached = track(shoot(session));
+    await settle();
+    cdp.lose();
+    await settle();
+    expect(detached.error).toMatchObject({ reason: "detached" });
+    expect(pendingCount(session)).toBe(0);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(session.state).toBe("ready");
+    // A reply that never comes ends at the deadline.
+    cdp.holdReplies = true;
+    const timing = track(shoot(session, { deadline: Date.now() + 2000 }));
+    await settle();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(timing.error).toMatchObject({ reason: "timeout" });
+    expect(pendingCount(session)).toBe(0);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    // Chromium's own message never leaves the main process.
+    cdp.reply("Page.captureScreenshot", () => {
+      throw new Error("UnknownVizError internal details");
+    });
+    const failed = await rejection(shoot(session));
+    expect(failed).toBeInstanceOf(CaptureFailedError);
+    expect(failed).toMatchObject({ reason: "failed" });
+    expect((failed as Error).message).not.toContain("UnknownVizError");
+    // Failures with a meaning of their own keep it.
+    for (const error of [
+      new TabClosedError(),
+      new DialogOpenError({ type: "alert", message: "Wait" }, true),
+      new TargetRefusedError("Target.getTargets"),
+      new ApiError("human_control", "The person took over this space."),
+    ]) {
+      cdp.reply("Page.captureScreenshot", () => {
+        throw error;
+      });
+      expect(await rejection(shoot(session)), error.constructor.name).toBe(
+        error,
+      );
+    }
+    // A takeover while the capture is in flight reports the person's control.
+    let taken = false;
+    const guard = () => {
+      if (taken)
+        throw new ApiError("human_control", "The person took over this space.");
+    };
+    cdp.reply("Page.captureScreenshot", () => ({ data: "" }));
+    cdp.holdReplies = true;
+    const cut = track(shoot(session, { guard }));
+    await settle();
+    taken = true;
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(cut.error).toBeInstanceOf(ApiError);
+    expect(cut.error).toMatchObject({ code: "human_control" });
+    // So does a tab that closes under it.
+    cdp.holdReplies = true;
+    const closing = track(shoot(session));
+    await settle();
+    host.destroy();
+    await settle();
+    expect(closing.error).toBeInstanceOf(TabClosedError);
+    expect(pendingCount(session)).toBe(0);
+  });
+
   it("lets only key releases and drag cleanup through while releasing, waits for the space's running request, then detaches", async () => {
     const idle = deferred<void>();
     const { session, cdp, waitForSpaceIdle } = await ready({
@@ -1495,6 +1646,20 @@ it("maps session errors to API errors", () => {
     message: "The tab was closed.",
     fields: {},
   });
+  for (const reason of [
+    "navigation",
+    "crashed",
+    "detached",
+    "timeout",
+    "failed",
+  ] as const)
+    expect(mapped(new CaptureFailedError(reason)), reason).toEqual({
+      status: 503,
+      code: "screenshot_failed",
+      message:
+        "The page could not render a screenshot. Read a snapshot or try again after the page finishes rendering.",
+      fields: {},
+    });
   expect(toApiError(new Error("Protocol error"))).toBeUndefined();
   // The envelope spreads a mapped error's fields and hides anything else.
   expect(errorBody(new SessionLostError("devtools"), "Fallback.")).toEqual({

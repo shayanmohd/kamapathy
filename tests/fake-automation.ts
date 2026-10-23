@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
+import type { LayoutMetrics } from "../electron/agent/screenshot";
 import type { AutomationController } from "../electron/agent/server";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
@@ -26,12 +27,37 @@ import type {
 import { isWebUrl } from "../shared/url";
 import { FakeHost } from "./fake-cdp";
 
+// A PNG's signature and header, which is all a capture's size needs.
+export function fakePng(width: number, height: number): Buffer {
+  const png = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(13, 8);
+  png.write("IHDR", 12, "ascii");
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png;
+}
+
 // A page whose debugger answers page operations with `result`. It records
 // each operation with the world it ran in, and each input command.
 export class FakeContents extends FakeHost {
   scripts: { world: string; code: string }[] = [];
-  captureCalls = 0;
+  // The clip of each capture, in the order they were sent.
+  captures: Record<string, any>[] = [];
   captureError?: Error;
+  // A 1,200 by 800 viewport at the document origin, showing a document of
+  // the same size, in CSS pixels at zoom 1.
+  metrics: LayoutMetrics = {
+    cssVisualViewport: {
+      pageX: 0,
+      pageY: 0,
+      clientWidth: 1200,
+      clientHeight: 800,
+      zoom: 1,
+    },
+    contentSize: { width: 1200, height: 800 },
+  };
+  zoom = 1;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
   result: unknown = {
@@ -60,6 +86,20 @@ export class FakeContents extends FakeHost {
         : this.result);
       return { result: { type: "object", value } };
     });
+    this.debugger.reply("Page.getLayoutMetrics", () => this.metrics);
+    // Chromium sizes the image from the clip, in device-independent pixels,
+    // times its scale.
+    this.debugger.reply("Page.captureScreenshot", (params) => {
+      this.captures.push(params);
+      if (this.captureError) throw this.captureError;
+      const { clip } = params;
+      return {
+        data: fakePng(
+          Math.ceil(clip.width * clip.scale),
+          Math.ceil(clip.height * clip.scale),
+        ).toString("base64"),
+      };
+    });
     for (const method of [
       "Input.dispatchMouseEvent",
       "Input.dispatchKeyEvent",
@@ -76,13 +116,8 @@ export class FakeContents extends FakeHost {
   emitProtocol(method: string, parameters: Record<string, unknown>) {
     this.debugger.event(method, parameters);
   }
-  async capturePage() {
-    this.captureCalls += 1;
-    if (this.captureError) throw this.captureError;
-    return {
-      isEmpty: () => false,
-      toPNG: () => Buffer.from([137, 80, 78, 71]),
-    };
+  getZoomFactor() {
+    return this.zoom;
   }
 }
 // BrowserController's state, registry and server-facing methods, without
@@ -101,7 +136,10 @@ export class FakeController implements AutomationController {
   calls: BrowserAction[] = [];
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
-  captureAvailable = true;
+  // The tabs whose views were lent to a capture window, in order.
+  lent: string[] = [];
+  scale = 1;
+  emptyCapture = false;
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
@@ -191,8 +229,20 @@ export class FakeController implements AutomationController {
     }
     return page;
   }
-  canCapturePage() {
-    return this.captureAvailable;
+  async withVisibleView<T>(tabId: string, capture: () => Promise<T>) {
+    this.lent.push(tabId);
+    return capture();
+  }
+  deviceScale() {
+    return this.scale;
+  }
+  cropPng(png: Buffer, width: number, height: number) {
+    if (this.emptyCapture || png.length < 24) return null;
+    const cropped = {
+      width: Math.min(width, png.readUInt32BE(16)),
+      height: Math.min(height, png.readUInt32BE(20)),
+    };
+    return { png: fakePng(cropped.width, cropped.height), ...cropped };
   }
   // The tabs showing a PDF, which a snapshot header reports.
   pdfTabs = new Set<string>();

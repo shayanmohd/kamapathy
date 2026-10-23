@@ -1,7 +1,9 @@
 import {
   BrowserWindow,
   dialog,
+  nativeImage,
   nativeTheme,
+  screen,
   session,
   shell,
   WebContentsView,
@@ -41,6 +43,7 @@ import type {
   Tab,
 } from "../shared/types";
 import { TabRegistry } from "./agent/tab-registry";
+import { CaptureHost } from "./capture-host";
 import { validSettings, writeState } from "./persistence";
 
 const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
@@ -165,12 +168,14 @@ export class BrowserController {
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  private captureHost: CaptureHost;
 
   constructor(
     readonly window: BrowserWindow,
     state: BrowserState,
     private statePath: string,
   ) {
+    this.captureHost = new CaptureHost(window);
     this.state = state;
     // Restored tabs are the person's.
     for (const tab of state.tabs)
@@ -298,6 +303,8 @@ export class BrowserController {
       if (tab && isWebUrl(tab.url)) this.ensureView(tab);
     }
     for (const [id, view] of this.views) {
+      // A view lent for a capture is the capture window's until it is back.
+      if (this.captureHost.lends(view)) continue;
       const tab = this.state.tabs.find((item) => item.id === id);
       const visible =
         !this.frozen &&
@@ -622,12 +629,61 @@ export class BrowserController {
     );
   }
 
+  // Runs an agent's capture with Chromium painting the tab's view, in any
+  // window state: the shown view where it is, every other view lent to the
+  // capture window. Nothing is shown or focused, and the active space and
+  // the window keep their own state.
+  async withVisibleView<T>(
+    tabId: string,
+    capture: () => Promise<T>,
+  ): Promise<T> {
+    const view = this.views.get(tabId);
+    if (!view) return capture();
+    if (view.getVisible() && !this.window.isMinimized()) return capture();
+    try {
+      return await this.captureHost.present(
+        view,
+        capture,
+        () => this.views.get(tabId) === view && !this.destroyed,
+      );
+    } finally {
+      this.layout();
+    }
+  }
+
+  // The scale factor of the display the window is on.
+  deviceScale(): number {
+    return screen.getDisplayMatching(this.window.getBounds()).scaleFactor;
+  }
+
+  // Cuts a capture down to the size that was planned, from its top left.
+  // Chromium rounds a clip's size down, so captures are asked for rounded
+  // up and cropped here, never resized.
+  cropPng(
+    png: Buffer,
+    width: number,
+    height: number,
+  ): { png: Buffer; width: number; height: number } | null {
+    const image = nativeImage.createFromBuffer(png);
+    if (image.isEmpty()) return null;
+    const size = image.getSize();
+    if (size.width === width && size.height === height)
+      return { png, width, height };
+    const cropped = {
+      width: Math.min(width, size.width),
+      height: Math.min(height, size.height),
+    };
+    return { png: image.crop({ x: 0, y: 0, ...cropped }).toPNG(), ...cropped };
+  }
+
   // The pages keep showing until the renderer has drawn these captures in
   // their place and calls hidePages().
   async freeze(): Promise<FrozenFrame[]> {
     const { activeSpaceId, activeTabId } = this.state;
     const capturable = this.canCapturePage();
-    const shown = [...this.views].filter(([, view]) => view.getVisible());
+    const shown = [...this.views].filter(
+      ([, view]) => view.getVisible() && !this.captureHost.lends(view),
+    );
     const frames = await Promise.all(
       shown.map(async ([id, view]) => {
         const bounds = view.getBounds();
@@ -1101,6 +1157,8 @@ export class BrowserController {
     if (!view) return;
     this.views.delete(id);
     this.pendingLoads.delete(id);
+    // A view lent for a capture leaves the capture window with its tab.
+    this.captureHost.remove(view);
     if (!this.window.isDestroyed())
       this.window.contentView.removeChildView(view);
     // A page that closed itself leaves its view without contents.
@@ -1921,6 +1979,7 @@ export class BrowserController {
     this.persist();
     this.destroyed = true;
     for (const id of this.views.keys()) this.destroyTab(id);
+    this.captureHost.dispose();
     for (const cleanup of this.sessionCleanups.values()) cleanup();
     this.sessionCleanups.clear();
     this.sessions.clear();

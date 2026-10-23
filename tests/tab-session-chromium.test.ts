@@ -4,6 +4,7 @@
 // installed.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { inflateSync } from "node:zlib";
 import {
   afterAll,
   afterEach,
@@ -27,6 +28,69 @@ import {
   type ChromiumPage,
 } from "./cdp-socket";
 import { framePages } from "./fixtures/frame-pages.mjs";
+
+const sizeOf = (png: Buffer) => ({
+  width: png.readUInt32BE(16),
+  height: png.readUInt32BE(20),
+});
+// One pixel of an 8-bit PNG, read through zlib and PNG's own row filters, so
+// a capture's content can be checked without an image library.
+function pixel(png: Buffer, x: number, y: number): number[] {
+  expect(png.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+  // Bit depth, colour type and interlacing of the header.
+  expect([png[24], png[25], png[28]]).toEqual([8, png[25] === 6 ? 6 : 2, 0]);
+  const channels = png[25] === 6 ? 4 : 3;
+  const stride = sizeOf(png).width * channels;
+  const parts: Buffer[] = [];
+  for (let at = 8; at + 8 <= png.length; ) {
+    const length = png.readUInt32BE(at);
+    if (png.toString("ascii", at + 4, at + 8) === "IDAT")
+      parts.push(png.subarray(at + 8, at + 8 + length));
+    at += length + 12;
+  }
+  const raw = inflateSync(Buffer.concat(parts));
+  let previous = Buffer.alloc(stride);
+  let row = previous;
+  for (let index = 0; index <= y; index += 1) {
+    const start = index * (stride + 1);
+    const filter = raw[start];
+    row = Buffer.from(raw.subarray(start + 1, start + 1 + stride));
+    for (let at = 0; at < stride; at += 1) {
+      const left = at >= channels ? row[at - channels] : 0;
+      const up = previous[at];
+      const corner = at >= channels ? previous[at - channels] : 0;
+      if (filter === 1) row[at] = (row[at] + left) & 255;
+      else if (filter === 2) row[at] = (row[at] + up) & 255;
+      else if (filter === 3) row[at] = (row[at] + ((left + up) >> 1)) & 255;
+      else if (filter === 4) {
+        const guess = left + up - corner;
+        const near = [
+          Math.abs(guess - left),
+          Math.abs(guess - up),
+          Math.abs(guess - corner),
+        ];
+        const pick =
+          near[0] <= near[1] && near[0] <= near[2]
+            ? left
+            : near[1] <= near[2]
+              ? up
+              : corner;
+        row[at] = (row[at] + pick) & 255;
+      }
+    }
+    previous = row;
+  }
+  return [row[x * channels], row[x * channels + 1], row[x * channels + 2]];
+}
+// Chromium encodes captures in sRGB, with its own rounding per channel.
+function expectColour(png: Buffer, x: number, y: number, colour: number[]) {
+  const found = pixel(png, x, y);
+  for (const [index, channel] of colour.entries())
+    expect(
+      Math.abs(found[index] - channel),
+      `${found.join(",")} at ${x},${y}`,
+    ).toBeLessThanOrEqual(8);
+}
 
 describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
   let site: Server;
@@ -552,3 +616,90 @@ describe.skipIf(!chromiumAvailable)(
     }, 20000);
   },
 );
+
+// Its own server answers /capture with two solid blocks, one in the viewport
+// and one far below it.
+describe.skipIf(!chromiumAvailable)("captures in Chromium", () => {
+  const CAPTURE_PAGE = `<!doctype html><meta charset="utf-8"><title>Capture probe</title>
+<style>
+body { margin: 0; background: #ffffff; }
+.block { position: absolute; left: 0; width: 400px; height: 200px; }
+#near { top: 0; background: rgb(0, 128, 255); }
+#far { top: 1200px; background: rgb(255, 0, 0); }
+#tall { height: 2000px; }
+</style>
+<div class="block" id="near"></div><div class="block" id="far"></div><div id="tall"></div>`;
+  let site: Server;
+  let origin: string;
+  let browser: ChromiumBrowser;
+  let page: ChromiumPage | undefined;
+  let session: TabSession | undefined;
+  beforeAll(async () => {
+    site = createServer((request, response) => {
+      const html =
+        new URL(request.url || "/", "http://x").pathname === "/capture"
+          ? CAPTURE_PAGE
+          : "";
+      response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
+      response.end(html);
+    });
+    await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+    origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+    browser = await launchChromium();
+  }, 60000);
+  afterEach(async () => {
+    await session?.release();
+    await page?.close();
+    session = page = undefined;
+  });
+  afterAll(async () => {
+    await browser?.close();
+    site?.close();
+  });
+  const step = (): Step => ({ deadline: Date.now() + 15000 });
+
+  it("captures a CSS-scaled clip, and a region below the viewport beyond it", async () => {
+    page = await browser.newPage();
+    const tab = new TabSession(page.host, {
+      tabId: "chromium",
+      waitForSpaceIdle: async () => {},
+      buffer: new EventBufferPool().create("chromium"),
+    });
+    session = tab;
+    tab.attach();
+    const { loaderId } = await tab.send<{ loaderId: string }>(
+      "Page.navigate",
+      { url: `${origin}/capture` },
+      step(),
+    );
+    await tab.waitForLifecycle("load", { ...step(), loaderId });
+    // Headless Chromium paints at device scale 1, so scale 1 gives one image
+    // pixel per CSS pixel.
+    const ratio = await tab.send<{ result: { value: number } }>(
+      "Runtime.evaluate",
+      { expression: "devicePixelRatio", returnByValue: true },
+      step(),
+    );
+    expect(ratio.result.value).toBe(1);
+    const inside = await tab.captureScreenshot(
+      {
+        clip: { x: 100, y: 50, width: 200, height: 100, scale: 1 },
+        captureBeyondViewport: false,
+      },
+      step(),
+    );
+    expect(sizeOf(inside)).toEqual({ width: 200, height: 100 });
+    expectColour(inside, 100, 50, [0, 128, 255]);
+    // The far block starts 1,200 CSS pixels down, past the viewport, so
+    // Chromium captures beyond it.
+    const below = await tab.captureScreenshot(
+      {
+        clip: { x: 0, y: 1250, width: 200, height: 100, scale: 1 },
+        captureBeyondViewport: true,
+      },
+      step(),
+    );
+    expect(sizeOf(below)).toEqual({ width: 200, height: 100 });
+    expectColour(below, 100, 50, [255, 0, 0]);
+  }, 30000);
+});

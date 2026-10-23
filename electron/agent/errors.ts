@@ -3,6 +3,7 @@ import {
   isTransient,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import {
+  CaptureFailedError,
   CdpTimeoutError,
   ContextLostError,
   DialogOpenError,
@@ -105,6 +106,11 @@ export function toApiError(error: unknown): ApiError | undefined {
     );
   if (error instanceof TabClosedError)
     return new ApiError("tab_closed", "The tab was closed.");
+  if (error instanceof CaptureFailedError)
+    return new ApiError(
+      "screenshot_failed",
+      "The page could not render a screenshot. Read a snapshot or try again after the page finishes rendering.",
+    );
   return undefined;
 }
 

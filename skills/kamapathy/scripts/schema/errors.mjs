@@ -161,10 +161,11 @@ export const ERRORS = {
   ),
   tab_limit: code(409, false, "The space already has its most tabs."),
   space_limit: code(409, false, "The API already manages its most spaces."),
+  // Kept so older scripts still find the code; no route raises it.
   screenshot_unavailable: code(
     409,
     false,
-    "Screenshots need the Kamapathy window shown.",
+    "Retired from API level 3: screenshots work with the window hidden or minimized.",
   ),
   empty_screenshot: code(409, true, "The page has not rendered yet."),
   no_web_page: code(409, false, "The tab is not showing a web page."),
@@ -238,6 +239,20 @@ export const ERRORS = {
     "The ref is not a file input that can take these files.",
   ),
   invalid_value: code(422, false, "The control cannot take this value."),
+  clip_outside_page: code(
+    422,
+    false,
+    "The clip misses the viewport, or the document with fullPage.",
+    ["clip"],
+    3,
+  ),
+  screenshot_too_large: code(
+    422,
+    false,
+    "The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all.",
+    ["width", "height", "maxSide", "maxPixels"],
+    3,
+  ),
   busy: code(429, true, "Too many requests are waiting.", [
     "scope",
     "retryAfterMs",

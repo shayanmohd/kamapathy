@@ -43,9 +43,18 @@ export interface AutomationController {
     options?: { isolated?: boolean; pageBudget?: number },
   ): Space;
   getWebContents(tabId: string): WebContents | undefined;
-  canCapturePage(): boolean;
   /** Whether the tab shows a PDF. Section 16 implements it; absent is no. */
   pdfDocument?(tabId: string): boolean;
+  /** Runs a capture with Chromium painting the tab's view, in any window state. */
+  withVisibleView<T>(tabId: string, capture: () => Promise<T>): Promise<T>;
+  /** The scale factor of the display the window is on. */
+  deviceScale(): number;
+  /** Cuts a capture down to the planned size; null for an empty image. */
+  cropPng(
+    png: Buffer,
+    width: number,
+    height: number,
+  ): { png: Buffer; width: number; height: number } | null;
   addActivity(
     spaceId: string | undefined,
     message: string,

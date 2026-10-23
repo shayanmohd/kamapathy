@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PageOperation } from "../../automation-dom";
+import { ApiError } from "../errors";
 import {
+  CaptureFailedError,
   CdpTimeoutError,
   ContextLostError,
   DialogOpenError,
@@ -85,6 +87,31 @@ const DISPATCHES =
 // stays out, because setup sends it through the same pending set.
 const DIALOG_HOLDS =
   /^(Input\.|Runtime\.|DOM\.|Accessibility\.|Page\.(navigate|reload|captureScreenshot|getLayoutMetrics)$)/;
+// The one command a navigation of the main frame's document leaves without
+// a reply.
+const CAPTURES = /^Page\.captureScreenshot$/;
+// What a failed capture means. A crash, a lost session and the deadline all
+// stop it; anything else Chromium reports is a rendering failure, and its
+// message stays in the main process. Failures with a meaning of their own,
+// a guard's refusal included, pass through.
+const captureFailure = (error: unknown): unknown => {
+  if (error instanceof PageCrashedError)
+    return new CaptureFailedError("crashed");
+  if (error instanceof SessionLostError)
+    return new CaptureFailedError("detached");
+  if (error instanceof CdpTimeoutError)
+    return new CaptureFailedError("timeout");
+  if (
+    error instanceof CaptureFailedError ||
+    error instanceof ApiError ||
+    error instanceof TabClosedError ||
+    error instanceof DialogOpenError ||
+    error instanceof TargetRefusedError ||
+    !(error instanceof Error)
+  )
+    return error;
+  return new CaptureFailedError("failed");
+};
 // Kamapathy's own sessions record only page and network events.
 const RECORDED = /^(Page|Network)\./;
 // Dialog text keeps tab and newline, and loses other control characters and
@@ -549,6 +576,47 @@ export class TabSession {
           continue;
         throw error;
       }
+    }
+  }
+
+  // A PNG of the page, as Chromium paints the tab's view now. The clip is in
+  // DIP from the document origin, with the scale the output size needs. The
+  // whole remaining deadline is the capture's: a large full page takes
+  // seconds.
+  async captureScreenshot(
+    params: {
+      clip: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        scale: number;
+      };
+      captureBeyondViewport: boolean;
+    },
+    step: Step,
+  ): Promise<Buffer> {
+    try {
+      const reply = await this.send<{ data: string }>(
+        "Page.captureScreenshot",
+        {
+          format: "png",
+          clip: params.clip,
+          captureBeyondViewport: params.captureBeyondViewport,
+          // A hidden view answers a surface capture slowly or not at all, so
+          // the controller lends it to a window Chromium paints first.
+          fromSurface: true,
+        },
+        {
+          deadline: step.deadline,
+          signal: step.signal,
+          guard: step.guard,
+          timeoutMs: step.deadline - Date.now(),
+        },
+      );
+      return Buffer.from(reply.data, "base64");
+    } catch (error) {
+      throw captureFailure(error);
     }
   }
 
@@ -1480,6 +1548,8 @@ export class TabSession {
     // Every world ends with the main frame's document, and an id it had is
     // refused from now on like any other id Kamapathy did not hand out.
     this.handles.clear();
+    // Chromium never answers a capture the new document interrupted.
+    this.failPending(() => new CaptureFailedError("navigation"), CAPTURES);
   };
 
   private readonly onNavigate = () => {
