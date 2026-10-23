@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -17,6 +18,7 @@ import { join } from "node:path";
 import {
   agentPaths,
   chooseSocketPath,
+  clearQuitMarker,
   clearStaleEndpoint,
   launchCommand,
   prepareAgentDirectory,
@@ -25,6 +27,7 @@ import {
   setAgentAccess,
   withdrawEndpoint,
   writeLaunchInfo,
+  writeQuitMarker,
 } from "../electron/agent-socket";
 
 const directories: string[] = [];
@@ -282,5 +285,69 @@ describe("second review hardening", () => {
     publishEndpoint(paths, join(unrelated, "kamapathy.sock"), "a".repeat(32));
     clearStaleEndpoint(paths);
     expect(existsSync(unrelated)).toBe(true);
+  });
+});
+
+// The client is Node-only JavaScript with no types of its own, so it answers
+// here the way agents run it: in its own Node, over this profile's folder.
+function clientRefusal(userData: string): { code: string; reason: string } {
+  const transport = new URL(
+    "../skills/kamapathy/scripts/lib/transport.mjs",
+    import.meta.url,
+  ).href;
+  const script = `import { resolveSocket } from ${JSON.stringify(transport)};
+let answer = { code: "connected", reason: "connected" };
+try {
+  await resolveSocket();
+} catch (error) {
+  answer = { code: error.code, reason: error.reason };
+}
+process.stdout.write(JSON.stringify(answer));`;
+  return JSON.parse(
+    execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        KAMAPATHY_USER_DATA: userData,
+        KAMAPATHY_NO_LAUNCH: "1",
+      },
+    }),
+  );
+}
+
+describe("the quit marker", () => {
+  it("blocks automatic starts for ten minutes and is removed at start", () => {
+    const userData = profile();
+    const paths = agentPaths(userData);
+    prepareAgentDirectory(paths);
+    // Beside the endpoint and the off marker, at the path the client derives.
+    expect(paths.quit).toBe(join(paths.directory, "quit"));
+    for (const file of [paths.endpoint, paths.off, paths.quit])
+      expect(file.startsWith(paths.directory)).toBe(true);
+    writeQuitMarker(paths, 1700000000000);
+    expect(JSON.parse(readFileSync(paths.quit, "utf8"))).toEqual({
+      at: 1700000000000,
+    });
+    if (posix) expect(statSync(paths.quit).mode & 0o777).toBe(0o600);
+    // A quit just now stops the client from starting Kamapathy again.
+    writeQuitMarker(paths);
+    const { at } = JSON.parse(readFileSync(paths.quit, "utf8"));
+    expect(Math.abs(Date.now() - at)).toBeLessThan(5000);
+    expect(clientRefusal(userData)).toEqual({
+      code: "not_connected",
+      reason: "quit_by_person",
+    });
+    // Ten minutes on, the quit no longer stands in the way of a start.
+    writeQuitMarker(paths, Date.now() - 600001);
+    expect(clientRefusal(userData)).toEqual({
+      code: "not_connected",
+      reason: "not_running",
+    });
+    // Every start removes it, and removing one that is gone is no error.
+    writeQuitMarker(paths);
+    clearQuitMarker(paths);
+    expect(existsSync(paths.quit)).toBe(false);
+    clearQuitMarker(paths);
+    expect(existsSync(paths.quit)).toBe(false);
   });
 });

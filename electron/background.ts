@@ -6,7 +6,7 @@ import { AGENT_TEXT_LIMITS, cleanAgentText } from "../shared/agent-text";
 import { agentRules } from "../shared/state";
 import { agentBarCopy, statusCopy } from "../src/copy";
 import { agentStatus, statusLine, type AgentStatus } from "../src/lib/spaces";
-import type { AgentPaths } from "./agent-socket";
+import { writeQuitMarker, type AgentPaths } from "./agent-socket";
 import type { BrowserController } from "./controller";
 
 // What the person is told the first time Kamapathy keeps running without a
@@ -32,12 +32,31 @@ export const TRAY_COPY = {
   failed: "An agent could not finish",
 } as const;
 
+// What the person is asked before a quit stops agents at work. The question
+// names the spaces, which are the agent's own words, so they are quoted.
+export const QUIT_COPY = {
+  question: (names: string[], more: number) =>
+    `Quit while ${names.join(", ")}${more ? ` and ${more} more` : ""} ${
+      names.length === 1 && !more ? "is" : "are"
+    } still running?`,
+  detail:
+    "Agent spaces close and their agents stop. Changes already made on websites stay.",
+  quit: "Quit",
+  cancel: "Cancel",
+} as const;
+
 // How often the menus, the tooltip and the icon are rebuilt, and how many
 // spaces the menus list.
 const MENU_INTERVAL_MS = 500;
 const MENU_SPACES = 10;
 // The states that count as an agent at work, as the Spaces button counts them.
 const WORKING: readonly AgentStatus[] = ["browsing", "idle", "error"];
+// The states a quit would cut short: an agent at work, or one waiting for the
+// person to do something. A space that is done, failed, stopped, paused or in
+// the person's hands has nothing left to lose.
+const ASKING: readonly AgentStatus[] = [...WORKING, "needs-you"];
+// How many spaces the quit question names before counting the rest.
+const QUIT_NAMES = 3;
 // Nothing is marked seen out here: the person is not at the window.
 const SEEN_NOTHING: ReadonlySet<string> = new Set<string>();
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -80,6 +99,7 @@ export class BackgroundService {
   private rebuiltAt = 0;
   private rebuiltHidden = false;
   private rebuilding: ReturnType<typeof setTimeout> | null = null;
+  private asking = false;
   // The last state each space was announced in, so one change speaks once.
   private readonly announced = new Map<string, AgentStatus>();
 
@@ -157,6 +177,61 @@ export class BackgroundService {
     this.shutdown = true;
   }
 
+  /** True when this quit must ask the person first. */
+  needsQuestion(): boolean {
+    if (this.disposed || this.shutdown) return false;
+    return this.running().length > 0;
+  }
+
+  /** Asks; false keeps Kamapathy running. A confirmed quit writes the marker. */
+  async confirmQuit(): Promise<boolean> {
+    // A shutdown or a logout is not the person's choice to stop the agents:
+    // it is never delayed by a question, and the client is never told they
+    // quit. Local runs cannot observe whether the shutdown flag always
+    // arrives before this; a quit Kamapathy sees first still only asks while
+    // agents are at work, and the person can answer it.
+    if (this.shutdown || this.disposed) return true;
+    if (this.asking) return false;
+    const spaces = this.running();
+    if (!spaces.length) return true;
+    const names = spaces
+      .slice(0, QUIT_NAMES)
+      .map((space) => quoted(space.name));
+    const window = this.host.window();
+    const question = {
+      type: "question" as const,
+      title: TRAY_COPY.quit,
+      message: QUIT_COPY.question(names, spaces.length - names.length),
+      detail: QUIT_COPY.detail,
+      buttons: [QUIT_COPY.quit, QUIT_COPY.cancel],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    this.asking = true;
+    try {
+      const { response } = await (window &&
+      !window.isDestroyed() &&
+      window.isVisible()
+        ? dialog.showMessageBox(window, question)
+        : dialog.showMessageBox(question));
+      if (response !== 0) return false;
+      try {
+        writeQuitMarker(this.host.agent, this.now());
+      } catch (error) {
+        // Without the marker an agent may start Kamapathy again, which is a
+        // smaller harm than a quit the person cannot complete.
+        console.error(
+          "The quit marker could not be written:",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+      }
+      return true;
+    } finally {
+      this.asking = false;
+    }
+  }
+
   /** The spaces the menus list, newest first, at most 10. */
   agentSpaces(): BackgroundSpace[] {
     return this.collect().slice(0, MENU_SPACES);
@@ -186,6 +261,11 @@ export class BackgroundService {
       this.rebuilding = null;
     }
     this.dropTray();
+  }
+
+  // The spaces a quit would stop, newest first.
+  private running(): BackgroundSpace[] {
+    return this.collect().filter((space) => ASKING.includes(space.status));
   }
 
   private collect(): BackgroundSpace[] {

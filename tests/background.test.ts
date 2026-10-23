@@ -1,5 +1,12 @@
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
@@ -7,12 +14,13 @@ import { app, dialog, Menu, Notification } from "electron";
 import {
   BACKGROUND_NOTICE,
   BackgroundService,
+  QUIT_COPY,
   TRAY_COPY,
   type BackgroundHost,
 } from "../electron/background";
 import { agentBarCopy, statusCopy } from "../src/copy";
 import { BrowserController } from "../electron/controller";
-import { agentPaths } from "../electron/agent-socket";
+import { agentPaths, prepareAgentDirectory } from "../electron/agent-socket";
 import { HOME_URL, initialState } from "../shared/state";
 
 vi.mock("electron", () => ({
@@ -156,6 +164,12 @@ describe("running in the background", () => {
       .filter((contents) => !!contents);
   let clock = 0;
   const resources = "/res/tray";
+  const profiles: string[] = [];
+  const profile = () => {
+    const directory = mkdtempSync(join(tmpdir(), "kamapathy-background-"));
+    profiles.push(directory);
+    return directory;
+  };
   const service = (platform: NodeJS.Platform) =>
     new BackgroundService(host, { platform, resources, now: () => clock });
   beforeEach(() => {
@@ -207,11 +221,15 @@ describe("running in the background", () => {
       serviceRunning: () => running,
       quitting: () => quitting,
       show: vi.fn(),
-      agent: agentPaths("/tmp/kamapathy-background-test"),
+      // The quit marker is a real file, so it needs a real agent folder.
+      agent: agentPaths(profile()),
     };
+    prepareAgentDirectory(host.agent);
   });
   afterEach(() => {
     controller.dispose();
+    for (const directory of profiles.splice(0))
+      rmSync(directory, { recursive: true, force: true });
   });
 
   it("close hides by the platform rules", () => {
@@ -571,5 +589,126 @@ describe("running in the background", () => {
         size,
       ]);
     }
+  });
+
+  it("quit asks once naming up to three spaces, Cancel keeps running, Quit writes the marker", async () => {
+    controller.state.settings.backgroundNoticeShown = true;
+    const background = service("darwin");
+    // With nothing at work a quit goes straight through.
+    expect(background.needsQuestion()).toBe(false);
+    for (const name of ["Research", "Prices", "Deals & more", "Flights"]) {
+      const space = controller.createAgentSpace(name);
+      controller.openAgentTab(space.id, "https://example.com/");
+    }
+    clock += 6000;
+    expect(background.needsQuestion()).toBe(true);
+    // One space reads as the spec's sentence.
+    expect(QUIT_COPY.question(["“Research”"], 0)).toBe(
+      "Quit while “Research” is still running?",
+    );
+    let answer = (value: Electron.MessageBoxReturnValue) => {
+      void value;
+    };
+    vi.mocked(dialog.showMessageBox).mockReturnValue(
+      new Promise<Electron.MessageBoxReturnValue>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const asked = background.confirmQuit();
+    // A second quit while the question stands is ignored.
+    await expect(background.confirmQuit()).resolves.toBe(false);
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(dialog.showMessageBox).mock.calls[0] as unknown[];
+    // The window carries the question while the person can see it.
+    expect(call[0]).toBe(window);
+    const question = call.at(-1) as Electron.MessageBoxOptions;
+    // Three names, newest first, and how many more there are.
+    expect(question.message).toBe(
+      QUIT_COPY.question(["“Flights”", "“Deals & more”", "“Prices”"], 1),
+    );
+    expect(question.message).toContain("and 1 more are still running?");
+    expect(question.detail).toBe(QUIT_COPY.detail);
+    expect(question.buttons).toEqual([QUIT_COPY.quit, QUIT_COPY.cancel]);
+    expect(question.defaultId).toBe(1);
+    expect(question.cancelId).toBe(1);
+    // Cancel leaves the agents, the service and the spaces as they were.
+    answer({ response: 1, checkboxChecked: false });
+    await expect(asked).resolves.toBe(false);
+    expect(existsSync(host.agent.quit)).toBe(false);
+    expect(controller.state.settings.automationEnabled).toBe(true);
+    expect(
+      controller.state.spaces.filter((space) => space.owner === "agent"),
+    ).toHaveLength(4);
+    expect(background.hidden()).toBe(false);
+    // Quit writes the marker the client reads, at the moment of the quit.
+    vi.mocked(dialog.showMessageBox).mockResolvedValue({
+      response: 0,
+      checkboxChecked: false,
+    });
+    await expect(background.confirmQuit()).resolves.toBe(true);
+    expect(JSON.parse(readFileSync(host.agent.quit, "utf8"))).toEqual({
+      at: clock,
+    });
+    if (process.platform !== "win32")
+      expect(statSync(host.agent.quit).mode & 0o777).toBe(0o600);
+    // A hidden window carries no sheet, so the question stands alone.
+    background.enterBackground();
+    vi.mocked(dialog.showMessageBox).mockClear();
+    await expect(background.confirmQuit()).resolves.toBe(true);
+    expect(
+      vi.mocked(dialog.showMessageBox).mock.calls[0] as unknown[],
+    ).toHaveLength(1);
+    background.dispose();
+  });
+
+  it("shutdown, and spaces that are done, failed, paused or person-held, never ask", async () => {
+    controller.state.settings.backgroundNoticeShown = true;
+    const research = controller.createAgentSpace("Research");
+    controller.openAgentTab(research.id, "https://example.com/");
+    clock += 6000;
+    const background = service("darwin");
+    expect(background.needsQuestion()).toBe(true);
+    // A finished run and a reported failure leave nothing to stop.
+    controller.setTask(research.id, { state: "done" });
+    expect(background.needsQuestion()).toBe(false);
+    controller.setTask(research.id, {
+      state: "failed",
+      status: "The site needs a phone number",
+    });
+    expect(background.needsQuestion()).toBe(false);
+    controller.setTask(research.id, null);
+    expect(background.needsQuestion()).toBe(true);
+    // Agent access off: the agents are already stopped.
+    controller.state.settings.automationEnabled = false;
+    expect(background.needsQuestion()).toBe(false);
+    controller.state.settings.automationEnabled = true;
+    // A space the person took over is theirs to close.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: research.id,
+      owner: "human",
+    });
+    expect(background.needsQuestion()).toBe(false);
+    // A space whose access ended holds no agent either.
+    const prices = controller.createAgentSpace("Prices");
+    controller.openAgentTab(prices.id, "https://example.org/");
+    clock += 6000;
+    expect(background.needsQuestion()).toBe(true);
+    controller.endAccess(prices.id, { by: "person", reason: "stopped" });
+    expect(background.needsQuestion()).toBe(false);
+    // A space waiting for the person asks, whoever holds it.
+    controller.setTask(research.id, {
+      state: "needs-you",
+      reason: "Sign in to continue",
+    });
+    expect(background.needsQuestion()).toBe(true);
+    // A shutdown never asks, never hides and never says the person quit.
+    background.shuttingDown();
+    expect(background.needsQuestion()).toBe(false);
+    expect(background.hidesOnClose()).toBe(false);
+    await expect(background.confirmQuit()).resolves.toBe(true);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    expect(existsSync(host.agent.quit)).toBe(false);
+    background.dispose();
   });
 });
