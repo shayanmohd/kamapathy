@@ -4,6 +4,7 @@ import type {
   BrowserState,
   ContentBounds,
   KamapathyBridge,
+  PromptAnswer,
 } from "../shared/types";
 
 // Electron wraps a rejection in "Error invoking remote method ..."; the
@@ -43,6 +44,10 @@ const bridge: KamapathyBridge = {
   windowControl: (action) => ipcRenderer.send("kamapathy:window", action),
   importSources: () => invoke("kamapathy:import-sources"),
   importBrowserData: (request) => invoke("kamapathy:import", request),
+  // Its own channel: an answer may carry a password, which never belongs in
+  // an action or in the state an action returns.
+  answerPrompt: (answer: PromptAnswer) =>
+    invoke("kamapathy:answer-prompt", answer),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

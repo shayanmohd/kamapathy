@@ -105,6 +105,8 @@ export function initialState(
     downloads: [],
     activity: [],
     spaceRequests: [],
+    prompts: [],
+    sitePermissions: [],
     settings: {
       theme: "system",
       searchEngine: "duckduckgo",

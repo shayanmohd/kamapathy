@@ -1,3 +1,5 @@
+import type { PermissionKey, PromptKind } from "./permissions";
+
 export type Theme = "system" | "light" | "dark";
 export type SpaceColor = "green" | "blue" | "orange" | "purple";
 export type SignIns = "shared" | "separate";
@@ -136,6 +138,42 @@ export interface SpaceRequest {
   name?: string;
   at: number;
 }
+// A request only the person can answer, waiting in the prompt bar. It never
+// carries a secret: no password, and no more of a site's words than the bar
+// shows.
+export interface PendingPrompt {
+  id: string;
+  spaceId: string;
+  tabId?: string;
+  kind: PromptKind;
+  origin?: string;
+  host?: string;
+  at: number;
+  agent: boolean;
+  devices?: { id: string; name: string }[];
+  certificates?: {
+    id: string;
+    subject: string;
+    issuer: string;
+    expires: number;
+  }[];
+  signIn?: { host: string; realm?: string; proxy: boolean; retry: boolean };
+}
+// The person's Allow or Block, kept per space, origin and permission.
+export interface SitePermission {
+  spaceId: string;
+  origin: string;
+  permission: PermissionKey;
+  allow: boolean;
+  at: number;
+}
+export interface PromptAnswer {
+  id: string;
+  allow: boolean;
+  deviceId?: string;
+  certificateId?: string;
+  credentials?: { username: string; password: string };
+}
 export interface BrowserState {
   spaces: Space[];
   tabs: Tab[];
@@ -147,6 +185,8 @@ export interface BrowserState {
   downloads: Download[];
   activity: Activity[];
   spaceRequests: SpaceRequest[];
+  prompts: PendingPrompt[];
+  sitePermissions: SitePermission[];
   settings: Settings;
   platform: "darwin" | "win32" | "linux" | "web";
   version: string;
@@ -197,6 +237,13 @@ export type BrowserAction =
       allow: boolean;
       spaceId?: string;
     }
+  | {
+      type: "site-permission:remove";
+      spaceId: string;
+      origin: string;
+      permission: PermissionKey;
+    }
+  | { type: "site-permission:clear" }
   | { type: "bookmark:add"; url: string; title: string }
   | { type: "bookmark:remove"; id: string }
   | { type: "bookmark:update"; id: string; url: string; title: string }
@@ -240,4 +287,6 @@ export interface KamapathyBridge {
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
   importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
+  // Answers go their own way, so a password never joins an action or state.
+  answerPrompt(answer: PromptAnswer): Promise<void>;
 }

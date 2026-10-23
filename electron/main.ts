@@ -29,6 +29,7 @@ import type {
   ContentBounds,
   ImportOutcome,
   ImportRequest,
+  PromptAnswer,
 } from "../shared/types";
 import { surfaceColor } from "../shared/theme";
 
@@ -331,6 +332,14 @@ function registerIpc(): void {
       };
     },
   );
+  // Its own channel, not an action: an answer may carry a password, which
+  // never belongs in the action log or in the state an action returns.
+  ipcMain.handle("kamapathy:answer-prompt", (event, answer: PromptAnswer) => {
+    const owner = validateSender(event);
+    if (!answer || typeof answer !== "object" || typeof answer.id !== "string")
+      throw new Error("Invalid prompt answer.");
+    owner.prompts.answer(answer);
+  });
   ipcMain.on("kamapathy:window", (event, action: string) => {
     try {
       const current = validateSender(event).window;

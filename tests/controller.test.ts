@@ -322,18 +322,17 @@ describe("native browser lifecycle", () => {
     ) as unknown as FakeSession;
     const request = partition.setPermissionRequestHandler.mock.calls[0][0];
     const check = partition.setPermissionCheckHandler.mock.calls[0][0];
-    vi.mocked(dialog.showMessageBox).mockResolvedValue({
-      response: 1,
-      checkboxChecked: false,
-    });
     const microphone = vi.fn();
     request(page, "media", microphone, {
       requestingUrl: page.url,
       isMainFrame: true,
       mediaTypes: ["audio"],
     });
-    await Promise.resolve();
-    expect(microphone).toHaveBeenCalledWith(true);
+    expect(browser.state.prompts).toMatchObject([
+      { kind: "microphone", origin: "https://example.com", agent: false },
+    ]);
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: true });
+    expect(microphone).toHaveBeenCalledExactlyOnceWith(true);
     expect(
       check(page, "media", "https://example.com", { mediaType: "audio" }),
     ).toBe(true);
@@ -343,25 +342,91 @@ describe("native browser lifecycle", () => {
     expect(
       check(page, "media", "https://example.com", { mediaType: "unknown" }),
     ).toBe(false);
-    expect(dialog.showMessageBox).toHaveBeenLastCalledWith(
-      browser.window,
-      expect.objectContaining({
-        message: "https://example.com wants to use microphone.",
-      }),
-    );
-    vi.mocked(dialog.showMessageBox).mockResolvedValue({
-      response: 0,
-      checkboxChecked: false,
-    });
+    // The camera is a request of its own, and a Block is remembered.
     const camera = vi.fn();
     request(page, "media", camera, {
       requestingUrl: page.url,
       isMainFrame: true,
       mediaTypes: ["video"],
     });
-    await Promise.resolve();
-    expect(dialog.showMessageBox).toHaveBeenCalledTimes(2);
-    expect(camera).toHaveBeenCalledWith(false);
+    expect(browser.state.prompts).toMatchObject([{ kind: "camera" }]);
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: false });
+    expect(camera).toHaveBeenCalledExactlyOnceWith(false);
+    expect(browser.state.prompts).toEqual([]);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it("a personal space asks through the prompt center instead of a native box, and a saved Allow answers the next request without asking", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs[0];
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/",
+    });
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/");
+    const partition = session.fromPartition(
+      "persist:space-personal",
+    ) as unknown as FakeSession;
+    const request = partition.setPermissionRequestHandler.mock.calls[0][0];
+    const asked = vi.fn();
+    request(page, "notifications", asked, {
+      requestingUrl: page.url,
+      isMainFrame: true,
+    });
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    expect(asked).not.toHaveBeenCalled();
+    expect(browser.state.prompts).toMatchObject([
+      { spaceId: "personal", tabId: tab.id, kind: "notifications" },
+    ]);
+    // Opening the space shows the tab whose site is waiting.
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    await browser.dispatch({ type: "space:activate", id: "personal" });
+    expect(browser.state.activeTabId).toBe(tab.id);
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: true });
+    expect(asked).toHaveBeenCalledExactlyOnceWith(true);
+    expect(browser.state.sitePermissions).toMatchObject([
+      {
+        spaceId: "personal",
+        origin: "https://example.com",
+        permission: "notifications",
+        allow: true,
+      },
+    ]);
+    const again = vi.fn();
+    request(page, "notifications", again, {
+      requestingUrl: page.url,
+      isMainFrame: true,
+    });
+    expect(again).toHaveBeenCalledExactlyOnceWith(true);
+    expect(browser.state.prompts).toEqual([]);
+    // Settings removes the decision, and the site asks again.
+    await browser.dispatch({
+      type: "site-permission:remove",
+      spaceId: "personal",
+      origin: "https://example.com",
+      permission: "notifications",
+    });
+    expect(browser.state.sitePermissions).toEqual([]);
+    await expect(
+      browser.dispatch({
+        type: "site-permission:remove",
+        spaceId: "personal",
+        origin: "https://example.com",
+        permission: "camera-microphone" as "camera",
+      }),
+    ).rejects.toThrow("Invalid site permission.");
+    const third = vi.fn();
+    request(page, "notifications", third, {
+      requestingUrl: page.url,
+      isMainFrame: true,
+    });
+    expect(third).not.toHaveBeenCalled();
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: true });
+    expect(browser.state.sitePermissions).toHaveLength(1);
+    await browser.dispatch({ type: "site-permission:clear" });
+    expect(browser.state.sitePermissions).toEqual([]);
   });
 
   it("rejects a pending permission when the requesting space is deleted", async () => {
@@ -379,24 +444,16 @@ describe("native browser lifecycle", () => {
       "persist:space-work",
     ) as unknown as FakeSession;
     const request = partition.setPermissionRequestHandler.mock.calls[0][0];
-    let answer!: (value: {
-      response: number;
-      checkboxChecked: boolean;
-    }) => void;
-    vi.mocked(dialog.showMessageBox).mockReturnValue(
-      new Promise((resolve) => {
-        answer = resolve;
-      }),
-    );
     const callback = vi.fn();
     request(page, "notifications", callback, {
       requestingUrl: page.url,
       isMainFrame: true,
     });
+    expect(browser.state.prompts).toHaveLength(1);
     await browser.dispatch({ type: "space:delete", id: "work" });
-    answer({ response: 1, checkboxChecked: false });
-    await Promise.resolve();
     expect(callback).toHaveBeenCalledExactlyOnceWith(false);
+    expect(browser.state.prompts).toEqual([]);
+    expect(browser.state.sitePermissions).toEqual([]);
   });
 
   it("rejects a pending permission after a reload at the same URL", async () => {
@@ -413,15 +470,6 @@ describe("native browser lifecycle", () => {
       "persist:space-personal",
     ) as unknown as FakeSession;
     const request = partition.setPermissionRequestHandler.mock.calls[0][0];
-    let answer!: (value: {
-      response: number;
-      checkboxChecked: boolean;
-    }) => void;
-    vi.mocked(dialog.showMessageBox).mockReturnValue(
-      new Promise((resolve) => {
-        answer = resolve;
-      }),
-    );
     const callback = vi.fn();
     request(page, "notifications", callback, {
       requestingUrl: page.url,
@@ -431,12 +479,12 @@ describe("native browser lifecycle", () => {
       isMainFrame: true,
       isSameDocument: false,
     });
-    answer({ response: 1, checkboxChecked: false });
-    await Promise.resolve();
     expect(callback).toHaveBeenCalledExactlyOnceWith(false);
+    expect(browser.state.prompts).toEqual([]);
+    expect(browser.state.sitePermissions).toEqual([]);
   });
 
-  it("denies website permissions and downloads in human-owned agent spaces", async () => {
+  it("asks the person in a human-owned agent space and still denies its downloads", async () => {
     const browser = controller();
     await browser.dispatch({
       type: "space:create",
@@ -457,8 +505,15 @@ describe("native browser lifecycle", () => {
       requestingUrl: "https://example.com/",
       isMainFrame: true,
     });
-    expect(callback).toHaveBeenCalledExactlyOnceWith(false);
+    expect(callback).not.toHaveBeenCalled();
+    expect(browser.state.prompts).toMatchObject([
+      { kind: "notifications", agent: false },
+    ]);
     expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: true });
+    expect(callback).toHaveBeenCalledExactlyOnceWith(true);
+    // An agent space keeps its decisions in memory, never on disk.
+    expect(browser.state.sitePermissions).toEqual([]);
     const event = { preventDefault: vi.fn() };
     partition.emit("will-download", event, {});
     expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -964,16 +1019,13 @@ describe("sign-ins", () => {
     const shared = sessions.get("persist:space-personal")!;
     const request = shared.setPermissionRequestHandler.mock.calls[0][0];
     const check = shared.setPermissionCheckHandler.mock.calls[0][0];
-    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
-      response: 1,
-      checkboxChecked: false,
-    });
     const callback = vi.fn();
     request(personal, "notifications", callback, {
       requestingUrl: "https://example.com/",
       isMainFrame: true,
     });
-    await vi.waitFor(() => expect(callback).toHaveBeenCalledWith(true));
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: true });
+    expect(callback).toHaveBeenCalledExactlyOnceWith(true);
     expect(check(personal, "notifications", "https://example.com/", {})).toBe(
       true,
     );
@@ -1648,8 +1700,10 @@ describe("tab origins and agent rules", () => {
     expect(browser.state.history).toMatchObject([
       { url: "https://example.com/", title: "Before" },
     ]);
-    // A grant sets access and labels the space's tabs; set them directly.
+    // A grant hands the space to the agent, sets access and labels its
+    // tabs; set them directly.
     work.access = "granted";
+    work.owner = "agent";
     browser.registry.labelSpace(work.id);
     const shared = sessions.get("persist:space-personal")!;
     const request = shared.setPermissionRequestHandler.mock.calls[0][0];
@@ -1710,6 +1764,7 @@ describe("tab origins and agent rules", () => {
     });
     // When the grant ends, personal rules apply again.
     delete work.access;
+    work.owner = "human";
     page.commit("https://example.org/");
     expect(page.setBackgroundThrottling).toHaveBeenCalledOnce();
     expect(browser.state.history).toMatchObject([
@@ -1729,17 +1784,17 @@ describe("tab origins and agent rules", () => {
         webPreferences: { backgroundThrottling: true },
       },
     });
-    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
-      response: 0,
-      checkboxChecked: false,
-    });
     const asked = vi.fn();
     request(page, "notifications", asked, {
       requestingUrl: "https://example.org/",
       isMainFrame: true,
     });
-    await vi.waitFor(() => expect(asked).toHaveBeenCalledWith(false));
-    expect(dialog.showMessageBox).toHaveBeenCalledOnce();
+    expect(browser.state.prompts).toMatchObject([
+      { spaceId: "work", kind: "notifications", agent: false },
+    ]);
+    browser.prompts.answer({ id: browser.state.prompts[0].id, allow: false });
+    expect(asked).toHaveBeenCalledExactlyOnceWith(false);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
     const allowed = { preventDefault: vi.fn() };
     shared.emit("will-download", allowed, item, page);
     expect(allowed.preventDefault).not.toHaveBeenCalled();

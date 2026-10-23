@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { AutomationController } from "../electron/agent/server";
+import type { PromptReceipts } from "../electron/prompts";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
   agentRules,
@@ -102,11 +103,27 @@ export class FakeController implements AutomationController {
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
-  // What the receipt wrapper tells the prompt center about each route.
+  // What the receipt wrapper tells the prompt center about each route, and
+  // what the server hands it or clears while it runs.
   routeSignals: string[] = [];
+  deniedSink: PromptReceipts | null = null;
+  clearedPrompts: string[] = [];
   readonly prompts = {
-    routeStarted: (tabId: string) => this.routeSignals.push(`start ${tabId}`),
-    routeEnded: (tabId: string) => this.routeSignals.push(`end ${tabId}`),
+    routeStarted: (tabId: string) => {
+      this.routeSignals.push(`start ${tabId}`);
+    },
+    routeEnded: (tabId: string) => {
+      this.routeSignals.push(`end ${tabId}`);
+    },
+    setReceipts: (receipts: PromptReceipts | null) => {
+      this.deniedSink = receipts;
+    },
+    clearSpace: (spaceId: string) => {
+      this.clearedPrompts.push(spaceId);
+    },
+    clearAll: () => {
+      this.clearedPrompts.push("all");
+    },
   };
   constructor() {
     this.state.spaces.push({
