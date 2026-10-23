@@ -1778,17 +1778,19 @@ try {
     "Set up agents links Claude Code and Codex, leaves the Codex rule off, and removes cleanly",
   );
   // Help pages open as the person's tab, never in the agent space in front.
-  const helpWatcher = (
-    await (await api("/spaces", "POST", { name: "Help watcher" })).json()
-  ).space;
+  // Agent access is off by now, so the space in front is the one made by hand.
   await page.evaluate(
     (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
-    helpWatcher.id,
+    manual,
   );
-  await waitForState(
+  state = await waitForState(
     page,
-    (state, id) => state.activeSpaceId === id,
-    helpWatcher.id,
+    (next, id) => next.activeSpaceId === id,
+    manual,
+  );
+  assert.equal(
+    state.spaces.find((space) => space.id === manual)?.kind,
+    "agent",
   );
   await openBrowserMenu();
   await browserMenu.getByRole("menuitem", { name: "Help", exact: true }).click();
@@ -1800,7 +1802,7 @@ try {
   );
   assert.equal(helpTab.url, "https://kamapathy.app/#faq");
   assert.equal(state.activeTabId, helpTab.id);
-  assert.notEqual(helpTab.spaceId, helpWatcher.id);
+  assert.notEqual(helpTab.spaceId, manual);
   assert.equal(
     state.spaces.find((space) => space.id === helpTab.spaceId)?.kind,
     "personal",
@@ -1810,7 +1812,6 @@ try {
     (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
     helpTab.id,
   );
-  assert.equal((await api(`/spaces/${helpWatcher.id}`, "DELETE")).status, 200);
   checked("Help opens the FAQ in the personal space used last");
   // Section 13 in the window: Updates, with this copy running from source.
   await openBrowserMenu();
