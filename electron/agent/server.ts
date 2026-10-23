@@ -15,6 +15,7 @@ import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { createActions } from "./actions";
 import { activeSpace, createAuthority } from "./authority";
 import { createDialogs } from "./dialogs";
+import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
 import { createExpectations } from "./expectations";
 import {
@@ -25,6 +26,7 @@ import {
   type RouteDeps,
 } from "./http";
 import { createReceipts } from "./receipts";
+import { downloadRoutes } from "./routes/downloads";
 import { eventRoutes } from "./routes/events";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
@@ -73,6 +75,15 @@ export interface AutomationController {
   /** Whether the agent has this tab now: managed, in a space it owns under
    *  agent rules whose access has not ended. */
   agentControlled(tabId: string): boolean;
+  /** The profile directory downloads are stored under. */
+  userDataPath(): string;
+  /** Lets the agent server decide a download before the space refuses it. */
+  onDownload(
+    decide: (
+      contents: WebContents,
+      item: Electron.DownloadItem,
+    ) => { captured: true; id: string } | { captured: false },
+  ): () => void;
   /** The prompt center, told when each route on a tab starts and ends. */
   readonly prompts?: {
     routeStarted(tabId: string): void;
@@ -215,6 +226,18 @@ export async function startAutomation(
       dialogStops.delete(stop);
     });
   });
+  // Only downloads an agent armed are kept, in a private folder under the
+  // profile, and the controller asks before its space refuses one.
+  const downloads = createDownloads({
+    tabLog,
+    arms: () => expectations,
+    controller,
+    tabOf: (contents) =>
+      controller.state.tabs.find(
+        (tab) => controller.peekWebContents(tab.id) === contents,
+      ),
+  });
+  const stopDecider = controller.onDownload(downloads.decide);
   // A long run keeps no ring, request window or arm for a tab that is gone.
   const stopTabForget = controller.registry.on((event) => {
     if (event.type !== "closed") return;
@@ -232,6 +255,7 @@ export async function startAutomation(
     receipts,
     expectations,
     dialogs,
+    downloads,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -243,6 +267,7 @@ export async function startAutomation(
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
     ...eventRoutes(deps),
+    ...downloadRoutes(deps),
     ...requests.routes,
   });
   const versions = Object.fromEntries(
@@ -444,6 +469,9 @@ export async function startAutomation(
         for (const stop of dialogStops) stop();
         dialogStops.clear();
         stopDialogSessions();
+        // Nothing an agent downloaded outlives its access.
+        stopDecider();
+        downloads.clearAll();
         stopPopupLog();
         stopTabForget();
         // Nothing keeps a request window open once the server stops.

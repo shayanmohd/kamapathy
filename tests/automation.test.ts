@@ -16,6 +16,7 @@ import type { BrowserAction, BrowserState, Space } from "../shared/types";
 import {
   FakeContents,
   FakeController,
+  FakeDownloadItem,
   socketFetch,
   testSocket,
 } from "./fake-automation";
@@ -125,6 +126,7 @@ describe("local automation socket", () => {
   afterEach(async () => {
     await api.close();
     socket.cleanup();
+    FakeController.cleanup();
   });
 
   it("creates agent spaces with the person's sign-ins unless isolation is requested", async () => {
@@ -2206,13 +2208,27 @@ describe("local automation socket", () => {
       "POST /tabs/:id/expectations": { event: "popup", timeoutMs: 1000 },
       "POST /expectations/:id/wait": {},
       "POST /tabs/:id/dialog-policy": { accept: false },
+      "POST /downloads/:id/cancel": {},
     };
-    // A wait names its arm, not a space or a tab.
+    // A wait names its arm, and a cancel its download, not a space or a tab.
     const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
       event: "popup",
       timeoutMs: 60000,
     });
     const expectationId = (await armed.json()).expectation.id as string;
+    expect(
+      (
+        await request(`/tabs/${tab.id}/expectations`, "POST", {
+          event: "download",
+          timeoutMs: 60000,
+        })
+      ).status,
+    ).toBe(201);
+    const captured = controller.startDownload(
+      tab.id,
+      new FakeDownloadItem({ filename: "report.pdf" }),
+    );
+    const downloadId = (captured as { id: string }).id;
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
       const key = routeKey(route);
@@ -2223,7 +2239,9 @@ describe("local automation socket", () => {
           ? space.id
           : route.path.startsWith("/expectations/")
             ? expectationId
-            : tab.id,
+            : route.path.startsWith("/downloads/")
+              ? downloadId
+              : tab.id,
       );
       const response = await request(path, "POST", { ...SAMPLES[key], extra: true });
       expect(response.status, key).toBe(400);
@@ -2508,4 +2526,92 @@ describe("local automation socket", () => {
     await api.close();
     expect(installed()).toBeUndefined();
   });
+  it("the download list, read, cancel and delete routes authorize their space and answer download_not_found for an unknown id", async () => {
+    const { space, tab } = await createPage();
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "download",
+    });
+    expect(armed.status).toBe(201);
+    const item = new FakeDownloadItem({
+      filename: "report.pdf",
+      url: "https://example.com/report.pdf",
+      mimeType: "application/pdf",
+      totalBytes: 9,
+    });
+    const captured = controller.startDownload(tab.id, item);
+    expect(captured).toEqual({ captured: true, id: expect.any(String) });
+    const id = (captured as { id: string }).id;
+    // The list and the read answer the same view, and no path of this
+    // machine is in it.
+    const view = {
+      id,
+      tabId: tab.id,
+      url: "https://example.com/report.pdf",
+      suggestedFilename: "report.pdf",
+      mimeType: "application/pdf",
+      state: "progressing",
+      receivedBytes: 0,
+      totalBytes: 9,
+      failure: null,
+    };
+    const listed = await request(`/spaces/${space.id}/downloads`);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ downloads: [view] });
+    expect((await (await request(`/downloads/${id}`)).json()).download).toEqual(
+      view,
+    );
+    // An unknown id is not found on any of the four routes.
+    for (const [path, method] of [
+      ["/downloads/0123456789abcdef", "GET"],
+      ["/downloads/0123456789abcdef/cancel", "POST"],
+      ["/downloads/0123456789abcdef", "DELETE"],
+      [`/spaces/${space.id}/downloads/0123456789abcdef`, "GET"],
+    ] as const) {
+      const missing = await request(
+        path,
+        method,
+        method === "POST" ? {} : undefined,
+      );
+      expect([404, 404]).toContain(missing.status);
+      expect((await missing.json()).error.code).toBe(
+        path.startsWith("/downloads") ? "download_not_found" : "route_not_found",
+      );
+    }
+    // The person taking over refuses every one of them, as a page route.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const held = await request(`/downloads/${id}`);
+    expect(held.status).toBe(409);
+    expect((await held.json()).error.code).toBe("human_control");
+    expect((await request(`/spaces/${space.id}/downloads`)).status).toBe(409);
+    await request(`/spaces/${space.id}/resume`, "POST", {});
+
+    // Cancel stops a running download and answers its record; a finished
+    // one is left as it is.
+    const cancelled = await request(`/downloads/${id}/cancel`, "POST", {});
+    expect(cancelled.status).toBe(200);
+    expect(item.cancelled).toBe(true);
+    item.finish("cancelled", 4);
+    const after = (await (await request(`/downloads/${id}`)).json()).download;
+    expect(after).toMatchObject({
+      state: "cancelled",
+      failure: "cancelled",
+      receivedBytes: 4,
+    });
+    expect((await request(`/downloads/${id}/cancel`, "POST", {})).status).toBe(
+      200,
+    );
+    // Delete takes the bytes with it, and the id is gone.
+    const removed = await request(`/downloads/${id}`, "DELETE");
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ ok: true });
+    expect((await request(`/downloads/${id}`)).status).toBe(404);
+    expect(
+      (await (await request(`/spaces/${space.id}/downloads`)).json()).downloads,
+    ).toEqual([]);
+  });
+
 });

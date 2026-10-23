@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -83,6 +84,58 @@ export class FakeContents extends FakeHost {
       isEmpty: () => false,
       toPNG: () => Buffer.from([137, 80, 78, 71]),
     };
+  }
+}
+// Profile folders the fakes made, removed by FakeController.cleanup.
+const profiles: string[] = [];
+
+// A download as Electron hands one to will-download: the methods the agent
+// server reads, and the progress and end a test drives by hand.
+export class FakeDownloadItem extends EventEmitter {
+  savePath = "";
+  dialogOptions?: unknown;
+  cancelled = false;
+  private received = 0;
+  constructor(
+    private readonly file: {
+      filename: string;
+      url?: string;
+      mimeType?: string;
+      totalBytes?: number;
+    },
+  ) {
+    super();
+  }
+  getFilename = () => this.file.filename;
+  getURL = () => this.file.url ?? `https://example.com/${this.file.filename}`;
+  getMimeType = () => this.file.mimeType ?? "application/octet-stream";
+  getTotalBytes = () => this.file.totalBytes ?? 0;
+  getReceivedBytes = () => this.received;
+  setSavePath = (path: string) => {
+    this.savePath = path;
+  };
+  getSavePath = () => this.savePath;
+  setSaveDialogOptions = (options: unknown) => {
+    this.dialogOptions = options;
+  };
+  cancel = () => {
+    this.cancelled = true;
+  };
+  /** Bytes arriving, as Chromium reports them. */
+  progress(
+    bytes: number,
+    state: "progressing" | "interrupted" = "progressing",
+  ) {
+    this.received = bytes;
+    this.emit("updated", {}, state);
+  }
+  /** The end of the download. */
+  finish(
+    state: "completed" | "cancelled" | "interrupted" = "completed",
+    bytes = this.received,
+  ) {
+    this.received = bytes;
+    this.emit("done", {}, state);
   }
 }
 // BrowserController's state, registry and server-facing methods, without
@@ -240,6 +293,45 @@ export class FakeController implements AutomationController {
     if (!tab.unseen) return;
     delete tab.unseen;
     this.emit();
+  }
+  // Where the agent server keeps held downloads, made on first use so most
+  // tests leave no folder behind. FakeController.cleanup removes them.
+  private profile?: string;
+  userDataPath() {
+    if (!this.profile) {
+      this.profile = mkdtempSync(join(tmpdir(), "kamapathy-profile-"));
+      profiles.push(this.profile);
+    }
+    return this.profile;
+  }
+  private decider?: (
+    contents: WebContents,
+    item: Electron.DownloadItem,
+  ) => { captured: true; id: string } | { captured: false };
+  onDownload(
+    decide: (
+      contents: WebContents,
+      item: Electron.DownloadItem,
+    ) => { captured: true; id: string } | { captured: false },
+  ) {
+    this.decider = decide;
+    return () => {
+      if (this.decider === decide) delete this.decider;
+    };
+  }
+  /** A download starting in a tab, as the controller's handler decides it. */
+  startDownload(tabId: string, item: unknown) {
+    const contents = this.pages.get(tabId) as unknown as WebContents;
+    return (
+      this.decider?.(contents, item as Electron.DownloadItem) ?? {
+        captured: false as const,
+      }
+    );
+  }
+  /** Removes every profile folder the fakes made. */
+  static cleanup() {
+    for (const path of profiles.splice(0))
+      rmSync(path, { recursive: true, force: true });
   }
   agentControlled(tabId: string) {
     const tab = this.state.tabs.find((item) => item.id === tabId);

@@ -7,6 +7,7 @@ import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
 import { availableBrowsers, importFrom, type BrowserId } from "./import";
+import { clearDownloadFolder } from "./agent/downloads";
 import { startAutomation } from "./agent/server";
 import {
   agentPaths,
@@ -397,6 +398,9 @@ else {
       (_contents, _permission, callback) => callback(false),
     );
     session.defaultSession.setPermissionCheckHandler(() => false);
+    // Downloads an agent held are never kept across starts, so a crash
+    // leaves nothing behind.
+    clearDownloadFolder(app.getPath("userData"));
     try {
       // A crash leaves the last endpoint behind; record how agents can start
       // this Kamapathy again.

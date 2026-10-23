@@ -13,6 +13,7 @@ import {
   newTab,
   PAGE_BUDGET,
 } from "../shared/state";
+import { FakeDownloadItem } from "./fake-automation";
 
 vi.mock("electron", () => ({
   BrowserWindow: vi.fn(),
@@ -945,6 +946,87 @@ describe("sign-ins", () => {
     const unknown = { preventDefault: vi.fn() };
     shared.emit("will-download", unknown, item, {});
     expect(unknown.preventDefault).toHaveBeenCalledOnce();
+  });
+  it("a personal space still saves through the dialog, and a space under human control still blocks", async () => {
+    const profile = mkdtempSync(join(tmpdir(), "kamapathy-profile-"));
+    const browser = controller(join(profile, "browser-state.json"));
+    expect(browser.userDataPath()).toBe(profile);
+    const personal = await navigate(
+      browser,
+      browser.state.activeTabId,
+      "https://a.example/",
+    );
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.state.tabs.find(
+      (tab) => tab.spaceId === space.id,
+    )!;
+    const agent = await navigate(browser, agentTab.id, "https://b.example/");
+    // The agent server's decision, as the server registers it.
+    const asked: string[] = [];
+    const stop = browser.onDownload((_contents, item) => {
+      asked.push(item.getFilename());
+      return browser.agentControlled(agentTab.id)
+        ? { captured: true as const, id: "0123456789abcdef" }
+        : { captured: false as const };
+    });
+    const shared = sessions.get("persist:space-personal")!;
+    // A personal space never reaches the decider: Electron's save dialog
+    // and the person's Downloads list are unchanged.
+    const saved = { preventDefault: vi.fn() };
+    const personalItem = new FakeDownloadItem({ filename: "report.pdf" });
+    shared.emit("will-download", saved, personalItem, personal);
+    expect(saved.preventDefault).not.toHaveBeenCalled();
+    expect(asked).toEqual([]);
+    expect(personalItem.dialogOptions).toEqual({ title: "Save download" });
+    expect(browser.state.downloads[0].filename).toBe("report.pdf");
+    // An armed download in the agent space runs on, with nothing in the
+    // person's list and no blocked line.
+    const armed = { preventDefault: vi.fn() };
+    shared.emit(
+      "will-download",
+      armed,
+      new FakeDownloadItem({ filename: "armed.pdf" }),
+      agent,
+    );
+    expect(asked).toEqual(["armed.pdf"]);
+    expect(armed.preventDefault).not.toHaveBeenCalled();
+    expect(browser.state.downloads).toHaveLength(1);
+    expect(
+      browser.state.activity.some((entry) =>
+        entry.message.includes("A download was blocked"),
+      ),
+    ).toBe(false);
+    // The person taking the space over leaves no tab under agent control,
+    // so its downloads are blocked again.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const takenOver = { preventDefault: vi.fn() };
+    shared.emit(
+      "will-download",
+      takenOver,
+      new FakeDownloadItem({ filename: "during.pdf" }),
+      agent,
+    );
+    expect(takenOver.preventDefault).toHaveBeenCalledOnce();
+    expect(browser.state.activity[0].message).toBe(
+      "A download was blocked in the agent space.",
+    );
+    expect(browser.state.downloads).toHaveLength(1);
+    // With the server stopped, the handler does what it always did.
+    stop();
+    const stopped = { preventDefault: vi.fn() };
+    shared.emit(
+      "will-download",
+      stopped,
+      new FakeDownloadItem({ filename: "after.pdf" }),
+      agent,
+    );
+    expect(stopped.preventDefault).toHaveBeenCalledOnce();
+    expect(asked).toEqual(["armed.pdf", "during.pdf"]);
+    rmSync(profile, { recursive: true, force: true });
   });
   it("keeps a permission grant inside the space that allowed it", async () => {
     const browser = controller();

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
+import { downloadRoutes } from "../electron/agent/routes/downloads.ts";
 import { eventRoutes } from "../electron/agent/routes/events.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
@@ -145,6 +146,7 @@ describe("API schema", () => {
       ...spaceRoutes(deps),
       ...tabRoutes(deps),
       ...eventRoutes(deps),
+      ...downloadRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
     };
     expect(keys.sort()).toEqual([...Object.keys(impls), "GET /health"].sort());

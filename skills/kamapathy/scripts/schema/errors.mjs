@@ -97,6 +97,13 @@ export const ERRORS = {
     [],
     2,
   ),
+  download_not_found: code(
+    404,
+    false,
+    "No held download has this ID: it was deleted, its space closed, or an hour passed since it finished.",
+    [],
+    2,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -151,6 +158,13 @@ export const ERRORS = {
     false,
     "The page already waits for that event.",
     ["event", "expectationId"],
+    2,
+  ),
+  download_limit: code(
+    409,
+    false,
+    "The space already holds its most downloads. Delete one before arming another.",
+    ["limit"],
     2,
   ),
   tab_limit: code(409, false, "The space already has its most tabs."),

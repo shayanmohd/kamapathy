@@ -165,6 +165,12 @@ export class BrowserController {
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  // The agent server's download decision, asked before a space that follows
+  // agent rules refuses a download.
+  private downloadDecider?: (
+    contents: WebContents,
+    item: Electron.DownloadItem,
+  ) => { captured: true; id: string } | { captured: false };
 
   constructor(
     readonly window: BrowserWindow,
@@ -191,6 +197,24 @@ export class BrowserController {
   ): () => void {
     this.viewListeners.add(listener);
     return () => this.viewListeners.delete(listener);
+  }
+
+  // The profile directory, which the agent server keeps armed downloads
+  // under. The state file lives in it.
+  userDataPath(): string {
+    return dirname(this.statePath);
+  }
+
+  onDownload(
+    decide: (
+      contents: WebContents,
+      item: Electron.DownloadItem,
+    ) => { captured: true; id: string } | { captured: false },
+  ): () => void {
+    this.downloadDecider = decide;
+    return () => {
+      if (this.downloadDecider === decide) delete this.downloadDecider;
+    };
   }
 
   private emit(): BrowserState {
@@ -514,6 +538,19 @@ export class BrowserController {
     ) => {
       const space = this.spaceOf(contents);
       if (!space || agentRules(space)) {
+        // An agent that armed this download keeps it in its own folder; the
+        // space refuses every other one, as it always has.
+        const captured = (() => {
+          if (!space || !this.downloadDecider) return false;
+          try {
+            return this.downloadDecider(contents, item).captured;
+          } catch {
+            // A decision that fails blocks the download, so no save dialog
+            // ever reaches the person from an agent space.
+            return false;
+          }
+        })();
+        if (captured) return;
         event.preventDefault();
         if (space)
           this.addActivity(

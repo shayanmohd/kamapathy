@@ -8,6 +8,7 @@ import {
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
 import type { Dialogs } from "./dialogs";
+import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
 import type { Expectations } from "./expectations";
 import type { Receipts } from "./receipts";
@@ -108,6 +109,7 @@ export interface RouteDeps {
   receipts: Receipts;
   expectations: Expectations;
   dialogs: Dialogs;
+  downloads: Downloads;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {
