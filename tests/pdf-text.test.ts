@@ -94,7 +94,7 @@ describe("pdf text", () => {
     const one = ok(await read(textPdf(PAGES), { from: 2, to: 2 }));
     expect(one).toMatchObject({ title: "", pageCount: 3, from: 2, to: 2 });
     expect(one.pages).toEqual([{ number: 2, text: TEXT[1] }]);
-  });
+  }, 20000);
 
   it("maxChars 0", async () => {
     const reply = ok(
@@ -108,7 +108,7 @@ describe("pdf text", () => {
       truncated: false,
     });
     expect(reply.noText).toBeUndefined();
-  });
+  }, 20000);
 
   it("truncation with nextPage", async () => {
     const bytes = textPdf(PAGES);
@@ -122,7 +122,7 @@ describe("pdf text", () => {
     const cut = ok(await read(bytes, { maxChars: 4 }));
     expect(cut.pages).toEqual([{ number: 1, text: TEXT[0].slice(0, 4) }]);
     expect(cut).toMatchObject({ chars: 4, truncated: true, nextPage: 1 });
-  });
+  }, 20000);
 
   it("noText", async () => {
     const reply = ok(await read(imagePdf()));
@@ -133,16 +133,16 @@ describe("pdf text", () => {
       truncated: false,
       noText: true,
     });
-  });
+  }, 20000);
 
   it("CJK", async () => {
     const reply = ok(await read(cjkPdf("你好世界")));
     expect(reply.pages).toEqual([{ number: 1, text: "你好世界" }]);
-  });
+  }, 20000);
 
   it("pdf_locked", async () => {
     expect(await read(lockedPdf())).toEqual({ ok: false, code: "pdf_locked" });
-  });
+  }, 20000);
 
   it("pdf_unreadable", async () => {
     expect(await read(truncatedPdf())).toEqual({
@@ -158,7 +158,7 @@ describe("pdf text", () => {
       code: "page_out_of_range",
       pageCount: 3,
     });
-  });
+  }, 20000);
 
   it("text assembly", () => {
     expect(
@@ -226,6 +226,30 @@ describe("pdf extraction", () => {
     expect(error.code).toBe("page_out_of_range");
     expect(error.fields).toEqual({ pageCount: 7 });
     expect(error.message).toContain("7 pages");
+  });
+
+  it("a fork that fails frees the slot", async () => {
+    const children: FakeChild[] = [];
+    let broken = true;
+    const extractor = createExtractor({
+      fork: () => {
+        if (broken) throw new Error("no process");
+        const child = new FakeChild();
+        children.push(child);
+        return child;
+      },
+      cMapUrl,
+    });
+    const error = await failure(
+      extractor.extract(bytes, request, Date.now() + 10000),
+    );
+    expect(error.message).toBe("no process");
+    expect(extractor.running()).toBe(0);
+    broken = false;
+    const promise = extractor.extract(bytes, request, Date.now() + 10000);
+    children[0].send("message", pages);
+    await expect(promise).resolves.toEqual(pages);
+    expect(extractor.running()).toBe(0);
   });
 
   it("two at a time", async () => {

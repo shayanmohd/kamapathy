@@ -58,8 +58,10 @@ export function createExtractor(
           { scope: "pdf" },
         );
       const cmaps = (cMapUrl ??= cMapDirectory());
-      running += 1;
+      // A slot is taken once the process exists, so a fork that fails holds
+      // none.
       const child = fork();
+      running += 1;
       const timeoutMs = Math.max(0, deadline - Date.now());
       return await new Promise<PdfPages>((resolve, reject) => {
         let settled = false;
