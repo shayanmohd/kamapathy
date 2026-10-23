@@ -42,7 +42,8 @@ export type ToolAction = {
     | "wait"
     | "navigate"
     | "reload"
-    | "wait-for-url";
+    | "wait-for-url"
+    | "wait-for-load-state";
   payload: Record<string, unknown>;
 };
 
@@ -165,6 +166,19 @@ export function waitForUrlFields(body: Record<string, unknown>): UrlWaitBody {
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
+// The load-state wait takes navigate's states, with the quiet window
+// networkidle asks for.
+export function loadStateFields(body: Record<string, unknown>): {
+  state: WaitUntil;
+  idleMs: number;
+  timeoutMs: number;
+} {
+  return {
+    state: enumField(body, "state", WAIT_UNTIL, "load"),
+    idleMs: integerField(body, "idleMs", 500, 0, 10000),
+    timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
+  };
+}
 export function targetFields(
   body: Record<string, unknown>,
   optional = false,
@@ -280,6 +294,8 @@ export function parseToolAction(
       });
     return { type, payload: { ...fields } };
   }
+  if (type === "wait-for-load-state")
+    return { type, payload: loadStateFields(body) };
   if (type === "wait")
     return {
       type,

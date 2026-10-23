@@ -6,6 +6,7 @@ import { createTrackers } from "../navigation/trackers";
 import { createWaits, type UrlWaitBody } from "../navigation/waits";
 import type { AutomationController } from "../server";
 import {
+  loadStateFields,
   navigationFields,
   reloadFields,
   waitForUrlFields,
@@ -87,6 +88,11 @@ export function createNavigation(
     timeoutMs: number;
     ignoreCache: boolean;
   };
+  type LoadStateBody = {
+    state: WaitUntil;
+    idleMs: number;
+    timeoutMs: number;
+  };
   // What a batch step waits: its own timeout, cut to the budget the batch
   // has left, which its timeout error then reports.
   const cutTo = (timeoutMs: number, run: Run) =>
@@ -115,6 +121,14 @@ export function createNavigation(
             response,
             200,
             await waits.url(tab!.id, waitForUrlFields(body!), run),
+          ),
+      },
+      "POST /tabs/:id/wait-for-load-state": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await waits.loadState(tab!.id, loadStateFields(body!), run),
           ),
       },
       "GET /tabs/:id/info": {
@@ -158,7 +172,7 @@ export function createNavigation(
         },
       },
     },
-    stepTypes: ["navigate", "reload", "wait-for-url"],
+    stepTypes: ["navigate", "reload", "wait-for-url", "wait-for-load-state"],
     step: async (tabId, action, run) => {
       if (action.type === "navigate") {
         const body = action.payload as NavigateBody;
@@ -179,6 +193,14 @@ export function createNavigation(
       if (action.type === "wait-for-url") {
         const body = action.payload as unknown as UrlWaitBody;
         return waits.url(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      if (action.type === "wait-for-load-state") {
+        const body = action.payload as LoadStateBody;
+        return waits.loadState(
           tabId,
           { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
           run,

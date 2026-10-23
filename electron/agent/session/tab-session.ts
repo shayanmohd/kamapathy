@@ -181,10 +181,12 @@ export class TabSession {
   private ending = new AbortController();
   readonly network: {
     inFlight(): number;
+    pending(limit: number): string[];
     lastActivityAt(): number;
     waitForIdle(idleMs: number, step: Step): Promise<void>;
   } = {
     inFlight: () => this.requests.inFlight(),
+    pending: (limit) => this.requests.pending(limit),
     lastActivityAt: () => this.requests.lastActivityAt(),
     waitForIdle: (idleMs, step) =>
       this.requests.waitForIdle(idleMs, {

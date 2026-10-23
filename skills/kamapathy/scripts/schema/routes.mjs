@@ -45,6 +45,18 @@ const waitTimeout = {
   since: 2,
   description: "How long to wait. 0 checks once.",
 };
+// The state a load-state wait judges on the document the page shows, rather
+// than on a new one it starts.
+const loadState =
+  "commit needs a committed document; domcontentloaded and load wait for those events; networkidle adds a quiet network window.";
+// The quiet window networkidle asks for.
+const idleMs = {
+  kind: "ms",
+  max: 10000,
+  default: 500,
+  since: 2,
+  description: "How long nothing may be in flight before networkidle answers.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -176,6 +188,11 @@ const FIELDS = {
   "wait-for-url": {
     url: { ...urlGlob, required: true },
     waitUntil,
+    timeoutMs: waitTimeout,
+  },
+  "wait-for-load-state": {
+    state: { ...waitUntil, description: loadState },
+    idleMs,
     timeoutMs: waitTimeout,
   },
 };
@@ -422,6 +439,14 @@ export const ROUTES = [
     { budget: { field: "timeoutMs" }, since: 2 },
   ),
   route(
+    "POST",
+    "/tabs/:id/wait-for-load-state",
+    "Waits for the document this page shows to reach a state.",
+    "{ ok: true, tab: TabView, state }",
+    FIELDS["wait-for-load-state"],
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
     "GET",
     "/tabs/:id/info",
     "Reads the viewport, scroll offsets, document size and ready state.",
@@ -600,6 +625,12 @@ export const ACTIONS = [
     type: "wait-for-url",
     summary: "Waits for this page's URL to match a glob.",
     fields: FIELDS["wait-for-url"],
+    since: 2,
+  },
+  {
+    type: "wait-for-load-state",
+    summary: "Waits for the document this page shows to reach a state.",
+    fields: FIELDS["wait-for-load-state"],
     since: 2,
   },
 ];

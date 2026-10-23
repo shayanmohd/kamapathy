@@ -2103,6 +2103,297 @@ describe("local automation socket", () => {
     });
   });
 
+  // A load-state wait and its answer.
+  const waitForLoadState = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/wait-for-load-state`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // A load-state wait that is listening, so the page's own events reach it.
+  const judging = async (tabId: string, body: Record<string, unknown>) => {
+    const done = waitForLoadState(tabId, body);
+    await sleep(25);
+    return { done };
+  };
+  // A tab's navigation log starts with its first wait or navigation, so a
+  // test that drives the page's own events opens it first.
+  const tracking = async (tabId: string) => {
+    const started = await waitForUrl(tabId, {
+      url: "**",
+      waitUntil: "commit",
+    });
+    expect(started.status).toBe(200);
+  };
+  // A subresource of the page, in flight until it finishes.
+  const inFlight = (page: FakeContents, requestId: string, url: string) =>
+    page.emitProtocol("Network.requestWillBeSent", {
+      requestId,
+      loaderId: "loader-2",
+      documentURL: "https://example.com/feed",
+      request: { url, method: "GET", headers: {} },
+      type: "Fetch",
+    });
+  const finished = (page: FakeContents, requestId: string) =>
+    page.emitProtocol("Network.loadingFinished", { requestId });
+
+  it("domcontentloaded needs the handlers finished, not readyState interactive", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/next");
+    frame.commit("https://example.com/next");
+    // The page would answer readyState interactive with its DOMContentLoaded
+    // handlers still running, which is not the state the agent asked for.
+    page.result = {
+      ok: true,
+      readyState: "interactive",
+      domContentLoaded: false,
+      load: false,
+    };
+    const { done: pending } = await judging(tab.id, {
+      state: "domcontentloaded",
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await sleep(150);
+    expect(settled).toBe(false);
+    // Nothing was read from the page: the document's own event decides.
+    expect(page.scripts).toEqual([]);
+    frame.lifecycle("DOMContentLoaded");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, managed: true }),
+      state: "domcontentloaded",
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent observed a page condition",
+    });
+    // The batch step judges the same document, which has reached the state.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "wait-for-load-state", state: "domcontentloaded" }],
+    });
+    expect(batch.status).toBe(200);
+    expect(await batch.json()).toMatchObject({
+      ok: true,
+      results: [
+        {
+          index: 0,
+          type: "wait-for-load-state",
+          result: { ok: true, state: "domcontentloaded" },
+        },
+      ],
+    });
+  });
+
+  it("load follows a navigation in flight at entry", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/one");
+    first.commit("https://example.com/one");
+    first.lifecycle("load");
+    // A cross-document navigation is already in flight, so the document that
+    // loaded is not the one the wait judges.
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/two");
+    const { done: pending } = await judging(tab.id, {
+      state: "load",
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await sleep(150);
+    expect(settled).toBe(false);
+    second.commit("https://example.com/two");
+    await sleep(150);
+    expect(settled).toBe(false);
+    second.lifecycle("load");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({ ok: true, state: "load" });
+  });
+
+  it("a navigation that fails during the wait ends it", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/one");
+    first.commit("https://example.com/one");
+    const { done: pending } = await judging(tab.id, {
+      state: "load",
+      timeoutMs: 5000,
+    });
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/two");
+    second.request("https://example.com/two");
+    second.failed("net::ERR_NAME_NOT_RESOLVED");
+    const failed = await failure(await pending);
+    expect(failed.status).toBe(422);
+    expect(failed.error).toMatchObject({
+      code: "navigation_failed",
+      url: "https://example.com/two",
+      netError: "ERR_NAME_NOT_RESOLVED",
+    });
+  });
+
+  it("an end without a document keeps the old one", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/one");
+    first.commit("https://example.com/one");
+    first.lifecycle("load");
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/two");
+    const { done: pending } = await judging(tab.id, {
+      state: "load",
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await sleep(100);
+    expect(settled).toBe(false);
+    // The navigation stopped without committing, so the page still shows the
+    // document that loaded.
+    second.stop();
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({ ok: true, state: "load" });
+  });
+
+  it("networkidle waits for load and a quiet window, and names what is pending", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/feed");
+    frame.commit("https://example.com/feed");
+    frame.lifecycle("load");
+    inFlight(page, "r1", "https://example.com/a.json");
+    inFlight(page, "r2", "https://example.com/b.json");
+    const { done: pending } = await judging(tab.id, {
+      state: "networkidle",
+      idleMs: 200,
+      timeoutMs: 5000,
+    });
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await sleep(150);
+    expect(settled).toBe(false);
+    const quiet = Date.now();
+    finished(page, "r1");
+    finished(page, "r2");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      state: "networkidle",
+    });
+    expect(Date.now() - quiet).toBeGreaterThanOrEqual(190);
+    // A timeout names the state, the document and what is still in flight.
+    const long = `https://example.com/${"q".repeat(260)}`;
+    inFlight(page, "r3", "https://example.com/c.json");
+    inFlight(page, "r4", long);
+    inFlight(page, "r5", "https://example.com/e.json");
+    inFlight(page, "r6", "https://example.com/f.json");
+    const timedOut = await failure(
+      await waitForLoadState(tab.id, { state: "networkidle", timeoutMs: 150 }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toMatchObject({
+      code: "wait_timeout",
+      message:
+        "The page did not reach networkidle within 150 ms. It is at https://example.com/feed with readyState complete.",
+      awaited: "load_state",
+      timeoutMs: 150,
+      state: "networkidle",
+      url: "https://example.com/feed",
+      readyState: "complete",
+      inflight: 4,
+      pending: [
+        "https://example.com/c.json",
+        long.slice(0, 200),
+        "https://example.com/e.json",
+      ],
+    });
+  });
+
+  it("a document the tracker never saw commit is probed for its state", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      readyState: "loading",
+      domContentLoaded: false,
+      load: false,
+    };
+    const timedOut = await failure(
+      await waitForLoadState(tab.id, { state: "load", timeoutMs: 150 }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "load_state",
+      state: "load",
+      url: "https://example.com/",
+      readyState: "loading",
+    });
+    // One fixed read, and no field of a networkidle wait.
+    expect(
+      page.scripts.filter(
+        (item) => item.code === `(${PAGE_STATE_SOURCE})("loadProbe")`,
+      ),
+    ).toHaveLength(1);
+    expect(timedOut.error.inflight).toBeUndefined();
+    expect(timedOut.error.pending).toBeUndefined();
+  });
+
+  it("load-state fields are enforced", async () => {
+    const { tab } = await createPage();
+    for (const body of [
+      { idleMs: 10001 },
+      { timeoutMs: 60001 },
+      { state: "idle" },
+    ]) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/wait-for-load-state`, "POST", body),
+      );
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field: Object.keys(body)[0],
+      });
+    }
+    // The step takes the same fields, and the plan is checked before it runs.
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "wait-for-load-state", idleMs: -1 }],
+      }),
+    );
+    expect(step.status).toBe(400);
+    expect(step.error).toMatchObject({
+      code: "invalid_field",
+      field: "idleMs",
+    });
+    expect(controller.contents.scripts).toEqual([]);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -2748,6 +3039,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/navigate": { url: "https://example.com/" },
       "POST /tabs/:id/reload": {},
       "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
+      "POST /tabs/:id/wait-for-load-state": { state: "commit" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

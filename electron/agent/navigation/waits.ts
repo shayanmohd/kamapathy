@@ -1,7 +1,8 @@
 import { ApiError, fail } from "../errors";
 import type { Run } from "../http";
 import type { AutomationController } from "../server";
-import { tabView } from "../views";
+import type { TabSession } from "../session/tab-session";
+import { tabView, type TabView } from "../views";
 import { awaitLoadState, type NavigationScope, type WaitUntil } from "./await";
 import type { GoDeps } from "./go";
 import type { UrlGlob } from "./url-glob";
@@ -94,6 +95,54 @@ function nap(milliseconds: number, hold: { wake?: () => void }) {
 export function createWaits(deps: WaitsDeps) {
   const { controller, sessions, trackers, gate } = deps;
   const { authorizeTab } = deps.authority;
+  // The session of the page a wait reads, or why this tab has none.
+  const pageFor = (tabId: string): TabSession => {
+    const session = sessions.get(tabId);
+    if (session) return session;
+    return controller.peekWebContents(tabId)
+      ? fail(
+          "debugger_busy",
+          "Kamapathy lost its connection to this tab. Try again shortly.",
+          { reason: "unavailable" },
+        )
+      : fail(
+          "no_web_page",
+          "Navigate this tab to an HTTP or HTTPS page first.",
+        );
+  };
+  // The tab an answer carries, authorized once more as the wait answers.
+  const viewFor = (tabId: string) => {
+    const now = authorizeTab(tabId);
+    return tabView(now, controller.shownTab(now.spaceId));
+  };
+  // What a wait's page checks run under: its own deadline, its guard, and the
+  // lane it gives up between checks. A zero timeout still allows the page the
+  // time one check needs.
+  const scopeFor = (
+    tabId: string,
+    session: TabSession,
+    body: { timeoutMs: number; idleMs?: number },
+    deadline: number,
+    run: Run,
+  ): NavigationScope => ({
+    tabId,
+    session,
+    tracker: trackers.for(session),
+    step: {
+      deadline:
+        body.timeoutMs === 0
+          ? Math.min(run.deadline, Date.now() + ALLOWANCE_MS)
+          : deadline,
+      signal: run.signal,
+      guard: () => {
+        authorizeTab(tabId);
+      },
+      dispatch: run.dispatch,
+    },
+    park: run.park,
+    timeoutMs: body.timeoutMs,
+    ...(body.idleMs === undefined ? {} : { idleMs: body.idleMs }),
+  });
 
   const url = async (
     tabId: string,
@@ -104,18 +153,7 @@ export function createWaits(deps: WaitsDeps) {
     // This phase's stand-in for section 7's action window: a popup counts
     // when this page opened it while the wait ran.
     const since = Date.now();
-    const session = sessions.get(tabId);
-    if (!session)
-      return controller.peekWebContents(tabId)
-        ? fail(
-            "debugger_busy",
-            "Kamapathy lost its connection to this tab. Try again shortly.",
-            { reason: "unavailable" },
-          )
-        : fail(
-            "no_web_page",
-            "Navigate this tab to an HTTP or HTTPS page first.",
-          );
+    const session = pageFor(tabId);
     const release = gate.enter(tabId);
     const tracker = trackers.for(session);
     const hold: { wake?: () => void } = {};
@@ -144,30 +182,8 @@ export function createWaits(deps: WaitsDeps) {
       }
       return found;
     };
-    const view = () => {
-      const now = authorizeTab(tabId);
-      return tabView(now, controller.shownTab(now.spaceId));
-    };
     const deadline = Math.min(run.deadline, since + body.timeoutMs);
-    // A zero timeout still allows the page the time one check needs.
-    const scope = (): NavigationScope => ({
-      tabId,
-      session,
-      tracker,
-      step: {
-        deadline:
-          body.timeoutMs === 0
-            ? Math.min(run.deadline, Date.now() + ALLOWANCE_MS)
-            : deadline,
-        signal: run.signal,
-        guard: () => {
-          authorizeTab(tabId);
-        },
-        dispatch: run.dispatch,
-      },
-      park: run.park,
-      timeoutMs: body.timeoutMs,
-    });
+    const scope = () => scopeFor(tabId, session, body, deadline, run);
     const sleep = () =>
       run.park(() => nap(Math.min(TICK_MS, deadline - Date.now()), hold));
     try {
@@ -186,7 +202,7 @@ export function createWaits(deps: WaitsDeps) {
             });
             // Authorized once more before the answer, so a takeover at the
             // last moment leaves no activity line behind.
-            const answered = view();
+            const answered = viewFor(tabId);
             controller.addActivity(
               tab.spaceId,
               "Agent observed a page condition",
@@ -207,7 +223,7 @@ export function createWaits(deps: WaitsDeps) {
       if (after === undefined)
         return {
           ok: true,
-          tab: view(),
+          tab: viewFor(tabId),
           url: current(),
           navigation: tracker.navigation,
           committed: [],
@@ -225,7 +241,7 @@ export function createWaits(deps: WaitsDeps) {
           ).slice(-COMMIT_LIMIT);
           return {
             ok: true,
-            tab: view(),
+            tab: viewFor(tabId),
             url: current(),
             navigation: tracker.navigation,
             committed,
@@ -242,5 +258,38 @@ export function createWaits(deps: WaitsDeps) {
       release();
     }
   };
-  return { url };
+
+  // The state of the document the page shows, under navigate's definitions.
+  const loadState = async (
+    tabId: string,
+    body: { state: WaitUntil; idleMs: number; timeoutMs: number },
+    run: Run,
+  ): Promise<{ ok: true; tab: TabView; state: WaitUntil }> => {
+    const tab = authorizeTab(tabId);
+    const session = pageFor(tabId);
+    const release = gate.enter(tabId);
+    const deadline = Math.min(run.deadline, Date.now() + body.timeoutMs);
+    const scope = scopeFor(tabId, session, body, deadline, run);
+    try {
+      // A document the tracker never saw commit, as in a tab the person just
+      // granted: one fixed read gives the wait its state and its address. A
+      // page that cannot answer leaves both unknown, and the wait goes on,
+      // authorizing again before it judges anything.
+      if (!scope.tracker.document)
+        await trackers
+          .probe(session, { ...scope.step, namespace: "internal" })
+          .catch(() => {});
+      await awaitLoadState(scope, { state: body.state, awaited: "load_state" });
+      const answered = viewFor(tabId);
+      controller.addActivity(
+        tab.spaceId,
+        "Agent observed a page condition",
+        "info",
+      );
+      return { ok: true, tab: answered, state: body.state };
+    } finally {
+      release();
+    }
+  };
+  return { url, loadState };
 }

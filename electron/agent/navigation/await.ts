@@ -26,6 +26,8 @@ const TICK_MS = 100;
 const IDLE_MS = 500;
 // How many characters of a URL a message carries.
 const URL_CHARS = 100;
+// How many in-flight URLs a networkidle timeout names.
+const PENDING_URLS = 3;
 // The failures the spec calls transient: they are raised before any request
 // reached a server, so nothing can have happened at the far end.
 const RETRYABLE: readonly string[] = [
@@ -366,6 +368,52 @@ export async function awaitNavigation(
   };
 }
 
+// A cross-document navigation already in flight is the one a load state is
+// judged on, so the wait follows it to its commit, or to the end that leaves
+// the page on the document it already shows.
+async function followInFlight(scope: NavigationScope): Promise<void> {
+  const { tracker, step } = scope;
+  const inFlight = () => {
+    const pending = tracker.pending;
+    return pending !== undefined && pending.type !== "sameDocument";
+  };
+  if (!inFlight()) return;
+  const hold: { wake?: () => void } = {};
+  const stop = tracker.subscribe(() => hold.wake?.());
+  try {
+    while (inFlight()) {
+      step.guard?.();
+      if (step.signal?.aborted) throw step.signal.reason;
+      const left = step.deadline - Date.now();
+      if (left <= 0) throw new CdpTimeoutError("load", scope.timeoutMs);
+      await scope.park(() => nap(Math.min(TICK_MS, left), hold));
+    }
+  } finally {
+    hold.wake = undefined;
+    stop();
+  }
+}
+
+// What a load-state wait reports about the document it judged, and about the
+// requests a networkidle wait was still waiting for.
+export function loadStateFieldsOf(
+  scope: NavigationScope,
+  state: WaitUntil,
+): Record<string, unknown> {
+  const document = scope.tracker.document;
+  return {
+    state,
+    url: document?.url ?? scope.session.contents.getURL(),
+    readyState: readyStateOf(document) ?? "loading",
+    ...(state === "networkidle"
+      ? {
+          inflight: scope.session.network.inFlight(),
+          pending: scope.session.network.pending(PENDING_URLS),
+        }
+      : {}),
+  };
+}
+
 // Judges state on the current document, following a cross-document
 // navigation in flight and ending on its failure.
 export async function awaitLoadState(
@@ -387,25 +435,20 @@ export async function awaitLoadState(
     ? AbortSignal.any([scope.step.signal, ending.signal])
     : ending.signal;
   try {
-    await reachState(
-      { ...scope, step: { ...scope.step, signal } },
-      options.state,
-      undefined,
-    );
+    const following = { ...scope, step: { ...scope.step, signal } };
+    await followInFlight(following);
+    await reachState(following, options.state, undefined);
   } catch (error) {
     if (ending.signal.aborted) throw ending.signal.reason;
     if (!(error instanceof CdpTimeoutError)) throw error;
-    const document = tracker.document;
-    const readyState = readyStateOf(document) ?? "loading";
+    const fields = loadStateFieldsOf(scope, options.state);
     throw new ApiError(
       "wait_timeout",
-      `The page did not reach ${options.state} within ${scope.timeoutMs} ms. It is at ${cut(document?.url ?? "")} with readyState ${readyState}.`,
+      `The page did not reach ${options.state} within ${scope.timeoutMs} ms. It is at ${cut(String(fields.url))} with readyState ${String(fields.readyState)}.`,
       {
         awaited: options.awaited,
         timeoutMs: scope.timeoutMs,
-        state: options.state,
-        url: document?.url ?? "",
-        readyState,
+        ...fields,
       },
     );
   } finally {
