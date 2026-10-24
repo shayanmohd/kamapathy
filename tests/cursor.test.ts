@@ -17,7 +17,10 @@ vi.mock("electron", () => ({
   WebContentsView: vi.fn(function () {
     return new FakeView();
   }),
+  webContents: { getFocusedWebContents: () => shellContents },
 }));
+// What holds the keyboard when the overlay's view joins the window.
+let shellContents: FakeContents | undefined;
 
 class FakeContents extends EventEmitter {
   destroyed = false;
@@ -166,6 +169,7 @@ function setup() {
 
 beforeEach(() => {
   clock = clockOf();
+  shellContents = undefined;
   vi.mocked(WebContentsView).mockClear();
 });
 
@@ -482,5 +486,29 @@ describe("agent cursor overlay", () => {
     view.webContents.emit("focus");
     expect(view.getVisible()).toBe(false);
     expect(page.webContents.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("the focus a new view takes as it joins the window keeps its first point and the person's keyboard", async () => {
+    // The person is typing in the shell as the agent's first point arrives.
+    const shell = new FakeContents();
+    shellContents = shell;
+    const { cursor, overlay, page } = setup();
+    overlay.point("tab-1", { type: "press", x: 300, y: 200 }, "Save the topic");
+    // The view is built for this point, and focused, before it has drawn.
+    const view = cursor();
+    expect(view.getVisible()).toBe(false);
+    view.webContents.emit("focus");
+    await settle();
+    expect(view.getVisible()).toBe(true);
+    expect(view.webContents.updates.at(-1)).toMatchObject({
+      label: "Save the topic",
+    });
+    expect(shell.focus).toHaveBeenCalledTimes(1);
+    expect(page.webContents.focus).not.toHaveBeenCalled();
+    // A focus it gains once the person can see it is theirs reaching for it.
+    view.webContents.emit("focus");
+    expect(view.getVisible()).toBe(false);
+    expect(page.webContents.focus).toHaveBeenCalledTimes(1);
+    expect(shell.focus).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,4 @@
-import { WebContentsView } from "electron";
+import { WebContentsView, webContents } from "electron";
 import type { BrowserWindow, Rectangle, WebContents } from "electron";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -496,11 +496,31 @@ export class CursorOverlay {
       this.person = this.now();
       this.hide();
     });
-    contents.on("focus", () => {
-      const tabId = this.recorded?.tabId ?? this.lastTab;
-      this.hide();
+    // Whoever holds the keyboard as this view joins the window keeps it.
+    const held = (() => {
       try {
-        if (tabId) this.host.view(tabId)?.webContents.focus();
+        return webContents.getFocusedWebContents() ?? undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    contents.on("focus", () => {
+      // A view takes focus as it joins the window, before it has drawn
+      // anything: that is not the person reaching for the cursor, so the
+      // point it is being built for still draws and the keyboard goes back
+      // where it was. A focus the cursor gains once they can see it is
+      // theirs: it goes away and the page below takes the keyboard.
+      const drawn = view.getVisible();
+      if (drawn) this.hide();
+      const tabId = this.recorded?.tabId ?? this.lastTab;
+      try {
+        const back =
+          !drawn && held && !held.isDestroyed()
+            ? held
+            : tabId
+              ? this.host.view(tabId)?.webContents
+              : undefined;
+        back?.focus();
       } catch {
         // A page that went away keeps no focus.
       }
