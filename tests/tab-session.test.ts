@@ -2102,6 +2102,7 @@ describe("frames", () => {
         url: "file:///Users/person/page.html",
         origin: "file://",
         crossOrigin: false,
+        ownSession: false,
         path: "",
         loaderId: "loader-main",
         lifecycle: "unknown",
@@ -3394,7 +3395,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       {
         frameId: "main",
         origin: "https://example.com",
+        loaderId: "loader-1",
         crossOrigin: false,
+        ownSession: false,
         blocked: false,
         unavailable: false,
       },
@@ -3402,7 +3405,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-in",
         parentFrameId: "main",
         origin: "https://example.com",
+        loaderId: "loader-frame-in",
         crossOrigin: false,
+        ownSession: false,
         blocked: false,
         unavailable: false,
       },
@@ -3410,7 +3415,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-ext",
         parentFrameId: "main",
         origin: `chrome-extension://${PDF_VIEWER_ID}`,
+        loaderId: "loader-frame-ext",
         crossOrigin: true,
+        ownSession: false,
         blocked: true,
         unavailable: false,
       },
@@ -3418,8 +3425,10 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-oop",
         parentFrameId: "main",
         origin: "https://frame.example",
+        loaderId: "loader-frame-oop",
         sessionId: "child-1",
         crossOrigin: true,
+        ownSession: true,
         blocked: false,
         unavailable: false,
       },
@@ -3434,10 +3443,45 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       frameId: "frame-oop",
       parentFrameId: "main",
       origin: "https://frame.example",
+      loaderId: "loader-frame-oop",
       crossOrigin: true,
+      ownSession: false,
       blocked: false,
       unavailable: true,
     });
+  });
+
+  it("frames report whether they run in their own session", async () => {
+    const { session, cdp } = await framed();
+    framePaths(cdp, { "frame-in": "0", "frame-ext": "1", "frame-oop": "2" });
+    expect(
+      (await session.frames(soon())).map(({ frameId, ownSession }) => [
+        frameId,
+        ownSession,
+      ]),
+    ).toEqual([
+      ["main", false],
+      ["frame-in", false],
+      ["frame-ext", false],
+      ["frame-oop", true],
+    ]);
+    // A frame Chromium moves back into the page's process runs there.
+    cdp.event("Page.frameAttached", {
+      frameId: "frame-oop",
+      parentFrameId: "main",
+    });
+    await settle();
+    expect(
+      (await session.frames(soon())).map(({ frameId, ownSession }) => [
+        frameId,
+        ownSession,
+      ]),
+    ).toEqual([
+      ["main", false],
+      ["frame-in", false],
+      ["frame-ext", false],
+      ["frame-oop", false],
+    ]);
   });
 
   const opening = (

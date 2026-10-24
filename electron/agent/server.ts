@@ -22,6 +22,7 @@ import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
 import { createEventRecording } from "./events";
 import { createExpectations } from "./expectations";
+import { createFrameGroupsByTab } from "./frames/groups";
 import {
   buildRoutes,
   findRoute,
@@ -275,6 +276,9 @@ export async function startAutomation(
     sessions,
     pageScripts,
   });
+  // One frame map per tab session: the groups, their owner bindings and the
+  // home frame of every ref a read gave out.
+  const frames = createFrameGroupsByTab({ sessions, refs });
   const presence = createPresence({ controller, authority });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
@@ -368,6 +372,7 @@ export async function startAutomation(
     presence,
     pageScripts,
     events,
+    frames,
   });
   const deps: RouteDeps = {
     controller,
@@ -383,6 +388,7 @@ export async function startAutomation(
     presence,
     pageScripts,
     events,
+    frames,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -630,6 +636,7 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        frames.dispose();
         events.dispose();
         pageScripts.dispose();
         // A pending wait is answered before its tab session is released.

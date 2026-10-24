@@ -6,8 +6,18 @@ export const REF_BLOCK = 100;
 export const CANDIDATE_REFS = 3;
 /** Ranges kept per tab; past this the two oldest merge into one. */
 export const MAX_RANGES = 2000;
+/** Homes kept per tab; past this the oldest is evicted and reads as stale. */
+export const MAX_HOMES = 50000;
 
 export type RefState = "live" | "retired" | "unknown";
+
+/** Section 9's home of a ref: the frame and the document that issued it. */
+export interface RefHome {
+  frameId: string;
+  loaderId: string;
+  /** The frame path of the group whose world holds the element. */
+  group: string;
+}
 
 // API restarts in the same app process must not recycle an old element ref.
 let nextElementReference = 1;
@@ -25,6 +35,10 @@ type Issued = {
   /** The counter's value when the tab's refs were last retired. */
   mark: number;
   generation: number;
+  /** Each ref's home frame, oldest first, so the oldest is evicted first. */
+  homes: Map<number, RefHome>;
+  /** The highest number whose home was evicted. */
+  evicted: number;
 };
 
 // Which ref numbers each tab was issued, so the main process can tell a ref it
@@ -64,12 +78,36 @@ export class RefBook {
     }
   }
 
+  /** Records where a returned ref lives, evicting the oldest past MAX_HOMES. */
+  setHome(tabId: string, ref: string, home: RefHome): void {
+    const number = refNumber(ref);
+    if (number === undefined) return;
+    const entry = this.entry(tabId);
+    entry.homes.delete(number);
+    entry.homes.set(number, home);
+    while (entry.homes.size > MAX_HOMES) {
+      const oldest = entry.homes.keys().next().value as number;
+      entry.homes.delete(oldest);
+      entry.evicted = Math.max(entry.evicted, oldest);
+    }
+  }
+
+  home(tabId: string, ref: string): RefHome | undefined {
+    const number = refNumber(ref);
+    const entry = this.tabs.get(tabId);
+    return number === undefined ? undefined : entry?.homes.get(number);
+  }
+
   classify(tabId: string, ref: string): RefState {
     const number = refNumber(ref);
     const entry = this.tabs.get(tabId);
     if (number === undefined || !entry || !issued(entry.ranges, number))
       return "unknown";
-    return number < entry.mark ? "retired" : "live";
+    if (number < entry.mark) return "retired";
+    // A ref whose home the book evicted answers stale, never unknown.
+    return number <= entry.evicted && !entry.homes.has(number)
+      ? "retired"
+      : "live";
   }
 
   /** Lets only a live ref through, before any page work. */
@@ -94,6 +132,9 @@ export class RefBook {
     const entry = this.entry(tabId);
     entry.mark = nextElementReference;
     entry.generation += 1;
+    // Every home the tab held is below the mark, so the homes are no help.
+    entry.homes.clear();
+    entry.evicted = 0;
   }
 
   /** Page operations add this to their namespace, so retired refs stay gone. */
@@ -110,7 +151,13 @@ export class RefBook {
   private entry(tabId: string): Issued {
     let entry = this.tabs.get(tabId);
     if (!entry) {
-      entry = { ranges: [], mark: 0, generation: 0 };
+      entry = {
+        ranges: [],
+        mark: 0,
+        generation: 0,
+        homes: new Map(),
+        evicted: 0,
+      };
       this.tabs.set(tabId, entry);
     }
     return entry;

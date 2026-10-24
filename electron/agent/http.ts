@@ -13,6 +13,7 @@ import { ApiError, fail } from "./errors";
 import type { EventRecording } from "./events";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
+import type { FrameGroupsByTab } from "./frames/groups";
 import type { PageScripts } from "./page-scripts";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
@@ -120,6 +121,8 @@ export interface RouteDeps {
   pageScripts: PageScripts;
   /** Section 8's recording control, which the events route drains. */
   events: EventRecording;
+  /** Section 9's frame groups, one per live tab session. */
+  frames: FrameGroupsByTab;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

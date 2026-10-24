@@ -483,8 +483,10 @@ export class TabSession {
         ? {}
         : { parentFrameId: frame.parentFrameId }),
       origin: frame.origin,
+      loaderId: frame.loaderId,
       ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
       crossOrigin: this.registry.crossOrigin(frame.frameId),
+      ownSession: frame.ownSession,
       blocked: frame.blocked,
       unavailable: frame.unavailable,
     }));
@@ -516,6 +518,7 @@ export class TabSession {
             ? {}
             : { sessionId: frame.sessionId }),
           crossOrigin: this.registry.crossOrigin(frame.frameId),
+          ownSession: frame.ownSession,
           path,
           loaderId: frame.loaderId,
           lifecycle: this.lifecycle.state(frame.frameId, frame.loaderId),

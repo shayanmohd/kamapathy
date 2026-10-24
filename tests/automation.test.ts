@@ -14,7 +14,7 @@ import {
   type PdfChild,
 } from "../electron/agent/pdf/extract";
 import type { PdfPages } from "../electron/agent/pdf/worker";
-import { RefBook } from "../electron/agent/refs";
+import { MAX_HOMES, RefBook } from "../electron/agent/refs";
 import { watchLeaveGuard } from "../electron/agent/routes/navigation";
 import { FORMS, REF_HINT } from "../electron/agent/selectors";
 import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
@@ -1288,6 +1288,44 @@ describe("local automation socket", () => {
     expect(page.scripts).toEqual([]);
     expect(page.inputs).toEqual([]);
     expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("ref homes survive a frame's same-document navigation and are evicted past the limit", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true, x: 25, y: 45 };
+    const home = { frameId: "frame-1", loaderId: "loader-1", group: "" };
+    const first = refs.reserve(MAX_HOMES + 1);
+    refs.record(
+      tab.id,
+      Array.from({ length: MAX_HOMES + 1 }, (_, at) => first + at),
+    );
+    for (let at = 0; at <= MAX_HOMES; at += 1)
+      refs.setHome(tab.id, `@e${first + at}`, home);
+    // A navigation inside the same document keeps every home.
+    page.emitProtocol("Page.navigatedWithinDocument", {
+      frameId: "frame-1",
+      url: "https://example.com/#paid",
+    });
+    expect(refs.home(tab.id, `@e${first + 1}`)).toEqual(home);
+    // The oldest home was evicted, and its ref is stale rather than unknown.
+    expect(refs.home(tab.id, `@e${first}`)).toBeUndefined();
+    const evicted = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: `@e${first}`,
+    });
+    expect(evicted.status).toBe(409);
+    expect((await evicted.json()).error).toEqual({
+      code: "stale_ref",
+      message: "Element reference is stale. Take a new snapshot.",
+      ref: `@e${first}`,
+    });
+    expect(
+      (
+        await request(`/tabs/${tab.id}/click`, "POST", {
+          ref: `@e${first + 1}`,
+        })
+      ).status,
+    ).toBe(200);
   });
 
   it("records only the refs a snapshot assigned", async () => {

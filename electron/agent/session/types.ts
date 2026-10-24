@@ -44,6 +44,8 @@ export interface FrameInfo {
   origin: string;
   sessionId?: string;
   crossOrigin: boolean;
+  /** Whether Chromium runs the frame in its own process, on its own session. */
+  ownSession: boolean;
   path: string;
   loaderId: string;
   lifecycle: "unknown" | "commit" | "domcontentloaded" | "load";
@@ -56,8 +58,10 @@ export interface KnownFrame {
   frameId: string;
   parentFrameId?: string;
   origin: string;
+  loaderId: string;
   sessionId?: string;
   crossOrigin: boolean;
+  ownSession: boolean;
   blocked: boolean;
   unavailable: boolean;
 }

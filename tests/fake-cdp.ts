@@ -242,6 +242,42 @@ export class FakeHost extends EventEmitter {
   }
 }
 
+// Answers the three commands an owner binding sends, for the frames given,
+// on whichever session asks: DOM.getFrameOwner names a backend node, it
+// resolves into an owner object, and the function called on that object
+// answers section 9's binding or phase 1's frame index. A frame left out has
+// no owner element.
+export function frameOwners(
+  debuggerFake: FakeDebugger,
+  owners: Record<string, { local: string; readable?: boolean }>,
+): void {
+  const ids = Object.keys(owners);
+  debuggerFake.reply("DOM.getFrameOwner", (params) => {
+    if (!ids.includes(params.frameId))
+      throw new Error("Frame with the given id was not found.");
+    return { backendNodeId: ids.indexOf(params.frameId) + 1 };
+  });
+  debuggerFake.reply("DOM.resolveNode", (params) => ({
+    object: {
+      type: "object",
+      subtype: "node",
+      objectId: `owner-${params.backendNodeId}`,
+    },
+  }));
+  debuggerFake.reply("Runtime.callFunctionOn", (params) => {
+    const owner = owners[ids[Number(params.objectId.slice(6)) - 1]];
+    const binding = /__kamapathyFrames/.test(params.functionDeclaration);
+    return {
+      result: {
+        type: "object",
+        value: binding
+          ? { local: owner.local, readable: owner.readable === true }
+          : { ok: true, path: owner.local },
+      },
+    };
+  });
+}
+
 // A Page.getFrameTree reply. The first frame is the root; the others nest
 // under the frame their parentId names.
 export function frameTree(

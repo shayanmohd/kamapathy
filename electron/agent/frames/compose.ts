@@ -61,7 +61,7 @@ export function prefixPath(group: string, local: string): string {
 }
 const segmentsOf = (path: string) => (path ? path.split("/") : []);
 /** Depth first by frame path: a frame before the frames inside it, siblings in page order. */
-function comparePaths(first: string, second: string): number {
+export function comparePaths(first: string, second: string): number {
   const left = segmentsOf(first);
   const right = segmentsOf(second);
   for (let at = 0; at < Math.min(left.length, right.length); at += 1)
