@@ -3801,13 +3801,14 @@ try {
   await importDialog.getByText("Added").waitFor();
   await importDialog.getByRole("button", { name: "Continue" }).click();
   await markerButton.waitFor();
-  const imported = (await page.evaluate(() => window.kamapathy.extensions()))
-    .rows;
+  const importedExtensions = (
+    await page.evaluate(() => window.kamapathy.extensions())
+  ).rows;
   assert.deepEqual(
-    imported.map((row) => [row.name, row.source, row.importedFrom]),
+    importedExtensions.map((row) => [row.name, row.source, row.importedFrom]),
     [["Kamapathy marker", "unpacked", "Google Chrome"]],
   );
-  assert.notEqual(imported[0].id, markerId);
+  assert.notEqual(importedExtensions[0].id, markerId);
   await restoreExtensionDialogs();
   checked("import adds the fake profile's unpacked extension");
   if (process.platform === "darwin") {
