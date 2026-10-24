@@ -34,7 +34,16 @@ const TARGET = [
   "ambiguous_match",
   "element_action_failed",
 ];
-const INPUT = ["element_obscured", "input_not_delivered"];
+// Input refusals: a gesture that did not land, and the guards that stop
+// input which would leave the page, open something native or reach the
+// system clipboard.
+const INPUT = [
+  "element_obscured",
+  "input_not_delivered",
+  "input_target_blocked",
+  "native_popup_blocked",
+  "clipboard_blocked",
+];
 // What a snapshot's root, scope selector or cursor can answer.
 const SCOPE = [
   "invalid_field",

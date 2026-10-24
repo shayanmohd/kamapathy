@@ -116,8 +116,16 @@ slow.addEventListener("input", () => {
 <p><select id="roles" aria-label="Roles"><option value="r">Reader</option><option value="w" disabled>Writer</option></select></p>
 <p><select id="empty" aria-label="Empty"></select></p>
 <p><select id="tricky" aria-label="Tricky"><option value="one">two</option><option value="two">three</option></select></p>
+<p><span id="closed-root" style="display:inline-block"></span></p>
 <div id="nothing-here">Nothing to choose here</div>
 <script>
+// A dropdown the page cannot reach: a closed shadow root keeps it out of
+// selectors and out of the page's own hit test.
+const buried = document
+  .getElementById("closed-root")
+  .attachShadow({ mode: "closed" });
+buried.innerHTML =
+  '<select id="buried"><option value="a">Alpha</option><option value="b">Beta</option></select>';
 const many = document.getElementById("many");
 for (let index = 1; index <= 30; index++) {
   const option = document.createElement("option");

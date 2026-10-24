@@ -371,6 +371,43 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     });
   }, 30000);
 
+  it("names the picker a press would open, and nothing behind a closed shadow root", async () => {
+    await open("/input/selects");
+    const pickerOf = async (
+      selector: string,
+      extra: Record<string, unknown> = {},
+    ) => (await point(selector, extra)).picker;
+    expect(await pickerOf("#city")).toBe("select");
+    expect(await pickerOf("#several")).toBeUndefined();
+    expect(await pickerOf("#sized")).toBeUndefined();
+    // A closed shadow root holds a dropdown no selector reaches and the
+    // page's hit test stops at its host, so the page names no picker and
+    // the session's own hit test is what catches it.
+    const buried = await point("#closed-root");
+    expect(buried.blocked).toBeUndefined();
+    expect(buried.picker).toBeUndefined();
+    expect(
+      await page.evaluate(() => document.querySelectorAll("#buried").length),
+    ).toBe(0);
+    await open("/input/fields");
+    expect(await pickerOf("#tint")).toBe("color");
+    expect(await pickerOf("#name")).toBeUndefined();
+    expect(await pickerOf("#notes")).toBeUndefined();
+    // A date input names its kind wherever the point lands, its picker
+    // indicator at the right end included, and the main process decides
+    // from its own hit which of those opens the picker.
+    const day = await page.evaluate(() => {
+      const box = document.getElementById("day")!.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+    expect(await pickerOf("#day")).toBe("date");
+    expect(
+      await pickerOf("#day", {
+        position: { x: day.width - 6, y: day.height / 2 },
+      }),
+    ).toBe("date");
+  }, 30000);
+
   // The field operations the fill, select and focus routes drive.
   const prepare = (selector: string, extra: Record<string, unknown> = {}) =>
     operate("fillPrepare", aim(selector, { value: "Ada", ...extra }));

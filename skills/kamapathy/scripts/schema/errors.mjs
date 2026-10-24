@@ -109,6 +109,20 @@ export const ERRORS = {
     [],
     4,
   ),
+  input_target_blocked: code(
+    403,
+    false,
+    "The point, or the frame holding focus, belongs to an extension or an internal page.",
+    [],
+    4,
+  ),
+  native_popup_blocked: code(
+    403,
+    false,
+    "The input would open a native select, color or date picker.",
+    ["use"],
+    4,
+  ),
   route_not_found: code(404, false, "This Kamapathy has no such route.", [
     "method",
     "route",
