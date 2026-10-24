@@ -82,6 +82,7 @@ describe("application menu", () => {
       ["History", "Cmd+Y"],
       ["Downloads", "CmdOrCtrl+Shift+J"],
       ["Passwords", ""],
+      ["Extensions", ""],
       ["Split View", ""],
       ["Find", "CmdOrCtrl+F"],
       ["Save Page Screenshot", ""],

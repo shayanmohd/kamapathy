@@ -43,6 +43,14 @@ export function validSettings(value: unknown, base: Settings): Settings {
         : base.isolateAgentSpaces,
     welcomed:
       typeof settings.welcomed === "boolean" ? settings.welcomed : base.welcomed,
+    extensionUpdates:
+      typeof settings.extensionUpdates === "boolean"
+        ? settings.extensionUpdates
+        : base.extensionUpdates,
+    extensionDeveloperMode:
+      typeof settings.extensionDeveloperMode === "boolean"
+        ? settings.extensionDeveloperMode
+        : base.extensionDeveloperMode,
     updateChecks:
       typeof settings.updateChecks === "boolean"
         ? settings.updateChecks
@@ -186,7 +194,12 @@ export function restoreState(
             /^[a-z\d-]{1,80}$/i.test(tab.id) &&
             state.spaces.some((space) => space.id === tab.spaceId) &&
             typeof tab.title === "string" &&
-            (tab.url === HOME_URL || isWebUrl(tab.url)),
+            (tab.url === HOME_URL ||
+              isWebUrl(tab.url) ||
+              // Extension pages, which the controller checks against the
+              // extensions that load.
+              (typeof tab.url === "string" &&
+                /^chrome-extension:\/\/[a-p]{32}\//.test(tab.url))),
         )
         .filter((tab) => {
           if (tabIds.has(tab.id)) return false;

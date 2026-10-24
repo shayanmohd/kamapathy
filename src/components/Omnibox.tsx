@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Tab } from "../../shared/types";
 import { displayUrl } from "../../shared/url";
+import { extensionsCopy } from "../copy";
 import { IconButton } from "./ui";
 
 export function Omnibox({
@@ -15,6 +16,7 @@ export function Omnibox({
   readOnly,
   inputRef,
   bookmarked,
+  store,
   onNavigate,
   onToggleBookmark,
 }: {
@@ -23,6 +25,8 @@ export function Omnibox({
   readOnly: boolean;
   inputRef: RefObject<HTMLInputElement | null>;
   bookmarked: boolean;
+  // Set on a store page of an extension the person can add here.
+  store?: { added: boolean; adding: boolean; onAdd: () => void };
   onNavigate: (url: string) => void;
   onToggleBookmark: () => void;
 }) {
@@ -72,6 +76,20 @@ export function Omnibox({
         onBlur={() => setFocused(false)}
         onChange={(event) => setValue(event.target.value)}
       />
+      {store && (
+        <button
+          type="button"
+          className="omnibox-chip"
+          disabled={store.added || store.adding}
+          onClick={store.onAdd}
+        >
+          {store.added
+            ? extensionsCopy.added
+            : store.adding
+              ? extensionsCopy.adding
+              : extensionsCopy.chip}
+        </button>
+      )}
       <IconButton
         label={bookmarked ? "Remove bookmark" : "Bookmark this page"}
         disabled={isHome}

@@ -1,14 +1,20 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserWindow } from "electron";
+import type { BrowserWindow, Session } from "electron";
 import { dialog, Menu, session, shell, WebContentsView } from "electron";
-import { BrowserController } from "../electron/controller";
+import {
+  BrowserController,
+  restoredPartitions,
+  type ExtensionSessions,
+} from "../electron/controller";
 import { inputMarker } from "../electron/agent/input/marker";
 import { writeState } from "../electron/persistence";
 import type { UpdateState } from "../shared/types";
+import { ExtensionHost } from "../electron/extensions/host";
+import { spaceTabs } from "../src/lib/tabs";
 import {
   agentRules,
   HOME_URL,
@@ -40,6 +46,13 @@ vi.mock("../electron/persistence", async (original) => ({
 }));
 
 class FakeSession extends EventEmitter {
+  // Store builds sit in Extensions/<id>/<version>, so the folder names the id.
+  extensions = {
+    loadExtension: vi.fn(async (path: string) => ({
+      id: basename(dirname(path)),
+    })),
+    removeExtension: vi.fn(),
+  };
   setPermissionCheckHandler = vi.fn();
   setPermissionRequestHandler = vi.fn();
   clearStorageData = vi.fn(async () => {});
@@ -137,6 +150,7 @@ function controller(
   statePath = "unused-test-state.json",
   state = initialState(),
   options?: ControllerOptions,
+  extensions?: ExtensionSessions,
 ) {
   const window = new EventEmitter() as EventEmitter & {
     webContents: FakeContents;
@@ -162,6 +176,7 @@ function controller(
     state,
     statePath,
     options,
+    extensions,
   );
   result.setContentBounds({
     x: 200,
@@ -1197,6 +1212,657 @@ describe("partition housekeeping", () => {
     expect(sessions.get("persist:space-work")!.clearStorageData).toHaveBeenCalledOnce();
     expect(sessions.get("persist:space-personal")?.clearStorageData ?? vi.fn()).not.toHaveBeenCalled();
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("extension sessions", () => {
+  it("sessionFor attaches extensions to persistent partitions only, and discarding a partition detaches it first", async () => {
+    const extensions = {
+      attach: vi.fn(async (_partition: string, _ses: Session) => {}),
+      detach: vi.fn((_partition: string) => {}),
+      loadedIds: vi.fn((_partition: string) => new Set<string>()),
+      permissionFor: vi.fn(() => undefined),
+      isExtensionSurface: vi.fn(() => false),
+    };
+    const browser = controller(undefined, undefined, undefined, extensions);
+    const open = async (id: string, url: string) => {
+      await browser.dispatch({ type: "tab:navigate", id, url });
+      contents(browser, id);
+    };
+    await open(browser.state.activeTabId, "https://a.example/");
+    const shared = sessions.get("persist:space-personal")!;
+    expect(extensions.attach).toHaveBeenCalledExactlyOnceWith(
+      "persist:space-personal",
+      shared,
+    );
+    // The session's own handlers are in place first.
+    const [attached] = extensions.attach.mock.invocationCallOrder;
+    expect(attached).toBeGreaterThan(
+      shared.setPermissionRequestHandler.mock.invocationCallOrder[0],
+    );
+    expect(attached).toBeGreaterThan(
+      shared.setPermissionCheckHandler.mock.invocationCallOrder[0],
+    );
+    const isolated = browser.createAgentSpace("Clean", { isolated: true });
+    await open(
+      browser.state.tabs.find((tab) => tab.spaceId === isolated.id)!.id,
+      "https://b.example/",
+    );
+    await browser.dispatch({
+      type: "space:create",
+      kind: "personal",
+      color: "blue",
+      name: "Private",
+      signIns: "separate",
+    });
+    const separate = `persist:space-${browser.state.activeSpaceId}`;
+    await open(browser.state.activeTabId, "https://c.example/");
+    expect([...sessions.keys()]).toEqual([
+      "persist:space-personal",
+      expect.stringMatching(new RegExp(`^agent-.*-${isolated.id}$`)),
+      separate,
+    ]);
+    expect(
+      extensions.attach.mock.calls.map(([partition]) => partition),
+    ).toEqual(["persist:space-personal", separate]);
+    expect(extensions.detach).not.toHaveBeenCalled();
+
+    const separateSession = sessions.get(separate)!;
+    await browser.dispatch({
+      type: "space:delete",
+      id: browser.state.activeSpaceId,
+    });
+    expect(extensions.detach).toHaveBeenCalledExactlyOnceWith(separate);
+    const [detached] = extensions.detach.mock.invocationCallOrder;
+    expect(detached).toBeLessThan(
+      separateSession.clearStorageData.mock.invocationCallOrder[0],
+    );
+    // The handlers come off after the extensions.
+    const handlers = separateSession.setPermissionCheckHandler.mock;
+    expect(detached).toBeLessThan(handlers.invocationCallOrder.at(-1)!);
+
+    // A partition no tab used this launch is attached as it is created for
+    // clearing, and detached before anything is cleared.
+    browser.state.spaces[1].signIns = "separate";
+    await browser.dispatch({ type: "space:delete", id: "work" });
+    const work = sessions.get("persist:space-work")!;
+    expect(extensions.attach).toHaveBeenLastCalledWith(
+      "persist:space-work",
+      work,
+    );
+    expect(extensions.detach).toHaveBeenLastCalledWith("persist:space-work");
+    expect(extensions.detach.mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      work.clearStorageData.mock.invocationCallOrder[0],
+    );
+    expect(extensions.attach).toHaveBeenCalledTimes(3);
+  });
+
+  it("restoredPartitions lists the shared partition and each separate personal space's", () => {
+    const state = initialState();
+    expect(restoredPartitions(state)).toEqual(["persist:space-personal"]);
+    state.spaces[0].signIns = "separate";
+    state.spaces[1].signIns = "separate";
+    state.spaces.push({
+      ...state.spaces[1],
+      id: "agent",
+      kind: "agent",
+      owner: "agent",
+    });
+    expect(restoredPartitions(state)).toEqual([
+      "persist:space-personal",
+      "persist:space-work",
+    ]);
+  });
+});
+
+describe("extension pages", () => {
+  const ID = "abcdefghijklmnopabcdefghijklmnop";
+  const OTHER = "ponmlkjihgfedcbaponmlkjihgfedcba";
+  const page = (id: string, path = "options.html") =>
+    `chrome-extension://${id}/${path}`;
+  // Sessions running the extensions listed for their partition.
+  function running(
+    loaded: Record<string, string[]>,
+    overrides: Partial<ExtensionSessions> = {},
+  ) {
+    return {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(),
+      loadedIds: vi.fn((partition: string) => new Set(loaded[partition] ?? [])),
+      permissionFor: vi.fn(() => undefined),
+      isExtensionSurface: vi.fn(() => false),
+      ...overrides,
+    };
+  }
+  // A space's tabs as the tab strip shows them, pinned first.
+  const strip = (browser: BrowserController, spaceId: string) =>
+    spaceTabs({ tabs: browser.state.tabs, activeSpaceId: spaceId }).map(
+      (tab) => tab.id,
+    );
+  const folders: string[] = [];
+  afterEach(() => {
+    for (const folder of folders.splice(0))
+      rmSync(folder, { recursive: true, force: true });
+  });
+  // A host whose extensions.json lists one enabled store extension.
+  async function hostWith(id: string, manifest: Record<string, unknown>) {
+    const userData = mkdtempSync(join(tmpdir(), "kamapathy-extension-pages-"));
+    folders.push(userData);
+    const path = `Extensions/${id}/1.0.0`;
+    mkdirSync(join(userData, path), { recursive: true });
+    writeFileSync(
+      join(userData, path, "manifest.json"),
+      JSON.stringify({
+        manifest_version: 3,
+        name: "Clipper",
+        version: "1.0.0",
+        ...manifest,
+      }),
+    );
+    writeFileSync(
+      join(userData, "extensions.json"),
+      JSON.stringify({
+        extensions: [
+          {
+            id,
+            source: "webstore",
+            version: "1.0.0",
+            path,
+            enabled: true,
+            pinned: false,
+            installedAt: 1,
+            grantedPermissions: [],
+            grantedHosts: [],
+          },
+        ],
+        removals: [],
+      }),
+    );
+    const host = new ExtensionHost({
+      userData,
+      locale: "en-US",
+      chromeVersion: "152.0.7977.76",
+    });
+    await host.init();
+    return host;
+  }
+
+  it("opens an extension's page in an ungranted personal space and refuses it in agent and granted spaces", async () => {
+    const browser = controller(
+      undefined,
+      undefined,
+      undefined,
+      running({ "persist:space-personal": [ID] }),
+    );
+    const id = browser.state.activeTabId;
+    const tab = browser.state.tabs.find((item) => item.id === id)!;
+    await browser.dispatch({ type: "tab:navigate", id, url: page(ID) });
+    expect(tab).toMatchObject({ url: page(ID), title: page(ID) });
+    expect(WebContentsView).toHaveBeenCalledOnce();
+    const shown = contents(browser, id);
+    expect(shown.loadURL).toHaveBeenCalledExactlyOnceWith(page(ID));
+    shown.commit(page(ID));
+    expect(tab.url).toBe(page(ID));
+    expect(viewFor(shown).visible).toBe(true);
+    // The page moves between its own pages, and a page of an extension the
+    // session doesn't run stays out.
+    const own = { preventDefault: vi.fn() };
+    shown.emit("will-navigate", own, page(ID, "other.html"));
+    expect(own.preventDefault).not.toHaveBeenCalled();
+    shown.emit("did-start-navigation", {
+      url: page(ID, "other.html"),
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(tab.url).toBe(page(ID, "other.html"));
+    const foreign = { preventDefault: vi.fn() };
+    shown.emit("will-navigate", foreign, page(OTHER));
+    expect(foreign.preventDefault).toHaveBeenCalledOnce();
+    await expect(
+      browser.dispatch({ type: "tab:navigate", id, url: page(OTHER) }),
+    ).rejects.toThrow("That extension isn't installed or is turned off.");
+    // History, bookmarks and split view keep to web pages.
+    expect(browser.state.history).toEqual([]);
+    await expect(
+      browser.dispatch({
+        type: "bookmark:add",
+        url: page(ID),
+        title: "Options",
+      }),
+    ).rejects.toThrow();
+    // Spaces that share the session open them too.
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: "work",
+      url: page(ID, "welcome.html"),
+      background: true,
+    });
+    const welcome = browser.state.tabs.at(-1)!;
+    expect(welcome).toMatchObject({
+      spaceId: "work",
+      url: page(ID, "welcome.html"),
+    });
+    expect(
+      browser.peekWebContents(welcome.id)!.loadURL,
+    ).toHaveBeenCalledExactlyOnceWith(page(ID, "welcome.html"));
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/",
+      background: true,
+    });
+    await expect(
+      browser.dispatch({
+        type: "tab:split",
+        id: browser.state.tabs.at(-1)!.id,
+      }),
+    ).rejects.toThrow("Open two web pages in this space for split view.");
+    // A space with separate sign-ins runs only what its own session loaded.
+    await browser.dispatch({
+      type: "space:create",
+      kind: "personal",
+      color: "blue",
+      name: "Private",
+      signIns: "separate",
+    });
+    await expect(
+      browser.dispatch({
+        type: "tab:create",
+        spaceId: browser.state.activeSpaceId,
+        url: page(ID),
+      }),
+    ).rejects.toThrow("That extension isn't installed or is turned off.");
+    // Spaces an agent can reach refuse them, whoever asks.
+    const agent = browser.createAgentSpace("Task");
+    const agentTab = browser.state.tabs.find(
+      (item) => item.spaceId === agent.id,
+    )!;
+    for (const action of [
+      { type: "tab:navigate" as const, id: agentTab.id, url: page(ID) },
+      { type: "tab:create" as const, spaceId: agent.id, url: page(ID) },
+    ])
+      await expect(browser.dispatch(action)).rejects.toThrow(
+        "Extension pages open only in your personal spaces.",
+      );
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: agentTab.id,
+      url: "https://example.com/",
+    });
+    const refused = { preventDefault: vi.fn() };
+    contents(browser, agentTab.id).emit("will-navigate", refused, page(ID));
+    expect(refused.preventDefault).toHaveBeenCalledOnce();
+    browser.grantAccess("personal");
+    await expect(
+      browser.dispatch({ type: "tab:navigate", id, url: page(ID) }),
+    ).rejects.toThrow("Extension pages open only in your personal spaces.");
+    const granted = { preventDefault: vi.fn() };
+    shown.emit("will-navigate", granted, page(ID));
+    expect(granted.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("a restored page of a removed extension becomes a new tab", () => {
+    const state = initialState();
+    state.spaces[1].signIns = "separate";
+    const [personal, work] = state.tabs;
+    Object.assign(personal, { url: page(ID), title: "Options" });
+    // The extension isn't loaded in this space's own session.
+    Object.assign(work, { url: page(ID), title: "Options" });
+    const removed = {
+      ...newTab("personal", page(OTHER, "welcome.html")),
+      title: "Welcome",
+    };
+    state.tabs.push(removed);
+    const browser = controller(
+      undefined,
+      state,
+      undefined,
+      running({ "persist:space-personal": [ID] }),
+    );
+    for (const tab of [work, removed])
+      expect(tab).toMatchObject({ url: HOME_URL, title: "New tab" });
+    expect(personal).toMatchObject({ url: page(ID), title: "Options" });
+    expect(browser.state.tabs).toEqual([personal, work, removed]);
+    expect(
+      browser.peekWebContents(personal.id)!.loadURL,
+    ).toHaveBeenCalledExactlyOnceWith(page(ID));
+  });
+
+  it("openExtensionTab places, pins and activates tabs only as asked, and moveTab stays within the space", () => {
+    const browser = controller(
+      undefined,
+      undefined,
+      undefined,
+      running({ "persist:space-personal": [ID] }),
+    );
+    const first = browser.state.activeTabId;
+    const [work] = strip(browser, "work");
+    const emitted = vi.fn();
+    browser.subscribe(emitted);
+    const pinned = browser.openExtensionTab(
+      "personal",
+      "https://example.com/pinned",
+      { pinned: true, active: false },
+    );
+    expect(pinned).toMatchObject({
+      spaceId: "personal",
+      url: "https://example.com/pinned",
+      pinned: true,
+      openedBy: "person",
+      managed: false,
+    });
+    expect(pinned).not.toHaveProperty("label");
+    expect(emitted).toHaveBeenCalled();
+    expect(browser.state.activeTabId).toBe(first);
+    expect(
+      browser.peekWebContents(pinned.id)!.loadURL,
+    ).toHaveBeenCalledExactlyOnceWith("https://example.com/pinned");
+    // Unpinned tabs stay after the pinned ones, wherever asked.
+    const start = browser.openExtensionTab(
+      "personal",
+      "https://example.com/start",
+      { index: 0, active: false },
+    );
+    expect(strip(browser, "personal")).toEqual([pinned.id, start.id, first]);
+    // A tab opens last and shown unless asked otherwise.
+    const options = browser.openExtensionTab("personal", page(ID));
+    expect(strip(browser, "personal")).toEqual([
+      pinned.id,
+      start.id,
+      first,
+      options.id,
+    ]);
+    expect(browser.state.activeTabId).toBe(options.id);
+    expect(
+      browser.peekWebContents(options.id)!.loadURL,
+    ).toHaveBeenCalledExactlyOnceWith(page(ID));
+    // Blank pages open the new tab page.
+    const blank = browser.openExtensionTab("personal", "about:blank", {
+      index: 2,
+      active: false,
+    });
+    const empty = browser.openExtensionTab("personal", "", {
+      pinned: true,
+      index: 99,
+      active: false,
+    });
+    for (const tab of [blank, empty]) {
+      expect(tab).toMatchObject({ url: HOME_URL, title: "New tab" });
+      expect(browser.peekWebContents(tab.id)).toBeUndefined();
+    }
+    expect(strip(browser, "personal")).toEqual([
+      pinned.id,
+      empty.id,
+      start.id,
+      blank.id,
+      first,
+      options.id,
+    ]);
+    // Showing a tab in a space that isn't shown shows that space.
+    const elsewhere = browser.openExtensionTab("work", "https://example.org/");
+    expect([browser.state.activeSpaceId, browser.state.activeTabId]).toEqual([
+      "work",
+      elsewhere.id,
+    ]);
+    expect(strip(browser, "work")).toEqual([work, elsewhere.id]);
+    for (const url of [
+      "file:///etc/hosts",
+      "javascript:alert(1)",
+      "data:text/html,hi",
+      "chrome://extensions/",
+      "kamapathy://settings",
+      "https://user:secret@example.com/",
+      page(OTHER),
+    ])
+      expect(() => browser.openExtensionTab("personal", url), url).toThrow(
+        "Extensions can't open this URL.",
+      );
+    const agent = browser.createAgentSpace("Task");
+    browser.grantAccess("work");
+    for (const spaceId of [agent.id, "work"])
+      expect(() =>
+        browser.openExtensionTab(spaceId, "https://example.com/"),
+      ).toThrow("Extensions open tabs only in your personal spaces.");
+    const tabs = browser.state.tabs.length;
+    // moveTab keeps a tab within its pin group, and -1 is last.
+    expect(browser.moveTab(first, 0)).toMatchObject({ id: first });
+    expect(strip(browser, "personal")).toEqual([
+      pinned.id,
+      empty.id,
+      first,
+      start.id,
+      blank.id,
+      options.id,
+    ]);
+    browser.moveTab(first, -1);
+    expect(strip(browser, "personal")).toEqual([
+      pinned.id,
+      empty.id,
+      start.id,
+      blank.id,
+      options.id,
+      first,
+    ]);
+    browser.moveTab(pinned.id, 99);
+    browser.moveTab(options.id, 3);
+    expect(strip(browser, "personal")).toEqual([
+      empty.id,
+      pinned.id,
+      start.id,
+      options.id,
+      blank.id,
+      first,
+    ]);
+    expect(strip(browser, "work")).toEqual([work, elsewhere.id]);
+    expect(browser.state.tabs).toHaveLength(tabs);
+  });
+
+  it("closing an extension's pages closes its tabs everywhere", async () => {
+    const browser = controller(
+      undefined,
+      undefined,
+      undefined,
+      running({ "persist:space-personal": [ID, OTHER] }),
+    );
+    const blank = browser.state.activeTabId;
+    const options = browser.openExtensionTab("personal", page(ID));
+    const web = browser.openExtensionTab("personal", "https://example.com/", {
+      active: false,
+    });
+    const other = browser.openExtensionTab("personal", page(OTHER), {
+      active: false,
+    });
+    const [work] = browser.state.tabs.filter((tab) => tab.spaceId === "work");
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: work.id,
+      url: page(ID, "welcome.html"),
+    });
+    const closing = [options, work].map((tab) => contents(browser, tab.id));
+    expect(browser.extensionPageTabs(ID)).toEqual([options, work]);
+    expect(browser.extensionPageTabs(OTHER)).toEqual([other]);
+    const emitted = vi.fn();
+    browser.subscribe(emitted);
+    browser.closeExtensionPages(ID);
+    expect(emitted).toHaveBeenCalledOnce();
+    expect(browser.extensionPageTabs(ID)).toEqual([]);
+    for (const page of closing) expect(page.destroyed).toBe(true);
+    expect(strip(browser, "personal")).toEqual([blank, web.id, other.id]);
+    // A space left without tabs gets a blank one.
+    expect(
+      browser.state.tabs.filter((tab) => tab.spaceId === "work"),
+    ).toMatchObject([{ url: HOME_URL, openedBy: "person", managed: false }]);
+    browser.closeExtensionPages(ID);
+    expect(emitted).toHaveBeenCalledOnce();
+  });
+
+  it("downloads from an extension popup follow the personal flow, and downloads without a page are blocked", async () => {
+    const popupPage = new FakeContents();
+    const extensions = running(
+      {},
+      {
+        isExtensionSurface: vi.fn(
+          (contents: Electron.WebContents) =>
+            contents === (popupPage as unknown as Electron.WebContents),
+        ),
+      },
+    );
+    const browser = controller(undefined, undefined, undefined, extensions);
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: browser.state.activeTabId,
+      url: "https://example.com/",
+    });
+    const shared = sessions.get("persist:space-personal")!;
+    let done!: (event: unknown, state: string) => void;
+    const item = {
+      setSaveDialogOptions: vi.fn(),
+      getFilename: () => "export.csv",
+      getTotalBytes: () => 10,
+      getReceivedBytes: () => 10,
+      getSavePath: () => "/Users/person/Downloads/export.csv",
+      on: vi.fn(),
+      once: vi.fn((_event: string, listener: typeof done) => {
+        done = listener;
+      }),
+    };
+    const allowed = { preventDefault: vi.fn() };
+    shared.emit("will-download", allowed, item, popupPage);
+    expect(allowed.preventDefault).not.toHaveBeenCalled();
+    expect(item.setSaveDialogOptions).toHaveBeenCalledWith({
+      title: "Save download",
+    });
+    expect(browser.state.downloads).toMatchObject([
+      { filename: "export.csv", state: "progressing" },
+    ]);
+    done({}, "completed");
+    expect(browser.state.activity[0]).toMatchObject({
+      message: "export.csv: completed.",
+      kind: "success",
+    });
+    expect(browser.state.activity[0].spaceId).toBeUndefined();
+    // No tab and no popup or extension window, such as a service worker.
+    const blocked = { preventDefault: vi.fn() };
+    shared.emit("will-download", blocked, item, new FakeContents());
+    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    expect(browser.state.downloads).toHaveLength(1);
+  });
+
+  it("extension pages get clipboard and location only when declared, and nothing else", async () => {
+    const host = await hostWith(ID, {
+      permissions: ["clipboardWrite", "geolocation", "notifications", "tabs"],
+    });
+    const browser = controller(undefined, undefined, undefined, host);
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id,
+      url: "https://example.com/",
+    });
+    const web = contents(browser, id);
+    web.commit("https://example.com/");
+    await vi.waitFor(() =>
+      expect(host.isLoaded("persist:space-personal", ID)).toBe(true),
+    );
+    const shared = sessions.get("persist:space-personal")!;
+    const request = shared.setPermissionRequestHandler.mock.calls[0][0];
+    const check = shared.setPermissionCheckHandler.mock.calls[0][0];
+    const ask = (
+      target: FakeContents | null,
+      permission: string,
+      details: Record<string, unknown>,
+    ) => {
+      const callback = vi.fn();
+      request(target, permission, callback, { isMainFrame: true, ...details });
+      return callback.mock.calls.map(([answer]) => answer);
+    };
+    // The action popup is no tab, so it has no space.
+    const popupPage = new FakeContents();
+    popupPage.url = page(ID, "popup.html");
+    const answers = Object.fromEntries(
+      [
+        "clipboard-read",
+        "clipboard-sanitized-write",
+        "geolocation",
+        "notifications",
+        "media",
+        "fullscreen",
+        "openExternal",
+      ].map((permission) => [
+        permission,
+        [
+          ask(popupPage, permission, { requestingUrl: popupPage.url }),
+          check(popupPage, permission, `chrome-extension://${ID}/`, {
+            requestingUrl: popupPage.url,
+            isMainFrame: true,
+          }),
+        ],
+      ]),
+    );
+    expect(answers).toEqual({
+      "clipboard-read": [[false], false],
+      "clipboard-sanitized-write": [[true], true],
+      geolocation: [[true], true],
+      notifications: [[false], false],
+      media: [[false], false],
+      fullscreen: [[false], false],
+      openExternal: [[false], false],
+    });
+    // The page is the requesting URL, else the security or requesting origin,
+    // else the page's own URL; an extension's frame in a web page is the
+    // extension's.
+    expect(ask(popupPage, "geolocation", {})).toEqual([true]);
+    expect(check(popupPage, "geolocation", "", { isMainFrame: true })).toBe(
+      true,
+    );
+    expect(
+      ask(web, "geolocation", {
+        requestingUrl: page(ID, "frame.html"),
+        isMainFrame: false,
+      }),
+    ).toEqual([true]);
+    expect(
+      ask(web, "geolocation", {
+        securityOrigin: `chrome-extension://${ID}/`,
+        isMainFrame: false,
+      }),
+    ).toEqual([true]);
+    expect(
+      check(web, "geolocation", `chrome-extension://${ID}/`, {
+        isMainFrame: false,
+      }),
+    ).toBe(true);
+    expect(
+      check(null, "clipboard-sanitized-write", `chrome-extension://${ID}/`, {
+        isMainFrame: true,
+      }),
+    ).toBe(true);
+    // An extension this session doesn't run gets nothing, and the PDF viewer
+    // keeps Kamapathy's own handling.
+    const stranger = new FakeContents();
+    stranger.url = page(OTHER, "popup.html");
+    expect(
+      ask(stranger, "geolocation", { requestingUrl: stranger.url }),
+    ).toEqual([false]);
+    expect(
+      ask(web, "geolocation", {
+        requestingUrl:
+          "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html",
+        isMainFrame: false,
+      }),
+    ).toEqual([false]);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    // Web origins keep the person's prompt.
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+      response: 1,
+      checkboxChecked: false,
+    });
+    const asked = vi.fn();
+    request(web, "geolocation", asked, {
+      requestingUrl: "https://example.com/",
+      isMainFrame: true,
+    });
+    await vi.waitFor(() => expect(asked).toHaveBeenCalledWith(true));
+    expect(dialog.showMessageBox).toHaveBeenCalledOnce();
   });
 });
 

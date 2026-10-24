@@ -1,3 +1,9 @@
+import type {
+  ExtensionCommand,
+  ExtensionCommandResult,
+  ExtensionsView,
+} from "./extensions";
+
 export type Theme = "system" | "light" | "dark";
 export type SpaceColor = "green" | "blue" | "orange" | "purple";
 export type SignIns = "shared" | "separate";
@@ -101,6 +107,8 @@ export interface Settings {
   updateChecks: boolean;
   // What's new lists the notes above this version.
   seenVersion: string;
+  extensionUpdates: boolean;
+  extensionDeveloperMode: boolean;
 }
 export interface ImportProfile {
   id: string;
@@ -461,4 +469,7 @@ export interface KamapathyBridge {
   copyText(text: string): Promise<void>;
   helpSpaceId(): Promise<string>;
   update(command: UpdateCommand): Promise<UpdateStatus>;
+  extensions(): Promise<ExtensionsView>;
+  onExtensions(callback: (view: ExtensionsView) => void): () => void;
+  extensionCommand(command: ExtensionCommand): Promise<ExtensionCommandResult>;
 }

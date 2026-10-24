@@ -7,6 +7,7 @@ import type {
 import { HOME_URL, id, initialState, newTab } from "../../shared/state";
 import { restoreState } from "../../shared/restore";
 import { hostname, normalizeUrl } from "../../shared/url";
+import { extensionsCopy } from "../copy";
 
 const STORAGE_KEY = "kamapathy-preview-v1";
 // The web preview has no password vault, so every call gets this answer.
@@ -423,6 +424,16 @@ export function createPreviewBridge(): KamapathyBridge {
       version: state.version,
       checks: state.settings.updateChecks,
     }),
+    extensions: async () => ({
+      rows: [],
+      actions: [],
+      installing: [],
+      imports: [],
+    }),
+    onExtensions: () => () => {},
+    extensionCommand: async () => {
+      throw new Error(extensionsCopy.desktopOnly);
+    },
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

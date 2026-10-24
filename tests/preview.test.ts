@@ -50,6 +50,20 @@ async function split(bridge: KamapathyBridge) {
   return { firstId, secondId };
 }
 describe("interactive preview state invariants", () => {
+  it("the web preview lists no extensions and refuses extension commands", async () => {
+    const bridge = create();
+    expect(await bridge.extensions()).toEqual({
+      rows: [],
+      actions: [],
+      installing: [],
+      imports: [],
+    });
+    expect(bridge.onExtensions(() => {})()).toBeUndefined();
+    await expect(
+      bridge.extensionCommand({ type: "install", input: "abc" }),
+    ).rejects.toThrow("This feature is available in the desktop app.");
+  });
+
   it("recovers from corrupt storage without trusting saved runtime state", async () => {
     const saved = await create().getState();
     storage.set(

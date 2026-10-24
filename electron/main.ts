@@ -1,11 +1,28 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, safeStorage, session, shell, systemPreferences } from "electron";
-import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, Session } from "electron";
 import { existsSync } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserController } from "./controller";
+import {
+  BrowserController,
+  NO_EXTENSIONS,
+  restoredPartitions,
+} from "./controller";
+import { ExtensionBridge } from "./extensions/bridge";
+import { ExtensionChannel } from "./extensions/channel";
+import { chooseFolder, confirmAdd, confirmRemove } from "./extensions/dialogs";
+import { ExtensionHost } from "./extensions/host";
+import { ExtensionInstaller } from "./extensions/install";
+import { registerExtensionIpc, type ExtensionIpc } from "./extensions/ipc";
+import { ExtensionPopups } from "./extensions/popup";
+import { ExtensionUpdates } from "./extensions/updates";
+import {
+  STORE_PARTITION,
+  sessionFetcher,
+  storeEnv,
+} from "./extensions/webstore";
 import { menuTemplate } from "./menu";
 import { maybeMoveToApplications } from "./move-to-applications";
 import { readState } from "./persistence";
@@ -74,6 +91,26 @@ const agent = agentPaths(app.getPath("userData"));
 
 let window: BrowserWindow | null = null;
 let controller: BrowserController | null = null;
+// The person's extensions, from ready on and across windows. Windows wait
+// until extensions.json is read.
+let extensionHost: ExtensionHost | null = null;
+let extensionsReady: Promise<void> = Promise.resolve();
+// The path between extension contexts and the main process. It exists before
+// any session attaches, so the preloads are registered before loads.
+let extensionChannel: ExtensionChannel | null = null;
+// The spaces and tabs extensions see as windows and tabs. It binds to each
+// window's controller.
+let extensionBridge: ExtensionBridge | null = null;
+// The action popups and the windows extensions open for their own pages.
+let extensionPopups: ExtensionPopups | null = null;
+// Adds extensions the person asked for, one install at a time.
+let extensionInstaller: ExtensionInstaller | null = null;
+// The daily Chrome Web Store check, while the person leaves it on.
+let extensionUpdates: ExtensionUpdates | null = null;
+// The shell's view of the person's extensions, and its commands.
+let extensionIpc: ExtensionIpc | null = null;
+// A window waiting for its extensions; later calls share it.
+let windowOpening: Promise<void> | null = null;
 let automation: Awaited<ReturnType<typeof startAutomation>> | null = null;
 let automationSyncing = false;
 // A failed start waits until the person turns access off and on again. It is
@@ -280,7 +317,26 @@ function shortcut(name: string): void {
   }
 }
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
+  windowOpening ??= openWindow().finally(() => {
+    windowOpening = null;
+  });
+  return windowOpening;
+}
+
+// Extensions load into these sessions before the controller sets their
+// handlers, so until then they refuse every permission.
+function extensionSession(partition: string): Session {
+  const browsingSession = session.fromPartition(partition);
+  browsingSession.setPermissionRequestHandler(
+    (_contents, _permission, callback) => callback(false),
+  );
+  browsingSession.setPermissionCheckHandler(() => false);
+  return browsingSession;
+}
+
+async function openWindow(): Promise<void> {
+  await extensionsReady;
   const platform: BrowserState["platform"] =
     process.platform === "darwin"
       ? "darwin"
@@ -289,6 +345,14 @@ function createWindow(): void {
         : "linux";
   const statePath = join(app.getPath("userData"), "browser-state.json");
   const state = readState(statePath, platform, version);
+  extensionUpdates?.setEnabled(state.settings.extensionUpdates);
+  const host = extensionHost;
+  if (host) {
+    await host.setDeveloperMode(state.settings.extensionDeveloperMode);
+    // Restored tabs open with their extensions, unless loading takes longer.
+    await host.attachAll(restoredPartitions(state), 5000, extensionSession);
+  }
+  if (quitting || window) return;
   window = new BrowserWindow({
     title: "Kamapathy",
     width: 1440,
@@ -317,11 +381,22 @@ function createWindow(): void {
     },
   });
   const currentWindow = window;
-  controller = new BrowserController(currentWindow, state, statePath, {
-    framePreload: join(moduleDirectory, "../preload/forms.cjs"),
-  });
+  controller = new BrowserController(
+    currentWindow,
+    state,
+    statePath,
+    { framePreload: join(moduleDirectory, "../preload/forms.cjs") },
+    host ?? NO_EXTENSIONS,
+  );
   const currentController = controller;
-  currentController.subscribe(() => {
+  const unbindBridge = extensionBridge?.bind(currentController);
+  currentController.subscribe((next) => {
+    extensionPopups?.onState(next);
+    // The shown tab decides which buttons the toolbar draws.
+    extensionIpc?.push();
+    extensionUpdates?.setEnabled(next.settings.extensionUpdates);
+    if (host && next.settings.extensionDeveloperMode !== host.developerMode)
+      void host.setDeveloperMode(next.settings.extensionDeveloperMode);
     void syncAutomation();
     updater?.settingsChanged();
   });
@@ -361,6 +436,7 @@ function createWindow(): void {
   });
   currentWindow.on("close", () => currentController.dispose());
   currentWindow.on("closed", () => {
+    unbindBridge?.();
     if (window === currentWindow) {
       window = null;
       controller = null;
@@ -715,8 +791,8 @@ function installMenu(): void {
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", (_event, argv) => {
-    if (!window) createWindow();
+  app.on("second-instance", async (_event, argv) => {
+    if (!window) await createWindow();
     if (window?.isMinimized()) window.restore();
     window?.focus();
     const url = argv.find((argument) => isWebUrl(argument));
@@ -730,6 +806,8 @@ else {
     } catch {}
     controller?.dispose();
     void updater?.stop();
+    extensionPopups?.dispose();
+    extensionIpc?.dispose();
     void syncAutomation();
     // Times saved logins were last used are written in batches.
     void vault?.flush();
@@ -738,7 +816,7 @@ else {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("activate", () => {
-    if (!window) createWindow();
+    if (!window) void createWindow();
     else window.show();
   });
   void app.whenReady().then(async () => {
@@ -798,5 +876,112 @@ else {
     createWindow();
     updaterStarted = true;
     void updater.start();
+    extensionHost = new ExtensionHost({
+      userData: app.getPath("userData"),
+      locale: app.getLocale(),
+      chromeVersion: process.versions.chrome,
+    });
+    extensionsReady = extensionHost.init().catch((error) => {
+      console.error(
+        "Extensions could not be prepared:",
+        error instanceof Error ? error.message : "Unknown error",
+      );
+    });
+    const extensions = extensionHost;
+    // Pages of an extension that runs in no session any more close.
+    extensions.onEvent((event) => {
+      if (
+        event.type !== "unloaded" ||
+        extensions
+          .partitions()
+          .some((partition) => extensions.isLoaded(partition, event.id))
+      )
+        return;
+      controller?.closeExtensionPages(event.id);
+    });
+    extensionChannel = new ExtensionChannel({
+      host: extensionHost,
+      preloads: {
+        page: join(moduleDirectory, "../preload/extension-page.cjs"),
+        worker: join(moduleDirectory, "../preload/extension-worker.cjs"),
+      },
+      surfaceOf: (contents) =>
+        controller?.tabOfContents(contents)
+          ? "tab"
+          : extensionHost?.surfaceOf(contents)?.kind,
+    });
+    extensionBridge = new ExtensionBridge({
+      host: extensionHost,
+      channel: extensionChannel,
+    });
+    const bridge = extensionBridge;
+    extensionPopups = new ExtensionPopups({
+      host: extensionHost,
+      window: () => window,
+      // A popup's web links become tabs in a space of the person's.
+      openLink: (url, from) => {
+        try {
+          bridge.openTab(
+            {
+              extensionId: from.extensionId,
+              partition: from.partition,
+              surface: "popup",
+            },
+            url,
+            {
+              windowId: from.spaceId
+                ? bridge.windowIdOf(from.spaceId)
+                : undefined,
+            },
+          );
+        } catch (error) {
+          console.error(
+            "An extension could not open a tab:",
+            error instanceof Error ? error.message : "Unknown error",
+          );
+        }
+      },
+    });
+    bridge.setPopups(extensionPopups);
+    extensionInstaller = new ExtensionInstaller({
+      host: extensionHost,
+      // An in-memory session with no cookies, used by no tab.
+      fetcher: sessionFetcher(session.fromPartition(STORE_PARTITION)),
+      env: storeEnv(),
+      locale: app.getLocale(),
+      confirm: confirmAdd(() => window),
+      chooseFolder: chooseFolder(() => window),
+    });
+    extensionUpdates = new ExtensionUpdates({
+      host: extensionHost,
+      installer: extensionInstaller,
+      fetcher: sessionFetcher(session.fromPartition(STORE_PARTITION)),
+      env: storeEnv(),
+      pagesOpen: (id) =>
+        (controller?.extensionPageTabs(id).length ?? 0) > 0 ||
+        (extensionHost?.surfacesOf(id).length ?? 0) > 0,
+      confirm: confirmAdd(() => window),
+    });
+    const installer = extensionInstaller;
+    const updates = extensionUpdates;
+    extensionIpc = registerExtensionIpc({
+      ipc: ipcMain,
+      validateSender,
+      window: () => window,
+      controller: () => controller,
+      host: extensions,
+      installer,
+      updates,
+      bridge,
+      confirmRemove: confirmRemove(() => window),
+    });
+    const pushExtensions = () => extensionIpc?.push();
+    extensions.onEvent(pushExtensions);
+    installer.onChange(pushExtensions);
+    updates.onChange(pushExtensions);
+    bridge.onToolbarChange(pushExtensions);
+    registerIpc();
+    installMenu();
+    await createWindow();
   });
 }

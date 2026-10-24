@@ -5,6 +5,7 @@ import type {
   ContentBounds,
   KamapathyBridge,
 } from "../shared/types";
+import type { ExtensionCommand, ExtensionsView } from "../shared/extensions";
 
 // Electron wraps a rejection in "Error invoking remote method ..."; the
 // interface shows the message itself.
@@ -68,6 +69,18 @@ const bridge: KamapathyBridge = {
   copyText: (text) => invoke("kamapathy:copy-text", text),
   helpSpaceId: () => invoke("kamapathy:help-space"),
   update: (command) => invoke("kamapathy:update", command),
+  extensions: () => invoke("kamapathy:extensions"),
+  onExtensions(callback) {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      view: ExtensionsView,
+    ) => callback(view);
+    ipcRenderer.on("kamapathy:extensions-changed", listener);
+    return () =>
+      ipcRenderer.removeListener("kamapathy:extensions-changed", listener);
+  },
+  extensionCommand: (command: ExtensionCommand) =>
+    invoke("kamapathy:extension-command", command),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

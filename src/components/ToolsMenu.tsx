@@ -12,6 +12,7 @@ import {
   Plus,
   Question,
   Robot,
+  PuzzlePiece,
   Stack,
 } from "@phosphor-icons/react";
 import {
@@ -31,6 +32,7 @@ const icons: Record<ToolsMenuAction, ReactNode> = {
   history: <ClockCounterClockwise size={16} />,
   downloads: <DownloadSimple size={16} />,
   passwords: <Password size={16} />,
+  extensions: <PuzzlePiece size={16} />,
   split: <Columns size={16} />,
   find: <MagnifyingGlass size={16} />,
   settings: <GearSix size={16} />,

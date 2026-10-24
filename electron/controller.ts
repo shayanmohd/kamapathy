@@ -18,6 +18,7 @@ import {
   openingTab,
   PAGE_BUDGET,
 } from "../shared/state";
+import { extensionIdOf } from "../shared/extensions";
 import {
   googleSignInFallback,
   isPopupUrl,
@@ -50,6 +51,50 @@ const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 // Spaces that share sign-ins use the first space's partition, so sign-ins
 // made before shared sessions carry over.
 export const SHARED_PARTITION = "persist:space-personal";
+
+// The person's extensions load into persistent sessions as the controller
+// creates them, and unload before a partition is discarded.
+export interface ExtensionSessions {
+  attach(partition: string, ses: Session): Promise<void>;
+  detach(partition: string): void;
+  loadedIds(partition: string): ReadonlySet<string>;
+  // Undefined when the URL isn't an extension page.
+  permissionFor(
+    partition: string,
+    requestingUrl: string,
+    permission: string,
+  ): boolean | undefined;
+  // The action popup or an extension window.
+  isExtensionSurface(contents: WebContents): boolean;
+}
+export const NO_EXTENSIONS: ExtensionSessions = {
+  attach: async () => {},
+  detach: () => {},
+  loadedIds: () => new Set(),
+  permissionFor: () => undefined,
+  isExtensionSurface: () => false,
+};
+// Where openExtensionTab puts a tab: shown unless active is false, at index
+// in the space's tab strip, else last.
+export interface ExtensionTabOptions {
+  active?: boolean;
+  index?: number;
+  pinned?: boolean;
+}
+// The sessions restored tabs open in: the shared one and each personal
+// space's with separate sign-ins.
+export function restoredPartitions(state: BrowserState): string[] {
+  return [
+    ...new Set([
+      SHARED_PARTITION,
+      ...state.spaces
+        .filter(
+          (space) => space.kind === "personal" && space.signIns === "separate",
+        )
+        .map((space) => `persist:space-${space.id}`),
+    ]),
+  ];
+}
 const cleanText = (value: unknown, maximum = 300): string => {
   if (typeof value !== "string" || value.length > maximum)
     throw new Error("Invalid text value.");
@@ -183,12 +228,23 @@ export class BrowserController {
     state: BrowserState,
     private statePath: string,
     private options: ControllerOptions = {},
+    private extensions: ExtensionSessions = NO_EXTENSIONS,
   ) {
     this.state = state;
     this.recentSpaces = [state.activeSpaceId];
     // Restored tabs are the person's.
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
+    // A restored page of an extension that didn't load in its space's
+    // session, such as one removed since, comes back as a new tab.
+    for (const tab of state.tabs) {
+      const id = extensionIdOf(tab.url);
+      const space = state.spaces.find((item) => item.id === tab.spaceId);
+      if (id && !(space && this.extensionIds(space)?.has(id))) {
+        tab.url = HOME_URL;
+        tab.title = "New tab";
+      }
+    }
     nativeTheme.themeSource = state.settings.theme;
     this.bindShortcuts(window.webContents);
     window.on("resize", () => this.layout());
@@ -338,7 +394,7 @@ export class BrowserController {
     };
     for (const id of ids) {
       const tab = this.state.tabs.find((item) => item.id === id);
-      if (tab && isWebUrl(tab.url)) this.ensureView(tab);
+      if (tab && this.loadable(tab)) this.ensureView(tab);
     }
     for (const [id, view] of this.views) {
       const tab = this.state.tabs.find((item) => item.id === id);
@@ -388,6 +444,40 @@ export class BrowserController {
       : `persist:space-${space.id}`;
   }
 
+  // The extensions whose pages a space shows: those loaded in its session,
+  // and none for a space an agent can reach, whoever asks.
+  private extensionIds(space: Space): ReadonlySet<string> | undefined {
+    return space.kind === "personal" && !agentRules(space)
+      ? this.extensions.loadedIds(this.partitionFor(space))
+      : undefined;
+  }
+
+  // Web pages, and pages of the extensions the space runs.
+  private acceptsUrl(space: Space, url: string): boolean {
+    if (isWebUrl(url)) return true;
+    const id = extensionIdOf(url);
+    return !!id && !!this.extensionIds(space)?.has(id);
+  }
+
+  private loadable(tab: Tab): boolean {
+    return this.acceptsUrl(this.getSpace(tab.spaceId), tab.url);
+  }
+
+  // The address the person asked a space to open: web addresses and
+  // searches, and pages of the extensions the space runs.
+  private openTarget(space: Space, input: string): string {
+    const value = input.trim();
+    if (!/^chrome-extension:/i.test(value))
+      return normalizeUrl(value, this.state.settings.searchEngine);
+    const ids = this.extensionIds(space);
+    if (!ids)
+      throw new Error("Extension pages open only in your personal spaces.");
+    const id = extensionIdOf(value);
+    if (!id || !ids.has(id))
+      throw new Error("That extension isn't installed or is turned off.");
+    return new URL(value).href;
+  }
+
   // The space a page belongs to. Session handlers need it because spaces
   // that share sign-ins share the session.
   private spaceOf(contents: WebContents | null): Space | undefined {
@@ -411,8 +501,28 @@ export class BrowserController {
       `${space.id}|${origin}|${permission}`;
     const isCurrentSession = () =>
       !this.destroyed && this.sessions.get(partition) === browsingSession;
+    // Extension pages have no space, so the extensions answer first. The
+    // page is the requesting URL, else the security or requesting origin,
+    // else the contents' own URL.
+    const extensionVerdict = (
+      contents: WebContents | null,
+      permission: string,
+      urls: (string | undefined)[],
+    ) =>
+      this.extensions.permissionFor(
+        partition,
+        urls.find((url) => !!url) ??
+          (contents && !contents.isDestroyed() ? contents.getURL() : ""),
+        permission,
+      );
     browsingSession.setPermissionCheckHandler(
       (contents, permission, origin, details) => {
+        const verdict = extensionVerdict(contents, permission, [
+          details.requestingUrl,
+          details.securityOrigin,
+          origin,
+        ]);
+        if (verdict !== undefined) return verdict;
         const space = this.spaceOf(contents);
         if (!space || agentRules(space) || !isCurrentSession())
           return false;
@@ -439,6 +549,14 @@ export class BrowserController {
     );
     browsingSession.setPermissionRequestHandler(
       (contents, permission, callback, details) => {
+        const verdict = extensionVerdict(contents, permission, [
+          details.requestingUrl,
+          "securityOrigin" in details ? details.securityOrigin : undefined,
+        ]);
+        if (verdict !== undefined) {
+          callback(verdict);
+          return;
+        }
         const space = this.spaceOf(contents);
         if (
           !space ||
@@ -556,7 +674,10 @@ export class BrowserController {
       contents: WebContents,
     ) => {
       const space = this.spaceOf(contents);
-      if (!space || agentRules(space)) {
+      // An extension's popup and windows download like personal pages.
+      // Anything else without a tab, such as a service worker, can't.
+      const surface = !space && this.extensions.isExtensionSurface(contents);
+      if (!surface && (!space || agentRules(space))) {
         event.preventDefault();
         if (space)
           this.addActivity(
@@ -593,7 +714,7 @@ export class BrowserController {
         download.path = item.getSavePath();
         download.receivedBytes = item.getReceivedBytes();
         this.addActivity(
-          space.id,
+          space?.id,
           `${download.filename}: ${status}.`,
           status === "completed" ? "success" : "warning",
         );
@@ -622,6 +743,10 @@ export class BrowserController {
         (_contents, _permission, callback) => callback(false),
       );
     });
+    if (partition.startsWith("persist:"))
+      void this.extensions
+        .attach(partition, browsingSession)
+        .catch(() => undefined);
     return browsingSession;
   }
 
@@ -632,6 +757,8 @@ export class BrowserController {
     const pending = this.discards.get(partition);
     if (pending) return pending;
     const oldSession = this.sessionFor(partition);
+    // Extensions unload first, also when the session was only made here.
+    this.extensions.detach(partition);
     this.sessionCleanups.get(partition)?.();
     this.sessionCleanups.delete(partition);
     this.sessions.delete(partition);
@@ -859,7 +986,7 @@ export class BrowserController {
     const contents = view.webContents;
     // Popups may also show about:blank and web-origin blob: documents.
     const allowed = (url: string) =>
-      tab.openedBy === "page" ? isPopupUrl(url) : isWebUrl(url);
+      tab.openedBy === "page" ? isPopupUrl(url) : this.acceptsUrl(space, url);
     // Chromium paints nothing for a page that was never shown, so an agent
     // page nobody is watching would run no animations, accept no native
     // input and have nothing to capture. Each new document starts hidden,
@@ -1120,7 +1247,7 @@ export class BrowserController {
     contents: WebContents,
     options?: Electron.LoadURLOptions,
   ): void {
-    if (!isWebUrl(tab.url)) return;
+    if (!this.loadable(tab)) return;
     const request = Symbol();
     const requestedUrl = tab.url;
     this.pendingLoads.set(tab.id, request);
@@ -1312,6 +1439,96 @@ export class BrowserController {
     const result = this.removeTab(this.getTab(tabId), by);
     this.emit();
     return result;
+  }
+
+  partitionOf(spaceId: string): string {
+    return this.partitionFor(this.getSpace(spaceId));
+  }
+
+  tabOfContents(contents: WebContents): Tab | undefined {
+    for (const [id, view] of this.views)
+      if (view.webContents === contents)
+        return this.state.tabs.find((tab) => tab.id === id);
+    return undefined;
+  }
+
+  extensionPageTabs(extensionId: string): Tab[] {
+    return this.state.tabs.filter(
+      (tab) => extensionIdOf(tab.url) === extensionId,
+    );
+  }
+
+  // When an extension stops running, its pages close.
+  closeExtensionPages(extensionId: string): void {
+    if (this.destroyed) return;
+    const tabs = this.extensionPageTabs(extensionId);
+    if (!tabs.length) return;
+    for (const tab of tabs) this.removeTab(tab, "person");
+    this.emit();
+  }
+
+  // A tab an extension opens for the person, only in a personal space no
+  // agent can reach. It may show a web page, the new tab page for "" and
+  // about:blank, or a page of an extension the space runs.
+  openExtensionTab(
+    spaceId: string,
+    url: string,
+    options: ExtensionTabOptions = {},
+  ): Tab {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    const space = this.getSpace(spaceId);
+    const ids = this.extensionIds(space);
+    if (!ids)
+      throw new Error("Extensions open tabs only in your personal spaces.");
+    if (this.state.tabs.length >= 200)
+      throw new Error("The maximum of 200 tabs has been reached.");
+    let target = HOME_URL;
+    if (url !== "" && url !== HOME_URL && url !== "about:blank") {
+      const id = extensionIdOf(url);
+      if (!isWebUrl(url) && !(id && ids.has(id)))
+        throw new Error("Extensions can't open this URL.");
+      target = new URL(url).href;
+    }
+    const tab = { ...newTab(space.id, target), pinned: !!options.pinned };
+    this.registry.register(tab, { openedBy: "person", managed: false });
+    this.placeTab(tab, options.index);
+    if (options.active !== false) this.activate(tab);
+    if (this.loadable(tab)) this.ensureView(tab);
+    this.emit();
+    return tab;
+  }
+
+  moveTab(tabId: string, index: number): Tab {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    const tab = this.getTab(tabId);
+    this.placeTab(tab, index);
+    this.emit();
+    return tab;
+  }
+
+  // Puts a tab at index in its space's tab strip, where pinned tabs come
+  // first, kept within its own pin group. No index, or -1, means last.
+  private placeTab(tab: Tab, index?: number): void {
+    const current = this.state.tabs.indexOf(tab);
+    if (current >= 0) this.state.tabs.splice(current, 1);
+    const others = this.state.tabs.filter(
+      (item) => item.spaceId === tab.spaceId,
+    );
+    const group = others.filter((item) => item.pinned === tab.pinned);
+    const before = tab.pinned ? 0 : others.length - group.length;
+    const rank =
+      index === undefined || !(index >= 0)
+        ? group.length
+        : Math.min(group.length, Math.max(0, Math.floor(index) - before));
+    if (rank < group.length)
+      this.state.tabs.splice(this.state.tabs.indexOf(group[rank]), 0, tab);
+    else if (group.length)
+      this.state.tabs.splice(
+        this.state.tabs.indexOf(group.at(-1)!) + 1,
+        0,
+        tab,
+      );
+    else this.state.tabs.push(tab);
   }
 
   setManaged(tabId: string, managed: boolean): Tab {
@@ -1509,16 +1726,16 @@ export class BrowserController {
         const space = this.getSpace(action.spaceId ?? this.state.activeSpaceId);
         const tab = newTab(
           space.id,
-          normalizeUrl(
+          this.openTarget(
+            space,
             action.url === undefined ? "" : cleanText(action.url, 8192),
-            this.state.settings.searchEngine,
           ),
         );
         // Tabs made through the app are the person's, in any space.
         this.registry.register(tab, { openedBy: "person", managed: false });
         this.state.tabs.push(tab);
         if (!action.background) this.activate(tab);
-        if (isWebUrl(tab.url)) this.ensureView(tab);
+        if (this.loadable(tab)) this.ensureView(tab);
         break;
       }
       case "tab:open-external": {
@@ -1534,9 +1751,9 @@ export class BrowserController {
         break;
       case "tab:navigate": {
         const tab = this.getTab(action.id);
-        tab.url = normalizeUrl(
+        tab.url = this.openTarget(
+          this.getSpace(tab.spaceId),
           cleanText(action.url, 8192),
-          this.state.settings.searchEngine,
         );
         tab.title = tab.url === HOME_URL ? "New tab" : tab.url;
         delete tab.favicon;

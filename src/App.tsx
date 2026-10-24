@@ -32,6 +32,12 @@ import type {
   SpaceColor,
 } from "../shared/types";
 import {
+  agentHeld,
+  storeDetailId,
+  type ExtensionCommand,
+  type ExtensionsView,
+} from "../shared/extensions";
+import {
   agentRules,
   HOME_URL,
   initialState,
@@ -47,6 +53,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { Settings } from "./components/Settings";
 import { LibraryDialog } from "./components/Library";
 import { PasswordsDialog } from "./components/Passwords";
+import { Extensions } from "./components/Extensions";
 import { ToolsMenu } from "./components/ToolsMenu";
 import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
@@ -91,7 +98,9 @@ type Overlay =
   | "agent-setup"
   | "whats-new"
   | "install-update"
-  | "space-request";
+  | "space-request"
+  | "extensions"
+  | "extensions-menu";
 export default function App() {
   const [state, setState] = useState<BrowserState>(() => initialState());
   const [ready, setReady] = useState(false);
@@ -101,6 +110,12 @@ export default function App() {
     () => new Freezer({ bridge, decode: decodeFrames, painted: nextPaint }),
   );
   const [toast, setToast] = useState("");
+  const [extensionsView, setExtensionsView] = useState<ExtensionsView>(() => ({
+    rows: [],
+    actions: [],
+    installing: [],
+    imports: [],
+  }));
   const [findOpen, setFindOpen] = useState(false);
   const [spaceName, setSpaceName] = useState("");
   const [spaceKind, setSpaceKind] = useState<"personal" | "agent">("personal");
@@ -115,6 +130,7 @@ export default function App() {
   const addressRef = useRef<HTMLInputElement>(null);
   const overlayRef = useRef<Overlay | null>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
+  const puzzleButton = useRef<HTMLButtonElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -173,6 +189,54 @@ export default function App() {
     },
     [attempt, notify],
   );
+  // Main keeps the view: the buttons follow the shown tab, the rows follow
+  // extensions.json.
+  useEffect(() => {
+    let alive = true;
+    const unsubscribe = bridge.onExtensions((view) => {
+      if (alive) setExtensionsView(view);
+    });
+    bridge.extensions().then(
+      (view) => {
+        if (alive) setExtensionsView(view);
+      },
+      () => {},
+    );
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, []);
+  const extensionCommand = useCallback(async (command: ExtensionCommand) => {
+    try {
+      await bridge.extensionCommand(command);
+      return "";
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : "Something went wrong. Please try again.";
+    }
+  }, []);
+  // The toolbar, its menu and the chip have nowhere to show a failure.
+  const runExtension = useCallback(
+    (command: ExtensionCommand) => {
+      void extensionCommand(command).then((message) => {
+        if (message && command.type !== "anchors") notify(message);
+      });
+    },
+    [extensionCommand, notify],
+  );
+  const storeId =
+    active && activeSpace.kind === "personal" && !agentHeld(activeSpace)
+      ? storeDetailId(active.url)
+      : undefined;
+  const store = storeId
+    ? {
+        added: extensionsView.rows.some((row) => row.id === storeId),
+        adding: extensionsView.installing.includes(storeId),
+        onAdd: () => runExtension({ type: "install", input: active.url }),
+      }
+    : undefined;
   useEffect(() => {
     let alive = true;
     const unsubscribe = bridge.subscribe((next) => {
@@ -455,6 +519,7 @@ export default function App() {
         case "history":
         case "downloads":
         case "passwords":
+        case "extensions":
           void show(name);
           break;
         case "next-tab":
@@ -578,6 +643,19 @@ export default function App() {
         mac={mac}
         agentOwned={ownedByAgent}
         bookmarked={!!bookmarked}
+        extensions={{
+          view: extensionsView,
+          puzzleRef: puzzleButton,
+          menuOpen: overlay === "extensions-menu",
+          onCommand: runExtension,
+          onMenu: () =>
+            overlay === "extensions-menu"
+              ? close()
+              : void show("extensions-menu"),
+          onCloseMenu: close,
+          onManage: () => void show("extensions"),
+        }}
+        store={store}
         dispatch={dispatch}
         addressRef={addressRef}
         onNavigate={navigate}
@@ -757,6 +835,15 @@ export default function App() {
         onAgentSetup={() => void show("agent-setup")}
         onInstall={() => void show("install-update")}
         onWhatsNew={openWhatsNew}
+        onExtensions={() => void show("extensions")}
+      />
+      <Extensions
+        open={overlay === "extensions"}
+        onClose={close}
+        view={extensionsView}
+        developerMode={state.settings.extensionDeveloperMode}
+        desktop={isDesktop}
+        onCommand={extensionCommand}
       />
       <Welcome
         open={overlay === "welcome"}

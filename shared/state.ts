@@ -124,6 +124,8 @@ export function initialState(
       welcomed: false,
       updateChecks: true,
       seenVersion: version,
+      extensionUpdates: true,
+      extensionDeveloperMode: false,
     },
     platform,
     version,

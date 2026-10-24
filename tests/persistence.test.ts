@@ -455,6 +455,36 @@ describe("desktop session persistence", () => {
     expect(restored.settings.automationEnabled).toBe(true);
   });
 
+  it("restores extension pages in personal spaces", () => {
+    const path = statePath();
+    const original = initialState();
+    const id = "abcdefghijklmnopabcdefghijklmnop";
+    const kept = [
+      `chrome-extension://${id}/x.html`,
+      `chrome-extension://${id}/options/index.html?tab=general#top`,
+      `chrome-extension://${id}/`,
+    ];
+    const dropped = [
+      "chrome-extension://bad/",
+      `chrome-extension://${id.replace("a", "q")}/x.html`,
+      `chrome-extension://${id}`,
+      `chrome-extension://user:secret@${id}/x.html`,
+      `CHROME-EXTENSION://${id}/x.html`,
+      "chrome://extensions/",
+      "chrome-untrusted://print/",
+      "javascript:alert(1)",
+    ];
+    original.tabs = [...kept, ...dropped].map((url, index) => ({
+      ...newTab(index % 2 ? "work" : "personal", url),
+      title: `Page ${index}`,
+    }));
+    writeState(path, original);
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.tabs.map((tab) => [tab.url, tab.title])).toEqual(
+      kept.map((url, index) => [url, `Page ${index}`]),
+    );
+  });
+
   it("keeps agent access off for a person who turned it off", () => {
     const path = statePath();
     const original = initialState();
@@ -646,5 +676,42 @@ describe("desktop session persistence", () => {
         restore({ checkedAt, latest: release }),
         JSON.stringify(release)?.slice(0, 200),
       ).toEqual({ ...none, checkedAt });
+  });
+
+  it("both new extension settings validate", () => {
+    const path = statePath();
+    const original = initialState();
+    expect(original.settings.extensionUpdates).toBe(true);
+    expect(original.settings.extensionDeveloperMode).toBe(false);
+    const { extensionUpdates, extensionDeveloperMode, ...older } =
+      original.settings;
+    writeFileSync(path, JSON.stringify({ ...original, settings: older }));
+    // readState records the running version it was given as seenVersion.
+    expect(readState(path, "linux", "0.1.0").settings).toEqual({
+      ...original.settings,
+      seenVersion: "0.1.0",
+    });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...original,
+        settings: {
+          ...original.settings,
+          extensionUpdates: "no",
+          extensionDeveloperMode: 1,
+        },
+      }),
+    );
+    expect(readState(path, "linux", "0.1.0").settings).toMatchObject({
+      extensionUpdates: true,
+      extensionDeveloperMode: false,
+    });
+    original.settings.extensionUpdates = false;
+    original.settings.extensionDeveloperMode = true;
+    writeState(path, original);
+    expect(readState(path, "linux", "0.1.0").settings).toMatchObject({
+      extensionUpdates: false,
+      extensionDeveloperMode: true,
+    });
   });
 });

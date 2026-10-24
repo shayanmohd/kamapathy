@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Kamapathy marker",
+  "version": "1.0.0",
+  "description": "Test extension for Kamapathy's end-to-end checks.",
+  "permissions": ["tabs", "storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "worker.js" },
+  "action": {
+    "default_title": "Kamapathy marker",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["frame.html"],
+      "matches": ["http://127.0.0.1/*", "http://localhost/*"]
+    }
+  ]
+}
