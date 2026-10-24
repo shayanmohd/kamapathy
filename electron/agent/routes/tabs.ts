@@ -8,12 +8,7 @@ import {
   type RouteImpl,
 } from "../http";
 import type { TabSession } from "../session/tab-session";
-import {
-  parseToolAction,
-  stringField,
-  uploadFields,
-  urlField,
-} from "../validate";
+import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
 import { checkPageBudget } from "./spaces";
 
@@ -22,6 +17,7 @@ export function tabRoutes({
   authority,
   actions: { readyContents, evaluatePage, executeToolAction },
   sessions,
+  navigation,
 }: RouteDeps): Record<string, RouteImpl> {
   const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
@@ -94,22 +90,6 @@ export function tabRoutes({
         });
       },
     },
-    "POST /tabs/:id/navigate": {
-      handler: async ({ response, body, tab, run }) => {
-        const url = urlField(body!);
-        run.dispatch.dispatched = true;
-        await controller.dispatch({ type: "tab:navigate", id: tab!.id, url });
-        const updated = authorizeTab(tab!.id);
-        controller.addActivity(
-          tab!.spaceId,
-          `Agent navigated to ${new URL(url).hostname}`,
-          "info",
-        );
-        return send(response, 200, {
-          tab: tabView(updated, controller.shownTab(updated.spaceId)),
-        });
-      },
-    },
     "GET /tabs/:id/snapshot": {
       handler: snapshot,
     },
@@ -135,7 +115,9 @@ export function tabRoutes({
               "Each action must be an object with a type.",
             );
           const action = value as Record<string, unknown>;
-          return parseToolAction(stringField(action, "type", 20), action);
+          return parseToolAction(stringField(action, "type", 20), action, {
+            controller,
+          });
         });
         const results: {
           index: number;
@@ -152,7 +134,9 @@ export function tabRoutes({
             results.push({
               index,
               type: action.type,
-              result: await executeToolAction(tab!.id, action, step),
+              result: navigation.stepTypes.includes(action.type)
+                ? await navigation.step(tab!.id, action, step)
+                : await executeToolAction(tab!.id, action, step),
             });
           } catch (error) {
             const { status, error: failure } = envelope(

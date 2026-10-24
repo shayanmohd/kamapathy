@@ -121,6 +121,8 @@ export function initialState(
       // Local agents may connect unless the person turns this off.
       automationEnabled: true,
       isolateAgentSpaces: false,
+      // Agents may run page scripts unless the person turns this off.
+      agentPageScripts: true,
       welcomed: false,
       updateChecks: true,
       seenVersion: version,

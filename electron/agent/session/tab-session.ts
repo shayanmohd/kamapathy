@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PageOperation } from "../../automation-dom";
+import type { PageStateOperation } from "../dom/page-state";
 import {
   CdpTimeoutError,
   ContextLostError,
@@ -180,10 +181,12 @@ export class TabSession {
   private ending = new AbortController();
   readonly network: {
     inFlight(): number;
+    pending(limit: number): string[];
     lastActivityAt(): number;
     waitForIdle(idleMs: number, step: Step): Promise<void>;
   } = {
     inFlight: () => this.requests.inFlight(),
+    pending: (limit) => this.requests.pending(limit),
     lastActivityAt: () => this.requests.lastActivityAt(),
     waitForIdle: (idleMs, step) =>
       this.requests.waitForIdle(idleMs, {
@@ -281,6 +284,11 @@ export class TabSession {
   }
   get attachCount(): number {
     return this.attaches;
+  }
+  // The main frame the registry knows, undefined until a setup seeds it. A
+  // CDP listener is synchronous and cannot await mainFrameId.
+  get mainFrame(): string | undefined {
+    return this.registry.mainFrameId;
   }
 
   attach(): void {
@@ -470,7 +478,7 @@ export class TabSession {
   // world, on the session that hosts the frame.
   async evaluateInFrame(
     frameId: string,
-    op: PageOperation,
+    op: PageOperation | PageStateOperation,
     payload: object,
     step: Step & { namespace: string; timeoutMs?: number },
   ): Promise<Record<string, unknown>> {

@@ -63,6 +63,27 @@ describe("desktop session persistence", () => {
     expect(restored.settings.isolateAgentSpaces).toBe(false);
     expect(restored.settings.welcomed).toBe(false);
   });
+  it("agentPageScripts defaults to true and restores", () => {
+    const path = statePath();
+    const original = initialState();
+    expect(original.settings.agentPageScripts).toBe(true);
+    const stored = (agentPageScripts: unknown) =>
+      JSON.stringify({
+        ...original,
+        settings: { ...original.settings, agentPageScripts },
+      });
+    writeFileSync(path, stored(false));
+    expect(readState(path, "darwin", "0.2.0").settings.agentPageScripts).toBe(
+      false,
+    );
+    for (const value of ["off", 0, null, undefined]) {
+      writeFileSync(path, stored(value));
+      expect(
+        readState(path, "darwin", "0.2.0").settings.agentPageScripts,
+        JSON.stringify(value ?? null),
+      ).toBe(true);
+    }
+  });
   it("keeps visit counts from imported history and drops invalid ones", () => {
     const path = statePath();
     const original = initialState();

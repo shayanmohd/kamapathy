@@ -37,7 +37,11 @@ vi.mock("electron", () => ({
       return sessions.get(partition)!;
     }),
   },
-  dialog: { showMessageBox: vi.fn(), showSaveDialog: vi.fn() },
+  dialog: {
+    showMessageBox: vi.fn(),
+    showMessageBoxSync: vi.fn(),
+    showSaveDialog: vi.fn(),
+  },
   shell: { showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) },
 }));
 vi.mock("../electron/persistence", async (original) => ({
@@ -109,6 +113,7 @@ class FakeContents extends EventEmitter {
     this.zoom = value;
   };
   reload = vi.fn();
+  reloadIgnoringCache = vi.fn();
   loadURL = vi.fn(
     (url: string) =>
       new Promise<void>((_resolve, reject) => {
@@ -3317,5 +3322,332 @@ describe("update state", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+describe("agent navigation", () => {
+  // An agent space and its first tab, before anything loaded in it.
+  function agentTab(browser: BrowserController) {
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.state.tabs.find((item) => item.spaceId === space.id)!;
+    return { space, tab };
+  }
+  const downloadItem = () => ({
+    setSaveDialogOptions: vi.fn(),
+    getFilename: () => "report.pdf",
+    getTotalBytes: () => 10,
+    on: vi.fn(),
+    once: vi.fn(),
+  });
+
+  it("navigateAgentTab loads a URL with the referer exactly as given", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    browser.navigateAgentTab(tab.id, "https://example.com/first");
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/first");
+    page.emit("page-favicon-updated", {}, ["https://example.com/icon.png"]);
+    page.emit(
+      "did-fail-load",
+      {},
+      -102,
+      "ERR_CONNECTION_REFUSED",
+      "https://example.com/first",
+      true,
+    );
+    expect(tab).toMatchObject({
+      favicon: "https://example.com/icon.png",
+      error: "ERR_CONNECTION_REFUSED",
+    });
+    browser.navigateAgentTab(tab.id, "https://example.com", {
+      referer: "https://referrer.example/path?a=1",
+    });
+    expect(page.loadURL).toHaveBeenLastCalledWith("https://example.com", {
+      httpReferrer: {
+        url: "https://referrer.example/path?a=1",
+        policy: "unsafe-url",
+      },
+    });
+    // The URL reaches the page as given, so nothing normalizes it.
+    expect(tab).toMatchObject({
+      url: "https://example.com",
+      title: "https://example.com",
+      loading: true,
+    });
+    expect(tab).not.toHaveProperty("favicon");
+    expect(tab).not.toHaveProperty("error");
+  });
+
+  it("navigateAgentTab creates a missing view and loads about:blank", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    expect(browser.peekWebContents(tab.id)).toBeUndefined();
+    browser.navigateAgentTab(tab.id, "about:blank");
+    const page = contents(browser, tab.id);
+    expect(page.loadURL).toHaveBeenCalledExactlyOnceWith("about:blank");
+    expect(tab).toMatchObject({ url: "about:blank", title: "about:blank" });
+    page.commit("about:blank");
+    expect(tab).toMatchObject({ url: "about:blank", title: "about:blank" });
+    page.emit("page-title-updated", {}, "Blank page");
+    expect(tab.title).toBe("Blank page");
+  });
+
+  it("openAgentTab opens a blank page agents may use", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.openAgentTab(space.id, "about:blank");
+    expect(tab).toMatchObject({ url: "about:blank", title: "about:blank" });
+    expect(contents(browser, tab.id).loadURL).toHaveBeenCalledExactlyOnceWith(
+      "about:blank",
+    );
+  });
+
+  it("navigateAgentTab refuses anything outside the agent URL rule", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    for (const url of [
+      "file:///etc/hosts",
+      "data:text/html,<p>Hello</p>",
+      "blob:https://example.com/1234",
+      "view-source:https://example.com/",
+      "https://user:secret@example.com/",
+      "example.com",
+      HOME_URL,
+    ])
+      expect(() => browser.navigateAgentTab(tab.id, url), url).toThrow(
+        "This address cannot be opened.",
+      );
+    expect(tab.url).toBe(HOME_URL);
+    expect(browser.peekWebContents(tab.id)).toBeUndefined();
+    expect(() =>
+      browser.navigateAgentTab("gone", "https://example.com/"),
+    ).toThrow("Tab was not found.");
+  });
+
+  it("reloadAgentTab reloads, retries a failed load and bypasses the cache", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    browser.navigateAgentTab(tab.id, "https://example.com/page");
+    const page = contents(browser, tab.id);
+    page.commit("https://example.com/page");
+    browser.reloadAgentTab(tab.id);
+    expect(page.reload).toHaveBeenCalledOnce();
+    expect(page.reloadIgnoringCache).not.toHaveBeenCalled();
+    browser.reloadAgentTab(tab.id, { ignoreCache: true });
+    expect(page.reloadIgnoringCache).toHaveBeenCalledOnce();
+    expect(page.reload).toHaveBeenCalledOnce();
+    // A failed load is retried by loading its URL again, as the person's
+    // reload does.
+    page.emit(
+      "did-fail-load",
+      {},
+      -102,
+      "ERR_CONNECTION_REFUSED",
+      "https://example.com/page",
+      true,
+    );
+    browser.reloadAgentTab(tab.id, { ignoreCache: true });
+    expect(page.loadURL).toHaveBeenCalledTimes(2);
+    expect(page.loadURL).toHaveBeenLastCalledWith("https://example.com/page");
+    expect(page.reloadIgnoringCache).toHaveBeenCalledOnce();
+  });
+
+  it("a cancelled server redirect is reported once", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    browser.navigateAgentTab(tab.id, "https://example.com/page");
+    const page = contents(browser, tab.id);
+    const blocked: [string, string][] = [];
+    const stop = browser.onBlockedRedirect((tabId, url) =>
+      blocked.push([tabId, url]),
+    );
+    const refused = { preventDefault: vi.fn() };
+    page.emit("will-redirect", refused, "file:///etc/hosts");
+    expect(refused.preventDefault).toHaveBeenCalledOnce();
+    expect(blocked).toEqual([[tab.id, "file:///etc/hosts"]]);
+    const followed = { preventDefault: vi.fn() };
+    page.emit("will-redirect", followed, "https://example.com/next");
+    expect(followed.preventDefault).not.toHaveBeenCalled();
+    stop();
+    page.emit(
+      "will-redirect",
+      { preventDefault: vi.fn() },
+      "data:text/html,<p>Hello</p>",
+    );
+    expect(blocked).toHaveLength(1);
+  });
+
+  it("a started download is reported with its tab", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    browser.navigateAgentTab(tab.id, "https://example.com/page");
+    const page = contents(browser, tab.id);
+    const started: string[] = [];
+    browser.onDownloadStarted((tabId) => started.push(tabId));
+    const shared = sessions.get("persist:space-personal")!;
+    const event = { preventDefault: vi.fn() };
+    shared.emit("will-download", event, downloadItem(), page);
+    // The agent side hears of it, and the agent space still refuses it.
+    expect(started).toEqual([tab.id]);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(browser.state.downloads).toEqual([]);
+  });
+
+  it("a page may navigate itself to about:blank", async () => {
+    const browser = controller();
+    const { tab } = agentTab(browser);
+    browser.navigateAgentTab(tab.id, "https://example.com/page");
+    const agentPage = contents(browser, tab.id);
+    agentPage.commit("https://example.com/page");
+    const personId = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: personId,
+      url: "https://example.org/",
+    });
+    const personPage = contents(browser, personId);
+    personPage.commit("https://example.org/");
+    for (const page of [agentPage, personPage]) {
+      const blank = { preventDefault: vi.fn() };
+      page.emit("will-navigate", blank, "about:blank");
+      expect(blank.preventDefault).not.toHaveBeenCalled();
+      const refused = { preventDefault: vi.fn() };
+      page.emit("will-navigate", refused, "file:///etc/hosts");
+      expect(refused.preventDefault).toHaveBeenCalledOnce();
+    }
+  });
+});
+
+describe("leave guards", () => {
+  const guard = () => ({ preventDefault: vi.fn() });
+  // An agent space, its first tab and that tab's page.
+  function agentPage(browser: BrowserController) {
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.state.tabs.find((item) => item.spaceId === space.id)!;
+    browser.navigateAgentTab(tab.id, "https://example.com/form");
+    return { space, tab, page: contents(browser, tab.id) };
+  }
+  // The person's first tab, on a page of its own.
+  async function personPage(browser: BrowserController) {
+    const space = browser.state.spaces[0];
+    const tab = browser.state.tabs[0];
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/form",
+    });
+    return { space, tab, page: contents(browser, tab.id) };
+  }
+
+  it("an agent-controlled tab leaves a guarded page without asking", async () => {
+    const browser = controller();
+    const { space, tab, page } = agentPage(browser);
+    const overrides: { tabId: string; at: number }[] = [];
+    const stop = browser.onLeaveGuard((tabId, at) =>
+      overrides.push({ tabId, at }),
+    );
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(overrides).toHaveLength(1);
+    expect(overrides[0].tabId).toBe(tab.id);
+    expect(overrides[0].at).toBeGreaterThan(0);
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: space.id,
+      message: "Agent left a page that asked it to stay",
+    });
+    // A stopped listener hears no more guards.
+    stop();
+    page.emit("will-prevent-unload", guard());
+    expect(overrides).toHaveLength(1);
+  });
+
+  it("a granted personal space follows the same rule while the agent has control", async () => {
+    const browser = controller();
+    const { space, page } = await personPage(browser);
+    // The view was wired before the grant, so control is read as the guard
+    // fires.
+    browser.grantAccess(space.id);
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(browser.state.activity[0]).toMatchObject({
+      spaceId: space.id,
+      message: "Agent left a page that asked it to stay",
+    });
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const asked = guard();
+    page.emit("will-prevent-unload", asked);
+    expect(asked.preventDefault).not.toHaveBeenCalled();
+    expect(dialog.showMessageBoxSync).toHaveBeenCalledOnce();
+  });
+
+  it("the person in control is asked, with Stay as the default", async () => {
+    const browser = controller();
+    const { tab, page } = await personPage(browser);
+    const overrides: string[] = [];
+    browser.onLeaveGuard((tabId) => overrides.push(tabId));
+    vi.mocked(dialog.showMessageBoxSync).mockReturnValue(1);
+    const staying = guard();
+    page.emit("will-prevent-unload", staying);
+    expect(dialog.showMessageBoxSync).toHaveBeenCalledWith(expect.anything(), {
+      type: "question",
+      message: "Leave site?",
+      detail: "Changes you made may not be saved.",
+      buttons: ["Leave", "Stay"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    expect(staying.preventDefault).not.toHaveBeenCalled();
+    vi.mocked(dialog.showMessageBoxSync).mockReturnValue(0);
+    const leaving = guard();
+    page.emit("will-prevent-unload", leaving);
+    expect(leaving.preventDefault).toHaveBeenCalledOnce();
+    // The prompt is the person's, so no agent hears of it and Recent
+    // activity stays quiet.
+    expect(overrides).toEqual([]);
+    expect(
+      browser.state.activity.some((entry) =>
+        entry.message.startsWith("Agent left"),
+      ),
+    ).toBe(false);
+    expect(tab.url).toBe("https://example.com/form");
+  });
+
+  it("a background tab under the person's control keeps the page without a box", async () => {
+    const browser = controller();
+    const { space } = await personPage(browser);
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/second",
+      spaceId: space.id,
+      background: true,
+    });
+    const background = browser.state.tabs.at(-1)!;
+    expect(background.id).not.toBe(browser.state.activeTabId);
+    const page = contents(browser, background.id);
+    const staying = guard();
+    page.emit("will-prevent-unload", staying);
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(staying.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("closing a tab skips the guard", async () => {
+    const browser = controller();
+    const { tab, page } = agentPage(browser);
+    const overrides: string[] = [];
+    browser.onLeaveGuard((tabId) => overrides.push(tabId));
+    const close = vi.spyOn(page, "close");
+    browser.closeTab(tab.id, "agent");
+    expect(close).toHaveBeenCalledWith({ waitForBeforeUnload: false });
+    expect(page.destroyed).toBe(true);
+    expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
+    expect(overrides).toEqual([]);
   });
 });

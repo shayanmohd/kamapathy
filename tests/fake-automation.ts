@@ -41,6 +41,10 @@ export class FakeContents extends FakeHost {
     interactables: [],
     truncated: false,
   };
+  // What the controller asked the page to load or reload. A load is not a
+  // commit, so a test drives the page's own events itself.
+  loads: { url: string; options?: Electron.LoadURLOptions }[] = [];
+  reloads: { ignoreCache: boolean }[] = [];
   private contextWorlds = new Map<number, string>();
   constructor() {
     super({ url: "https://example.com/" });
@@ -72,6 +76,15 @@ export class FakeContents extends FakeHost {
         return {};
       });
   }
+  async loadURL(url: string, options?: Electron.LoadURLOptions) {
+    this.loads.push({ url, ...(options ? { options } : {}) });
+  }
+  reload() {
+    this.reloads.push({ ignoreCache: false });
+  }
+  reloadIgnoringCache() {
+    this.reloads.push({ ignoreCache: true });
+  }
   // A protocol event Chromium sends to an attached debugger.
   emitProtocol(method: string, parameters: Record<string, unknown>) {
     this.debugger.event(method, parameters);
@@ -102,6 +115,9 @@ export class FakeController implements AutomationController {
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
+  private blockedRedirects = new Set<(tabId: string, url: string) => void>();
+  private downloadStarts = new Set<(tabId: string) => void>();
+  private leaveGuards = new Set<(tabId: string, at: number) => void>();
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
@@ -211,6 +227,73 @@ export class FakeController implements AutomationController {
     if (isWebUrl(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
+  }
+  // As BrowserController navigates an agent tab: the address is loaded as
+  // given, so nothing normalizes it.
+  navigateAgentTab(
+    tabId: string,
+    url: string,
+    options: { referer?: string } = {},
+  ) {
+    const tab = this.getTab(tabId);
+    if (!isWebUrl(url) && url !== "about:blank")
+      throw new Error("This address cannot be opened.");
+    tab.url = url;
+    tab.title = url;
+    delete tab.favicon;
+    delete tab.error;
+    void this.ensureView(tab).loadURL(
+      url,
+      options.referer
+        ? { httpReferrer: { url: options.referer, policy: "unsafe-url" } }
+        : undefined,
+    );
+    this.emit();
+  }
+  reloadAgentTab(tabId: string, options: { ignoreCache?: boolean } = {}) {
+    const tab = this.getTab(tabId);
+    const page = this.pages.get(tab.id);
+    if (!page) return;
+    if (tab.error) void page.loadURL(tab.url);
+    else if (options.ignoreCache) page.reloadIgnoringCache();
+    else page.reload();
+  }
+  onBlockedRedirect(listener: (tabId: string, url: string) => void) {
+    this.blockedRedirects.add(listener);
+    return () => {
+      this.blockedRedirects.delete(listener);
+    };
+  }
+  onDownloadStarted(listener: (tabId: string) => void) {
+    this.downloadStarts.add(listener);
+    return () => {
+      this.downloadStarts.delete(listener);
+    };
+  }
+  onLeaveGuard(listener: (tabId: string, at: number) => void) {
+    this.leaveGuards.add(listener);
+    return () => {
+      this.leaveGuards.delete(listener);
+    };
+  }
+  // The hook listeners still subscribed, so a test can see a closed server
+  // let go of them.
+  get hookCount() {
+    return (
+      this.blockedRedirects.size +
+      this.downloadStarts.size +
+      this.leaveGuards.size
+    );
+  }
+  // The controller's own hooks, as a test fires them.
+  blockRedirect(tabId: string, url: string) {
+    for (const listener of this.blockedRedirects) listener(tabId, url);
+  }
+  startDownload(tabId: string) {
+    for (const listener of this.downloadStarts) listener(tabId);
+  }
+  leaveGuard(tabId: string) {
+    for (const listener of this.leaveGuards) listener(tabId, Date.now());
   }
   closeTab(tabId: string, by: ClosedBy) {
     const result = this.removeTab(this.getTab(tabId), by);

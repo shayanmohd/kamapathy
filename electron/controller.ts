@@ -44,6 +44,7 @@ import type {
   UpdateState,
 } from "../shared/types";
 import { inputMarker } from "./agent/input/marker";
+import { activeSpace } from "./agent/authority";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
 
@@ -95,6 +96,10 @@ export function restoredPartitions(state: BrowserState): string[] {
     ]),
   ];
 }
+// What a tab may load: a web page, or the blank page agents may open. The
+// agent server checks the address it is given before it reaches here.
+const isLoadable = (url: string): boolean =>
+  isWebUrl(url) || url === "about:blank";
 const cleanText = (value: unknown, maximum = 300): string => {
   if (typeof value !== "string" || value.length > maximum)
     throw new Error("Invalid text value.");
@@ -202,6 +207,9 @@ export class BrowserController {
   private viewListeners = new Set<
     (tabId: string, contents: WebContents) => void
   >();
+  private blockedRedirects = new Set<(tabId: string, url: string) => void>();
+  private downloadStarts = new Set<(tabId: string) => void>();
+  private leaveGuards = new Set<(tabId: string, at: number) => void>();
   private closedTabs: Tab[] = [];
   private lastActive = new Map<string, string>();
   private bounds: ContentBounds = {
@@ -454,7 +462,7 @@ export class BrowserController {
 
   // Web pages, and pages of the extensions the space runs.
   private acceptsUrl(space: Space, url: string): boolean {
-    if (isWebUrl(url)) return true;
+    if (isLoadable(url)) return true;
     const id = extensionIdOf(url);
     return !!id && !!this.extensionIds(space)?.has(id);
   }
@@ -490,6 +498,29 @@ export class BrowserController {
           : undefined;
       }
     return undefined;
+  }
+
+  private tabIdOf(contents: WebContents | null): string | undefined {
+    if (!contents) return undefined;
+    for (const [id, view] of this.views)
+      if (view.webContents === contents) return id;
+    return undefined;
+  }
+
+  // A listener the agent server set. One that throws must not stop the page.
+  private notify<Arguments extends unknown[]>(
+    listeners: Set<(...args: Arguments) => void>,
+    ...args: Arguments
+  ): void {
+    for (const listener of listeners)
+      try {
+        listener(...args);
+      } catch (error) {
+        console.error(
+          "Navigation listener failed:",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+      }
   }
 
   private sessionFor(partition: string): Session {
@@ -673,6 +704,8 @@ export class BrowserController {
       item: Electron.DownloadItem,
       contents: WebContents,
     ) => {
+      const downloaded = this.tabIdOf(contents);
+      if (downloaded) this.notify(this.downloadStarts, downloaded);
       const space = this.spaceOf(contents);
       // An extension's popup and windows download like personal pages.
       // Anything else without a tab, such as a service worker, can't.
@@ -1070,7 +1103,42 @@ export class BrowserController {
         });
     });
     contents.on("will-redirect", (event, url) => {
-      if (!isWebUrl(url)) event.preventDefault();
+      if (isLoadable(url)) return;
+      event.preventDefault();
+      this.notify(this.blockedRedirects, tab.id, url);
+    });
+    // A page asking to stay. Under agent control the page leaves and the
+    // running operation reports the override; the person is asked instead,
+    // unless they are looking at another tab or window.
+    contents.on("will-prevent-unload", (event) => {
+      if (!isCurrentView()) return;
+      if (activeSpace(space) && space.owner === "agent") {
+        event.preventDefault();
+        this.notify(this.leaveGuards, tab.id, Date.now());
+        this.addActivity(
+          tab.spaceId,
+          "Agent left a page that asked it to stay",
+          "info",
+        );
+        return;
+      }
+      // The window test a capture uses: nothing is shown over a hidden or
+      // minimized window, and a background tab keeps its page.
+      if (
+        !this.canCapturePage() ||
+        this.shownTab(this.state.activeSpaceId)?.id !== tab.id
+      )
+        return;
+      const answer = dialog.showMessageBoxSync(this.window, {
+        type: "question",
+        message: "Leave site?",
+        detail: "Changes you made may not be saved.",
+        buttons: ["Leave", "Stay"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (answer === 0) event.preventDefault();
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.on("did-start-navigation", (details) => {
@@ -1384,16 +1452,16 @@ export class BrowserController {
     if (this.state.tabs.length >= 200)
       throw new Error("The maximum of 200 tabs has been reached.");
     const space = this.getSpace(spaceId);
+    const requested = url === undefined ? "" : cleanText(url, 8192);
     const tab = newTab(
       space.id,
-      normalizeUrl(
-        url === undefined ? "" : cleanText(url, 8192),
-        this.state.settings.searchEngine,
-      ),
+      requested === "about:blank"
+        ? requested
+        : normalizeUrl(requested, this.state.settings.searchEngine),
     );
     this.registry.register(tab, { openedBy: "agent", managed: true });
     this.state.tabs.push(tab);
-    if (isWebUrl(tab.url)) this.ensureView(tab);
+    if (isLoadable(tab.url)) this.ensureView(tab);
     this.emit();
     return tab;
   }
@@ -1429,6 +1497,68 @@ export class BrowserController {
     this.state.tabs.push(tab);
     this.emit();
     return space;
+  }
+
+  // Not a BrowserAction: only the agent server navigates an agent tab. The
+  // tab is updated as tab:navigate updates it, except that the address is
+  // loaded as given, so about:blank never reaches the search engine.
+  navigateAgentTab(
+    tabId: string,
+    url: string,
+    options: { referer?: string } = {},
+  ): void {
+    const tab = this.getTab(tabId);
+    if (!isLoadable(url)) throw new Error("This address cannot be opened.");
+    tab.url = url;
+    tab.title = url;
+    delete tab.favicon;
+    delete tab.error;
+    const loadOptions: Electron.LoadURLOptions | undefined = options.referer
+      ? { httpReferrer: { url: options.referer, policy: "unsafe-url" } }
+      : undefined;
+    const view = this.views.get(tab.id);
+    if (view) this.load(tab, view.webContents, loadOptions);
+    else this.ensureView(tab, loadOptions);
+    this.emit();
+  }
+
+  // The tab:reload path, past the cache with ignoreCache. Not a
+  // BrowserAction either.
+  reloadAgentTab(tabId: string, options: { ignoreCache?: boolean } = {}): void {
+    const tab = this.getTab(tabId);
+    const contents = this.getWebContents(tab.id);
+    if (contents) this.reloadTab(tab, contents, options.ignoreCache === true);
+  }
+
+  // A server redirect the agent URL rule cancelled.
+  onBlockedRedirect(
+    listener: (tabId: string, url: string) => void,
+  ): () => void {
+    this.blockedRedirects.add(listener);
+    return () => this.blockedRedirects.delete(listener);
+  }
+
+  // A download the session started for a tab, before any refusal.
+  onDownloadStarted(listener: (tabId: string) => void): () => void {
+    this.downloadStarts.add(listener);
+    return () => this.downloadStarts.delete(listener);
+  }
+
+  // A leave guard this agent overrode, with the moment it happened.
+  onLeaveGuard(listener: (tabId: string, at: number) => void): () => void {
+    this.leaveGuards.add(listener);
+    return () => this.leaveGuards.delete(listener);
+  }
+
+  // A failed load is retried by loading its URL again, as before.
+  private reloadTab(
+    tab: Tab,
+    contents: WebContents,
+    ignoreCache = false,
+  ): void {
+    if (tab.error) this.load(tab, contents);
+    else if (ignoreCache) contents.reloadIgnoringCache();
+    else contents.reload();
   }
 
   closeTab(
@@ -1836,10 +1966,7 @@ export class BrowserController {
             contents.navigationHistory.canGoForward()
           )
             contents.navigationHistory.goForward();
-          if (action.type === "tab:reload") {
-            if (tab.error) this.load(tab, contents);
-            else contents.reload();
-          }
+          if (action.type === "tab:reload") this.reloadTab(tab, contents);
           if (action.type === "tab:stop") {
             contents.stop();
             tab.loading = false;

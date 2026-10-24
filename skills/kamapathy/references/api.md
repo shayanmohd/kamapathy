@@ -589,7 +589,12 @@ Show the commands, or help on one
 | DELETE | `/tabs/:id` |  | Closes a page the agent manages. Its label is retired, and a blank page with the next label replaces a space's last page. Returns `{ ok: true, closed?: label, replacement?: TabView }`. |
 | POST | `/tabs/:id/adopt` | `{}` | Makes a page the agent did not open its own, within the page budget. The page keeps its label. Returns `{ tab: TabView }`. |
 | POST | `/tabs/:id/release` | `{}` | Gives a page the agent did not open back to the person. The page stays open. Returns `{ tab: TabView }`. |
-| POST | `/tabs/:id/navigate` | `url` | Loads a URL in the tab. Returns `{ tab: TabView }`. |
+| POST | `/tabs/:id/navigate` | `url`, `waitUntil?`, `timeoutMs?`, `referer?` | Loads a URL in the tab and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
+| POST | `/tabs/:id/reload` | `waitUntil?`, `timeoutMs?`, `ignoreCache?` | Reloads the page and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
+| POST | `/tabs/:id/wait-for-url` | `url?`, `waitUntil?`, `after?`, `timeoutMs?` | Waits for this page's URL to match a glob, or reports its commits so a script can match them itself. Returns `{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }`. |
+| POST | `/tabs/:id/wait-for-load-state` | `state?`, `idleMs?`, `timeoutMs?` | Waits for the document this page shows to reach a state. Returns `{ ok: true, tab: TabView, state }`. |
+| POST | `/tabs/:id/wait-for-function` | `expression?`, `function?`, `arg?`, `intervalMs?`, `timeoutMs?` | Waits for a function the agent wrote to return a truthy value in the page. Returns `{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }`. |
+| GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
@@ -620,6 +625,7 @@ Show the commands, or help on one
 | `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
+| `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
@@ -640,6 +646,10 @@ Show the commands, or help on one
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
+| `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
+| `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
+| `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |
@@ -653,6 +663,9 @@ Show the commands, or help on one
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
 | `element_action_failed` | 422 | not retryable |  | The page refused the action. |
+| `navigation_failed` | 422 | retryable when netError is ERR_INTERNET_DISCONNECTED or ERR_NETWORK_CHANGED or ERR_NETWORK_IO_SUSPENDED or ERR_NAME_RESOLUTION_FAILED or ERR_CONNECTION_REFUSED or ERR_CONNECTION_TIMED_OUT | `url`, `netError`, `errorCode`, `httpStatus`, `blockedUrl` | The navigation ended without loading a document. |
+| `navigation_download` | 422 | not retryable | `url`, `armed` | The address is a download, not a page. |
+| `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
@@ -668,7 +681,8 @@ Show the commands, or help on one
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The condition was not met before the timeout. |
+| `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `title`, `popups` | The condition was not met before the timeout. |
 | `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
 | `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |
 | `update_download_failed` | in GET /update | retryable when reason is network or stalled, or httpStatus is in range | `reason`, `httpStatus` | The installer download stopped. |

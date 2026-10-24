@@ -8,6 +8,10 @@ type Request = {
   url: string;
 };
 
+// How many characters of a pending URL a wait's answer carries. The cut is
+// made here, so no caller can hand out a longer one.
+const URL_CHARS = 200;
+
 const favicon = (url: string) => {
   try {
     return new URL(url).pathname.endsWith("/favicon.ico");
@@ -76,6 +80,16 @@ export class NetworkTracker {
 
   inFlight(): number {
     return this.requests.size;
+  }
+
+  // Up to limit of the URLs in flight, oldest first, for a wait that ran out.
+  pending(limit: number): string[] {
+    const urls: string[] = [];
+    for (const request of this.requests.values()) {
+      if (urls.length >= limit) break;
+      urls.push(request.url.slice(0, URL_CHARS));
+    }
+    return urls;
   }
 
   lastActivityAt(): number {

@@ -19,6 +19,44 @@ const url = {
   required: true,
   description: "A complete http or https URL.",
 };
+// How far a navigation or a load-state wait waits.
+const waitUntil = {
+  kind: "enum",
+  values: ["commit", "domcontentloaded", "load", "networkidle"],
+  default: "load",
+  since: 2,
+  description:
+    "commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window.",
+};
+// A URL glob. The main process matches it without backtracking, so a script
+// that needs a RegExp or a predicate watches this page's commits instead.
+const urlGlob = {
+  kind: "string",
+  max: 2048,
+  since: 2,
+  description:
+    "A glob for the whole URL: * inside a path segment, ** across segments, {a,b} for one alternative, a backslash for a literal character.",
+};
+// How long a wait waits for its condition.
+const waitTimeout = {
+  kind: "ms",
+  max: 60000,
+  default: 10000,
+  since: 2,
+  description: "How long to wait. 0 checks once.",
+};
+// The state a load-state wait judges on the document the page shows, rather
+// than on a new one it starts.
+const loadState =
+  "commit needs a committed document; domcontentloaded and load wait for those events; networkidle adds a quiet network window.";
+// The quiet window networkidle asks for.
+const idleMs = {
+  kind: "ms",
+  max: 10000,
+  default: 500,
+  since: 2,
+  description: "How long nothing may be in flight before networkidle answers.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -113,6 +151,78 @@ const FIELDS = {
       default: 5000,
       description: "How long to wait.",
     },
+  },
+  navigate: {
+    url,
+    waitUntil,
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      since: 2,
+      description: "How long to wait for the state.",
+    },
+    referer: {
+      kind: "url",
+      max: 8192,
+      since: 2,
+      description: "The Referer header to send, exactly as given.",
+    },
+  },
+  reload: {
+    waitUntil,
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      description: "How long to wait for the state.",
+    },
+    ignoreCache: {
+      kind: "boolean",
+      default: false,
+      description: "Fetch the page and its subresources past the cache.",
+    },
+  },
+  "wait-for-url": {
+    url: { ...urlGlob, required: true },
+    waitUntil,
+    timeoutMs: waitTimeout,
+  },
+  "wait-for-load-state": {
+    state: { ...waitUntil, description: loadState },
+    idleMs,
+    timeoutMs: waitTimeout,
+  },
+  "wait-for-function": {
+    expression: {
+      kind: "string",
+      max: 16384,
+      since: 2,
+      description:
+        "An expression to evaluate in the page. Give this or function, not both.",
+    },
+    function: {
+      kind: "string",
+      max: 16384,
+      since: 2,
+      description: "The source of a function to call in the page.",
+    },
+    arg: {
+      kind: "json",
+      since: 2,
+      description: "The one JSON argument the function is called with.",
+    },
+    intervalMs: {
+      kind: "ms",
+      min: 10,
+      max: 10000,
+      default: 100,
+      since: 2,
+      description: "How long between checks.",
+    },
+    timeoutMs: waitTimeout,
   },
 };
 
@@ -348,10 +458,62 @@ export const ROUTES = [
   route(
     "POST",
     "/tabs/:id/navigate",
-    "Loads a URL in the tab.",
-    "{ tab: TabView }",
-    { url },
-    { follow: true },
+    "Loads a URL in the tab and waits for the new document to reach a state.",
+    "{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }",
+    FIELDS.navigate,
+    { follow: true, budget: { field: "timeoutMs" } },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/reload",
+    "Reloads the page and waits for the new document to reach a state.",
+    "{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }",
+    FIELDS.reload,
+    { follow: true, budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/wait-for-url",
+    "Waits for this page's URL to match a glob, or reports its commits so a script can match them itself.",
+    "{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }",
+    {
+      url: urlGlob,
+      waitUntil,
+      after: {
+        kind: "integer",
+        min: 0,
+        max: 2147483647,
+        since: 2,
+        description:
+          "A navigation count from an earlier answer. Without a url, the wait ends once a later commit exists.",
+      },
+      timeoutMs: waitTimeout,
+    },
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/wait-for-load-state",
+    "Waits for the document this page shows to reach a state.",
+    "{ ok: true, tab: TabView, state }",
+    FIELDS["wait-for-load-state"],
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/wait-for-function",
+    "Waits for a function the agent wrote to return a truthy value in the page.",
+    "{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }",
+    FIELDS["wait-for-function"],
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "GET",
+    "/tabs/:id/info",
+    "Reads the viewport, scroll offsets, document size and ready state.",
+    "{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }",
+    null,
+    { budget: 10000, follow: false, since: 2 },
   ),
   route(
     "GET",
@@ -506,6 +668,37 @@ export const ACTIONS = [
     summary: "Waits for a visible element, text, or both.",
     fields: FIELDS.wait,
     since: 1,
+  },
+  {
+    type: "navigate",
+    summary: "Loads a URL and waits for the new document to reach a state.",
+    fields: FIELDS.navigate,
+    since: 2,
+  },
+  {
+    type: "reload",
+    summary:
+      "Reloads the page and waits for the new document to reach a state.",
+    fields: FIELDS.reload,
+    since: 2,
+  },
+  {
+    type: "wait-for-url",
+    summary: "Waits for this page's URL to match a glob.",
+    fields: FIELDS["wait-for-url"],
+    since: 2,
+  },
+  {
+    type: "wait-for-load-state",
+    summary: "Waits for the document this page shows to reach a state.",
+    fields: FIELDS["wait-for-load-state"],
+    since: 2,
+  },
+  {
+    type: "wait-for-function",
+    summary: "Waits for a page function to return a truthy value.",
+    fields: FIELDS["wait-for-function"],
+    since: 2,
   },
 ];
 

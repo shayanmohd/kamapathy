@@ -103,6 +103,7 @@ export interface Settings {
   offerToSavePasswords: boolean;
   automationEnabled: boolean;
   isolateAgentSpaces: boolean;
+  agentPageScripts: boolean;
   welcomed: boolean;
   updateChecks: boolean;
   // What's new lists the notes above this version.

@@ -23,6 +23,7 @@ import {
   type RouteDeps,
 } from "./http";
 import { createDispatchers } from "./input/dispatch";
+import { createNavigation } from "./routes/navigation";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
 import { tabRoutes } from "./routes/tabs";
@@ -61,6 +62,20 @@ export interface AutomationController {
   shownTab(spaceId: string): Tab | undefined;
   /** A managed agent tab in the background; a blank page without url. */
   openAgentTab(spaceId: string, url?: string): Tab;
+  /** Not a BrowserAction: only the agent server navigates an agent tab. */
+  navigateAgentTab(
+    tabId: string,
+    url: string,
+    options?: { referer?: string },
+  ): void;
+  /** The tab:reload path, past the cache with ignoreCache. */
+  reloadAgentTab(tabId: string, options?: { ignoreCache?: boolean }): void;
+  /** A server redirect the agent URL rule cancelled. */
+  onBlockedRedirect(listener: (tabId: string, url: string) => void): () => void;
+  /** A download the session started for a tab, before any refusal. */
+  onDownloadStarted(listener: (tabId: string) => void): () => void;
+  /** A leave guard this agent overrode, with the moment it happened. */
+  onLeaveGuard(listener: (tabId: string, at: number) => void): () => void;
   /** Retires the tab's label; a space left empty gets a blank tab. */
   closeTab(tabId: string, by: ClosedBy): { closed?: string; replacement?: Tab };
   setManaged(tabId: string, managed: boolean): Tab;
@@ -174,7 +189,19 @@ export async function startAutomation(
     referenceSession,
     dispatchers,
   });
-  const deps: RouteDeps = { controller, authority, actions, sessions };
+  const navigation = createNavigation({
+    controller,
+    authority,
+    actions,
+    sessions,
+  });
+  const deps: RouteDeps = {
+    controller,
+    authority,
+    actions,
+    sessions,
+    navigation,
+  };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
     sessions.sync();
@@ -184,6 +211,7 @@ export async function startAutomation(
   const routes = buildRoutes({
     ...spaceRoutes(deps),
     ...tabRoutes(deps),
+    ...navigation.routes,
     ...requests.routes,
     ...updateRoutes({ updates: options.updates }),
   });
@@ -377,6 +405,7 @@ export async function startAutomation(
         scheduler.close();
         // The dispatchers go last, so each session's release still lets go
         // of the keys it holds.
+        navigation.dispose();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
+import { createNavigation } from "../electron/agent/routes/navigation.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
@@ -128,7 +129,10 @@ describe("API schema", () => {
     const keys = ROUTES.map(routeKey);
     expect(new Set(keys).size).toBe(keys.length);
     const deps = {
-      controller: {},
+      controller: {
+        onBlockedRedirect: () => () => {},
+        onDownloadStarted: () => () => {},
+      },
       authority: {
         managedSpaces: new Set(),
         authorizeSpace() {},
@@ -144,6 +148,7 @@ describe("API schema", () => {
     const impls = {
       ...spaceRoutes(deps),
       ...tabRoutes(deps),
+      ...createNavigation(deps).routes,
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
       ...updateRoutes({}),
     };
@@ -186,12 +191,14 @@ describe("API schema", () => {
     }
     // Batch step types: the ones the server parses, which it lists when a
     // step has another.
-    const union = read("electron/agent/validate.ts").match(/type: ([^;]+);/)[1];
+    const union = read("electron/agent/validate.ts").match(
+      /type:\s*([^;]+);/,
+    )[1];
     expect(ACTIONS.map((item) => item.type).sort()).toEqual(
-      [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort(),
+      [...union.matchAll(/"([\w-]+)"/g)].map((m) => m[1]).sort(),
     );
     expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
+      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -501,11 +508,16 @@ describe("API schema", () => {
       "scroll",
       "drag",
       "wait",
+      "navigate",
+      "reload",
+      "wait-for-url",
+      "wait-for-load-state",
+      "wait-for-function",
     ];
     expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, and wait.",
+        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])

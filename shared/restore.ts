@@ -41,6 +41,10 @@ export function validSettings(value: unknown, base: Settings): Settings {
       typeof settings.isolateAgentSpaces === "boolean"
         ? settings.isolateAgentSpaces
         : base.isolateAgentSpaces,
+    agentPageScripts:
+      typeof settings.agentPageScripts === "boolean"
+        ? settings.agentPageScripts
+        : base.agentPageScripts,
     welcomed:
       typeof settings.welcomed === "boolean" ? settings.welcomed : base.welcomed,
     extensionUpdates:

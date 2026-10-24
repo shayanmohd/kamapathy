@@ -2,6 +2,7 @@ import type { WebContents } from "electron";
 import { ERRORS } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
+import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
@@ -74,7 +75,7 @@ export interface Actions {
   evaluatePage(
     id: string,
     session: TabSession,
-    operation: PageOperation,
+    operation: PageOperation | PageStateOperation,
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
@@ -178,7 +179,7 @@ export function createActions(deps: {
   const evaluatePage = async (
     id: string,
     session: TabSession,
-    operation: PageOperation,
+    operation: PageOperation | PageStateOperation,
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
@@ -711,7 +712,8 @@ export function createActions(deps: {
       }
     }
     authorizeTab(id);
-    const descriptions = {
+    // The step types this runs; the navigation steps log their own lines.
+    const descriptions: Record<string, string> = {
       snapshot: "Agent read a page snapshot",
       click: "Agent clicked an element",
       fill: "Agent filled a field",
