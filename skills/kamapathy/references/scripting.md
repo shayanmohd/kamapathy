@@ -93,6 +93,7 @@ Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`)
 | `batch(actions)` | `{ ok: true, results }` | 1 to 20 actions with the schema in actions.md; a failure throws, see below |
 | `upload(ref, files)` | `{ ok, selected }` | A file input ref and 1 to 8 local paths, 16 MiB together; the site may upload at once |
 | `screenshot(path)` | the absolute path | Viewport PNG; never overwrites a file; needs a shown, unminimized window |
+| `pdfText({ from?, to?, maxChars?, timeout? })` | `{ url, title, pageCount, from, to, pages, chars, truncated, nextPage?, noText? }` | The text of a PDF the tab shows, by page: at most 500 pages and `maxChars` characters, 20000 by default; `timeout` is sent as `timeoutMs` |
 | `opener()` | `Page` or `null` | The open page that opened this popup |
 | `close()` | `{ ok, closed?, replacement? }` | Retires the label; closing a space's last page leaves a blank page with the next label in its place |
 
@@ -133,7 +134,7 @@ The client's own codes:
 | `timeout` | The request timed out. The action may still have happened |
 | `request_too_large`, `invalid_response`, `request_failed` | The body is larger than its route accepts, the answer was not what the route returns, or the request failed without a code |
 
-Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `tab_unmanaged`, `page_budget`, `space_ended` or `screenshot_unavailable`; `help("errors")` lists them all.
+Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `tab_unmanaged`, `page_budget`, `space_ended`, `screenshot_unavailable`, `not_pdf` or `pdf_not_refetchable`; `help("errors")` lists them all.
 
 **Hard stops.** In `run`, these errors stop the run for good: `human_control` with reason `manual` or `handoff` (the person took over, or you handed them the space), `space_ended` with `endedBy: "person"` (they stopped the agent there), and `automation_stopped` or `not_connected` with reason `access_off`. The first one gets `hardStop: true`, catching it changes nothing, and every later call throws a copy with `hardStop: true` without sending anything. The run drops its output, prints only Kamapathy's guidance for that cause, and exits with status 3. Stop and tell the person; do not retry or call resume until they ask.
 

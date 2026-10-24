@@ -61,7 +61,7 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
   <tr>
     <td width="33%" valign="top">
       <h3>Bring your browser with you</h3>
-      On first launch, import bookmarks and history from Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera, Firefox or Safari. Later, from Settings.
+      On first launch, import bookmarks, history and, if you like, your sign-ins: a checkbox for every profile of Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera and Firefox, and Safari from the file it exports. Sign-ins join your shared sign-ins, or a new space for each profile. Later, from Settings.
     </td>
     <td width="33%" valign="top">
       <h3>Sees the whole page</h3>
@@ -70,6 +70,20 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
     <td width="33%" valign="top">
       <h3>Quiet by design</h3>
       Tabs across the top, one address bar, one menu. No account, no feed, no telemetry. Light and dark themes with a single accent.
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>Your default browser</h3>
+      Make Kamapathy your default browser from Settings. Links and files other apps hand over open in a personal space, and a link out to another app asks you first.
+    </td>
+    <td width="33%" valign="top">
+      <h3>PDFs in the tab</h3>
+      PDFs open in Chromium's own viewer in every space. Agents read one with <code>pdf-text</code>, page by page, instead of reaching into the viewer.
+    </td>
+    <td width="33%" valign="top">
+      <h3>Files on this computer</h3>
+      Open a local PDF, image, text file or page in a personal space. Local pages run with scripts off, and agents never see those tabs.
     </td>
   </tr>
 </table>
@@ -88,11 +102,11 @@ Each section opens to a screenshot. Want to click around instead? The [live demo
 </details>
 
 <details>
-<summary><strong>First launch: import and sign in once</strong>: bring your bookmarks and history, then open your top sites</summary>
+<summary><strong>First launch: six steps</strong>: spaces, your data, import, your agent, signing in once and your default browser</summary>
 <br />
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/kamapathy-welcome-dark.png" />
-  <img src="docs/images/kamapathy-welcome-light.png" alt="The welcome dialog listing the browsers found on this computer, with Bookmarks and History checked and an Import button" width="100%" />
+  <img src="docs/images/kamapathy-welcome-light.png" alt="The first welcome step, introducing your spaces and agent spaces, with a Get started button" width="100%" />
 </picture>
 </details>
 
@@ -176,7 +190,7 @@ Every release also carries the agent skill as a ZIP and a `SHA256SUMS.txt` file 
 
 </details>
 
-On first launch Kamapathy offers to bring over your bookmarks and history from another browser on this computer, then shows your top sites so you can sign in once. Both are optional, and the import is always there later under **Settings > Browsing**.
+On first launch Kamapathy walks you through six steps: what your spaces and agent spaces are, where your data stays, importing from another browser, connecting your agent, your top sites so you can sign in once, and making Kamapathy your default browser. Import and agent setup can be skipped, sign-ins can come along with your bookmarks and history, and the import is always there later under **Settings > Browsing**.
 
 ## Bring your own agent
 
@@ -237,7 +251,7 @@ await dinner.finish({ keep: [page] });
 node kamapathy.mjs run book.mjs
 ```
 
-The script runs on your computer, in JavaScript or TypeScript, with `createSpace`, `openSpace`, `requestSpace`, `space` and `spaces` as globals. `openSpace` finds a space again by name in a later run, and `requestSpace` asks you to let the agent use one of your own spaces. Pages have labels such as `p2` that are never reused in their space, so a later script picks up with `space.page("p2")`. A space has `open`, `newPage`, `page`, `tabs`, `adopt`, `handoff`, `resume` and `finish`, which closes the agent's other pages and leaves the space to you; a page has `snapshot`, `text`, `click`, `fill`, `press`, `scroll`, `drag`, `wait`, `batch`, `upload`, `screenshot` and `navigate`. Each call sends one documented request over the local socket, so no JavaScript from the script ever reaches a web page. If you take over or stop the agent, its run stops and the agent sees only a short note saying so. `node kamapathy.mjs help <command>` explains a command, `node kamapathy.mjs --version` shows client, app and engine versions, and `help()` in a script lists the whole API. The same work, one command at a time:
+The script runs on your computer, in JavaScript or TypeScript, with `createSpace`, `openSpace`, `requestSpace`, `space` and `spaces` as globals. `openSpace` finds a space again by name in a later run, and `requestSpace` asks you to let the agent use one of your own spaces. Pages have labels such as `p2` that are never reused in their space, so a later script picks up with `space.page("p2")`. A space has `open`, `newPage`, `page`, `tabs`, `adopt`, `handoff`, `resume` and `finish`, which closes the agent's other pages and leaves the space to you; a page has `snapshot`, `text`, `click`, `fill`, `press`, `scroll`, `drag`, `wait`, `batch`, `upload`, `screenshot`, `pdfText` and `navigate`. Each call sends one documented request over the local socket, so no JavaScript from the script ever reaches a web page. If you take over or stop the agent, its run stops and the agent sees only a short note saying so. `node kamapathy.mjs help <command>` explains a command, `node kamapathy.mjs --version` shows client, app and engine versions, and `help()` in a script lists the whole API. The same work, one command at a time:
 
 ```console
 $ node kamapathy.mjs space create "Dinner booking"
@@ -291,6 +305,11 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - A failed run prints where in the script it failed, a caret under a syntax error, whether the call can be retried and up to two hints.
 - `run` and `repl` load the workspace's `.env` and each `--env-file`, never changing a variable that is already set.
 - `<command> --help` and `-h` print that command's help and run nothing, and `--` ends option parsing.
+- Every page and request now sees Chrome's reduced user agent, `Mozilla/5.0 (<platform>) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36`, with no Electron or Kamapathy token and the minor, build and patch numbers zeroed. Client hints are unchanged.
+- `pdf-text <tab-id>` and `page.pdfText()` read a PDF's text by page, up to 500 pages and 20000 characters a call, with the codes `not_pdf`, `pdf_not_refetchable`, `pdf_too_large`, `pdf_locked`, `pdf_unreadable`, `pdf_fetch_failed`, `page_out_of_range` and `pdf_timeout`. `/health` answers API level 3.
+- Tabs showing files on this computer are never listed to an agent and answer `404 tab_not_found`. The address bar's refusal now reads `Kamapathy opens web addresses and files only.`, and a link from a local page opens a web page in a new tab.
+- Links and files other apps hand over open in a personal space no agent can reach, not the space you are in.
+- Packaged builds register as a web browser and viewer and turn off Electron's run-as-Node, `NODE_OPTIONS` and inspector fuses, so a `KAMAPATHY_EXECUTABLE` skill test can no longer attach to a packaged app.
 
 </details>
 
@@ -375,7 +394,7 @@ Kamapathy's trust boundary is your operating system account. Web pages run sandb
 
 ## What's not here yet
 
-Kamapathy is an early preview. Browser extensions, a password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed and don't update themselves, and Kamapathy hasn't had an independent security audit. If Google rejects a sign-in, Kamapathy offers to continue in your default browser instead.
+Kamapathy is an early preview. Browser extensions, a password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed and don't update themselves, and Kamapathy hasn't had an independent security audit. Kamapathy presents itself to sites as Chromium. If Google still rejects a sign-in, continue in another browser and import the sign-in.
 
 ## Contributing
 
