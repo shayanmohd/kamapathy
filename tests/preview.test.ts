@@ -1,5 +1,11 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import type { KamapathyBridge, PasswordsBridge } from "../shared/types";
+import type {
+  DefaultBrowserStatus,
+  KamapathyBridge,
+  PasswordsBridge,
+} from "../shared/types";
+import { signInNotice } from "../src/lib/sign-in-notice";
+import { signInNoticeCopy } from "../src/copy";
 
 // What the desktop preload hands to the shell and sends to main.
 const electron = vi.hoisted(() => ({
@@ -308,6 +314,45 @@ describe("interactive preview state invariants", () => {
     expect(await bridge.helpSpaceId()).toBe("personal");
     await bridge.dispatch({ type: "space:activate", id: "work" });
     expect(await bridge.helpSpaceId()).toBe("work");
+  });
+  it("has no default browser in the web preview", async () => {
+    const bridge = create();
+    const before = structuredClone(await bridge.getState());
+    expect(await bridge.defaultBrowser()).toEqual({
+      state: "unavailable",
+      reason: "web",
+    });
+    await expect(bridge.makeDefaultBrowser()).resolves.toBeUndefined();
+    expect(await bridge.getState()).toEqual(before);
+    expect(await bridge.defaultBrowser()).toEqual({
+      state: "unavailable",
+      reason: "web",
+    });
+  });
+  it("notice when default", async () => {
+    expect(signInNotice({ state: "default" })).toEqual({
+      message: signInNoticeCopy.whenDefault,
+      actions: ["import-sign-ins", "copy-link"],
+    });
+    const elsewhere: (DefaultBrowserStatus | null)[] = [
+      null,
+      { state: "available" },
+      { state: "unavailable", reason: "development" },
+      { state: "unavailable", reason: "web" },
+    ];
+    for (const status of elsewhere)
+      expect(signInNotice(status), String(status?.state)).toEqual({
+        message: signInNoticeCopy.elsewhere,
+        actions: ["open-external", "import-sign-ins"],
+      });
+    const bridge = create();
+    const before = structuredClone(await bridge.getState());
+    expect(
+      await bridge.dispatch({
+        type: "tab:copy-external",
+        id: before.activeTabId,
+      }),
+    ).toEqual(before);
   });
   it("recolours a space in the web preview", async () => {
     const bridge = create();

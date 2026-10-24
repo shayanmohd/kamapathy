@@ -1,0 +1,42 @@
+{
+  "history": [
+    {
+      "url": "https://example.com/redirect",
+      "title": "Redirect",
+      "time_usec": 1728307200000000,
+      "visit_count": 1
+    },
+    {
+      "url": "https://kamapathy.app/",
+      "title": "Kamapathy",
+      "time_usec": 1748307200250000,
+      "visit_count": 3
+    },
+    {
+      "url": "http://localhost:3000/",
+      "time_usec": 1718307200000000,
+      "visit_count": 2
+    },
+    {
+      "url": "https://example.com/no-count",
+      "title": "No count",
+      "time_usec": 1708307200000000
+    },
+    {
+      "url": "https://example.com/redirect",
+      "title": "Redirect once more",
+      "time_usec": 1698307200000000,
+      "visit_count": 9
+    },
+    {
+      "url": "https://example.com/undated",
+      "title": "Undated"
+    },
+    {
+      "url": "file:///Users/me/notes.html",
+      "title": "Local notes",
+      "time_usec": 1738307200000000,
+      "visit_count": 4
+    }
+  ]
+}

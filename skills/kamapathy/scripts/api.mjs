@@ -107,6 +107,19 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
  * @property {true} ok
  * @property {{ index: number, type: string, result: object }[]} results
  */
+/**
+ * @typedef {object} PdfText
+ * @property {string} url
+ * @property {string} title The document's title, else the tab's.
+ * @property {number} pageCount
+ * @property {number} from
+ * @property {number} to
+ * @property {{ number: number, text: string }[]} pages
+ * @property {number} chars
+ * @property {boolean} truncated
+ * @property {number} [nextPage] The first page not fully returned.
+ * @property {true} [noText] The pages carry no text, such as scans.
+ */
 
 // Refreshes a page from a response that carries its tab.
 const REFRESH = Symbol("refresh");
@@ -371,6 +384,21 @@ export class Page {
       });
       await writeFile(output, bytes, { flag: "wx" });
       return output;
+    });
+  }
+  /**
+   * Reads a PDF's text by page, without entering Chromium's viewer.
+   * Continue a truncated read from nextPage.
+   * @param {{ from?: number, to?: number, maxChars?: number, timeout?: number }} [options]
+   * @returns {Promise<PdfText>}
+   */
+  pdfText(options = {}) {
+    return this.#call("pdfText", [options], () => {
+      const { timeout, ...fields } = options;
+      return this.#post("pdf/text", {
+        ...fields,
+        ...(timeout === undefined ? {} : { timeoutMs: timeout }),
+      });
     });
   }
   /**

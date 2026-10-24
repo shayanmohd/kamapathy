@@ -32,6 +32,8 @@ npm run test:skill
 
 Linux smoke testing requires a display. For a headless machine, use `xvfb-run -a npm run test:desktop`. CI also packages the app on native operating system runners.
 
+Packaged builds turn off Electron's run-as-Node and inspector fuses, so check a packaged app with `npm run package:<platform>` and then `node scripts/test-branding.mjs --packaged`; a `KAMAPATHY_EXECUTABLE` skill test cannot attach to a packaged app, because its main process no longer takes an inspector.
+
 The skill test drives the bundled client against a temporary Electron profile and a local form server. It verifies real creation and submission, partial failures, stale refs, screenshots, keyboard input, takeover, taking control back with `resume`, and a whole task run as one script. Public website reads are opt-in with `KAMAPATHY_TEST_PUBLIC=1`. For a skill change, validate its `SKILL.md` and test the installed copy using `KAMAPATHY_SKILL_DIR` as well.
 
 A pull request should explain the user facing behavior, the reason for the change, and the checks you ran. Include screenshots for visible changes and mention any operating system coverage that is still pending.

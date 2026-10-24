@@ -6,6 +6,7 @@ import type {
   OpenedBy,
   Tab,
 } from "../../shared/types";
+import { agentVisible } from "./views";
 
 export interface TabOrigin {
   openedBy: OpenedBy;
@@ -76,7 +77,8 @@ export class TabRegistry {
     if (origin.openerId) tab.openerId = origin.openerId;
     tab.managed = origin.managed;
     const space = this.state().spaces.find((item) => item.id === tab.spaceId);
-    if (space && agentRules(space)) {
+    // A tab showing a file on this computer never gets a label.
+    if (space && agentRules(space) && agentVisible(tab)) {
       tab.label = this.nextLabel(tab.spaceId);
       // A popup stays unseen until something reports it to the agent.
       if (origin.openedBy === "page") tab.unseen = true;
@@ -92,8 +94,11 @@ export class TabRegistry {
   }
 
   // Labels the space's unlabeled tabs in tab-strip order, pinned tabs first.
+  // File tabs are skipped.
   labelSpace(spaceId: string): void {
-    const tabs = this.state().tabs.filter((tab) => tab.spaceId === spaceId);
+    const tabs = this.state().tabs.filter(
+      (tab) => tab.spaceId === spaceId && agentVisible(tab),
+    );
     for (const tab of [
       ...tabs.filter((tab) => tab.pinned),
       ...tabs.filter((tab) => !tab.pinned),

@@ -434,6 +434,12 @@ export function createPreviewBridge(): KamapathyBridge {
     extensionCommand: async () => {
       throw new Error(extensionsCopy.desktopOnly);
     },
+    importSafariArchive: async () => {
+      throw new Error("Install the desktop app to import from another browser.");
+    },
+    openImportPermissions: () => {},
+    defaultBrowser: async () => ({ state: "unavailable", reason: "web" }),
+    makeDefaultBrowser: async () => {},
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

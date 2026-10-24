@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
 import { createNavigation } from "../electron/agent/routes/navigation.ts";
+import { pdfRoutes } from "../electron/agent/routes/pdf.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
@@ -149,6 +150,7 @@ describe("API schema", () => {
       ...spaceRoutes(deps),
       ...tabRoutes(deps),
       ...createNavigation(deps).routes,
+      ...pdfRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
       ...updateRoutes({}),
     };

@@ -1,10 +1,28 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { CookiesSetDetails } from "electron";
+import type {
+  BrowserAction,
+  BrowserState,
+  ImportErrorCode,
+  ImportOutcome,
+  ImportRequest,
+  ImportSelection,
+  SignInsTarget,
+} from "../shared/types";
 import { isWebUrl } from "../shared/url";
+import {
+  defaultRun,
+  keyCache,
+  readChromiumCookies,
+  type ChromiumBrowserId,
+  type RunCommand,
+  type SafeStorageKeys,
+} from "./import-cookies";
 
 export type BrowserId =
   | "chrome"
@@ -25,6 +43,8 @@ export interface ImportSource {
   name: string;
   profiles: ImportProfile[];
   default: boolean;
+  signInsAvailable: boolean;
+  status: "ready" | "needs_permission";
 }
 export interface ImportedBookmark {
   title: string;
@@ -42,23 +62,71 @@ export interface ImportResult {
   warnings: string[];
 }
 // Tests point the module at a fake home and stub the commands that read the
-// default browser and convert Safari's binary plist.
+// default browser.
 export interface ImportEnv {
   platform: NodeJS.Platform;
   home: string;
   appData?: string;
   localAppData?: string;
   exec?: (command: string, args: string[]) => string;
+  // Async commands that may wait for the person, such as the keychain prompt.
+  command?: RunCommand;
+  // Where macOS apps are installed; "/Applications" unless a test says otherwise.
+  applications?: string;
+}
+
+export class ImportError extends Error {
+  constructor(
+    readonly code: ImportErrorCode,
+    message: string,
+    readonly fields: { retryable?: true; sources?: string[] } = {},
+  ) {
+    super(message);
+    this.name = "ImportError";
+  }
+}
+// Sign-ins read from one source profile, for the destination to write.
+export interface ProfileCookies {
+  source: BrowserId;
+  browser: string;
+  profile: string;
+  cookies: CookiesSetDetails[];
+}
+export interface SelectionResult {
+  bookmarks: ImportedBookmark[];
+  history: ImportedVisit[];
+  profiles: ProfileCookies[];
+  warnings: string[];
+}
+export interface CookieOutcome {
+  written: number;
+  failed: number;
+  spaces: { id: string; name: string }[];
+  warnings: string[];
+}
+// What an import writes into: the browser controller, or a fake in tests.
+export interface ImportTarget {
+  readonly state: Pick<BrowserState, "bookmarks" | "history">;
+  dispatch(action: BrowserAction): Promise<unknown>;
+  applyImportedCookies(
+    target: "shared" | "separate",
+    profiles: readonly ProfileCookies[],
+  ): Promise<CookieOutcome>;
 }
 
 const LIMIT = 1000;
 const TITLE_LENGTH = 300;
-const SAFARI_BLOCKED =
-  "macOS blocked access to Safari's history. Give Kamapathy Full Disk Access in System Settings > Privacy & Security, then try again.";
+const INVALID_REQUEST = "Something was wrong with that import. Try again.";
+const REQUEST_LIMIT = 64 * 1024;
+const SELECTION_LIMIT = 64;
+const PROFILE_LENGTH = 512;
+const signInsTargets: readonly SignInsTarget[] = ["none", "shared", "separate"];
 
 interface BrowserInfo {
   name: string;
   engine: "chromium" | "firefox" | "safari";
+  // The macOS app, for telling a blocked data folder from an empty one.
+  app?: string;
   darwin?: string;
   win32?: string;
   linux?: string;
@@ -69,6 +137,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   chrome: {
     name: "Google Chrome",
     engine: "chromium",
+    app: "Google Chrome",
     darwin: "Library/Application Support/Google/Chrome",
     win32: "Google/Chrome/User Data",
     linux: ".config/google-chrome",
@@ -76,6 +145,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   chromium: {
     name: "Chromium",
     engine: "chromium",
+    app: "Chromium",
     darwin: "Library/Application Support/Chromium",
     win32: "Chromium/User Data",
     linux: ".config/chromium",
@@ -83,6 +153,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   edge: {
     name: "Microsoft Edge",
     engine: "chromium",
+    app: "Microsoft Edge",
     darwin: "Library/Application Support/Microsoft Edge",
     win32: "Microsoft/Edge/User Data",
     linux: ".config/microsoft-edge",
@@ -90,6 +161,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   brave: {
     name: "Brave",
     engine: "chromium",
+    app: "Brave Browser",
     darwin: "Library/Application Support/BraveSoftware/Brave-Browser",
     win32: "BraveSoftware/Brave-Browser/User Data",
     linux: ".config/BraveSoftware/Brave-Browser",
@@ -97,6 +169,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   arc: {
     name: "Arc",
     engine: "chromium",
+    app: "Arc",
     darwin: "Library/Application Support/Arc/User Data",
     win32:
       "Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data",
@@ -104,6 +177,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   vivaldi: {
     name: "Vivaldi",
     engine: "chromium",
+    app: "Vivaldi",
     darwin: "Library/Application Support/Vivaldi",
     win32: "Vivaldi/User Data",
     linux: ".config/vivaldi",
@@ -111,6 +185,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   opera: {
     name: "Opera",
     engine: "chromium",
+    app: "Opera",
     darwin: "Library/Application Support/com.operasoftware.Opera",
     win32: "Opera Software/Opera Stable",
     roaming: true,
@@ -119,6 +194,7 @@ const browsers: Record<BrowserId, BrowserInfo> = {
   firefox: {
     name: "Firefox",
     engine: "firefox",
+    app: "Firefox",
     darwin: "Library/Application Support/Firefox",
     win32: "Mozilla/Firefox",
     roaming: true,
@@ -148,14 +224,10 @@ const firefoxHistory =
   "SELECT url, title, visit_count AS visits, CAST(last_visit_date AS REAL) AS time FROM moz_places WHERE hidden = 0 AND last_visit_date IS NOT NULL ORDER BY last_visit_date DESC";
 const firefoxBookmarkRows =
   "SELECT b.id, b.parent, b.type, b.title, b.guid, p.url FROM moz_bookmarks b LEFT JOIN moz_places p ON p.id = b.fk ORDER BY b.position";
-// Safari keeps titles on visits, not items; the newest titled visit wins.
-const safariHistory =
-  "SELECT url, visit_count AS visits, (SELECT MAX(visit_time) FROM history_visits WHERE history_item = i.id) AS time, (SELECT title FROM history_visits WHERE history_item = i.id AND title IS NOT NULL ORDER BY visit_time DESC LIMIT 1) AS title FROM history_items i ORDER BY time DESC";
 
 export const chromiumTime = (time: number): number =>
   time / 1000 - 11644473600000;
 export const firefoxTime = (time: number): number => time / 1000;
-export const safariTime = (time: number): number => (time + 978307200) * 1000;
 
 function defaultEnv(): ImportEnv {
   return {
@@ -181,6 +253,16 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// How macOS refuses a folder it protects.
+function permissionDenied(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EPERM" || code === "EACCES";
+}
+
 function readJson(path: string): unknown {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -196,7 +278,7 @@ const entities: Record<string, string> = {
   quot: '"',
   apos: "'",
 };
-function decodeXml(text: string): string {
+export function decodeXml(text: string): string {
   return text.replace(
     /&(?:#x([0-9a-fA-F]+)|#([0-9]+)|(amp|lt|gt|quot|apos));/g,
     (_, hex?: string, decimal?: string, name?: string) =>
@@ -369,23 +451,46 @@ function profilesOf(id: BrowserId, dir: string): ImportProfile[] {
   return chromiumProfiles(dir);
 }
 
+// A data folder that refuses to be listed, or on macOS an installed browser's
+// folder that lists as empty, waits for the person's permission. Safari's
+// live files are never probed.
+function needsPermission(id: BrowserId, dir: string, env: ImportEnv): boolean {
+  const { engine, app } = browsers[id];
+  if (engine === "safari") return false;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch (error) {
+    return permissionDenied(error);
+  }
+  return (
+    env.platform === "darwin" &&
+    entries.length === 0 &&
+    app !== undefined &&
+    existsSync(join(env.applications ?? "/Applications", `${app}.app`))
+  );
+}
+
 export function availableBrowsers(env: ImportEnv = defaultEnv()): ImportSource[] {
   const preferred = defaultBrowser(env);
   const found: ImportSource[] = [];
   for (const id of ids) {
     const dir = dataDir(id, env);
     if (!dir || !existsSync(dir)) continue;
+    const blocked = needsPermission(id, dir, env);
     found.push({
       id,
       name: browsers[id].name,
-      profiles: profilesOf(id, dir),
+      profiles: blocked ? [] : profilesOf(id, dir),
       default: id === preferred,
+      signInsAvailable: browsers[id].engine === "chromium",
+      status: blocked ? "needs_permission" : "ready",
     });
   }
   return found;
 }
 
-function handlerName(env: ImportEnv): string | undefined {
+export function handlerName(env: ImportEnv): string | undefined {
   const exec = env.exec ?? run;
   if (env.platform === "darwin") {
     const plist = join(
@@ -430,13 +535,13 @@ export function defaultBrowser(env: ImportEnv = defaultEnv()): BrowserId | undef
   }
 }
 
-function entry(title: unknown, url: unknown): ImportedBookmark | undefined {
+export function entry(title: unknown, url: unknown): ImportedBookmark | undefined {
   if (typeof url !== "string" || !isWebUrl(url)) return undefined;
   const text = typeof title === "string" ? title.trim() : "";
   return { title: (text || url).slice(0, TITLE_LENGTH), url };
 }
 
-function visit(
+export function visit(
   title: unknown,
   url: unknown,
   time: number,
@@ -454,7 +559,7 @@ function visit(
   };
 }
 
-function unique<T extends { url: string }>(items: Iterable<T>): T[] {
+export function unique<T extends { url: string }>(items: Iterable<T>): T[] {
   const seen = new Set<string>();
   const kept: T[] = [];
   for (const item of items) {
@@ -477,24 +582,6 @@ export function parseChromiumBookmarks(json: unknown): ImportedBookmark[] {
   };
   const roots = record(record(json).roots);
   for (const root of ["bookmark_bar", "other", "synced"]) walk(roots[root]);
-  return unique(found);
-}
-
-export function parseSafariBookmarks(json: unknown): ImportedBookmark[] {
-  const found: ImportedBookmark[] = [];
-  const walk = (node: unknown) => {
-    const { WebBookmarkType, URLString, URIDictionary, Children } = record(node);
-    if (WebBookmarkType === "WebBookmarkTypeLeaf") {
-      const item = entry(record(URIDictionary).title, URLString);
-      if (item) found.push(item);
-    } else if (WebBookmarkType === "WebBookmarkTypeList" && Array.isArray(Children))
-      Children.forEach(walk);
-  };
-  const children = record(json).Children;
-  const lists = Array.isArray(children) ? children : [];
-  const isBar = (node: unknown) => record(node).Title === "BookmarksBar";
-  for (const list of lists) if (isBar(list)) walk(list);
-  for (const list of lists) if (!isBar(list)) walk(list);
   return unique(found);
 }
 
@@ -569,7 +656,7 @@ async function withCopy<T>(
   }
 }
 
-function withDatabase<T>(
+export function withDatabase<T>(
   file: string,
   read: (db: DatabaseSync) => T,
 ): Promise<T> {
@@ -596,66 +683,41 @@ function pick<T extends ImportProfile>(
   return chosen;
 }
 
-export async function importFrom(
+// Reads one profile's bookmarks and history. A missing file means there is
+// nothing to import; anything else is reported and the rest goes on. A read
+// the system refused also marks the profile blocked.
+async function readProfile(
   id: BrowserId,
-  profile: string | undefined,
+  profileDir: string,
   options: { bookmarks: boolean; history: boolean },
-  env: ImportEnv = defaultEnv(),
-): Promise<ImportResult> {
+): Promise<{ result: ImportResult; blocked: boolean }> {
   const browser = browsers[id];
-  if (!browser) throw new Error("Unknown browser.");
-  const dir = dataDir(id, env);
-  if (!dir || !existsSync(dir))
-    throw new Error(`${browser.name} was not found on this computer.`);
   const result: ImportResult = { bookmarks: [], history: [], warnings: [] };
-  // A missing file means there is nothing to import; anything else is
-  // reported and the rest of the import goes on.
+  let blocked = false;
   const attempt = async (what: string, step: () => Promise<void>) => {
     try {
       await step();
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return;
-      const warning =
-        id === "safari" && (code === "EPERM" || code === "EACCES")
-          ? SAFARI_BLOCKED
-          : `Could not read ${browser.name} ${what}.`;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if (permissionDenied(error)) blocked = true;
+      const warning = `Could not read ${browser.name} ${what}.`;
       if (!result.warnings.includes(warning)) result.warnings.push(warning);
     }
   };
-  if (browser.engine === "safari") {
-    if (options.bookmarks)
-      await attempt("bookmarks", async () => {
-        const plist = await withCopy(join(dir, "Bookmarks.plist"), (copy) =>
-          parsePlistXml(
-            (env.exec ?? run)("plutil", ["-convert", "xml1", "-o", "-", copy]),
-          ),
-        );
-        result.bookmarks = parseSafariBookmarks(plist);
-      });
-    if (options.history)
-      await attempt("history", async () => {
-        result.history = await withDatabase(join(dir, "History.db"), (db) =>
-          visits(db, safariHistory, safariTime),
-        );
-      });
-  } else if (browser.engine === "firefox") {
-    const chosen = pick(firefoxProfiles(dir), profile, browser.name);
+  if (browser.engine === "firefox") {
     const wanted = [
       options.bookmarks && "bookmarks",
       options.history && "history",
     ].filter(Boolean);
     if (wanted.length)
       await attempt(wanted.join(" and "), async () => {
-        await withDatabase(join(chosen.path, "places.sqlite"), (db) => {
+        await withDatabase(join(profileDir, "places.sqlite"), (db) => {
           if (options.bookmarks) result.bookmarks = firefoxBookmarks(db);
           if (options.history)
             result.history = visits(db, firefoxHistory, firefoxTime);
         });
       });
   } else {
-    const chosen = pick(chromiumProfiles(dir), profile, browser.name);
-    const profileDir = join(dir, chosen.id);
     if (options.bookmarks)
       await attempt("bookmarks", async () => {
         const text = await readFile(join(profileDir, "Bookmarks"), "utf8");
@@ -668,5 +730,285 @@ export async function importFrom(
         );
       });
   }
-  return result;
+  return { result, blocked };
+}
+
+export async function importFrom(
+  id: BrowserId,
+  profile: string | undefined,
+  options: { bookmarks: boolean; history: boolean },
+  env: ImportEnv = defaultEnv(),
+): Promise<ImportResult> {
+  const browser = browsers[id];
+  if (!browser) throw new Error("Unknown browser.");
+  const dir = dataDir(id, env);
+  if (!dir || !existsSync(dir))
+    throw new Error(`${browser.name} was not found on this computer.`);
+  const profileDir =
+    browser.engine === "firefox"
+      ? pick(firefoxProfiles(dir), profile, browser.name).path
+      : join(dir, pick(chromiumProfiles(dir), profile, browser.name).id);
+  return (await readProfile(id, profileDir, options)).result;
+}
+
+export function parseImportRequest(value: unknown): ImportRequest {
+  const invalid = () =>
+    new ImportError("import_invalid_request", INVALID_REQUEST);
+  if (!isObject(value)) throw invalid();
+  let size: number;
+  try {
+    size = JSON.stringify(value).length;
+  } catch {
+    throw invalid();
+  }
+  const { profiles, bookmarks, history, signIns } = value;
+  if (
+    size > REQUEST_LIMIT ||
+    !Array.isArray(profiles) ||
+    profiles.length < 1 ||
+    profiles.length > SELECTION_LIMIT ||
+    typeof bookmarks !== "boolean" ||
+    typeof history !== "boolean" ||
+    !signInsTargets.includes(signIns as SignInsTarget) ||
+    (!bookmarks && !history && signIns === "none")
+  )
+    throw invalid();
+  const selections: ImportSelection[] = [];
+  const seen = new Set<string>();
+  for (const item of profiles) {
+    if (!isObject(item)) throw invalid();
+    const { source, profile } = item;
+    if (
+      typeof source !== "string" ||
+      !ids.includes(source as BrowserId) ||
+      source === "safari" ||
+      (profile !== undefined &&
+        (typeof profile !== "string" || profile.length > PROFILE_LENGTH))
+    )
+      throw invalid();
+    const key = JSON.stringify([source, profile ?? null]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selections.push(profile === undefined ? { source } : { source, profile });
+  }
+  return {
+    profiles: selections,
+    bookmarks,
+    history,
+    signIns: signIns as SignInsTarget,
+  };
+}
+
+interface ResolvedSelection {
+  id: BrowserId;
+  engine: "chromium" | "firefox" | "safari";
+  browser: string;
+  profile: string;
+  dataDir: string;
+  profileDir: string;
+}
+
+/** Where one selection's files are and what it is called; ImportError source_not_found or profile_not_found. Section 18 reads Login Data from the same profileDir. */
+export function resolveSelection(
+  selection: ImportSelection,
+  sources: readonly ImportSource[],
+  env: ImportEnv = defaultEnv(),
+): ResolvedSelection {
+  const source = sources.find((item) => item.id === selection.source);
+  const dir = source && dataDir(source.id, env);
+  if (!source || !dir || !existsSync(dir))
+    throw new ImportError(
+      "source_not_found",
+      "That browser was not found on this computer.",
+    );
+  const { name, engine } = browsers[source.id];
+  const profile =
+    selection.profile === undefined
+      ? source.profiles[0]
+      : source.profiles.find((item) => item.id === selection.profile);
+  // Firefox profiles can live outside the data folder.
+  const profileDir = !profile
+    ? undefined
+    : engine === "safari"
+      ? dir
+      : engine === "firefox"
+        ? firefoxProfiles(dir).find((item) => item.id === profile.id)?.path
+        : join(dir, profile.id);
+  if (!profile || !profileDir)
+    throw new ImportError("profile_not_found", "That profile was not found.");
+  return {
+    id: source.id,
+    engine,
+    browser: name,
+    profile: profile.name,
+    dataDir: dir,
+    profileDir,
+  };
+}
+
+export async function importSelections(
+  selections: readonly ImportSelection[],
+  options: { bookmarks: boolean; history: boolean; signIns: boolean },
+  env: ImportEnv = defaultEnv(),
+): Promise<SelectionResult> {
+  const sources = availableBrowsers(env);
+  // Browsers the system would not let Kamapathy read, by name.
+  const blocked = new Set<string>();
+  // Every selection is found before anything is read or any key is asked
+  // for, so a browser or profile that went away fails the whole request.
+  const places: ResolvedSelection[] = [];
+  const seen = new Set<string>();
+  for (const selection of selections) {
+    const source = sources.find((item) => item.id === selection.source);
+    if (source?.status === "needs_permission") {
+      blocked.add(source.name);
+      continue;
+    }
+    const place = resolveSelection(selection, sources, env);
+    const key = `${place.id}\n${place.profileDir}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    places.push(place);
+  }
+  const keys = keyCache({
+    platform: env.platform,
+    run: env.command ?? defaultRun(),
+  });
+  const bookmarks: ImportedBookmark[] = [];
+  const history: ImportedVisit[] = [];
+  const profiles: ProfileCookies[] = [];
+  const warnings: string[] = [];
+  const warn = (warning: string) => {
+    if (!warnings.includes(warning)) warnings.push(warning);
+  };
+  let readable = 0;
+  let skipped = 0;
+  for (const place of places) {
+    const read = await readProfile(place.id, place.profileDir, options);
+    bookmarks.push(...read.result.bookmarks);
+    history.push(...read.result.history);
+    if (read.blocked) {
+      blocked.add(place.browser);
+      continue;
+    }
+    readable++;
+    read.result.warnings.forEach(warn);
+    if (!options.signIns || place.engine !== "chromium") continue;
+    let keyring: SafeStorageKeys;
+    try {
+      keyring = await keys(place.id as ChromiumBrowserId, place.dataDir);
+    } catch {
+      warn(
+        `Kamapathy could not get the sign-in key for ${place.browser} from your keychain.`,
+      );
+      continue;
+    }
+    try {
+      const found = await readChromiumCookies(
+        place.profileDir,
+        keyring,
+        env.platform,
+      );
+      skipped += found.skipped;
+      if (found.cookies.length)
+        profiles.push({
+          source: place.id,
+          browser: place.browser,
+          profile: place.profile,
+          cookies: found.cookies,
+        });
+      else if (found.skipped)
+        warn(
+          `Sign-ins from ${place.browser} could not be imported on this system.`,
+        );
+    } catch (error) {
+      if (permissionDenied(error)) blocked.add(place.browser);
+      else warn(`Could not read ${place.browser} sign-ins.`);
+    }
+  }
+  if (blocked.size && !readable)
+    throw new ImportError(
+      "read_blocked",
+      "Kamapathy needs permission to read this browser's data.",
+      { sources: [...blocked] },
+    );
+  for (const name of blocked)
+    warn(`Kamapathy needs permission to read ${name}'s data.`);
+  if (skipped)
+    warn(
+      skipped === 1
+        ? "1 sign-in could not be read and was left out."
+        : `${skipped} sign-ins could not be read and were left out.`,
+    );
+  return {
+    bookmarks: unique(bookmarks),
+    history: unique(history),
+    profiles,
+    warnings,
+  };
+}
+
+/** import:apply once, returning the net new counts; Safari's archive uses it too. */
+export async function applyImported(
+  target: ImportTarget,
+  data: { bookmarks: ImportedBookmark[]; history: ImportedVisit[] },
+): Promise<{ bookmarks: number; history: number }> {
+  if (!data.bookmarks.length && !data.history.length)
+    return { bookmarks: 0, history: 0 };
+  const bookmarksBefore = target.state.bookmarks.length;
+  const known = new Set(target.state.history.map((entry) => entry.url));
+  await target.dispatch({
+    type: "import:apply",
+    bookmarks: data.bookmarks,
+    history: data.history,
+  });
+  return {
+    bookmarks: target.state.bookmarks.length - bookmarksBefore,
+    history: target.state.history.filter((entry) => !known.has(entry.url))
+      .length,
+  };
+}
+
+export async function runImport(
+  target: ImportTarget,
+  request: ImportRequest,
+  env: ImportEnv = defaultEnv(),
+): Promise<ImportOutcome> {
+  const { signIns } = request;
+  const data = await importSelections(
+    request.profiles,
+    {
+      bookmarks: request.bookmarks,
+      history: request.history,
+      signIns: signIns !== "none",
+    },
+    env,
+  );
+  const counts = await applyImported(target, data);
+  const cookies =
+    signIns !== "none" && data.profiles.some((item) => item.cookies.length)
+      ? await target.applyImportedCookies(signIns, data.profiles)
+      : { written: 0, spaces: [], warnings: [] };
+  return {
+    bookmarks: counts.bookmarks,
+    history: counts.history,
+    signIns: cookies.written,
+    spaces: cookies.spaces,
+    warnings: [...data.warnings, ...cookies.warnings],
+  };
+}
+
+let importing = false;
+/** One import at a time across kamapathy:import and kamapathy:import-safari. */
+export async function exclusive<T>(run: () => Promise<T>): Promise<T> {
+  if (importing)
+    throw new ImportError("import_busy", "An import is already running.", {
+      retryable: true,
+    });
+  importing = true;
+  try {
+    return await run();
+  } finally {
+    importing = false;
+  }
 }

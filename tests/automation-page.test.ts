@@ -6,12 +6,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { pdfDocument, readBlobPdf } from "../electron/agent/dom/pdf";
 import { pageOperation, type PageOperation } from "../electron/automation-dom";
 import { framePages } from "./fixtures/frame-pages.mjs";
 
 const executable = chromium.executablePath();
 const browserAvailable = !!executable && existsSync(executable);
 const script = `(${pageOperation.toString()})`;
+const documentScript = `(${pdfDocument.toString()})`;
+const blobScript = `(${readBlobPdf.toString()})`;
 
 describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   let site: Server;
@@ -20,7 +23,12 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   let page: Page;
   beforeAll(async () => {
     site = createServer((request, response) => {
-      const html = framePages[new URL(request.url || "/", "http://x").pathname];
+      const path = new URL(request.url || "/", "http://x").pathname;
+      if (path === "/plain") {
+        response.writeHead(200, { "Content-Type": "text/plain" });
+        return response.end("Plain words, not markup.");
+      }
+      const html = framePages[path];
       response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
       response.end(html || "");
     });
@@ -230,5 +238,46 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     expect(await operate("target", { ref: count.ref })).toMatchObject({
       ok: true,
     });
+  }, 20000);
+
+  it("pdfDocument reports the document's content type", async () => {
+    await open("/frames/outer");
+    expect(
+      await page.evaluate((source) => (0, eval)(source)(), documentScript),
+    ).toEqual({ contentType: "text/html" });
+    await open("/plain");
+    expect(
+      await page.evaluate((source) => (0, eval)(source)(), documentScript),
+    ).toEqual({ contentType: "text/plain" });
+  }, 20000);
+
+  it("readBlobPdf returns a blob in chunks, refuses one past maxBytes and reports a revoked URL", async () => {
+    await open("/frames/outer");
+    const url = await page.evaluate(() =>
+      URL.createObjectURL(
+        new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]),
+      ),
+    );
+    const read = (request: Record<string, unknown>): Promise<any> =>
+      page.evaluate(
+        ([source, request]) => (0, eval)(source as string)(request),
+        [blobScript, request] as const,
+      );
+    const parts = [];
+    for (const offset of [0, 4, 8]) {
+      const chunk = await read({ url, offset, chunkBytes: 4, maxBytes: 1024 });
+      expect(chunk).toMatchObject({ ok: true, total: 10, offset });
+      parts.push(Buffer.from(chunk.data, "base64"));
+    }
+    expect([...Buffer.concat(parts)]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(await read({ url, offset: 0, chunkBytes: 4, maxBytes: 8 })).toEqual({
+      ok: false,
+      reason: "too_large",
+      total: 10,
+    });
+    await page.evaluate((url) => URL.revokeObjectURL(url), url);
+    expect(
+      await read({ url, offset: 0, chunkBytes: 4, maxBytes: 1024 }),
+    ).toEqual({ ok: false, reason: "fetch_failed" });
   }, 20000);
 });

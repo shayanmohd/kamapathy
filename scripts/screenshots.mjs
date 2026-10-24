@@ -180,10 +180,12 @@ export async function captureSurfaces({
         theme,
       );
     };
-    // The welcome dialog opens once per profile, before anything else.
+    // The welcome dialog opens once per profile, before anything else, and
+    // walks through its six steps.
     const welcomeDialog = shell.locator(".welcome-modal");
-    const next = welcomeDialog.getByRole("button", { name: /^(Skip|Continue)$/ });
-    await next.waitFor();
+    const heading = (name) => welcomeDialog.getByRole("heading", { name }).waitFor();
+    const press = (name) => welcomeDialog.getByRole("button", { name }).click();
+    await heading("Welcome to Kamapathy");
     if (welcome) {
       await mkdir(outDir, { recursive: true });
       for (const theme of ["light", "dark"]) {
@@ -192,15 +194,24 @@ export async function captureSurfaces({
         await shoot(app, shell, join(outDir, `welcome-${theme}.png`), frameRadius);
       }
     }
-    await next.click();
-    await welcomeDialog.getByRole("heading", { name: "Sign in once" }).waitFor();
+    await press("Get started");
+    await heading("Your data stays here");
+    await press("Next");
+    await heading("Bring your browser with you");
+    // The import panel offers Continue when it finds no other browser.
+    await press(/^(Skip|Continue)$/);
+    await heading("Connect your agent");
+    await press("Set up later");
+    await heading("Sign in once");
     if (welcome)
       for (const theme of ["light", "dark"]) {
         await setTheme(theme);
         await shell.waitForTimeout(300);
         await shoot(app, shell, join(outDir, `welcome-sites-${theme}.png`), frameRadius);
       }
-    await welcomeDialog.getByRole("button", { name: "Done" }).click();
+    await press("Next");
+    await heading("You're all set");
+    await press("Start browsing");
     await welcomeDialog.waitFor({ state: "detached" });
     await setTheme("light");
     // Serves Google's rejected sign-in page locally, so its notice shows offline.

@@ -5,7 +5,13 @@ import { fail } from "../errors";
 import { send, type RouteDeps, type RouteImpl } from "../http";
 import type { AutomationController } from "../server";
 import { stringField, urlField } from "../validate";
-import { boundaryView, pagesOf, spaceView, tabView } from "../views";
+import {
+  agentVisible,
+  boundaryView,
+  pagesOf,
+  spaceView,
+  tabView,
+} from "../views";
 
 const CONTROL_WAITS = 8;
 
@@ -231,7 +237,10 @@ export function spaceRoutes({
             { field: "keep", expected: '"all" or up to 20 unique tab ids' },
           );
         const ids = keep === "all" ? undefined : (keep as string[]);
-        const tabs = controller.state.tabs.filter((tab) => tab.spaceId === id);
+        // Tabs showing files on this computer are not the agent's to name.
+        const tabs = controller.state.tabs.filter(
+          (tab) => tab.spaceId === id && agentVisible(tab),
+        );
         // Every id is checked before anything closes.
         for (const tabId of ids ?? [])
           if (!tabs.some((tab) => tab.id === tabId))
@@ -291,7 +300,9 @@ export function spaceRoutes({
               tabs: controller.state.tabs
                 .filter(
                   (tab) =>
-                    tab.spaceId === space!.id && tab.openedBy === "person",
+                    tab.spaceId === space!.id &&
+                    tab.openedBy === "person" &&
+                    agentVisible(tab),
                 )
                 .map(({ id, label, title, url }) => ({
                   id,
@@ -309,12 +320,14 @@ export function spaceRoutes({
             "space_protected",
             "The person opened tabs in this space, so the agent cannot close it. Finish it instead.",
             {
-              tabs: personTabs.map(({ id, label, title, url }) => ({
-                id,
-                label,
-                title,
-                url,
-              })),
+              tabs: personTabs
+                .filter(agentVisible)
+                .map(({ id, label, title, url }) => ({
+                  id,
+                  label,
+                  title,
+                  url,
+                })),
             },
           );
         await controller.dispatch({ type: "space:delete", id: space!.id });
@@ -343,7 +356,7 @@ export function spaceRoutes({
         const shown = controller.shownTab(space!.id);
         return send(response, 200, {
           tabs: controller.state.tabs
-            .filter((tab) => tab.spaceId === space!.id)
+            .filter((tab) => tab.spaceId === space!.id && agentVisible(tab))
             .map((tab) => tabView(tab, shown)),
           closed: controller.registry
             .closed(space!.id)

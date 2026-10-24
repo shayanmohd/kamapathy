@@ -2,6 +2,7 @@ import { agentRules } from "../../shared/state";
 import type { ControlReason, Space, Tab } from "../../shared/types";
 import { ApiError, fail } from "./errors";
 import type { AutomationController } from "./server";
+import { agentVisible } from "./views";
 
 // Only the reasons the agent itself can end; holds and approvals end when
 // the person answers.
@@ -100,14 +101,15 @@ export function createAuthority(controller: AutomationController): Authority {
     });
   };
   // Page routes need a tab the agent manages; adopt and release are the
-  // two routes that reach the others.
+  // two routes that reach the others. A tab showing a file on this computer
+  // is missing to every route.
   const authorizeTab = (
     id: string,
     options: { unmanaged?: true } = {},
   ): Tab => {
     if (stopped) return fail("automation_stopped", "Automation is disabled.");
     const tab = controller.state.tabs.find((item) => item.id === id);
-    if (!tab || !managedSpaces.has(tab.spaceId))
+    if (!tab || !managedSpaces.has(tab.spaceId) || !agentVisible(tab))
       return fail("tab_not_found", "Agent tab was not found.", { tabId: id });
     authorizeSpace(tab.spaceId);
     if (!tab.managed && !options.unmanaged)

@@ -10,6 +10,11 @@ import {
   NO_EXTENSIONS,
   restoredPartitions,
 } from "./controller";
+import {
+  defaultBrowserStatus,
+  electronDefaultBrowserEnv,
+  makeDefaultBrowser,
+} from "./default-browser";
 import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
 import { chooseFolder, confirmAdd, confirmRemove } from "./extensions/dialogs";
@@ -23,6 +28,8 @@ import {
   sessionFetcher,
   storeEnv,
 } from "./extensions/webstore";
+import { chromeUserAgent } from "./identity";
+import { incomingItem, incomingItems, incomingLimiter } from "./incoming";
 import { menuTemplate } from "./menu";
 import { maybeMoveToApplications } from "./move-to-applications";
 import { readState } from "./persistence";
@@ -38,7 +45,14 @@ import {
   UpdateFailure,
   Updater,
 } from "./updates";
-import { availableBrowsers, importFrom, type BrowserId } from "./import";
+import {
+  availableBrowsers,
+  exclusive,
+  ImportError,
+  parseImportRequest,
+  runImport,
+} from "./import";
+import { runSafariImport } from "./import-safari";
 import { startAutomation } from "./agent/server";
 import { writeCsvFile } from "./passwords/csv";
 import { connectForms, type FormBroker } from "./passwords/forms";
@@ -74,6 +88,7 @@ import type {
   BrowserState,
   ContentBounds,
   ImportOutcome,
+  ImportReply,
   ImportRequest,
   InstallKind,
   UpdateCommand,
@@ -86,6 +101,12 @@ if (process.env.KAMAPATHY_USER_DATA)
 app.setName("Kamapathy");
 if (process.platform === "win32") app.setAppUserModelId("app.kamapathy.browser");
 if (process.platform === "linux") app.setDesktopName("app.kamapathy.browser.desktop");
+// Every session, worker and service worker presents Chrome's reduced user agent.
+app.userAgentFallback = chromeUserAgent(
+  app.userAgentFallback,
+  process.versions.chrome,
+  (message) => console.warn(message),
+);
 // Agents on this computer find Kamapathy through this profile's agent folder.
 const agent = agentPaths(app.getPath("userData"));
 
@@ -121,9 +142,6 @@ let quitting = false;
 let vault: Vault | null = null;
 let forms: FormBroker | null = null;
 let vaultOpenScheduled = false;
-// One import runs at a time, whether it brings another browser's data or a
-// file of saved passwords.
-let importing = false;
 let updater: Updater | null = null;
 let updaterStarted = false;
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
@@ -192,20 +210,6 @@ function refreshAgentSkill(): void {
 // only "Error: ", so a setup failure travels as a plain Error.
 function plainError(error: unknown): never {
   throw error instanceof SetupError ? new Error(error.message) : error;
-}
-
-async function exclusive<T>(work: () => Promise<T>): Promise<T> {
-  if (importing) {
-    const busy = new Error("An import is already running.");
-    (busy as { code?: string }).code = "import_busy";
-    throw busy;
-  }
-  importing = true;
-  try {
-    return await work();
-  } finally {
-    importing = false;
-  }
 }
 
 function trustedUrl(url: string): boolean {
@@ -450,6 +454,21 @@ async function openWindow(): Promise<void> {
   void syncAutomation();
 }
 
+// One import at a time. Its failures resolve as values, since the bridge
+// would keep only an Error's message.
+async function importReply(
+  run: () => Promise<ImportOutcome>,
+): Promise<ImportReply> {
+  try {
+    return await exclusive(run);
+  } catch (error) {
+    if (!(error instanceof ImportError)) throw error;
+    return {
+      error: { code: error.code, message: error.message, ...error.fields },
+    };
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("kamapathy:state", (event) => validateSender(event).state);
   ipcMain.handle("kamapathy:dispatch", async (event, action: BrowserAction) => {
@@ -512,44 +531,49 @@ function registerIpc(): void {
     validateSender(event);
     return availableBrowsers();
   });
+  ipcMain.handle("kamapathy:import", (event, request: unknown) => {
+    const owner = validateSender(event);
+    return importReply(() => runImport(owner, parseImportRequest(request)));
+  });
+  // The export file the person chose, up to SAFARI_ARCHIVE_LIMIT.
   ipcMain.handle(
-    "kamapathy:import",
-    async (event, request: ImportRequest): Promise<ImportOutcome> => {
+    "kamapathy:import-safari",
+    (event, bytes: unknown, options: unknown) => {
       const owner = validateSender(event);
-      if (
-        !request ||
-        typeof request !== "object" ||
-        typeof request.source !== "string" ||
-        (request.profile !== undefined && typeof request.profile !== "string") ||
-        typeof request.bookmarks !== "boolean" ||
-        typeof request.history !== "boolean"
-      )
-        throw new Error("Invalid import request.");
-      const source = availableBrowsers().find(
-        (item) => item.id === request.source,
-      );
-      if (!source) throw new Error("That browser was not found.");
-      const data = await exclusive(() =>
-        importFrom(source.id as BrowserId, request.profile, {
-          bookmarks: request.bookmarks,
-          history: request.history,
-        }),
-      );
-      const bookmarksBefore = owner.state.bookmarks.length;
-      const known = new Set(owner.state.history.map((entry) => entry.url));
-      await owner.dispatch({
-        type: "import:apply",
-        bookmarks: data.bookmarks,
-        history: data.history,
-      });
-      return {
-        bookmarks: owner.state.bookmarks.length - bookmarksBefore,
-        history: owner.state.history.filter((entry) => !known.has(entry.url))
-          .length,
-        warnings: data.warnings,
-      };
+      return importReply(() => runSafariImport(owner, bytes, options));
     },
   );
+  // Opens the macOS privacy pane where the person lets Kamapathy read
+  // another browser's data.
+  ipcMain.on("kamapathy:open-import-permissions", (event, options: unknown) => {
+    try {
+      validateSender(event);
+    } catch {
+      return;
+    }
+    const pane = (options as { pane?: unknown } | null)?.pane;
+    const privacy =
+      pane === "full-disk"
+        ? "Privacy_AllFiles"
+        : pane === "files-folders"
+          ? "Privacy_FilesAndFolders"
+          : undefined;
+    if (process.platform !== "darwin" || !privacy) return;
+    void shell
+      .openExternal(
+        `x-apple.systempreferences:com.apple.preference.security?${privacy}`,
+      )
+      .catch(() => undefined);
+  });
+  ipcMain.handle("kamapathy:default-browser", (event) => {
+    validateSender(event);
+    return defaultBrowserStatus(electronDefaultBrowserEnv());
+  });
+  // Runs only while Kamapathy can become the default browser.
+  ipcMain.handle("kamapathy:make-default-browser", async (event) => {
+    validateSender(event);
+    await makeDefaultBrowser(electronDefaultBrowserEnv());
+  });
   ipcMain.on("kamapathy:window", (event, action: string) => {
     try {
       const current = validateSender(event).window;
@@ -789,14 +813,49 @@ function installMenu(): void {
   );
 }
 
+// Links and files from other apps open in a personal space no agent can
+// reach. They wait for the window, and a closed macOS window comes back.
+const pendingIncoming: string[] = [];
+const allowIncoming = incomingLimiter();
+
+function deliverIncoming(urls: readonly string[]): void {
+  if (!urls.length) return;
+  if (!app.isReady()) {
+    pendingIncoming.push(...urls);
+    return;
+  }
+  try {
+    if (!window) createWindow();
+    controller?.openIncoming(urls);
+  } catch (error) {
+    console.error(
+      "Links from other apps could not open:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  }
+}
+
+// macOS hands them over as events, from before ready on.
+function receiveIncoming(event: Electron.Event, value: string): void {
+  event.preventDefault();
+  if (!allowIncoming()) return;
+  const url = incomingItem(value, process.cwd());
+  if (url) deliverIncoming([url]);
+}
+app.on("open-url", receiveIncoming);
+app.on("open-file", receiveIncoming);
+
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", async (_event, argv) => {
+  app.on("second-instance", async (_event, argv, workingDirectory) => {
     if (!window) await createWindow();
     if (window?.isMinimized()) window.restore();
     window?.focus();
-    const url = argv.find((argument) => isWebUrl(argument));
-    if (url) void controller?.dispatch({ type: "tab:create", url });
+    deliverIncoming(
+      incomingItems(argv, workingDirectory, {
+        defaultApp: externalApplication,
+      }),
+    );
   });
   app.on("before-quit", () => {
     quitting = true;
@@ -980,8 +1039,12 @@ else {
     installer.onChange(pushExtensions);
     updates.onChange(pushExtensions);
     bridge.onToolbarChange(pushExtensions);
-    registerIpc();
-    installMenu();
     await createWindow();
+    deliverIncoming([
+      ...pendingIncoming.splice(0),
+      ...incomingItems(process.argv, process.cwd(), {
+        defaultApp: externalApplication,
+      }),
+    ]);
   });
 }

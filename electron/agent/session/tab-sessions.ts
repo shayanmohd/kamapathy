@@ -11,6 +11,8 @@ export interface TabSessionsOptions {
   managedTab(tabId: string): boolean;
   waitForSpaceIdle(spaceId: string, timeoutMs: number): Promise<void>;
   buffers: EventBufferPool;
+  // Called with each new session before it attaches.
+  onOpen?(session: TabSession): void;
 }
 
 // Decides which tabs hold a debugger session: those with a page, in a space
@@ -126,6 +128,7 @@ export class TabSessions {
         this.options.waitForSpaceIdle(tab.spaceId, timeoutMs),
       buffer,
     });
+    this.options.onOpen?.(session);
     this.current.set(tab.id, session);
     this.live.add(session);
     session.on("closed", () => {

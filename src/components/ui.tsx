@@ -15,10 +15,12 @@ import {
   Terminal,
   Play,
   MagnifyingGlass,
+  FileText,
 } from "@phosphor-icons/react";
-import { hostname } from "../../shared/url";
+import { hostname, isFileUrl } from "../../shared/url";
 import { HOME_URL } from "../../shared/state";
 import type { Tab } from "../../shared/types";
+import { fileCopy } from "../copy";
 
 export function IconButton({
   label,
@@ -39,6 +41,12 @@ export function IconButton({
   );
 }
 export function SiteIcon({ url, size = 20 }: { url: string; size?: number }) {
+  if (isFileUrl(url))
+    return (
+      <span className="file-icon" role="img" aria-label={fileCopy.icon}>
+        <FileText size={size} />
+      </span>
+    );
   const host = hostname(url);
   if (host.includes("github")) return <GithubLogo size={size} weight="fill" />;
   if (host.includes("figma")) return <FigmaLogo size={size} />;

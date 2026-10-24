@@ -17,7 +17,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
-import { startFormSite } from "../tests/fixtures/form-site.mjs";
+import { REPORT_PAGES, startFormSite } from "../tests/fixtures/form-site.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
@@ -1489,6 +1489,94 @@ try {
   }
   await cli(["space", "close", popupSpace.id]);
   passed("target=_blank forms keep urlencoded, multipart and text/plain bodies");
+  // Section 16 in the real app: PDFs read by page, a form's PDF never sent
+  // again, a blob PDF read from the page, and Chromium's viewer out of reach.
+  const pdfSpace = (await json(["space", "create", "PDF review"])).space;
+  const pageTwo = REPORT_PAGES[1].join("\n");
+  const linking = (await json(["open", pdfSpace.id, `${fixture.origin}/pdf/links`])).tab;
+  await json(["click", linking.id, ref(await observe(linking.id), "Open the report")]);
+  const report = await poll(
+    async () =>
+      (await tabsOf(pdfSpace.id)).tabs.find((item) => item.url.endsWith("/pdf/report.pdf")),
+    { timeoutMs: 15000, label: "the PDF popup" },
+  );
+  assert.equal(report.openedBy, "page");
+  const reportText = (await cli(["pdf-text", `${pdfSpace.id}:${report.label}`])).output;
+  assert.match(reportText, /^Quarterly report, 3 pages, http/);
+  assert.ok(reportText.includes(pageTwo), reportText);
+  const paged = (await cli([
+    "pdf-text",
+    `${pdfSpace.id}:${report.label}`,
+    "--from",
+    "2",
+    "--max-chars",
+    String(pageTwo.length),
+  ])).output;
+  assert.match(paged, /\[page 2\]/);
+  assert.match(paged, /More pages: rerun with --from 3\./);
+  const scriptedPdf = await cli([
+    "run",
+    "-e",
+    `const page = (await (await space(${JSON.stringify(pdfSpace.id)})).tabs()).find((item) => item.id === ${JSON.stringify(report.id)}); const text = await page.pdfText(); console.log(text.pageCount + " " + text.pages.length);`,
+  ]);
+  assert.equal(scriptedPdf.output, "3 3\n");
+  passed("a target=_blank link to a PDF opens a popup the agent reads by page with pdf-text and page.pdfText");
+  const posting = (await json(["open", pdfSpace.id, `${fixture.origin}/pdf/form`])).tab;
+  await json(["click", posting.id, ref(await observe(posting.id), "Post for the report")]);
+  await poll(
+    async () =>
+      (await tabsOf(pdfSpace.id)).tabs.find(
+        (item) => item.id === posting.id && item.url.endsWith("/pdf/posted.pdf"),
+      ),
+    { timeoutMs: 15000, label: "the posted PDF" },
+  );
+  const refusedPdf = await cli(["pdf-text", posting.id], undefined, { failure: true });
+  assert.match(
+    refusedPdf.errors,
+    /409 pdf_not_refetchable: This PDF came from a form submission/,
+  );
+  const reasonPdf = await cli([
+    "run",
+    "-e",
+    `const page = (await (await space(${JSON.stringify(pdfSpace.id)})).tabs()).find((item) => item.id === ${JSON.stringify(posting.id)}); try { await page.pdfText(); console.log("read"); } catch (error) { console.log(error.status + " " + error.code + " " + error.reason); }`,
+  ]);
+  assert.equal(reasonPdf.output, "409 pdf_not_refetchable post\n");
+  assert.deepEqual(
+    fixture.requests.filter((item) => item.path === "/pdf/posted.pdf").map((item) => item.method),
+    ["POST"],
+  );
+  passed("a PDF that came back from a form post is refused and never asked for again");
+  const building = (await json(["open", pdfSpace.id, `${fixture.origin}/pdf/blob`])).tab;
+  await json(["click", building.id, ref(await observe(building.id), "Open the blob report")]);
+  const blob = await poll(
+    async () => (await tabsOf(pdfSpace.id)).tabs.find((item) => item.url.startsWith("blob:")),
+    { timeoutMs: 15000, label: "the blob PDF popup" },
+  );
+  const blobText = await json(["pdf-text", `${pdfSpace.id}:${blob.label}`]);
+  assert.equal(blobText.pageCount, 3);
+  assert.equal(blobText.pages[1].text, pageTwo);
+  passed("a PDF built as a blob and opened in a popup is read from the page itself");
+  const viewed = await observe(report.id);
+  assert.deepEqual(viewed.interactables, []);
+  assert.doesNotMatch(viewed.text, /Download|Print|Rotate/i);
+  // Chromium draws the PDF in its own viewer, which it hangs under the frame
+  // showing the document. The one frame an agent reaches is that document;
+  // today Chromium reports no frame of the viewer at all, and wherever it
+  // reports one it stays blocked.
+  const pdfFrames = await probe("frames", report.id);
+  assert.deepEqual(
+    pdfFrames.filter((frame) => !frame.blocked).map((frame) => frame.url),
+    [report.url],
+    JSON.stringify(pdfFrames),
+  );
+  assert.deepEqual(
+    pdfFrames.filter(
+      (frame) => frame.url.includes("mhjfbmdgcfjbbpaeojofohoefgiehjai") && !frame.blocked,
+    ),
+    [],
+  );
+  await cli(["space", "close", pdfSpace.id]);
+  passed("a PDF snapshot lists no viewer controls and the viewer's own frames stay blocked");
   const finishing = (await json(["space", "create", "Finish review"])).space;
   await json(["open", finishing.id, `${fixture.origin}/lab`]);
   await chrome.evaluate(

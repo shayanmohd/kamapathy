@@ -364,6 +364,34 @@ describe("desktop session persistence", () => {
       expect(tab).not.toHaveProperty(field);
   });
 
+  it("writes no file tabs", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    const [blank, workTab] = original.tabs;
+    const report = newTab(
+      "personal",
+      "file:///Users/someone/private/report.pdf",
+    );
+    original.tabs.push(report);
+    original.activeTabId = report.id;
+    // A space showing only a file has no tab left to save.
+    workTab.url = "file:///Users/someone/private/notes.html";
+    workTab.title = "notes.html";
+    writeState(path, original);
+    const raw = readFileSync(path, "utf8");
+    expect(raw).not.toContain("file:");
+    expect(raw).not.toContain("report.pdf");
+    expect(raw).not.toContain("notes.html");
+    const saved = JSON.parse(raw);
+    expect(saved.tabs.map((tab: { id: string }) => tab.id)).toEqual([blank.id]);
+    expect(saved.activeTabId).toBe(blank.id);
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.activeTabId).toBe(blank.id);
+    expect(restored.tabs.filter((tab) => tab.spaceId === "work")).toMatchObject(
+      [{ url: HOME_URL }],
+    );
+  });
+
   it("never saves requests for a space", () => {
     const path = statePath();
     const original = initialState("darwin");

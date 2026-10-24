@@ -1143,10 +1143,10 @@ export class TabSession {
       this.releasing ||
       this.registry.get(target.targetId)?.blocked
     ) {
-      const resume = params.waitingForDebugger
-        ? this.command("Runtime.runIfWaitingForDebugger", {}, sessionId)
-        : Promise.resolve();
-      resume
+      // Letting a target go without resuming it took the browser process
+      // down when Chromium's PDF viewer opened in a popup, and that target
+      // reports no wait, so every target is resumed before it is let go.
+      this.command("Runtime.runIfWaitingForDebugger", {}, sessionId)
         .catch(() => {})
         .then(() =>
           this.command("Target.detachFromTarget", { sessionId }, parent),

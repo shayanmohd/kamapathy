@@ -49,8 +49,29 @@ const pages = {
     `<button id="play">Play sound</button><p id="sound">Silent</p>`,
     `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
   ),
+  // The page asks for an image, fetches, starts a worker that fetches and
+  // registers a service worker that fetches, then reports what it sees of
+  // itself. Every request shows the server its identity.
+  "/identity": page(
+    `<p id="identity">Reading this browser's identity</p>`,
+    `new Image().src='/identity/pixel.png';new Worker('/identity/worker.js');navigator.serviceWorker.register('/identity/sw.js').catch(()=>{});(async()=>{await fetch('/identity/from-page');const hints=await navigator.userAgentData.getHighEntropyValues(['fullVersionList']);await fetch('/report',{method:'POST',body:JSON.stringify({userAgent:navigator.userAgent,brands:navigator.userAgentData.brands,fullVersionList:hints.fullVersionList,pdfViewerEnabled:navigator.pdfViewerEnabled})});document.getElementById('identity').textContent='Identity reported';})();`,
+  ),
   ...framePages,
 };
+// Each identity request's own User-Agent and Sec-CH-UA, by path.
+const IDENTITY_PATHS = [
+  "/identity",
+  "/identity/pixel.png",
+  "/identity/from-page",
+  "/identity/from-worker",
+  "/identity/from-sw",
+];
+const seen = new Map();
+let identity;
+const pixel = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
 // One second of 8 kHz, 8-bit mono PCM: a 44-byte RIFF header, then 8000
 // samples at the silent midpoint 0x80.
 const silence = Buffer.alloc(44 + 8000, 0x80);
@@ -66,11 +87,38 @@ silence.writeUInt16LE(1, 32);
 silence.writeUInt16LE(8, 34);
 silence.write("data", 36, "ascii");
 silence.writeUInt32LE(8000, 40);
-const site = createServer((request, response) => {
+const site = createServer(async (request, response) => {
   const path = new URL(request.url, "http://x").pathname;
   if (path === "/silence.wav") {
     response.writeHead(200, { "Content-Type": "audio/wav" });
     return response.end(silence);
+  }
+  if (IDENTITY_PATHS.includes(path))
+    seen.set(path, {
+      userAgent: request.headers["user-agent"],
+      hints: request.headers["sec-ch-ua"],
+    });
+  if (path === "/report") {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    identity = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    response.writeHead(200, { "Content-Type": "text/plain" });
+    return response.end("ok");
+  }
+  if (path === "/identity/pixel.png") {
+    response.writeHead(200, { "Content-Type": "image/png" });
+    return response.end(pixel);
+  }
+  // A service worker needs a secure context, which http://127.0.0.1 is.
+  if (path === "/identity/worker.js" || path === "/identity/sw.js") {
+    response.writeHead(200, { "Content-Type": "text/javascript" });
+    return response.end(
+      `fetch('/identity/from-${path.endsWith("sw.js") ? "sw" : "worker"}');\n`,
+    );
+  }
+  if (path.startsWith("/identity/from-")) {
+    response.writeHead(204);
+    return response.end();
   }
   const html = pages[path];
   response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
@@ -357,6 +405,52 @@ try {
   assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
   assert.ok((await controls(popup.id)).includes("popup clicked"));
   passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
+
+  // Section 16: what every request tells a site about this browser.
+  await open("/identity");
+  await poll(
+    () => identity && IDENTITY_PATHS.every((path) => seen.has(path)),
+    { timeoutMs: 20000, label: "the navigation, image, fetch, worker and service worker requests" },
+  );
+  const agents = IDENTITY_PATHS.map((path) => seen.get(path).userAgent);
+  assert.equal(new Set(agents).size, 1, JSON.stringify(agents));
+  assert.doesNotMatch(agents[0], /Kamapathy|Electron/i);
+  assert.match(
+    agents[0],
+    /^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/,
+  );
+  passed("navigations, images, fetches, workers and service workers all send the Chrome-compatible user agent");
+
+  const { versions } = await json("/health");
+  const major = versions.chromium.split(".")[0];
+  assert.match(agents[0], new RegExp(`Chrome/${major}\\.0\\.0\\.0 `));
+  assert.equal(identity.userAgent, agents[0]);
+  assert.ok(
+    !identity.userAgent.includes(versions.chromium),
+    `The user agent carries the full version ${versions.chromium}`,
+  );
+  assert.deepEqual(
+    identity.fullVersionList.find((brand) => brand.brand === "Chromium"),
+    { brand: "Chromium", version: versions.chromium },
+  );
+  passed("the user agent zeroes the minor, build and patch while the client hints keep the full Chromium version");
+
+  // Chromium sends its hints with the requests a page makes; a navigation the
+  // shell starts carries none, so the page's own fetch is where they show.
+  const hints = seen.get("/identity/from-page").hints;
+  assert.match(hints, new RegExp(`"Chromium";v="${major}"`));
+  assert.doesNotMatch(hints, /Google Chrome/);
+  assert.ok(
+    identity.brands.some(
+      (brand) => brand.brand === "Chromium" && brand.version === major,
+    ),
+    JSON.stringify(identity.brands),
+  );
+  assert.ok(!identity.brands.some((brand) => brand.brand === "Google Chrome"));
+  passed("Chromium's own client hints reach sites, with no Google Chrome brand");
+
+  assert.equal(identity.pdfViewerEnabled, true);
+  passed("an agent tab reports Chromium's PDF viewer as available");
 
   console.log(`Native launch passed: ${checks.length} checks.`);
 } finally {

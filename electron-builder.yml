@@ -9,6 +9,8 @@ files:
   - out/**/*
   - package.json
   - LICENSE
+  # The PDF reader needs no canvas, so its native build stays out.
+  - "!**/node_modules/@napi-rs/**"
 extraResources:
   - from: build/icon.png
     to: icon.png
@@ -19,7 +21,21 @@ extraResources:
     filter:
       - "**/*"
       - "!**/.DS_Store"
+  - from: node_modules/pdfjs-dist/cmaps
+    to: pdfjs-cmaps
 publish: null
+# NSIS ignores protocols; Windows registers through build/installer.nsh.
+protocols:
+  - name: Web site URL
+    schemes:
+      - http
+      - https
+    role: Viewer
+# Any link can start Kamapathy with arguments.
+electronFuses:
+  runAsNode: false
+  enableNodeCliInspectArguments: false
+  enableNodeOptionsEnvironmentVariable: false
 mac:
   category: public.app-category.productivity
   icon: build/icon.icns
@@ -34,6 +50,22 @@ mac:
   extendInfo:
     NSCameraUsageDescription: Websites you allow can use the camera.
     NSMicrophoneUsageDescription: Websites you allow can use the microphone.
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: Web content and documents
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - public.html
+          - public.xhtml
+          - public.svg-image
+          - com.adobe.pdf
+          - public.png
+          - public.jpeg
+          - com.compuserve.gif
+          - org.webmproject.webp
+          - public.avif
+          - public.plain-text
+          - org.webmproject.webm
 dmg:
   title: Kamapathy
   contents:
@@ -59,6 +91,7 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: Kamapathy
   deleteAppDataOnUninstall: false
+  include: build/installer.nsh
 portable:
   artifactName: Kamapathy-${version}-windows-${arch}-portable.${ext}
 linux:
@@ -74,6 +107,18 @@ linux:
     - AppImage
     - deb
   artifactName: Kamapathy-${version}-linux-${arch}.${ext}
+  mimeTypes:
+    - text/html
+    - application/xhtml+xml
+    - image/svg+xml
+    - application/pdf
+    - image/png
+    - image/jpeg
+    - image/gif
+    - image/webp
+    - image/avif
+    - text/plain
+    - video/webm
   desktop:
     entry:
       Name: Kamapathy

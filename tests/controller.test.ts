@@ -2,9 +2,27 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { pathToFileURL } from "node:url";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { BrowserWindow, Session } from "electron";
-import { dialog, Menu, session, shell, WebContentsView } from "electron";
+import {
+  app,
+  clipboard,
+  dialog,
+  Menu,
+  session,
+  shell,
+  WebContentsView,
+} from "electron";
 import {
   BrowserController,
   restoredPartitions,
@@ -12,7 +30,8 @@ import {
 } from "../electron/controller";
 import { inputMarker } from "../electron/agent/input/marker";
 import { writeState } from "../electron/persistence";
-import type { UpdateState } from "../shared/types";
+import type { DefaultBrowserStatus, UpdateState } from "../shared/types";
+import { PDF_VIEWER_ID } from "../electron/agent/session/frames";
 import { ExtensionHost } from "../electron/extensions/host";
 import { spaceTabs } from "../src/lib/tabs";
 import {
@@ -25,6 +44,7 @@ import {
 import type { ControllerOptions } from "../electron/controller";
 
 vi.mock("electron", () => ({
+  app: { getApplicationNameForProtocol: vi.fn(() => "") },
   BrowserWindow: vi.fn(),
   Menu: { buildFromTemplate: vi.fn(() => ({ popup: vi.fn() })) },
   WebContentsView: vi.fn(function (options?: { webContents?: FakeContents }) {
@@ -43,6 +63,11 @@ vi.mock("electron", () => ({
     showSaveDialog: vi.fn(),
   },
   shell: { showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) },
+  clipboard: { writeText: vi.fn() },
+}));
+vi.mock("../electron/default-browser", () => ({
+  defaultBrowserStatus: vi.fn(async () => defaultBrowser),
+  electronDefaultBrowserEnv: vi.fn(() => ({})),
 }));
 vi.mock("../electron/persistence", async (original) => ({
   ...(await original<typeof import("../electron/persistence")>()),
@@ -75,6 +100,10 @@ class FakeSession extends EventEmitter {
     },
   );
   getPreloadScripts = vi.fn(() => this.registered);
+  cookies = {
+    set: vi.fn(async (_details: Electron.CookiesSetDetails) => {}),
+    flushStore: vi.fn(async () => {}),
+  };
 }
 interface FakeImage {
   isEmpty(): boolean;
@@ -92,7 +121,9 @@ function fakeImage(width = 1000): FakeImage {
 }
 const jpegOf = (width: number) =>
   `data:image/jpeg;base64,${Buffer.from(`jpeg-${width}`).toString("base64")}`;
+let contentsIds = 0;
 class FakeContents extends EventEmitter {
+  id = ++contentsIds;
   url = "";
   destroyed = false;
   zoom = 0;
@@ -168,9 +199,15 @@ function controller(
     isVisible: () => boolean;
     isMinimized: () => boolean;
     close: ReturnType<typeof vi.fn>;
+    restore: ReturnType<typeof vi.fn>;
+    show: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
   };
   window.webContents = new FakeContents();
   window.close = vi.fn();
+  window.restore = vi.fn();
+  window.show = vi.fn();
+  window.focus = vi.fn();
   window.contentView = { addChildView: vi.fn(), removeChildView: vi.fn() };
   window.isDestroyed = () => false;
   window.getContentSize = () => [1400, 900];
@@ -249,9 +286,24 @@ function popup(
       : undefined;
   return { decision, returned };
 }
+// Starts a navigation as Chromium reports it to will-navigate,
+// will-frame-navigate or will-redirect, and returns its preventDefault.
+function attempt(
+  page: FakeContents,
+  type: "will-navigate" | "will-frame-navigate" | "will-redirect",
+  url: string,
+  isMainFrame = true,
+) {
+  const event = { url, isMainFrame, preventDefault: vi.fn() };
+  page.emit(type, event, url);
+  return event.preventDefault;
+}
+let defaultBrowser: DefaultBrowserStatus = { state: "available" };
 beforeEach(() => {
   sessions.clear();
   vi.clearAllMocks();
+  defaultBrowser = { state: "available" };
+  vi.mocked(app.getApplicationNameForProtocol).mockReturnValue("");
 });
 afterEach(() => {
   for (const browser of controllers.splice(0)) browser.dispose();
@@ -313,6 +365,24 @@ describe("native browser lifecycle", () => {
     browser.state.activeTabId = browser.state.tabs.find((item) => item.id !== tab.id)!.id;
     await browser.dispatch({ type: "tab:open-external", id: tab.id });
     expect(shell.openExternal).toHaveBeenCalledTimes(1);
+  });
+  it("no loop: copies the rejected sign-in link and opens nothing while Kamapathy is the default", async () => {
+    const browser = controller();
+    const tab = browser.state.tabs.find((item) => item.id === browser.state.activeTabId)!;
+    tab.url = "https://accounts.google.com/v3/signin/rejected?continue=" + encodeURIComponent("https://play.google.com/console/private?state=secret");
+    defaultBrowser = { state: "default" };
+    await browser.dispatch({ type: "tab:open-external", id: tab.id });
+    expect(shell.openExternal).not.toHaveBeenCalled();
+    await browser.dispatch({ type: "tab:copy-external", id: tab.id });
+    expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith("https://play.google.com/console/");
+    defaultBrowser = { state: "available" };
+    await browser.dispatch({ type: "tab:open-external", id: tab.id });
+    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith("https://play.google.com/console/");
+    const other = browser.state.tabs.find((item) => item.id !== tab.id)!;
+    await browser.dispatch({ type: "tab:copy-external", id: other.id });
+    tab.url = "https://example.com/";
+    await browser.dispatch({ type: "tab:copy-external", id: tab.id });
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
   });
   it("preserves a new-window form's POST body and referrer when opening its tab", async () => {
     const browser = controller();
@@ -1935,6 +2005,154 @@ describe("imported browsing data", () => {
     contents(browser, id).commit("https://example.com/");
     expect(browser.state.history).toHaveLength(1);
     expect(browser.state.history[0].visits).toBe(2);
+  });
+});
+
+describe("imported sign-ins", () => {
+  const cookie = (name: string): Electron.CookiesSetDetails => ({
+    url: `https://${name}.example/`,
+    name,
+    value: `${name}-value`,
+    secure: true,
+    httpOnly: false,
+    sameSite: "lax",
+  });
+  const chrome = (profile: string, ...names: string[]) => ({
+    source: "chrome" as const,
+    browser: "Google Chrome",
+    profile,
+    cookies: names.map(cookie),
+  });
+  const setCalls = (store: FakeSession) =>
+    store.cookies.set.mock.calls.map(([details]) => details);
+  it("import: separate destination creates one space per profile", async () => {
+    const browser = controller();
+    // The shared session exists, so a write to it would show.
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: browser.state.activeTabId,
+      url: "https://a.example/",
+    });
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    const activeTabId = browser.state.activeTabId;
+    const activity = browser.state.activity.length;
+    const person = chrome("Person 1", "a", "b");
+    const work = chrome("Work", "c");
+
+    const outcome = await browser.applyImportedCookies("separate", [
+      person,
+      { source: "edge", browser: "Microsoft Edge", profile: "Default", cookies: [] },
+      work,
+    ]);
+
+    const created = browser.state.spaces.slice(2);
+    expect(
+      created.map(({ name, color, kind, owner, signIns }) => ({
+        name,
+        color,
+        kind,
+        owner,
+        signIns,
+      })),
+    ).toEqual([
+      {
+        name: "Person 1 from Google Chrome",
+        color: "blue",
+        kind: "personal",
+        owner: "human",
+        signIns: "separate",
+      },
+      {
+        name: "Work from Google Chrome",
+        color: "orange",
+        kind: "personal",
+        owner: "human",
+        signIns: "separate",
+      },
+    ]);
+    expect(outcome).toEqual({
+      written: 3,
+      failed: 0,
+      spaces: created.map(({ id, name }) => ({ id, name })),
+      warnings: [],
+    });
+    const [first, second] = created.map(
+      (space) => sessions.get(`persist:space-${space.id}`)!,
+    );
+    expect(setCalls(first)).toEqual(person.cookies);
+    expect(setCalls(second)).toEqual(work.cookies);
+    expect(first.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(second.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(sessions.get("persist:space-personal")!.cookies.set).not.toHaveBeenCalled();
+    expect(browser.state.activeSpaceId).toBe("work");
+    expect(browser.state.activeTabId).toBe(activeTabId);
+    expect(browser.state.activity).toHaveLength(activity);
+  });
+  it("shared destination", async () => {
+    const browser = controller();
+    const shared = session.fromPartition(
+      "persist:space-personal",
+    ) as unknown as FakeSession;
+    shared.cookies.set.mockImplementation(async (details) => {
+      if (details.name === "c" || (details.name === "b" && details.sameSite))
+        throw new Error("Failed to set cookie");
+    });
+    const activity = browser.state.activity.length;
+
+    const outcome = await browser.applyImportedCookies("shared", [
+      chrome("Person 1", "a", "b"),
+      chrome("Work", "c"),
+    ]);
+
+    expect(
+      setCalls(shared).map((details) => [details.name, details.sameSite]),
+    ).toEqual([
+      ["a", "lax"],
+      ["b", "lax"],
+      ["b", undefined],
+      ["c", "lax"],
+      ["c", undefined],
+    ]);
+    const { sameSite: _, ...withoutSameSite } = cookie("b");
+    expect(setCalls(shared)[2]).toEqual(withoutSameSite);
+    expect(shared.cookies.flushStore).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({
+      written: 2,
+      failed: 1,
+      spaces: [],
+      warnings: ["1 sign-in could not be saved."],
+    });
+    expect(browser.state.spaces).toHaveLength(2);
+    expect(browser.state.activity).toHaveLength(activity);
+    shared.cookies.set.mockRejectedValue(new Error("Failed to set cookie"));
+    expect(
+      (await browser.applyImportedCookies("shared", [chrome("Person 1", "a", "b")]))
+        .warnings,
+    ).toEqual(["2 sign-ins could not be saved."]);
+  });
+  it("stops at the 30-space limit and cuts long names", async () => {
+    const browser = controller();
+    for (let index = browser.state.spaces.length; index < 29; index++)
+      await browser.dispatch({
+        type: "space:create",
+        kind: "personal",
+        color: "green",
+        name: `Space ${index}`,
+      });
+    const activeTabId = browser.state.activeTabId;
+
+    const outcome = await browser.applyImportedCookies("separate", [
+      chrome("P".repeat(60), "a"),
+      chrome("Work", "b"),
+    ]);
+
+    expect(browser.state.spaces).toHaveLength(30);
+    expect(outcome.spaces.map((space) => space.name)).toEqual(["P".repeat(48)]);
+    expect(outcome.written).toBe(1);
+    expect(outcome.warnings).toEqual([
+      "Kamapathy holds at most 30 spaces, so some profiles were left out.",
+    ]);
+    expect(browser.state.activeTabId).toBe(activeTabId);
   });
 });
 
@@ -3649,5 +3867,754 @@ describe("leave guards", () => {
     expect(page.destroyed).toBe(true);
     expect(dialog.showMessageBoxSync).not.toHaveBeenCalled();
     expect(overrides).toEqual([]);
+  });
+});
+
+describe("files, extension pages and other apps", () => {
+  let folder: string;
+  const fileUrl = (name: string) => pathToFileURL(join(folder, name)).href;
+  const active = (browser: BrowserController) =>
+    browser.state.tabs.find((tab) => tab.id === browser.state.activeTabId)!;
+  // Opens url in a new tab of the space and commits it.
+  async function open(
+    browser: BrowserController,
+    url: string,
+    spaceId?: string,
+  ) {
+    await browser.dispatch({ type: "tab:create", url, spaceId });
+    const tab = browser.state.tabs.at(-1)!;
+    const page = contents(browser, tab.id);
+    page.commit(url);
+    return { tab, page };
+  }
+  beforeAll(() => {
+    folder = mkdtempSync(join(tmpdir(), "kamapathy-files-"));
+    for (const name of [
+      "page.html",
+      "page.htm",
+      "page.xhtml",
+      "image.svg",
+      "doc.pdf",
+      "other.pdf",
+      "note.txt",
+    ])
+      writeFileSync(join(folder, name), "file");
+    mkdirSync(join(folder, "folder.pdf"));
+  });
+  afterAll(() => rmSync(folder, { recursive: true, force: true }));
+
+  it("view kinds: markup files load without scripts, other pages keep them, and a change of kind gets a new view", async () => {
+    const browser = controller();
+    for (const name of ["page.html", "page.htm", "page.xhtml", "image.svg"]) {
+      const { page } = await open(browser, fileUrl(name));
+      expect(preferencesOf(page).javascript, name).toBe(false);
+      expect(page.loadURL, name).toHaveBeenCalledExactlyOnceWith(fileUrl(name));
+    }
+    for (const url of [
+      fileUrl("doc.pdf"),
+      fileUrl("note.txt"),
+      "https://example.com/",
+    ]) {
+      const { page } = await open(browser, url);
+      const preferences = preferencesOf(page);
+      expect(preferences.javascript, url).toBe(true);
+      // Chromium's viewer shows PDFs without the plugins preference.
+      expect(preferences, url).not.toHaveProperty("plugins");
+    }
+    // The shell gives a page of another kind a new view, without its back
+    // history.
+    const { tab, page: markup } = await open(browser, fileUrl("page.html"));
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/next",
+    });
+    expect(markup.destroyed).toBe(true);
+    const web = contents(browser, tab.id);
+    expect(web).not.toBe(markup);
+    expect(preferencesOf(web).javascript).toBe(true);
+    expect(web.loadURL).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/next",
+    );
+    expect(tab).toMatchObject({
+      url: "https://example.com/next",
+      canGoBack: false,
+      canGoForward: false,
+    });
+    // A page's own link to another kind opens in a new tab in front, and
+    // the file tab keeps its URL although Chromium reports the navigation
+    // starting first.
+    const second = await open(browser, fileUrl("page.html"));
+    second.page.emit("did-start-navigation", {
+      url: "https://example.org/",
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(
+      attempt(second.page, "will-navigate", "https://example.org/"),
+    ).toHaveBeenCalledOnce();
+    expect(second.tab.url).toBe(fileUrl("page.html"));
+    const opened = browser.state.tabs.at(-1)!;
+    expect(opened).toMatchObject({
+      url: "https://example.org/",
+      spaceId: second.tab.spaceId,
+      openedBy: "person",
+    });
+    expect(browser.state.activeTabId).toBe(opened.id);
+    expect(preferencesOf(contents(browser, opened.id)).javascript).toBe(true);
+    // From a PDF, another PDF loads in place and a markup file opens a tab.
+    const pdf = await open(browser, fileUrl("doc.pdf"));
+    expect(
+      attempt(pdf.page, "will-navigate", fileUrl("other.pdf")),
+    ).not.toHaveBeenCalled();
+    pdf.page.emit("did-start-navigation", {
+      url: fileUrl("other.pdf"),
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(pdf.tab.url).toBe(fileUrl("other.pdf"));
+    const tabs = browser.state.tabs.length;
+    expect(
+      attempt(pdf.page, "will-navigate", fileUrl("page.html")),
+    ).toHaveBeenCalledOnce();
+    expect(browser.state.tabs).toHaveLength(tabs + 1);
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      url: fileUrl("page.html"),
+      spaceId: pdf.tab.spaceId,
+    });
+    expect(pdf.tab.url).toBe(fileUrl("other.pdf"));
+  });
+
+  it("files and web pages never share a tab's history", async () => {
+    const browser = controller();
+    // A link from a PDF to a web page opens a new tab.
+    const pdf = await open(browser, fileUrl("doc.pdf"));
+    expect(
+      attempt(pdf.page, "will-navigate", "https://example.com/"),
+    ).toHaveBeenCalledOnce();
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      url: "https://example.com/",
+      spaceId: pdf.tab.spaceId,
+    });
+    expect(pdf.tab.url).toBe(fileUrl("doc.pdf"));
+    // The shell rebuilds the view between a file and a web page, either way,
+    // and loads another file of the same kind in place.
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: pdf.tab.id,
+      url: fileUrl("other.pdf"),
+    });
+    expect(contents(browser, pdf.tab.id)).toBe(pdf.page);
+    expect(pdf.page.loadURL).toHaveBeenLastCalledWith(fileUrl("other.pdf"));
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: pdf.tab.id,
+      url: "https://example.com/",
+    });
+    expect(pdf.page.destroyed).toBe(true);
+    const web = contents(browser, pdf.tab.id);
+    web.commit("https://example.com/");
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: pdf.tab.id,
+      url: fileUrl("doc.pdf"),
+    });
+    expect(web.destroyed).toBe(true);
+    expect(contents(browser, pdf.tab.id).loadURL).toHaveBeenCalledWith(
+      fileUrl("doc.pdf"),
+    );
+    // A web page never reaches a file, in its tab or a new one.
+    const page = contents(
+      browser,
+      (await open(browser, "https://example.org/")).tab.id,
+    );
+    const count = browser.state.tabs.length;
+    expect(
+      attempt(page, "will-navigate", fileUrl("doc.pdf")),
+    ).toHaveBeenCalledOnce();
+    expect(browser.state.tabs).toHaveLength(count);
+  });
+
+  it("file tabs excluded: no history, bookmarks, split view, agent spaces or reopening where an agent works", async () => {
+    const browser = controller();
+    const url = fileUrl("doc.pdf");
+    const { tab, page } = await open(browser, url);
+    expect(tab).toMatchObject({ url, spaceId: "personal", openedBy: "person" });
+    expect(tab).not.toHaveProperty("label");
+    expect(page.loadURL).toHaveBeenCalledExactlyOnceWith(url);
+    page.emit("page-title-updated", {}, "doc.pdf");
+    expect(browser.state.history).toEqual([]);
+    await expect(
+      browser.dispatch({ type: "bookmark:add", url, title: "Doc" }),
+    ).rejects.toThrow("Only web pages can be bookmarked.");
+    await expect(
+      browser.dispatch({
+        type: "bookmark:update",
+        id: "github",
+        url,
+        title: "Doc",
+      }),
+    ).rejects.toThrow("Only web pages can be bookmarked.");
+    await open(browser, "https://example.com/");
+    await expect(
+      browser.dispatch({ type: "tab:split", id: tab.id }),
+    ).rejects.toThrow("Open two web pages in this space for split view.");
+    // Duplicating goes through the same checks.
+    await browser.dispatch({ type: "tab:duplicate", id: tab.id });
+    expect(browser.state.tabs.at(-1)).toMatchObject({
+      url,
+      spaceId: "personal",
+    });
+    await expect(
+      browser.dispatch({ type: "tab:create", url: fileUrl("missing.pdf") }),
+    ).rejects.toThrow("That file was not found.");
+    await expect(
+      browser.dispatch({ type: "tab:create", url: fileUrl("folder.pdf") }),
+    ).rejects.toThrow("That file was not found.");
+    // No space an agent can reach takes a file.
+    const agent = browser.createAgentSpace("Task");
+    await expect(
+      browser.dispatch({ type: "tab:create", url, spaceId: agent.id }),
+    ).rejects.toThrow(
+      "Files on this computer open only in your personal spaces.",
+    );
+    const agentTab = browser.state.tabs.find(
+      (item) => item.spaceId === agent.id,
+    )!;
+    await expect(
+      browser.dispatch({ type: "tab:navigate", id: agentTab.id, url }),
+    ).rejects.toThrow(
+      "Files on this computer open only in your personal spaces.",
+    );
+    browser.grantAccess("work");
+    await expect(
+      browser.dispatch({ type: "tab:create", url, spaceId: "work" }),
+    ).rejects.toThrow(
+      "Files on this computer open only in your personal spaces.",
+    );
+    // A closed file tab reopens in its personal space while nobody else can
+    // reach it, and is skipped once that space is granted.
+    await browser.dispatch({ type: "tab:close", id: tab.id });
+    await browser.dispatch({ type: "tab:reopen" });
+    const reopened = browser.state.tabs.at(-1)!;
+    expect(reopened).toMatchObject({ url, spaceId: "personal" });
+    expect(browser.state.activeTabId).toBe(reopened.id);
+    await browser.dispatch({ type: "tab:close", id: reopened.id });
+    browser.grantAccess("personal");
+    const count = browser.state.tabs.length;
+    await browser.dispatch({ type: "tab:reopen" });
+    expect(browser.state.tabs).toHaveLength(count);
+    expect(browser.state.tabs.filter((item) => item.url === url)).toHaveLength(
+      1,
+    );
+  });
+
+  it("a file tab in a space granted later stays hidden until the person opens a web page in it", async () => {
+    const browser = controller();
+    const markup = await open(browser, fileUrl("page.html"), "work");
+    browser.grantAccess("work");
+    expect(markup.tab).not.toHaveProperty("label");
+    // Its view keeps showing the file, which the space no longer loads.
+    markup.page.emit("did-start-navigation", {
+      url: fileUrl("page.htm"),
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    expect(markup.tab.url).toBe(fileUrl("page.html"));
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: markup.tab.id,
+      url: "https://example.com/",
+    });
+    expect(markup.tab.label).toMatch(/^p\d+$/);
+    expect(preferencesOf(contents(browser, markup.tab.id)).javascript).toBe(
+      true,
+    );
+  });
+
+  it("subframes keep about:, blob: and data: documents and Chromium's PDF viewer, and never reach files or other extensions", async () => {
+    const browser = controller();
+    browser.setExtensionLookup(() => ["a".repeat(32)]);
+    const { page } = await open(browser, "https://example.com/");
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    const agentPage = contents(browser, agentTab.id);
+    agentPage.commit("https://example.com/");
+    for (const target of [page, agentPage]) {
+      for (const url of [
+        "https://example.org/frame",
+        "about:srcdoc",
+        "data:text/html,<p>Hello</p>",
+        "blob:https://example.com/1234",
+        `chrome-extension://${PDF_VIEWER_ID}/0c7b0a4e-5d22-4a8f-9a64-0f5d1c1e2b3a`,
+      ])
+        expect(
+          attempt(target, "will-frame-navigate", url, false),
+          url,
+        ).not.toHaveBeenCalled();
+      for (const url of [
+        fileUrl("doc.pdf"),
+        `chrome-extension://${"b".repeat(32)}/frame.html`,
+        "view-source:https://example.com/",
+        "ms-msdt:x",
+      ])
+        expect(
+          attempt(target, "will-frame-navigate", url, false),
+          url,
+        ).toHaveBeenCalledOnce();
+      // will-navigate decides for main frames.
+      expect(
+        attempt(target, "will-frame-navigate", "data:text/html,x", true),
+      ).not.toHaveBeenCalled();
+    }
+    // A loaded extension's frame stays in personal pages, other apps are
+    // asked for there, and an agent's page gets neither.
+    const extension = `chrome-extension://${"a".repeat(32)}/frame.html`;
+    expect(
+      attempt(page, "will-frame-navigate", extension, false),
+    ).not.toHaveBeenCalled();
+    expect(
+      attempt(agentPage, "will-frame-navigate", extension, false),
+    ).toHaveBeenCalledOnce();
+    expect(
+      attempt(page, "will-frame-navigate", "zoommtg://zoom.us/j/1", false),
+    ).not.toHaveBeenCalled();
+    expect(
+      attempt(agentPage, "will-frame-navigate", "zoommtg://zoom.us/j/1", false),
+    ).toHaveBeenCalledOnce();
+    // In a local markup file a frame keeps to files of its kind.
+    const markup = await open(browser, fileUrl("page.html"));
+    expect(
+      attempt(markup.page, "will-frame-navigate", fileUrl("page.htm"), false),
+    ).not.toHaveBeenCalled();
+    for (const url of [fileUrl("doc.pdf"), extension])
+      expect(
+        attempt(markup.page, "will-frame-navigate", url, false),
+        url,
+      ).toHaveBeenCalledOnce();
+    // The viewer's frame loads in a PDF from this computer too.
+    const pdf = await open(browser, fileUrl("doc.pdf"));
+    expect(
+      attempt(
+        pdf.page,
+        "will-frame-navigate",
+        `chrome-extension://${PDF_VIEWER_ID}/0c7b0a4e-5d22-4a8f-9a64-0f5d1c1e2b3a`,
+        false,
+      ),
+    ).not.toHaveBeenCalled();
+  });
+
+  it("redirects reach web pages, and other apps only from personal tabs", async () => {
+    const browser = controller();
+    browser.setExtensionLookup(() => ["a".repeat(32)]);
+    const { page } = await open(browser, "https://example.com/");
+    for (const url of ["https://example.org/", "mailto:someone@example.com"])
+      expect(attempt(page, "will-redirect", url), url).not.toHaveBeenCalled();
+    for (const url of [
+      fileUrl("doc.pdf"),
+      `chrome-extension://${"a".repeat(32)}/options.html`,
+      "data:text/html,x",
+      "ms-msdt:x",
+    ])
+      expect(attempt(page, "will-redirect", url), url).toHaveBeenCalledOnce();
+    const space = browser.createAgentSpace("Task");
+    const agentPage = contents(
+      browser,
+      browser.openAgentTab(space.id, "https://example.com/").id,
+    );
+    expect(
+      attempt(agentPage, "will-redirect", "https://example.org/"),
+    ).not.toHaveBeenCalled();
+    expect(
+      attempt(agentPage, "will-redirect", "mailto:someone@example.com"),
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("a popup from a local markup file runs scripts like any web page", async () => {
+    const browser = controller();
+    const { page } = await open(browser, fileUrl("page.html"));
+    const { decision } = popup(page, { url: "https://example.com/popup" });
+    expect(decision).toMatchObject({
+      action: "allow",
+      overrideBrowserWindowOptions: { webPreferences: { javascript: true } },
+    });
+  });
+
+  it("extension pages: loaded ids open in personal spaces no agent can reach", async () => {
+    const browser = controller();
+    const id = "a".repeat(32);
+    const options = `chrome-extension://${id}/options.html`;
+    await expect(
+      browser.dispatch({ type: "tab:create", url: options }),
+    ).rejects.toThrow("That extension isn't installed or is turned off.");
+    const lookup = vi.fn((partition: string) =>
+      partition === "persist:space-personal" ? [id] : [],
+    );
+    browser.setExtensionLookup(lookup);
+    await browser.dispatch({ type: "tab:create", url: options });
+    const tab = active(browser);
+    expect(tab).toMatchObject({ url: options, spaceId: "personal" });
+    expect(contents(browser, tab.id).loadURL).toHaveBeenCalledExactlyOnceWith(
+      options,
+    );
+    expect(lookup).toHaveBeenCalledWith("persist:space-personal");
+    await expect(
+      browser.dispatch({
+        type: "tab:create",
+        url: `chrome-extension://${"b".repeat(32)}/options.html`,
+      }),
+    ).rejects.toThrow("That extension isn't installed or is turned off.");
+    // A personal page may go there itself.
+    const { page } = await open(browser, "https://example.com/");
+    expect(attempt(page, "will-navigate", options)).not.toHaveBeenCalled();
+    // Spaces an agent can reach refuse it from the shell and from pages.
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.state.tabs.find(
+      (item) => item.spaceId === space.id,
+    )!;
+    browser.grantAccess("work");
+    const workTab = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    for (const target of [agentTab, workTab]) {
+      await expect(
+        browser.dispatch({
+          type: "tab:create",
+          url: options,
+          spaceId: target.spaceId,
+        }),
+      ).rejects.toThrow("Extension pages open only in your personal spaces.");
+      await expect(
+        browser.dispatch({ type: "tab:navigate", id: target.id, url: options }),
+      ).rejects.toThrow("Extension pages open only in your personal spaces.");
+    }
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: agentTab.id,
+      url: "https://example.com/",
+    });
+    const agentPage = contents(browser, agentTab.id);
+    expect(attempt(agentPage, "will-navigate", options)).toHaveBeenCalledOnce();
+  });
+
+  it("open external: other apps open only after the person confirms, and never from spaces an agent can reach", async () => {
+    const browser = controller();
+    vi.mocked(app.getApplicationNameForProtocol).mockImplementation((url) =>
+      url.startsWith("zoommtg:") ? "Zoom" : "",
+    );
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id,
+      url: "http://127.0.0.1:8123/",
+    });
+    const page = contents(browser, id);
+    page.commit("http://127.0.0.1:8123/");
+    const shared = sessions.get("persist:space-personal")!;
+    const request = shared.setPermissionRequestHandler.mock.calls[0][0];
+    const ask = (target: FakeContents, externalURL: string) => {
+      const callback = vi.fn();
+      request(target, "openExternal", callback, {
+        externalURL,
+        requestingUrl: target.url,
+        isMainFrame: true,
+      });
+      return callback;
+    };
+    // No app for it, or a blocked scheme: denied without asking.
+    for (const url of ["kamapathyprobe://x", "ms-msdt:x"])
+      expect(ask(page, url), url).toHaveBeenCalledExactlyOnceWith(false);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+      response: 1,
+      checkboxChecked: false,
+    });
+    const opened = ask(page, "zoommtg://zoom.us/j/1");
+    await vi.waitFor(() => expect(opened).toHaveBeenCalledWith(true));
+    expect(dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(
+      browser.window,
+      {
+        type: "question",
+        title: "Open another app",
+        message: "Open Zoom?",
+        detail: "http://127.0.0.1:8123 wants to open a link in Zoom.",
+        buttons: ["Cancel", "Open"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      },
+    );
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+      response: 0,
+      checkboxChecked: false,
+    });
+    const cancelled = ask(page, "zoommtg://zoom.us/j/1");
+    await vi.waitFor(() => expect(cancelled).toHaveBeenCalledWith(false));
+    // One box per page; a navigation meanwhile cancels it.
+    let answer!: (value: {
+      response: number;
+      checkboxChecked: boolean;
+    }) => void;
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const pending = ask(page, "zoommtg://zoom.us/j/1");
+    const second = ask(page, "zoommtg://zoom.us/j/2");
+    expect(second).toHaveBeenCalledExactlyOnceWith(false);
+    page.emit("did-start-navigation", {
+      url: "http://127.0.0.1:8123/next",
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    answer({ response: 1, checkboxChecked: false });
+    await vi.waitFor(() => expect(pending).toHaveBeenCalledWith(false));
+    // Nothing is remembered: the next link asks again.
+    vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+      response: 1,
+      checkboxChecked: false,
+    });
+    const again = ask(page, "zoommtg://zoom.us/j/1");
+    await vi.waitFor(() => expect(again).toHaveBeenCalledWith(true));
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(4);
+    expect(
+      attempt(page, "will-navigate", "zoommtg://zoom.us/j/1"),
+    ).not.toHaveBeenCalled();
+    // An agent space and a granted personal space block it without a box.
+    const space = browser.createAgentSpace("Task");
+    const agentPage = contents(
+      browser,
+      browser.openAgentTab(space.id, "http://127.0.0.1:8123/").id,
+    );
+    agentPage.commit("http://127.0.0.1:8123/");
+    expect(
+      ask(agentPage, "zoommtg://zoom.us/j/1"),
+    ).toHaveBeenCalledExactlyOnceWith(false);
+    expect(
+      attempt(agentPage, "will-navigate", "zoommtg://zoom.us/j/1"),
+    ).toHaveBeenCalledOnce();
+    browser.grantAccess("personal");
+    expect(ask(page, "zoommtg://zoom.us/j/1")).toHaveBeenCalledExactlyOnceWith(
+      false,
+    );
+    expect(
+      attempt(page, "will-navigate", "zoommtg://zoom.us/j/1"),
+    ).toHaveBeenCalledOnce();
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(4);
+  });
+
+  it("open external: a grant while the box is open denies it, and files never ask", async () => {
+    const browser = controller();
+    vi.mocked(app.getApplicationNameForProtocol).mockReturnValue("Mail");
+    const web = await open(browser, "https://example.com/");
+    const markup = await open(browser, fileUrl("page.html"));
+    const request = sessions.get("persist:space-personal")!
+      .setPermissionRequestHandler.mock.calls[0][0];
+    const fromFile = vi.fn();
+    request(markup.page, "openExternal", fromFile, {
+      externalURL: "mailto:someone@example.com",
+      requestingUrl: markup.page.url,
+      isMainFrame: true,
+    });
+    expect(fromFile).toHaveBeenCalledExactlyOnceWith(false);
+    expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    let answer!: (value: {
+      response: number;
+      checkboxChecked: boolean;
+    }) => void;
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const callback = vi.fn();
+    request(web.page, "openExternal", callback, {
+      externalURL: "mailto:someone@example.com",
+      requestingUrl: web.page.url,
+      isMainFrame: true,
+    });
+    browser.grantAccess("personal");
+    answer({ response: 1, checkboxChecked: false });
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledWith(false));
+  });
+});
+
+describe("links and files from other apps", () => {
+  let folder: string;
+  const fileUrl = (name: string) => pathToFileURL(join(folder, name)).href;
+  const nativeWindow = (browser: BrowserController) =>
+    browser.window as unknown as {
+      isMinimized: () => boolean;
+      restore: ReturnType<typeof vi.fn>;
+      show: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+    };
+  const tabsIn = (browser: BrowserController, spaceId: string) =>
+    browser.state.tabs.filter((tab) => tab.spaceId === spaceId);
+  beforeAll(() => {
+    folder = mkdtempSync(join(tmpdir(), "kamapathy-incoming-"));
+    for (const name of ["doc.pdf", "page.html"])
+      writeFileSync(join(folder, name), "file");
+  });
+  afterAll(() => rmSync(folder, { recursive: true, force: true }));
+
+  it("incoming space: the active personal space, else the one used last, never an agent's or a granted one, else a new Personal space", async () => {
+    const browser = controller();
+    expect(browser.incomingSpace().id).toBe("personal");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    expect(browser.incomingSpace().id).toBe("work");
+    // A granted personal space is passed over for the one used before it.
+    browser.grantAccess("work");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    expect(browser.incomingSpace().id).toBe("personal");
+    // With every personal space granted, a new one takes the links, and
+    // nothing changes the space in front.
+    browser.grantAccess("personal");
+    const spaces = browser.state.spaces.length;
+    const created = browser.incomingSpace();
+    expect(created).toMatchObject({
+      name: "Personal",
+      color: "green",
+      kind: "personal",
+      owner: "human",
+      signIns: "shared",
+      createdBy: "person",
+    });
+    expect(created).not.toHaveProperty("access");
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(tabsIn(browser, created.id)).toEqual([
+      expect.objectContaining({
+        url: HOME_URL,
+        openedBy: "person",
+        managed: false,
+      }),
+    ]);
+    expect(tabsIn(browser, created.id)[0]).not.toHaveProperty("label");
+    expect(browser.state.activeSpaceId).toBe("work");
+    // It is used again rather than making another.
+    expect(browser.incomingSpace()).toBe(created);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+  });
+
+  it("incoming space: a personal space not used this run comes before a new one, and the space and tab limits hold", async () => {
+    // Restored with Work in front, which an agent then gets.
+    const state = initialState();
+    state.activeSpaceId = "work";
+    state.activeTabId = state.tabs.find((tab) => tab.spaceId === "work")!.id;
+    const restored = controller(undefined, state);
+    restored.grantAccess("work");
+    expect(restored.incomingSpace().id).toBe("personal");
+    expect(restored.state.spaces).toHaveLength(2);
+    // A 31st space or a 201st tab is refused with the usual messages.
+    const browser = controller();
+    browser.grantAccess("personal");
+    browser.grantAccess("work");
+    while (browser.state.spaces.length < 30) browser.createAgentSpace("Task");
+    expect(() => browser.incomingSpace()).toThrow(
+      "The maximum of 30 spaces has been reached.",
+    );
+    const full = controller();
+    full.grantAccess("personal");
+    full.grantAccess("work");
+    while (full.state.tabs.length < 200) full.state.tabs.push(newTab("work"));
+    expect(() => full.incomingSpace()).toThrow(
+      "The maximum of 200 tabs has been reached.",
+    );
+  });
+
+  it("openIncoming opens each link and existing file as the person's tab in the incoming space, the last in front, and brings the window forward", async () => {
+    const browser = controller();
+    browser.setExtensionLookup(() => ["a".repeat(32)]);
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: "work" });
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    const window = nativeWindow(browser);
+    window.isMinimized = () => true;
+    const before = browser.state.tabs.length;
+    browser.openIncoming([
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+      fileUrl("missing.pdf"),
+      "mailto:someone@example.com",
+      `chrome-extension://${"a".repeat(32)}/page.html`,
+      "example.com",
+      fileUrl("page.html"),
+      "https://b.example/",
+    ]);
+    const opened = browser.state.tabs.slice(before);
+    expect(opened.map((tab) => tab.url)).toEqual([
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+      fileUrl("page.html"),
+      "https://b.example/",
+    ]);
+    // Each has its page loading already, local markup without scripts.
+    const pages = opened.map(
+      (tab) => browser.peekWebContents(tab.id) as unknown as FakeContents,
+    );
+    for (const [index, tab] of opened.entries()) {
+      expect(tab, tab.url).toMatchObject({
+        spaceId: "work",
+        openedBy: "person",
+        managed: false,
+      });
+      expect(tab, tab.url).not.toHaveProperty("label");
+      expect(pages[index], tab.url).toBeDefined();
+      expect(pages[index].loadURL).toHaveBeenCalledExactlyOnceWith(tab.url);
+    }
+    expect(preferencesOf(pages[2]).javascript).toBe(false);
+    expect(browser.state.activeSpaceId).toBe("work");
+    expect(browser.state.activeTabId).toBe(opened[3].id);
+    expect(tabsIn(browser, agent.id)).toHaveLength(1);
+    expect(browser.incomingSpace().id).toBe("work");
+    expect(window.restore).toHaveBeenCalledOnce();
+    expect(window.show).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
+    const order = (mock: ReturnType<typeof vi.fn>) =>
+      mock.mock.invocationCallOrder[0];
+    expect(order(window.restore)).toBeLessThan(order(window.show));
+    expect(order(window.show)).toBeLessThan(order(window.focus));
+  });
+
+  it("openIncoming never opens in an agent space or a granted one, and stops at 200 tabs", async () => {
+    const browser = controller();
+    browser.grantAccess("personal");
+    browser.grantAccess("work");
+    const agent = browser.createAgentSpace("Task");
+    await browser.dispatch({ type: "space:activate", id: agent.id });
+    const spaces = browser.state.spaces.length;
+    browser.openIncoming(["https://a.example/", fileUrl("doc.pdf")]);
+    const space = browser.state.spaces.at(-1)!;
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(space).toMatchObject({ name: "Personal", kind: "personal" });
+    expect(tabsIn(browser, space.id).map((tab) => tab.url)).toEqual([
+      HOME_URL,
+      "https://a.example/",
+      fileUrl("doc.pdf"),
+    ]);
+    for (const id of ["personal", "work", agent.id])
+      expect(tabsIn(browser, id), id).toHaveLength(1);
+    expect(browser.state.activeSpaceId).toBe(space.id);
+    const window = nativeWindow(browser);
+    expect(window.restore).not.toHaveBeenCalled();
+    expect(window.show).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
+    // Later links join the same space, as far as the tab limit allows.
+    while (browser.state.tabs.length < 198)
+      browser.state.tabs.push(newTab(agent.id));
+    browser.openIncoming([
+      "https://b.example/",
+      "https://c.example/",
+      "https://d.example/",
+    ]);
+    expect(browser.state.spaces).toHaveLength(spaces + 1);
+    expect(browser.state.tabs).toHaveLength(200);
+    expect(
+      tabsIn(browser, space.id)
+        .map((tab) => tab.url)
+        .slice(3),
+    ).toEqual(["https://b.example/", "https://c.example/"]);
   });
 });

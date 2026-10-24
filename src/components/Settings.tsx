@@ -9,15 +9,42 @@ import type {
   AgentSetupStatus,
   BrowserAction,
   BrowserState,
+  DefaultBrowserStatus,
   Theme,
 } from "../../shared/types";
 import { Modal } from "./ui";
 import { UpdatesSection } from "./Updates";
 import { bridge, isDesktop } from "../lib/bridge";
-import { agentSetupCopy, extensionsCopy, settingsCopy } from "../copy";
+import {
+  agentSetupCopy,
+  defaultBrowserCopy,
+  extensionsCopy,
+  settingsCopy,
+} from "../copy";
 import { activityTime } from "../lib/spaces";
 import { setupSummary } from "../lib/setupView";
+import { useDefaultBrowser } from "../lib/useDefaultBrowser";
 import "./Spaces.css";
+
+function defaultBrowserNote(
+  status: DefaultBrowserStatus,
+  platform: BrowserState["platform"],
+): string {
+  if (status.state !== "unavailable")
+    return status.state === "default"
+      ? defaultBrowserCopy.isDefault
+      : defaultBrowserCopy.available;
+  return {
+    development: defaultBrowserCopy.development,
+    "disk-image": defaultBrowserCopy.diskImage,
+    portable: defaultBrowserCopy.portable,
+    "not-installed":
+      platform === "win32"
+        ? defaultBrowserCopy.windowsNotInstalled
+        : defaultBrowserCopy.linuxNotInstalled,
+    web: "",
+  }[status.reason];
+}
 
 export function Settings({
   open,
@@ -61,6 +88,7 @@ export function Settings({
       alive = false;
     };
   }, [open]);
+  const defaultBrowser = useDefaultBrowser(open);
   const warning =
     state.settings.automationEnabled && !state.automation.running
       ? state.activity.find((item) => !item.spaceId && item.kind === "warning")
@@ -143,6 +171,27 @@ export function Settings({
             <option value="bing">Bing</option>
           </select>
         </div>
+        {state.platform !== "web" && (
+          <div className="setting-row">
+            <div>
+              <strong>{defaultBrowserCopy.label}</strong>
+              {defaultBrowser.status && (
+                <p>
+                  {defaultBrowserNote(defaultBrowser.status, state.platform)}
+                </p>
+              )}
+            </div>
+            {defaultBrowser.status?.state === "available" && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void defaultBrowser.makeDefault()}
+              >
+                {defaultBrowserCopy.make}
+              </button>
+            )}
+          </div>
+        )}
         <div className="setting-row">
           <div>
             <strong>Restore tabs on startup</strong>

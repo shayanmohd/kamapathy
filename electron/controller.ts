@@ -1,5 +1,7 @@
 import {
+  app,
   BrowserWindow,
+  clipboard,
   dialog,
   nativeTheme,
   session,
@@ -7,10 +9,11 @@ import {
   WebContentsView,
 } from "electron";
 import type { NativeImage, Session, WebContents } from "electron";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   agentRules,
   HOME_URL,
@@ -20,11 +23,17 @@ import {
 } from "../shared/state";
 import { extensionIdOf } from "../shared/extensions";
 import {
+  extensionId,
+  fileKind,
   googleSignInFallback,
+  isExternalAppUrl,
+  isFileUrl,
   isPopupUrl,
   isWebUrl,
   normalizeUrl,
+  URL_MESSAGES,
 } from "../shared/url";
+import type { UrlOptions } from "../shared/url";
 import type {
   Activity,
   BrowserAction,
@@ -45,8 +54,17 @@ import type {
 } from "../shared/types";
 import { inputMarker } from "./agent/input/marker";
 import { activeSpace } from "./agent/authority";
+import { PDF_VIEWER_ID } from "./agent/session/frames";
 import { TabRegistry } from "./agent/tab-registry";
+import {
+  defaultBrowserStatus,
+  electronDefaultBrowserEnv,
+} from "./default-browser";
+import type { CookieOutcome, ProfileCookies } from "./import";
 import { validSettings, writeState } from "./persistence";
+
+// Local markup files run without scripts; everything else is a web view.
+export type ViewKind = "web" | "markup";
 
 const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 // Spaces that share sign-ins use the first space's partition, so sign-ins
@@ -228,6 +246,11 @@ export class BrowserController {
   private splitLeadingTabId: string | null = null;
   private frozen = false;
   private captures = new Map<string, string>();
+  // The extension ids each session loaded. Section 17 supplies them.
+  private extensionLookup: (partition: string) => readonly string[] = () => [];
+  private viewKinds = new Map<string, ViewKind>();
+  // Pages showing an "Open <App>?" box, by contents id.
+  private externalPrompts = new Set<number>();
   // Space ids, most recently active first.
   private recentSpaces: string[];
 
@@ -269,6 +292,11 @@ export class BrowserController {
   ): () => void {
     this.viewListeners.add(listener);
     return () => this.viewListeners.delete(listener);
+  }
+
+  /** Section 17 reports which extension ids each session loaded; none until then. */
+  setExtensionLookup(lookup: (partition: string) => readonly string[]): void {
+    this.extensionLookup = lookup;
   }
 
   private emit(options: { save?: boolean } = {}): BrowserState {
@@ -452,38 +480,112 @@ export class BrowserController {
       : `persist:space-${space.id}`;
   }
 
-  // The extensions whose pages a space shows: those loaded in its session,
-  // and none for a space an agent can reach, whoever asks.
+  // The extensions whose pages a space shows: those loaded in its session
+  // and any a lookup reports, and none for a space an agent can reach,
+  // whoever asks.
   private extensionIds(space: Space): ReadonlySet<string> | undefined {
-    return space.kind === "personal" && !agentRules(space)
-      ? this.extensions.loadedIds(this.partitionFor(space))
-      : undefined;
+    if (space.kind !== "personal" || agentRules(space)) return undefined;
+    const partition = this.partitionFor(space);
+    return new Set([
+      ...this.extensions.loadedIds(partition),
+      ...this.extensionLookup(partition),
+    ]);
   }
 
-  // Web pages, and pages of the extensions the space runs.
+  // What a space opens besides web pages. A space an agent can reach opens
+  // neither files nor extension pages, whoever asks.
+  private urlOptions(space: Space): UrlOptions {
+    const ids = this.extensionIds(space);
+    return ids ? { allowFile: true, extensionIds: [...ids] } : {};
+  }
+
+  private viewKind(url: string): ViewKind {
+    return fileKind(url) === "markup" ? "markup" : "web";
+  }
+
+  // Web pages, the blank page agents may open, files, and pages of the
+  // extensions the space runs.
   private acceptsUrl(space: Space, url: string): boolean {
     if (isLoadable(url)) return true;
-    const id = extensionIdOf(url);
-    return !!id && !!this.extensionIds(space)?.has(id);
+    const options = this.urlOptions(space);
+    if (isFileUrl(url)) return !!options.allowFile && !!fileKind(url);
+    const id = extensionId(url);
+    return !!id && !!options.extensionIds?.includes(id);
   }
 
   private loadable(tab: Tab): boolean {
     return this.acceptsUrl(this.getSpace(tab.spaceId), tab.url);
   }
 
-  // The address the person asked a space to open: web addresses and
-  // searches, and pages of the extensions the space runs.
+  // The address the person asked the space to open, and for a file, one
+  // that is there.
   private openTarget(space: Space, input: string): string {
-    const value = input.trim();
-    if (!/^chrome-extension:/i.test(value))
-      return normalizeUrl(value, this.state.settings.searchEngine);
-    const ids = this.extensionIds(space);
-    if (!ids)
-      throw new Error("Extension pages open only in your personal spaces.");
-    const id = extensionIdOf(value);
-    if (!id || !ids.has(id))
-      throw new Error("That extension isn't installed or is turned off.");
-    return new URL(value).href;
+    const url = normalizeUrl(
+      input,
+      this.state.settings.searchEngine,
+      this.urlOptions(space),
+    );
+    if (isFileUrl(url)) {
+      let found = false;
+      try {
+        found = statSync(fileURLToPath(url)).isFile();
+      } catch {
+        /* Missing or unreadable. */
+      }
+      if (!found) throw new Error(URL_MESSAGES.fileMissing);
+    }
+    return url;
+  }
+
+  // Whether url needs a view other than the tab's: scripts on or off, or a
+  // file where the view shows other pages and the other way round. A tab's
+  // history never mixes files with other pages, so an agent that gains its
+  // space later has no way back into a file.
+  private changesView(tab: Tab, url: string): boolean {
+    return (
+      this.viewKinds.get(tab.id) !== this.viewKind(url) ||
+      isFileUrl(url) !== isFileUrl(tab.url)
+    );
+  }
+
+  // Section 16.4 for navigations a page starts. A subframe cannot move to a
+  // new tab, so there that counts as a refusal.
+  private pageNavigation(
+    tab: Tab,
+    url: string,
+    mainFrame: boolean,
+  ): "allow" | "new-tab" | "external" | "refuse" {
+    const space = this.getSpace(tab.spaceId);
+    const inView = (allowed: boolean) =>
+      !allowed
+        ? "refuse"
+        : !this.changesView(tab, url)
+          ? "allow"
+          : mainFrame
+            ? "new-tab"
+            : "refuse";
+    // Popups may also show about:blank and web-origin blob: documents.
+    if (tab.openedBy === "page" && !isWebUrl(url) && isPopupUrl(url))
+      return "allow";
+    if (isWebUrl(url)) return mainFrame ? inView(true) : "allow";
+    if (isFileUrl(url))
+      return inView(
+        !!this.urlOptions(space).allowFile &&
+          isFileUrl(tab.url) &&
+          !!fileKind(url),
+      );
+    const id = extensionId(url);
+    if (id) {
+      // Chromium's PDF viewer loads the document in a frame of its own.
+      if (!mainFrame && id === PDF_VIEWER_ID) return "allow";
+      return inView(!!this.urlOptions(space).extensionIds?.includes(id));
+    }
+    // Chromium asks the permission handler before another app opens.
+    if (isExternalAppUrl(url)) return agentRules(space) ? "refuse" : "external";
+    // Pages embed about:, blob: and data: documents, which Chromium governs,
+    // and a page may navigate itself to the blank page agents also open.
+    if (!mainFrame && /^(about|blob|data):/i.test(url)) return "allow";
+    return url === "about:blank" ? inView(true) : "refuse";
   }
 
   // The space a page belongs to. Session handlers need it because spaces
@@ -598,6 +700,16 @@ export class BrowserController {
           this.window.isDestroyed()
         ) {
           callback(false);
+          return;
+        }
+        if (permission === "openExternal") {
+          this.confirmOpenExternal(
+            space,
+            contents,
+            details,
+            callback,
+            isCurrentSession,
+          );
           return;
         }
         const allowed = [
@@ -783,6 +895,65 @@ export class BrowserController {
     return browsingSession;
   }
 
+  // A personal page's link to another app opens it only once the person
+  // says so, every time, one box per page. Nothing is remembered.
+  private confirmOpenExternal(
+    space: Space,
+    contents: WebContents,
+    details: Electron.OpenExternalPermissionRequest,
+    callback: (granted: boolean) => void,
+    isCurrentSession: () => boolean,
+  ): void {
+    const url = details.externalURL ?? "";
+    const requestingUrl = details.requestingUrl || contents.getURL();
+    const name = isExternalAppUrl(url)
+      ? app.getApplicationNameForProtocol(url)
+      : "";
+    const id = contents.id;
+    // The box names the site that asks, so files and other pages never ask.
+    if (!name || !isWebUrl(requestingUrl) || this.externalPrompts.has(id)) {
+      callback(false);
+      return;
+    }
+    this.externalPrompts.add(id);
+    const requestedPageUrl = contents.getURL();
+    let navigated = false;
+    const onNavigation = (
+      event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+    ) => {
+      if (event.isMainFrame && !event.isSameDocument) navigated = true;
+    };
+    contents.on("did-start-navigation", onNavigation);
+    void dialog
+      .showMessageBox(this.window, {
+        type: "question",
+        title: "Open another app",
+        message: `Open ${name}?`,
+        detail: `${new URL(requestingUrl).origin} wants to open a link in ${name}.`,
+        buttons: ["Cancel", "Open"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      })
+      .then(({ response }) =>
+        callback(
+          response === 1 &&
+            !navigated &&
+            isCurrentSession() &&
+            this.state.spaces.includes(space) &&
+            !agentRules(space) &&
+            !contents.isDestroyed() &&
+            !this.window.isDestroyed() &&
+            contents.getURL() === requestedPageUrl,
+        ),
+      )
+      .catch(() => callback(false))
+      .finally(() => {
+        this.externalPrompts.delete(id);
+        contents.removeListener("did-start-navigation", onNavigation);
+      });
+  }
+
   // Removes everything sites stored in a partition only one space used. The
   // handlers come off first, so a space that reuses the partition meanwhile
   // gets its own.
@@ -922,7 +1093,10 @@ export class BrowserController {
 
   // Tabs and the popups their pages open share these. A popup's session is
   // its opener's, so the session is given apart from them.
-  private pageWebPreferences(space: Space): Electron.WebPreferences {
+  private pageWebPreferences(
+    space: Space,
+    kind: ViewKind = "web",
+  ): Electron.WebPreferences {
     return {
       sandbox: true,
       contextIsolation: true,
@@ -935,6 +1109,10 @@ export class BrowserController {
       focusOnNavigation: false,
       spellcheck: true,
       backgroundThrottling: !agentRules(space),
+      // Pages from files may read other local files, so local markup runs
+      // no scripts. Saying so for web views keeps a popup from copying its
+      // opener's setting.
+      javascript: kind === "web",
     };
   }
 
@@ -955,6 +1133,7 @@ export class BrowserController {
   // again.
   private createView(tab: Tab, webContents?: WebContents): WebContentsView {
     const space = this.getSpace(tab.spaceId);
+    const kind = webContents ? "web" : this.viewKind(tab.url);
     const view = webContents
       ? new WebContentsView({
           webContents,
@@ -963,10 +1142,11 @@ export class BrowserController {
       : new WebContentsView({
           webPreferences: {
             session: this.sessionFor(this.partitionFor(space)),
-            ...this.pageWebPreferences(space),
+            ...this.pageWebPreferences(space, kind),
           },
         });
     this.views.set(tab.id, view);
+    this.viewKinds.set(tab.id, kind);
     this.window.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 1200, height: 800 });
     view.setVisible(false);
@@ -1020,6 +1200,10 @@ export class BrowserController {
     // Popups may also show about:blank and web-origin blob: documents.
     const allowed = (url: string) =>
       tab.openedBy === "page" ? isPopupUrl(url) : this.acceptsUrl(space, url);
+    // Chromium reports a navigation before will-navigate can refuse it or
+    // move it to a new tab, so the tab follows only those this view keeps.
+    const follows = (url: string) =>
+      allowed(url) && !this.changesView(tab, url);
     // Chromium paints nothing for a page that was never shown, so an agent
     // page nobody is watching would run no animations, accept no native
     // input and have nothing to capture. Each new document starts hidden,
@@ -1092,8 +1276,19 @@ export class BrowserController {
       };
     });
     contents.on("will-navigate", (event, url) => {
-      if (allowed(url)) return;
+      const decision = isCurrentView()
+        ? this.pageNavigation(tab, url, true)
+        : "refuse";
+      if (decision === "allow" || decision === "external") return;
       event.preventDefault();
+      if (decision === "new-tab") {
+        void this.dispatch({
+          type: "tab:create",
+          url,
+          spaceId: tab.spaceId,
+        }).catch(() => undefined);
+        return;
+      }
       // A popup refused its first document would stay an empty tab.
       if (tab.openedBy === "page" && contents.getURL() === "")
         setTimeout(() => {
@@ -1102,8 +1297,19 @@ export class BrowserController {
           this.emit();
         });
     });
+    // Main frames are will-navigate's.
+    contents.on("will-frame-navigate", (event) => {
+      if (event.isMainFrame) return;
+      const decision = isCurrentView()
+        ? this.pageNavigation(tab, event.url, false)
+        : "refuse";
+      if (decision !== "allow" && decision !== "external")
+        event.preventDefault();
+    });
+    // No redirect reaches a file or an extension page.
     contents.on("will-redirect", (event, url) => {
-      if (isLoadable(url)) return;
+      if (isLoadable(url) || (isExternalAppUrl(url) && !agentRules(space)))
+        return;
       event.preventDefault();
       this.notify(this.blockedRedirects, tab.id, url);
     });
@@ -1142,7 +1348,7 @@ export class BrowserController {
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
     contents.on("did-start-navigation", (details) => {
-      if (!isCurrentView() || !details.isMainFrame || !allowed(details.url))
+      if (!isCurrentView() || !details.isMainFrame || !follows(details.url))
         return;
       tab.url = details.url;
       delete tab.error;
@@ -1153,7 +1359,7 @@ export class BrowserController {
       this.emit();
     });
     contents.on("did-redirect-navigation", (details) => {
-      if (!isCurrentView() || !details.isMainFrame || !isWebUrl(details.url))
+      if (!isCurrentView() || !details.isMainFrame || !follows(details.url))
         return;
       tab.url = details.url;
       this.emit();
@@ -1209,7 +1415,7 @@ export class BrowserController {
           !isCurrentView() ||
           !mainFrame ||
           code === -3 ||
-          (isWebUrl(url) && url !== tab.url)
+          (allowed(url) && url !== tab.url)
         )
           return;
         tab.loading = false;
@@ -1290,6 +1496,7 @@ export class BrowserController {
       )
         return;
       this.views.delete(tab.id);
+      this.viewKinds.delete(tab.id);
       this.pendingLoads.delete(tab.id);
       if (!this.window.isDestroyed())
         this.window.contentView.removeChildView(view);
@@ -1384,6 +1591,7 @@ export class BrowserController {
     const view = this.views.get(id);
     if (!view) return;
     this.views.delete(id);
+    this.viewKinds.delete(id);
     this.pendingLoads.delete(id);
     if (!this.window.isDestroyed())
       this.window.contentView.removeChildView(view);
@@ -1466,7 +1674,8 @@ export class BrowserController {
     return tab;
   }
 
-  /** The personal space no agent can reach, where help links open. */
+  /** The personal space no agent can reach, where help links and links from
+   *  other apps open. */
   incomingSpace(): Space {
     const reachable = (space: Space | undefined): space is Space =>
       space?.kind === "personal" && space.access !== "granted";
@@ -1559,6 +1768,114 @@ export class BrowserController {
     if (tab.error) this.load(tab, contents);
     else if (ignoreCache) contents.reloadIgnoringCache();
     else contents.reload();
+  }
+
+  /** Opens each URL as the person's tab in incomingSpace(), the last one active,
+   *  then restores, shows and focuses the window. */
+  openIncoming(urls: readonly string[]): void {
+    if (this.destroyed) throw new Error("Browser is closing.");
+    const space = this.incomingSpace();
+    let last: Tab | undefined;
+    for (const input of urls) {
+      if (this.state.tabs.length >= 200) break;
+      // Other apps hand over web pages and files, nothing else.
+      if (!isWebUrl(input) && !isFileUrl(input)) continue;
+      let url: string;
+      try {
+        url = this.openTarget(space, input);
+      } catch {
+        // Such as a file removed since it was handed over.
+        continue;
+      }
+      const tab = newTab(space.id, url);
+      this.registry.register(tab, { openedBy: "person", managed: false });
+      this.state.tabs.push(tab);
+      if (this.loadable(tab)) this.ensureView(tab);
+      last = tab;
+    }
+    if (last) this.activate(last);
+    this.emit();
+    if (this.window.isMinimized()) this.window.restore();
+    this.window.show();
+    this.window.focus();
+  }
+
+  /** Writes imported sign-ins into the shared session, or into one new
+   *  personal space per profile with sign-ins of its own. */
+  async applyImportedCookies(
+    target: "shared" | "separate",
+    profiles: readonly ProfileCookies[],
+  ): Promise<CookieOutcome> {
+    const outcome: CookieOutcome = {
+      written: 0,
+      failed: 0,
+      spaces: [],
+      warnings: [],
+    };
+    const saved = (store: Session, details: Electron.CookiesSetDetails) =>
+      store.cookies.set(details).then(
+        () => true,
+        () => false,
+      );
+    const write = async (store: Session, cookies: ProfileCookies["cookies"]) => {
+      for (const details of cookies) {
+        // A refused cookie is tried once more without its SameSite value.
+        const { sameSite, ...rest } = details;
+        if (
+          (await saved(store, details)) ||
+          (sameSite !== undefined && (await saved(store, rest)))
+        )
+          outcome.written++;
+        else outcome.failed++;
+      }
+      await store.cookies.flushStore();
+    };
+    if (target === "shared")
+      await write(
+        this.sessionFor(SHARED_PARTITION),
+        profiles.flatMap((profile) => profile.cookies),
+      );
+    else {
+      const activeTabId = this.state.activeTabId;
+      const spaceColors: SpaceColor[] = ["blue", "orange", "purple", "green"];
+      try {
+        for (const [index, profile] of profiles
+          .filter((item) => item.cookies.length)
+          .entries()) {
+          if (this.state.spaces.length >= 30) {
+            outcome.warnings.push(
+              "Kamapathy holds at most 30 spaces, so some profiles were left out.",
+            );
+            break;
+          }
+          await this.dispatch({
+            type: "space:create",
+            name: `${profile.profile} from ${profile.browser}`.slice(0, 48),
+            color: spaceColors[index % spaceColors.length],
+            kind: "personal",
+            signIns: "separate",
+          });
+          const space = this.state.spaces[this.state.spaces.length - 1];
+          outcome.spaces.push({ id: space.id, name: space.name });
+          await write(
+            this.sessionFor(`persist:space-${space.id}`),
+            profile.cookies,
+          );
+        }
+      } finally {
+        // The new spaces wait in the sidebar; the person stays where they were.
+        const previous = this.state.tabs.find((tab) => tab.id === activeTabId);
+        if (previous) this.activate(previous);
+        this.emit();
+      }
+    }
+    if (outcome.failed)
+      outcome.warnings.push(
+        outcome.failed === 1
+          ? "1 sign-in could not be saved."
+          : `${outcome.failed} sign-ins could not be saved.`,
+      );
+    return outcome;
   }
 
   closeTab(
@@ -1872,7 +2189,21 @@ export class BrowserController {
         const tab = this.state.tabs.find((item) => item.id === action.id);
         if (tab && tab.id === this.state.activeTabId) {
           const destination = googleSignInFallback(tab.url);
-          if (destination) await shell.openExternal(destination);
+          // While Kamapathy is the default browser the link comes straight back.
+          const status = await defaultBrowserStatus(
+            electronDefaultBrowserEnv(),
+          );
+          if (destination && status.state !== "default")
+            await shell.openExternal(destination);
+        }
+        break;
+      }
+      // The person's own button, so agents never reach the clipboard.
+      case "tab:copy-external": {
+        const tab = this.state.tabs.find((item) => item.id === action.id);
+        if (tab && tab.id === this.state.activeTabId) {
+          const destination = googleSignInFallback(tab.url);
+          if (destination) clipboard.writeText(destination);
         }
         break;
       }
@@ -1881,23 +2212,30 @@ export class BrowserController {
         break;
       case "tab:navigate": {
         const tab = this.getTab(action.id);
-        tab.url = this.openTarget(
-          this.getSpace(tab.spaceId),
-          cleanText(action.url, 8192),
-        );
+        const space = this.getSpace(tab.spaceId);
+        const url = this.openTarget(space, cleanText(action.url, 8192));
+        // A page that needs another kind of view gets a new one, without
+        // its back history.
+        const rebuild = this.views.has(tab.id) && this.changesView(tab, url);
+        const wasFile = isFileUrl(tab.url);
+        tab.url = url;
         tab.title = tab.url === HOME_URL ? "New tab" : tab.url;
         delete tab.favicon;
         delete tab.error;
-        if (tab.url === HOME_URL) {
+        if (tab.url === HOME_URL || rebuild) {
           this.destroyTab(tab.id);
           tab.loading = false;
           tab.canGoBack = false;
           tab.canGoForward = false;
-        } else {
+        }
+        if (tab.url !== HOME_URL) {
           const view = this.views.get(tab.id);
           if (view) this.load(tab, view.webContents);
           else this.ensureView(tab);
         }
+        // A file tab in a space an agent can reach becomes one of its pages.
+        if (wasFile && !isFileUrl(tab.url) && agentRules(space))
+          this.registry.labelSpace(space.id);
         break;
       }
       case "tab:close": {
@@ -1921,12 +2259,20 @@ export class BrowserController {
         if (this.closedTabs.length && this.state.tabs.length >= 200)
           throw new Error("The maximum of 200 tabs has been reached.");
         const old = this.closedTabs.shift();
-        if (
-          old &&
-          this.state.spaces.some((space) => space.id === old.spaceId)
-        ) {
+        const space =
+          old && this.state.spaces.find((item) => item.id === old.spaceId);
+        if (old && space) {
+          let url = old.url;
+          // A file comes back only where files open, and only while it is
+          // there; otherwise it is skipped.
+          if (isFileUrl(url))
+            try {
+              url = this.openTarget(space, url);
+            } catch {
+              break;
+            }
           const tab = {
-            ...newTab(old.spaceId, old.url),
+            ...newTab(old.spaceId, url),
             title: old.title,
             pinned: old.pinned,
           };
@@ -2153,9 +2499,12 @@ export class BrowserController {
         break;
       }
       case "bookmark:add": {
+        // A file reaches the check below instead of the address bar's
+        // message about spaces.
         const url = normalizeUrl(
           cleanText(action.url, 8192),
           this.state.settings.searchEngine,
+          { allowFile: true },
         );
         if (!isWebUrl(url))
           throw new Error("Only web pages can be bookmarked.");
@@ -2181,6 +2530,7 @@ export class BrowserController {
         const url = normalizeUrl(
           cleanText(action.url, 8192),
           this.state.settings.searchEngine,
+          { allowFile: true },
         );
         if (!isWebUrl(url)) throw new Error("Only web pages can be bookmarked.");
         if (

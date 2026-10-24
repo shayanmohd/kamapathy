@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +11,11 @@ import { _electron as electron } from "playwright";
 import { desktopLaunch, prepareDesktopRuntime, projectDirectory } from "./desktop-runtime.mjs";
 
 const run = promisify(execFile);
+// --packaged checks only the packaged app in release/: its registrations and fuses.
+if (process.argv.includes("--packaged")) {
+  await verifyPackaged();
+  process.exit();
+}
 const executable = await prepareDesktopRuntime();
 assert.equal(await prepareDesktopRuntime(), executable);
 assert.equal(basename(executable), process.platform === "win32" ? "Kamapathy.exe" : process.platform === "darwin" ? "Kamapathy" : "kamapathy");
@@ -144,8 +150,9 @@ try {
   const capabilities = await observed;
   assert.equal(capabilities.webdriver, false);
   assert.equal(capabilities.cookies, true);
-  assert.match(capabilities.userAgent, /Kamapathy\//);
-  console.log("PASS normal Kamapathy source startup identifies itself and does not enable WebDriver");
+  assert.doesNotMatch(capabilities.userAgent, /Kamapathy|Electron/i);
+  assert.match(capabilities.userAgent, /Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/);
+  console.log("PASS normal Kamapathy source startup presents a Chrome-compatible user agent and does not enable WebDriver");
 } finally {
   clearTimeout(timer);
   fixture.close();
@@ -154,5 +161,64 @@ try {
     await stopChild(child);
   } finally {
     await rm(normalProfile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}
+
+async function newest(paths, what) {
+  const found = [];
+  for (const path of paths) {
+    try {
+      found.push({ path, time: (await stat(path)).mtimeMs });
+    } catch {}
+  }
+  if (!found.length) throw new Error(`No packaged ${what} in release/. Package Kamapathy first.`);
+  return found.sort((a, b) => b.time - a.time)[0].path;
+}
+
+async function verifyPackaged() {
+  const release = join(projectDirectory, "release");
+  const entries = await readdir(release).catch(() => []);
+  const documentTypes = ["public.html", "public.xhtml", "public.svg-image", "com.adobe.pdf", "public.png", "public.jpeg", "com.compuserve.gif", "org.webmproject.webp", "public.avif", "public.plain-text", "org.webmproject.webm"];
+  const mimeTypes = ["text/html", "application/xhtml+xml", "image/svg+xml", "application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "text/plain", "video/webm"];
+  let packaged;
+  let extracted;
+  try {
+    if (process.platform === "darwin") {
+      packaged = await newest(entries.filter((name) => name.startsWith("mac")).map((name) => join(release, name, "Kamapathy.app")), "Kamapathy.app");
+      const { stdout } = await run("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(packaged, "Contents", "Info.plist")]);
+      const info = JSON.parse(stdout);
+      assert.ok(
+        info.CFBundleURLTypes?.some((type) => type.CFBundleTypeRole === "Viewer" && ["http", "https"].every((scheme) => type.CFBundleURLSchemes?.includes(scheme))),
+        "Info.plist registers http and https with the Viewer role",
+      );
+      const documents = info.CFBundleDocumentTypes ?? [];
+      // Alternate never takes a type over from the app that owns it.
+      for (const type of documents) assert.equal(type.LSHandlerRank, "Alternate", type.CFBundleTypeName);
+      assert.deepEqual(documentTypes.filter((type) => !documents.some((document) => document.LSItemContentTypes?.includes(type))), []);
+      console.log(`PASS ${basename(dirname(packaged))}/Kamapathy.app registers web addresses and ${documentTypes.length} viewer types without taking any over`);
+    } else if (process.platform === "linux") {
+      const deb = await newest(entries.filter((name) => name.endsWith(".deb")).map((name) => join(release, name)), ".deb");
+      extracted = await mkdtemp(join(tmpdir(), "kamapathy-deb-"));
+      await run("dpkg-deb", ["-x", deb, extracted]);
+      const desktop = await readFile(join(extracted, "usr", "share", "applications", "app.kamapathy.browser.desktop"), "utf8");
+      const types = /^MimeType=(.*)$/m.exec(desktop)?.[1].split(";").filter(Boolean) ?? [];
+      assert.deepEqual(["x-scheme-handler/http", "x-scheme-handler/https", ...mimeTypes].filter((type) => !types.includes(type)), []);
+      const command = /^Exec=(?:"([^"]+)"|(\S+))/m.exec(desktop);
+      assert.ok(command, "the desktop file names the executable");
+      packaged = join(extracted, command[1] ?? command[2]);
+      console.log(`PASS ${basename(deb)} installs app.kamapathy.browser.desktop for web addresses and ${mimeTypes.length} viewer types`);
+    } else if (process.platform === "win32") {
+      packaged = await newest(entries.filter((name) => /^win.*-unpacked$/.test(name)).map((name) => join(release, name, "Kamapathy.exe")), "Kamapathy.exe");
+    } else {
+      throw new Error(`Packaged checks do not support ${process.platform}.`);
+    }
+    const fuses = createRequire(import.meta.url).resolve("@electron/fuses/dist/bin.js");
+    const { stdout } = await run(process.execPath, [fuses, "read", "--app", packaged]);
+    const report = stdout.replace(/\u001b\[[0-9;]*m/g, "");
+    for (const fuse of ["RunAsNode", "EnableNodeCliInspectArguments", "EnableNodeOptionsEnvironmentVariable"])
+      assert.match(report, new RegExp(`\\b${fuse} is Disabled\\b`), `${fuse} must be disabled`);
+    console.log("PASS packaged app ignores ELECTRON_RUN_AS_NODE, NODE_OPTIONS and inspector switches");
+  } finally {
+    if (extracted) await rm(extracted, { recursive: true, force: true });
   }
 }

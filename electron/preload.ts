@@ -81,6 +81,12 @@ const bridge: KamapathyBridge = {
   },
   extensionCommand: (command: ExtensionCommand) =>
     invoke("kamapathy:extension-command", command),
+  importSafariArchive: (bytes, request) =>
+    invoke("kamapathy:import-safari", bytes, request),
+  openImportPermissions: (pane) =>
+    ipcRenderer.send("kamapathy:open-import-permissions", { pane }),
+  defaultBrowser: () => invoke("kamapathy:default-browser"),
+  makeDefaultBrowser: () => invoke("kamapathy:make-default-browser"),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

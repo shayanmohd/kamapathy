@@ -120,6 +120,10 @@ export interface ImportSource {
   name: string;
   profiles: ImportProfile[];
   default: boolean;
+  // Sign-ins come from the Chromium family only.
+  signInsAvailable: boolean;
+  // macOS keeps the data folder from Kamapathy until the person allows it.
+  status: "ready" | "needs_permission";
 }
 export interface ImportedBookmark {
   title: string;
@@ -131,17 +135,44 @@ export interface ImportedVisit {
   visitedAt: number;
   visits: number;
 }
-export interface ImportRequest {
+export interface ImportSelection {
   source: string;
   profile?: string;
+}
+// Where imported sign-ins go: nowhere, the shared session or a new space per profile.
+export type SignInsTarget = "none" | "shared" | "separate";
+export interface ImportRequest {
+  profiles: ImportSelection[];
   bookmarks: boolean;
   history: boolean;
+  signIns: SignInsTarget;
 }
 export interface ImportOutcome {
   bookmarks: number;
   history: number;
+  signIns: number;
+  spaces: { id: string; name: string }[];
   warnings: string[];
 }
+export type ImportErrorCode =
+  | "import_invalid_request"
+  | "source_not_found"
+  | "profile_not_found"
+  | "import_busy"
+  | "read_blocked"
+  | "keychain_denied"
+  | "cookies_unavailable"
+  | "invalid_archive";
+// Failures arrive as values: the bridge would keep only an Error's message.
+export interface ImportFailure {
+  error: {
+    code: ImportErrorCode;
+    message: string;
+    retryable?: true;
+    sources?: string[];
+  };
+}
+export type ImportReply = ImportOutcome | ImportFailure;
 // An agent's request for one of the person's spaces, waiting for an answer.
 export interface SpaceRequest {
   id: string;
@@ -381,6 +412,7 @@ export type BrowserAction =
   | { type: "tab:activate"; id: string }
   | { type: "tab:navigate"; id: string; url: string }
   | { type: "tab:open-external"; id: string }
+  | { type: "tab:copy-external"; id: string }
   | {
       type:
         | "tab:back"
@@ -450,6 +482,12 @@ export interface FrozenFrame {
   height: number;
   image: string;
 }
+export type DefaultBrowserStatus =
+  | { state: "default" | "available" }
+  | {
+      state: "unavailable";
+      reason: "development" | "disk-image" | "portable" | "not-installed" | "web";
+    };
 export interface KamapathyBridge {
   getState(): Promise<BrowserState>;
   dispatch(action: BrowserAction): Promise<BrowserState>;
@@ -463,7 +501,6 @@ export interface KamapathyBridge {
   passwords: PasswordsBridge;
   windowControl(action: "minimize" | "maximize" | "close"): void;
   importSources(): Promise<ImportSource[]>;
-  importBrowserData(request: ImportRequest): Promise<ImportOutcome>;
   agentSetupStatus(options?: { probe?: boolean }): Promise<AgentSetupStatus>;
   applyAgentSetup(request: AgentSetupRequest): Promise<AgentSetupStatus>;
   removeAgentSetup(): Promise<AgentSetupStatus>;
@@ -473,4 +510,13 @@ export interface KamapathyBridge {
   extensions(): Promise<ExtensionsView>;
   onExtensions(callback: (view: ExtensionsView) => void): () => void;
   extensionCommand(command: ExtensionCommand): Promise<ExtensionCommandResult>;
+  importBrowserData(request: ImportRequest): Promise<ImportReply>;
+  // Safari comes in through the file its own export writes.
+  importSafariArchive(
+    bytes: Uint8Array,
+    request: Omit<ImportRequest, "profiles" | "signIns">,
+  ): Promise<ImportReply>;
+  openImportPermissions(pane: "full-disk" | "files-folders"): void;
+  defaultBrowser(): Promise<DefaultBrowserStatus>;
+  makeDefaultBrowser(): Promise<void>;
 }

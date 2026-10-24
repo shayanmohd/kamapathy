@@ -255,6 +255,9 @@ kbd {
     margin-left: 32px;
   }
 }
+.file-notice p {
+  margin-top: 0;
+}
 .eyebrow {
   display: flex;
   align-items: center;
@@ -296,6 +299,9 @@ kbd {
   left: 40%;
   top: -28%;
   transform: rotate(-45deg);
+}
+.file-icon {
+  display: inline-flex;
 }
 .web-page {
   height: 100%;

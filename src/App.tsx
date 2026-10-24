@@ -44,7 +44,7 @@ import {
   updateReminder,
 } from "../shared/state";
 import { compareVersions } from "../shared/version";
-import { hostname, isGoogleSignInRejectedUrl } from "../shared/url";
+import { fileKind, hostname, isGoogleSignInRejectedUrl } from "../shared/url";
 import { bridge, isDesktop } from "./lib/bridge";
 import { decodeFrames, Freezer, nextPaint } from "./lib/freeze";
 import { IconButton, Modal, SiteIcon } from "./components/ui";
@@ -70,7 +70,16 @@ import { AgentSetupDialog } from "./components/AgentSetup";
 import { InstallDialog } from "./components/Updates";
 import { WhatsNewDialog } from "./components/WhatsNew";
 import { notesSince, recentNotes, type ReleaseNote } from "./whats-new";
-import { importCopy, newTabCopy, signInsCopy, spacesCopy } from "./copy";
+import {
+  fileCopy,
+  importCopy,
+  newTabCopy,
+  signInNoticeCopy,
+  signInsCopy,
+  spacesCopy,
+} from "./copy";
+import { signInNotice } from "./lib/sign-in-notice";
+import { useDefaultBrowser } from "./lib/useDefaultBrowser";
 import { useAgentClock } from "./lib/useAgentClock";
 import { spaceTabs } from "./lib/tabs";
 import { type ActionName, isActionName } from "./lib/actions";
@@ -155,6 +164,13 @@ export default function App() {
   const isHome = !active || active.url === HOME_URL;
   const googleSignInRejected =
     isDesktop && !!active && isGoogleSignInRejectedUrl(active.url);
+  // The notice and the welcome's last step each read the default browser.
+  const noticeDefault = useDefaultBrowser(googleSignInRejected);
+  const welcomeDefault = useDefaultBrowser(overlay === "welcome");
+  const notice = signInNotice(noticeDefault.status);
+  const [importSignIns, setImportSignIns] = useState(false);
+  // Local HTML and SVG files load without scripts.
+  const scriptsOff = isDesktop && !!active && fileKind(active.url) === "markup";
   const ownedByAgent = agentRules(activeSpace) && activeSpace.owner === "agent";
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring = barStatus === "browsing" || barStatus === "idle";
@@ -316,6 +332,7 @@ export default function App() {
     findOpen,
     ownedByAgent,
     googleSignInRejected,
+    scriptsOff,
     ring,
     barStatus,
     toast,
@@ -696,21 +713,52 @@ export default function App() {
           >
             <WarningCircle size={20} />
             <div>
-              <strong>Google rejected this sign-in.</strong>
-              <p>
-                Continue in your default browser; this will not sign you into
-                Kamapathy.
-              </p>
+              <strong>{signInNoticeCopy.heading}</strong>
+              <p>{notice.message}</p>
             </div>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() =>
-                dispatch({ type: "tab:open-external", id: active.id })
-              }
-            >
-              Open in default browser <ArrowSquareOut size={15} />
-            </button>
+            {notice.actions.includes("open-external") && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() =>
+                  dispatch({ type: "tab:open-external", id: active.id })
+                }
+              >
+                {signInNoticeCopy.open} <ArrowSquareOut size={15} />
+              </button>
+            )}
+            {notice.actions.includes("import-sign-ins") && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setImportSignIns(true);
+                  void show("import");
+                }}
+              >
+                {signInNoticeCopy.importSignIns}
+              </button>
+            )}
+            {notice.actions.includes("copy-link") && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  void dispatch({ type: "tab:copy-external", id: active.id });
+                  notify(signInNoticeCopy.copied);
+                }}
+              >
+                {signInNoticeCopy.copyLink}
+              </button>
+            )}
+          </section>
+        )}
+        {scriptsOff && (
+          <section className="sign-in-notice file-notice" role="status">
+            <Info size={20} />
+            <div>
+              <p>{fileCopy.scriptsOff}</p>
+            </div>
           </section>
         )}
         {findOpen && (
@@ -830,7 +878,10 @@ export default function App() {
         state={state}
         dispatch={dispatch}
         focus={settingsFocus}
-        onImport={() => void show("import")}
+        onImport={() => {
+          setImportSignIns(false);
+          void show("import");
+        }}
         onPasswords={() => void show("passwords")}
         onAgentSetup={() => void show("agent-setup")}
         onInstall={() => void show("install-update")}
@@ -852,6 +903,8 @@ export default function App() {
           void dispatch({ type: "tab:create", url, background: true })
         }
         onClose={finishWelcome}
+        defaultBrowser={welcomeDefault.status}
+        onMakeDefault={() => void welcomeDefault.makeDefault()}
       />
       <Modal
         open={overlay === "import"}
@@ -859,7 +912,9 @@ export default function App() {
         title={importCopy.title}
         description={importCopy.description}
       >
-        {overlay === "import" && <ImportPanel onDone={close} />}
+        {overlay === "import" && (
+          <ImportPanel onDone={close} signIns={importSignIns} />
+        )}
       </Modal>
       <AgentSetupDialog
         open={overlay === "agent-setup"}
