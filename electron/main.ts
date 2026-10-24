@@ -30,6 +30,7 @@ import type {
   ContentBounds,
   ImportOutcome,
   ImportRequest,
+  PromptAnswer,
 } from "../shared/types";
 import { surfaceColor } from "../shared/theme";
 
@@ -332,6 +333,14 @@ function registerIpc(): void {
       };
     },
   );
+  // Its own channel, not an action: an answer may carry a password, which
+  // never belongs in the action log or in the state an action returns.
+  ipcMain.handle("kamapathy:answer-prompt", (event, answer: PromptAnswer) => {
+    const owner = validateSender(event);
+    if (!answer || typeof answer !== "object" || typeof answer.id !== "string")
+      throw new Error("Invalid prompt answer.");
+    owner.prompts.answer(answer);
+  });
   ipcMain.on("kamapathy:window", (event, action: string) => {
     try {
       const current = validateSender(event).window;
@@ -368,6 +377,21 @@ else {
     window?.focus();
     const url = argv.find((argument) => isWebUrl(argument));
     if (url) void controller?.dispatch({ type: "tab:create", url });
+  });
+  // A page's sign-in belongs to its own tab, which answers it in the prompt
+  // bar; one without a page has nobody to ask.
+  app.on("login", (event, contents, _details, _authInfo, callback) => {
+    if (contents) return;
+    event.preventDefault();
+    if (controller) controller.prompts.appLogin(callback);
+    else callback();
+  });
+  app.on("select-client-certificate", (event, contents, url, list, callback) => {
+    // Without this Electron sends the first certificate in the store.
+    event.preventDefault();
+    if (controller)
+      controller.prompts.selectClientCertificate(contents, url, list, callback);
+    else callback();
   });
   app.on("before-quit", () => {
     quitting = true;

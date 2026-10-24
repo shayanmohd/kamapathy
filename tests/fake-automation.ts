@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { AutomationController } from "../electron/agent/server";
+import type { HttpCredentials, PromptReceipts } from "../electron/prompts";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
   agentRules,
@@ -155,11 +156,48 @@ export class FakeController implements AutomationController {
   activity: { spaceId?: string; message: string; kind: string }[] = [];
   accessedTabs: string[] = [];
   captureAvailable = true;
-  // What the receipt wrapper tells the prompt center about each route.
+  // What the receipt wrapper tells the prompt center about each route, and
+  // what the server hands it or clears while it runs.
   routeSignals: string[] = [];
+  deniedSink: PromptReceipts | null = null;
+  clearedPrompts: string[] = [];
+  // The origins each space stored credentials for, in the order they arrived.
+  // The names and passwords themselves are never kept here either.
+  credentialOrigins = new Map<string, string[]>();
   readonly prompts = {
-    routeStarted: (tabId: string) => this.routeSignals.push(`start ${tabId}`),
-    routeEnded: (tabId: string) => this.routeSignals.push(`end ${tabId}`),
+    routeStarted: (tabId: string) => {
+      this.routeSignals.push(`start ${tabId}`);
+    },
+    routeEnded: (tabId: string) => {
+      this.routeSignals.push(`end ${tabId}`);
+    },
+    setReceipts: (receipts: PromptReceipts | null) => {
+      this.deniedSink = receipts;
+    },
+    setHTTPCredentials: (
+      spaceId: string,
+      credentials: HttpCredentials | null,
+    ) => {
+      if (!credentials) {
+        this.credentialOrigins.delete(spaceId);
+        return;
+      }
+      const origins = this.credentialOrigins.get(spaceId) ?? [];
+      this.credentialOrigins.set(spaceId, [
+        ...origins.filter((origin) => origin !== credentials.origin),
+        credentials.origin,
+      ]);
+    },
+    clearCredentials: () => {
+      this.credentialOrigins.clear();
+      this.clearedPrompts.push("credentials");
+    },
+    clearSpace: (spaceId: string) => {
+      this.clearedPrompts.push(spaceId);
+    },
+    clearAll: () => {
+      this.clearedPrompts.push("all");
+    },
   };
   constructor() {
     this.state.spaces.push({

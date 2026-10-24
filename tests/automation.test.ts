@@ -2232,6 +2232,11 @@ describe("local automation socket", () => {
       "POST /tabs/:id/dialog-policy": { accept: false },
       "POST /downloads/:id/cancel": {},
       "POST /downloads/:id/wait": { timeoutMs: 1000 },
+      "POST /spaces/:id/http-credentials": {
+        origin: "https://shop.example",
+        username: "person",
+        password: "secret",
+      },
     };
     // A wait names its arm, and a cancel its download, not a space or a tab.
     const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
@@ -2747,4 +2752,71 @@ describe("local automation socket", () => {
     });
   });
 
+
+  it("http-credentials validates its origin, username and password, answers ok with the origin only, and DELETE clears every origin of the space", async () => {
+    const space = await createSpace();
+    const path = `/spaces/${space.id}/http-credentials`;
+    const post = (body: Record<string, unknown>) =>
+      request(path, "POST", {
+        origin: "https://shop.example",
+        username: "person",
+        password: "secret",
+        ...body,
+      });
+    const refuses = async (body: Record<string, unknown>, field: string) => {
+      const response = await post(body);
+      expect(response.status, field).toBe(400);
+      expect((await response.json()).error.code, field).toBe("invalid_field");
+    };
+    await refuses({ origin: "https://shop.example/orders" }, "path");
+    await refuses({ origin: "https://shop.example/?q=1" }, "query");
+    await refuses({ origin: "https://shop.example/#top" }, "fragment");
+    await refuses({ origin: "ftp://shop.example" }, "scheme");
+    await refuses({ origin: "shop.example" }, "bare host");
+    await refuses({ origin: "https://person:secret@shop.example" }, "credentials");
+    await refuses({ username: "" }, "empty username");
+    await refuses({ username: "p".repeat(257) }, "long username");
+    await refuses({ password: "s".repeat(1025) }, "long password");
+    // The origin is stored as an origin, and an empty password is allowed.
+    const stored = await post({
+      origin: "https://shop.example:443/",
+      password: "",
+    });
+    expect(stored.status).toBe(200);
+    expect(await stored.json()).toEqual({
+      ok: true,
+      origin: "https://shop.example",
+    });
+    expect(controller.credentialOrigins.get(space.id)).toEqual([
+      "https://shop.example",
+    ]);
+    expect(controller.activity.at(-1)).toEqual({
+      spaceId: space.id,
+      message: "Agent stored a sign-in for https://shop.example",
+      kind: "info",
+    });
+    // DELETE clears every origin of the space.
+    const cleared = await request(path, "DELETE");
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ ok: true });
+    expect(controller.credentialOrigins.get(space.id)).toBeUndefined();
+  });
+
+  it("a ninth origin reaches the space and credentials are cleared when the server stops", async () => {
+    const space = await createSpace();
+    const path = `/spaces/${space.id}/http-credentials`;
+    for (let index = 0; index <= 8; index += 1) {
+      const response = await request(path, "POST", {
+        origin: `https://shop${index}.example`,
+        username: "person",
+        password: "secret",
+      });
+      expect(response.status, `origin ${index}`).toBe(200);
+    }
+    // The route stores each one; the prompt center keeps the newest eight.
+    expect(controller.credentialOrigins.get(space.id)).toHaveLength(9);
+    await api.close();
+    expect(controller.credentialOrigins.size).toBe(0);
+    expect(controller.clearedPrompts).toContain("credentials");
+  });
 });

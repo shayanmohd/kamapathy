@@ -173,3 +173,46 @@ export const newTabCopy = {
   save: "Save shortcut",
   saved: "Shortcut saved.",
 } as const;
+
+export const promptBarCopy = {
+  location: "{origin} wants to know your location",
+  notifications: "{origin} wants to show notifications",
+  camera: "{origin} wants to use your camera",
+  microphone: "{origin} wants to use your microphone",
+  camera_microphone: "{origin} wants to use your camera and microphone",
+  midi: "{origin} wants to use your MIDI devices",
+  usb: "{origin} wants to connect to a USB device",
+  hid: "{origin} wants to connect to a device",
+  serial: "{origin} wants to connect to a serial port",
+  bluetooth: "{origin} wants to connect to a Bluetooth device",
+  other: "{origin} wants a browser permission",
+  block: "Block",
+  allow: "Allow",
+  connect: "Connect",
+  noDevices: "No devices found.",
+  signIn: "Sign in to {host}",
+  realm: 'The site says "{realm}"',
+  retry: "That didn't work. Try again.",
+  username: "Username",
+  password: "Password",
+  certificate: "{host} asks for a certificate",
+  dontSend: "Don't send",
+  agentWaiting: "The agent is waiting for you.",
+  remembered: "Kamapathy remembers this for {space}.",
+  // The oldest request is on screen; the rest wait their turn.
+  count: (total: number) => `1 of ${total}`,
+  devices: "Devices",
+  certificates: "Certificates",
+} as const;
+
+export const sitePermissionsCopy = {
+  title: "Site permissions",
+  note: "Remove one to be asked again.",
+  remove: "Remove",
+  removeAll: "Remove all",
+  empty: "Sites you answer will appear here.",
+  allowed: "Allowed",
+  blocked: "Blocked",
+  removeOne: (permission: string, origin: string) =>
+    `Remove ${permission} for ${origin}`,
+} as const;

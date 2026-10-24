@@ -12,6 +12,7 @@ import type {
   Tab,
 } from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import type { PromptCenter } from "../prompts";
 import { createActions } from "./actions";
 import { activeSpace, createAuthority } from "./authority";
 import { createDialogs } from "./dialogs";
@@ -84,11 +85,18 @@ export interface AutomationController {
       item: Electron.DownloadItem,
     ) => { captured: true; id: string } | { captured: false },
   ): () => void;
-  /** The prompt center, told when each route on a tab starts and ends. */
-  readonly prompts?: {
-    routeStarted(tabId: string): void;
-    routeEnded(tabId: string): void;
-  };
+  /** The prompt center: each route's request window on a tab, the receipt
+   *  sink it reports refusals to, and what it drops when a space ends. */
+  readonly prompts: Pick<
+    PromptCenter,
+    | "routeStarted"
+    | "routeEnded"
+    | "setReceipts"
+    | "setHTTPCredentials"
+    | "clearCredentials"
+    | "clearSpace"
+    | "clearAll"
+  >;
   /** Gives the person control until they answer; returns the hold's id. */
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
   /** Returns control to the agent unless the person took over since. */
@@ -195,6 +203,8 @@ export async function startAutomation(
     controller,
     prompts: controller.prompts,
   });
+  // Refusals are reported to the agent only while the server runs.
+  controller.prompts.setReceipts(receipts);
   const stopPopupLog = watchPopups(
     tabLog,
     controller.registry,
@@ -474,8 +484,12 @@ export async function startAutomation(
         downloads.clearAll();
         stopPopupLog();
         stopTabForget();
-        // Nothing keeps a request window open once the server stops.
+        // Nothing keeps a request window open, or reports a refusal, once
+        // the server stops.
         for (const tab of controller.state.tabs) receipts.forget(tab.id);
+        controller.prompts.setReceipts(null);
+        // No space keeps an agent's stored sign-ins once the server stops.
+        controller.prompts.clearCredentials();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

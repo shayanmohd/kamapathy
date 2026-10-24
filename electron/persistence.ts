@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { SAVED_SITE_PERMISSIONS } from "../shared/permissions";
 import { restoreState } from "../shared/restore";
 import type { BrowserState } from "../shared/types";
 export { validSettings } from "../shared/restore";
@@ -48,6 +49,10 @@ export function writeState(path: string, state: BrowserState): void {
   const activeTabId =
     tabs.find((tab) => tab.id === state.activeTabId)?.id ??
     tabs.find((tab) => tab.spaceId === activeSpaceId)?.id;
+  // The person's own answers, for the spaces this save keeps.
+  const sitePermissions = state.sitePermissions
+    .filter((item) => ids.has(item.spaceId))
+    .slice(-SAVED_SITE_PERMISSIONS);
   const payload = {
     spaces,
     tabs,
@@ -55,6 +60,7 @@ export function writeState(path: string, state: BrowserState): void {
     activeTabId,
     bookmarks: state.bookmarks,
     history: state.history,
+    sitePermissions,
     settings: state.settings,
   };
   mkdirSync(dirname(path), { recursive: true });

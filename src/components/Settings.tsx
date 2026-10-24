@@ -8,7 +8,8 @@ import {
 import type { BrowserAction, BrowserState, Theme } from "../../shared/types";
 import { Modal } from "./ui";
 import { isDesktop } from "../lib/bridge";
-import { settingsCopy } from "../copy";
+import { settingsCopy, sitePermissionsCopy } from "../copy";
+import { permissionWords } from "../../shared/permissions";
 import { activityTime } from "../lib/spaces";
 import "./Spaces.css";
 
@@ -32,6 +33,15 @@ export function Settings({
     state.settings.automationEnabled && !state.automation.running
       ? state.activity.find((item) => !item.spaceId && item.kind === "warning")
       : undefined;
+  // The person's saved answers, newest first, under the space they belong to.
+  const savedSites = state.spaces
+    .map((space) => ({
+      space,
+      rows: state.sitePermissions
+        .filter((item) => item.spaceId === space.id)
+        .reverse(),
+    }))
+    .filter((group) => group.rows.length > 0);
   const update = (
     settings: Parameters<typeof dispatch>[0] & { type: "settings:update" },
   ) => dispatch(settings);
@@ -238,6 +248,62 @@ export function Settings({
           </ol>
         ) : (
           <p className="setting-note">{settingsCopy.noActivity}</p>
+        )}
+      </section>
+      <section className="settings-section" aria-labelledby="settings-sites">
+        <h3 id="settings-sites">{sitePermissionsCopy.title}</h3>
+        {savedSites.length ? (
+          savedSites.map((group) => (
+            <div key={group.space.id}>
+              <h4 className="settings-subheading">{group.space.name}</h4>
+              {group.rows.map((row) => (
+                <div
+                  className="setting-row"
+                  key={`${row.origin}|${row.permission}`}
+                >
+                  <div>
+                    <strong>{row.origin}</strong>
+                    <p>
+                      {permissionWords(row.permission)} ·{" "}
+                      {row.allow
+                        ? sitePermissionsCopy.allowed
+                        : sitePermissionsCopy.blocked}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    aria-label={sitePermissionsCopy.removeOne(
+                      permissionWords(row.permission),
+                      row.origin,
+                    )}
+                    onClick={() =>
+                      dispatch({
+                        type: "site-permission:remove",
+                        spaceId: row.spaceId,
+                        origin: row.origin,
+                        permission: row.permission,
+                      })
+                    }
+                  >
+                    {sitePermissionsCopy.remove}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ))
+        ) : (
+          <p className="setting-note">{sitePermissionsCopy.empty}</p>
+        )}
+        <p className="setting-note">{sitePermissionsCopy.note}</p>
+        {savedSites.length > 0 && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => dispatch({ type: "site-permission:clear" })}
+          >
+            {sitePermissionsCopy.removeAll}
+          </button>
         )}
       </section>
       <div className="settings-about">

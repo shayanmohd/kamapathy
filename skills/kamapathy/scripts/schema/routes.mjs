@@ -533,6 +533,46 @@ export const ROUTES = [
     { lane: "none", since: 2 },
   ),
   route(
+    "POST",
+    "/spaces/:id/http-credentials",
+    "Stores a name and password for one http or https origin, in memory only, to answer the first server sign-in from that origin in the space's own pages. A repeat, a proxy sign-in and a certificate request always go to the person.",
+    "{ ok: true, origin }",
+    {
+      origin: {
+        kind: "string",
+        max: 2048,
+        required: true,
+        since: 2,
+        description:
+          "The origin the credentials belong to, such as https://example.com, with no path, query, fragment or credentials.",
+      },
+      username: {
+        kind: "string",
+        max: 256,
+        required: true,
+        since: 2,
+        description: "The name to send.",
+      },
+      password: {
+        kind: "string",
+        min: 0,
+        max: 1024,
+        required: true,
+        since: 2,
+        description: "The password to send. May be empty.",
+      },
+    },
+    { since: 2 },
+  ),
+  route(
+    "DELETE",
+    "/spaces/:id/http-credentials",
+    "Forgets every origin the space stored credentials for.",
+    "{ ok: true }",
+    null,
+    { since: 2 },
+  ),
+  route(
     "GET",
     "/spaces/:id/downloads",
     "Lists the downloads this space holds, newest first. Only downloads an agent armed are kept.",

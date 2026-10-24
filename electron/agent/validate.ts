@@ -278,6 +278,31 @@ export function downloadWaitFields(body: Record<string, unknown>): {
 } {
   return { timeoutMs: integerField(body, "timeoutMs", WAIT_POLL_MS, 1, 60000) };
 }
+const ORIGIN_EXPECTED =
+  "origin must be an http or https origin, such as https://example.com, with no path, query, fragment or credentials.";
+export function credentialFields(body: Record<string, unknown>): {
+  origin: string;
+  username: string;
+  password: string;
+} {
+  const origin = stringField(body, "origin", 2048);
+  const username = stringField(body, "username", 256);
+  const password = stringField(body, "password", 1024, true);
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  }
+  if (
+    !isWebUrl(origin) ||
+    (parsed.pathname && parsed.pathname !== "/") ||
+    parsed.search ||
+    parsed.hash
+  )
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  return { origin: parsed.origin, username, password };
+}
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);
   if (!target.ref)

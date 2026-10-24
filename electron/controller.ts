@@ -4,6 +4,7 @@ import {
   nativeTheme,
   session,
   shell,
+  webContents,
   WebContentsView,
 } from "electron";
 import type { NativeImage, Session, WebContents } from "electron";
@@ -11,6 +12,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { isPermissionKey } from "../shared/permissions";
 import {
   agentRules,
   HOME_URL,
@@ -42,6 +44,7 @@ import type {
 } from "../shared/types";
 import { TabRegistry } from "./agent/tab-registry";
 import { validSettings, writeState } from "./persistence";
+import { createPromptCenter, type PromptCenter } from "./prompts";
 
 const colors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 // Spaces that share sign-ins use the first space's partition, so sign-ins
@@ -138,12 +141,13 @@ function jpeg(image: NativeImage, width: number): string {
 export class BrowserController {
   readonly state: BrowserState;
   readonly registry = new TabRegistry(() => this.state);
+  /** Every request only the person can answer, and their saved decisions. */
+  readonly prompts: PromptCenter;
   private views = new Map<string, WebContentsView>();
-  // Sessions and their cleanups are keyed by partition, grants by space.
+  // Sessions and their cleanups are keyed by partition.
   private sessions = new Map<string, Session>();
   private sessionCleanups = new Map<string, () => void>();
   private discards = new Map<string, Promise<void>>();
-  private grants = new Set<string>();
   private pendingLoads = new Map<string, symbol>();
   private listeners = new Set<(state: BrowserState) => void>();
   private viewListeners = new Set<
@@ -178,6 +182,27 @@ export class BrowserController {
     private statePath: string,
   ) {
     this.state = state;
+    this.prompts = createPromptCenter({
+      state: this.state,
+      spaceOf: (contents) => this.spaceOf(contents),
+      tabOf: (contents) => this.tabOf(contents),
+      agentControlled: (tabId) => this.agentControlled(tabId),
+      contentsForFrame: (frame) => {
+        try {
+          return frame ? (webContents.fromFrame(frame) ?? null) : null;
+        } catch {
+          return null;
+        }
+      },
+      holdForPerson: (spaceId, reason, prompt) =>
+        this.holdForPerson(spaceId, reason, prompt),
+      releaseHold: (holdId) => this.releaseHold(holdId),
+      addActivity: (spaceId, message, kind) =>
+        this.addActivity(spaceId, message, kind),
+      emit: () => {
+        this.emit();
+      },
+    });
     // Restored tabs are the person's.
     for (const tab of state.tabs)
       this.registry.register(tab, { openedBy: "person", managed: false });
@@ -369,18 +394,22 @@ export class BrowserController {
       : `persist:space-${space.id}`;
   }
 
-  // The space a page belongs to. Session handlers need it because spaces
-  // that share sign-ins share the session.
-  private spaceOf(contents: WebContents | null): Space | undefined {
+  // The tab a page belongs to. Session handlers need it because spaces that
+  // share sign-ins share the session.
+  private tabOf(contents: WebContents | null): Tab | undefined {
     if (!contents) return undefined;
     for (const [id, view] of this.views)
-      if (view.webContents === contents) {
-        const tab = this.state.tabs.find((item) => item.id === id);
-        return tab
-          ? this.state.spaces.find((space) => space.id === tab.spaceId)
-          : undefined;
-      }
+      if (view.webContents === contents)
+        return this.state.tabs.find((item) => item.id === id);
     return undefined;
+  }
+
+  // The space a page belongs to.
+  private spaceOf(contents: WebContents | null): Space | undefined {
+    const tab = this.tabOf(contents);
+    return tab
+      ? this.state.spaces.find((space) => space.id === tab.spaceId)
+      : undefined;
   }
 
   private sessionFor(partition: string): Session {
@@ -388,149 +417,9 @@ export class BrowserController {
     if (existing) return existing;
     const browsingSession = session.fromPartition(partition);
     this.sessions.set(partition, browsingSession);
-    const permissionKey = (space: Space, origin: string, permission: string) =>
-      `${space.id}|${origin}|${permission}`;
-    const isCurrentSession = () =>
-      !this.destroyed && this.sessions.get(partition) === browsingSession;
-    browsingSession.setPermissionCheckHandler(
-      (contents, permission, origin, details) => {
-        const space = this.spaceOf(contents);
-        if (!space || agentRules(space) || !isCurrentSession())
-          return false;
-        if (
-          permission === "media" &&
-          details.mediaType !== "audio" &&
-          details.mediaType !== "video"
-        )
-          return false;
-        try {
-          return this.grants.has(
-            permissionKey(
-              space,
-              new URL(origin).origin,
-              permission === "media"
-                ? `media:${details.mediaType}`
-                : permission,
-            ),
-          );
-        } catch {
-          return false;
-        }
-      },
-    );
-    browsingSession.setPermissionRequestHandler(
-      (contents, permission, callback, details) => {
-        const space = this.spaceOf(contents);
-        if (
-          !space ||
-          agentRules(space) ||
-          !isCurrentSession() ||
-          !contents ||
-          contents.isDestroyed() ||
-          this.window.isDestroyed()
-        ) {
-          callback(false);
-          return;
-        }
-        const allowed = [
-          "media",
-          "geolocation",
-          "notifications",
-          "clipboard-read",
-          "clipboard-sanitized-write",
-          "fullscreen",
-          "pointerLock",
-          "display-capture",
-          "speaker-selection",
-        ];
-        if (!allowed.includes(permission)) {
-          callback(false);
-          return;
-        }
-        let origin: string;
-        try {
-          const requestingUrl =
-            permission === "media" &&
-            "securityOrigin" in details &&
-            details.securityOrigin
-              ? details.securityOrigin
-              : details.requestingUrl || contents.getURL();
-          if (!isWebUrl(requestingUrl))
-            throw new Error("Invalid permission origin.");
-          origin = new URL(requestingUrl).origin;
-        } catch {
-          callback(false);
-          return;
-        }
-        const mediaTypes =
-          permission === "media" && "mediaTypes" in details
-            ? [...new Set(details.mediaTypes ?? [])]
-            : [];
-        if (
-          permission === "media" &&
-          (!mediaTypes.length ||
-            mediaTypes.some((type) => type !== "audio" && type !== "video"))
-        ) {
-          callback(false);
-          return;
-        }
-        const requestedPermissions =
-          permission === "media"
-            ? mediaTypes.map((type) => `media:${type}`)
-            : [permission];
-        if (
-          requestedPermissions.every((item) =>
-            this.grants.has(permissionKey(space, origin, item)),
-          )
-        ) {
-          callback(true);
-          return;
-        }
-        const requestedPageUrl = contents.getURL();
-        let navigated = false;
-        const onNavigation = (
-          event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
-        ) => {
-          if (event.isMainFrame && !event.isSameDocument) navigated = true;
-        };
-        contents.on("did-start-navigation", onNavigation);
-        const label =
-          permission === "media"
-            ? mediaTypes
-                .map((type) => (type === "audio" ? "microphone" : "camera"))
-                .join(" and ")
-            : permission;
-        void dialog
-          .showMessageBox(this.window, {
-            type: "question",
-            title: "Website permission",
-            message: `${origin} wants to use ${label}.`,
-            detail: `This permission applies to the ${space.name} space for this browser session.`,
-            buttons: ["Block", "Allow"],
-            defaultId: 0,
-            cancelId: 0,
-            noLink: true,
-          })
-          .then(({ response }) => {
-            const allow =
-              response === 1 &&
-              !navigated &&
-              isCurrentSession() &&
-              this.state.spaces.includes(space) &&
-              !contents.isDestroyed() &&
-              !this.window.isDestroyed() &&
-              contents.getURL() === requestedPageUrl;
-            if (allow)
-              for (const item of requestedPermissions)
-                this.grants.add(permissionKey(space, origin, item));
-            callback(allow);
-          })
-          .catch(() => callback(false))
-          .finally(() =>
-            contents.removeListener("did-start-navigation", onNavigation),
-          );
-      },
-    );
+    // Every permission request and check in this session goes to the
+    // prompt center, which asks the person or holds the space for them.
+    const detachPrompts = this.prompts.attachSession(browsingSession);
     const onDownload = (
       event: Electron.Event,
       item: Electron.DownloadItem,
@@ -597,10 +486,7 @@ export class BrowserController {
     browsingSession.on("will-download", onDownload);
     this.sessionCleanups.set(partition, () => {
       browsingSession.removeListener("will-download", onDownload);
-      browsingSession.setPermissionCheckHandler(() => false);
-      browsingSession.setPermissionRequestHandler(
-        (_contents, _permission, callback) => callback(false),
-      );
+      detachPrompts();
     });
     return browsingSession;
   }
@@ -834,6 +720,14 @@ export class BrowserController {
       this.views.get(tab.id) === view &&
       this.state.tabs.includes(tab);
     this.bindShortcuts(contents);
+    // The Bluetooth chooser is the page's own event, not the session's.
+    this.prompts.attachBluetooth(contents);
+    // A server or proxy asked for a name and password. Electron's default
+    // cancels every challenge the prompt center does not take.
+    contents.on("login", (event, details, authInfo, callback) => {
+      if (this.prompts.tabLogin(contents, details, authInfo, callback))
+        event.preventDefault();
+    });
     const activateFocusedPane = () => {
       if (
         !isCurrentView() ||
@@ -1616,8 +1510,11 @@ export class BrowserController {
       }
       case "space:activate": {
         const space = this.getSpace(action.id);
+        // The person sees the tab whose site is waiting for them first.
+        const waiting = this.prompts.oldestPromptTab(space.id);
         this.activate(
-          openingTab(this.state, space.id, this.lastActive.get(space.id))!,
+          this.state.tabs.find((tab) => tab.id === waiting) ??
+            openingTab(this.state, space.id, this.lastActive.get(space.id))!,
         );
         break;
       }
@@ -1718,8 +1615,7 @@ export class BrowserController {
         );
         this.captures.delete(space.id);
         this.registry.forget(space.id);
-        for (const key of this.grants)
-          if (key.startsWith(`${space.id}|`)) this.grants.delete(key);
+        this.prompts.clearSpace(space.id);
         this.state.activity = this.state.activity.filter(
           (item) => item.spaceId !== space.id,
         );
@@ -1737,6 +1633,19 @@ export class BrowserController {
         else if (own) await this.discardPartition(own);
         break;
       }
+      case "site-permission:remove": {
+        if (!isPermissionKey(action.permission))
+          throw new Error("Invalid site permission.");
+        this.prompts.removeSitePermission({
+          spaceId: action.spaceId,
+          origin: action.origin,
+          permission: action.permission,
+        });
+        break;
+      }
+      case "site-permission:clear":
+        this.prompts.clearSitePermissions();
+        break;
       case "bookmark:add": {
         const url = normalizeUrl(
           cleanText(action.url, 8192),
@@ -1971,6 +1880,8 @@ export class BrowserController {
     clearTimeout(this.saveTimer);
     this.persist();
     this.destroyed = true;
+    // Every request waiting for the person is answered no as Kamapathy goes.
+    this.prompts.clearAll();
     for (const id of this.views.keys()) this.destroyTab(id);
     for (const cleanup of this.sessionCleanups.values()) cleanup();
     this.sessionCleanups.clear();
