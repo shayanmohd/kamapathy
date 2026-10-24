@@ -53,7 +53,7 @@ Calls on different spaces run at the same time. Calls on one space run one at a 
 
 ## Space
 
-Fields: `id`, `name`, `owner` (`"agent"` or `"human"`), `signIns` (`"shared"` or `"separate"`), `kind` (`"agent"`, or `"personal"` for one of the person's spaces they let an agent use), `createdBy` (`"agent"` or `"person"`), `pageBudget`, and while the person has control, `reason`, `prompt` and `since`. Fields an older Kamapathy omits stay undefined. `handoff`, `resume` and `waitForControl` update `owner`.
+Fields: `id`, `name`, `owner` (`"agent"` or `"human"`), `signIns` (`"shared"` or `"separate"`), `kind` (`"agent"`, or `"personal"` for one of the person's spaces they let an agent use), `createdBy` (`"agent"` or `"person"`), `pageBudget`, `status`, the text the person is reading, `state` (`"needs-you"`, `"done"`, `"failed"` or `"error"`), and while the person has control, `reason`, `prompt` and `since`. Fields an older Kamapathy omits stay undefined. `handoff`, `resume` and `waitForControl` update `owner`. `status` and `state` are set from the listing or read this object came from, and by `setStatus` and `fail`, which update them; `resume` and `waitForControl` answer without them and leave them as they are.
 
 A page argument is a `Page`, a tab ID or a label such as `"p2"`. Labels are never reused in a space while Kamapathy runs.
 
@@ -66,6 +66,8 @@ A page argument is a `Page`, a tab ID or a label such as `"p2"`. Labels are neve
 | `tabs()` | `Page[]` | `GET /spaces/:id/tabs`; every tab, the person's included |
 | `adopt(page)` | `Page` | `POST /tabs/:id/adopt`; makes a page the agent did not open its own, keeping its label, within the page budget |
 | `release(page)` | `Page` | `POST /tabs/:id/release`; gives such a page back to the person, still open; `release_refused` for a page the agent opened |
+| `setStatus(text)` | `{ ok, status? }` | `POST /spaces/:id/status`; shows the person what the agent is doing, in at most 120 characters; `null` or `""` clears it, and `status` follows |
+| `fail(message)` | `{ ok, owner: "human", state: "failed", status }` | `POST /spaces/:id/fail`; reports that the task cannot be done, in at most 300 characters, and hands the space to the person with the message as its status; later calls throw `human_control` with `reason: "failed"` until `resume` or the person's Let agent continue |
 | `handoff()` | `{ ok, owner: "human" }` | `POST /spaces/:id/handoff` |
 | `resume()` | `{ ok, owner: "agent", active, opened, closed }` | `POST /spaces/:id/resume`; `active` is the page the person left or `null`, `opened` the pages that opened meanwhile, unmanaged, and `closed` the labels retired meanwhile |
 | `waitForControl({ timeout? })` | as `resume()` | `POST /spaces/:id/wait-for-control`; waits until the agent has control, never taking it, up to 600000 ms by default; `control_timeout` after that |
@@ -84,17 +86,19 @@ Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`)
 | `navigate(url)` | the page | Complete http or https URL. Refs from before become stale |
 | `snapshot({ mode?, selector?, maxChars?, maxControls? })` | parsed snapshot | `mode` is `"compact"` (default) or `"full"`; same bounds as the CLI |
 | `text(options?)` | string | The same text the CLI's `snapshot` prints, for the same options |
-| `click(target)` | `{ ok, url, fallback?, rebound? }` | Visible, enabled, uncovered control |
-| `fill(target, value)` | `{ ok, rebound? }` | Text-like inputs, textareas, single selects by option value, editable text |
-| `press(key, target?)` | `{ ok, rebound? }` | Enter, Tab, Escape, Backspace, Delete, arrows, Home, End, PageUp, PageDown, Space |
-| `scroll(direction, pixels?, target?)` | `{ ok, scrolled, selector?, x, y, moved }` | up, down, left or right; 1 to 2000 pixels, default 600; the target may take the pixels' place |
-| `drag(source, target)` | `{ ok, url, drag, rebound? }` | Native mouse drag or HTML drag and drop |
+| `click(target, options?)` | `{ ok, url, fallback?, rebound? }` | Visible, enabled, uncovered control |
+| `fill(target, value, options?)` | `{ ok, rebound? }` | Text-like inputs, textareas, single selects by option value, editable text |
+| `press(key, target?, options?)` | `{ ok, rebound? }` | Enter, Tab, Escape, Backspace, Delete, arrows, Home, End, PageUp, PageDown, Space |
+| `scroll(direction, pixels?, target?, options?)` | `{ ok, scrolled, selector?, x, y, moved }` | up, down, left or right; 1 to 2000 pixels, default 600; the target may take the pixels' place |
+| `drag(source, target, options?)` | `{ ok, url, drag, rebound? }` | Native mouse drag or HTML drag and drop |
 | `wait({ selector?, text?, timeoutMs? })` | `{ ok }` | 0 to 15000 ms, default 5000 |
 | `batch(actions)` | `{ ok: true, results }` | 1 to 20 actions with the schema in actions.md; a failure throws, see below |
 | `upload(ref, files)` | `{ ok, selected }` | A file input ref and 1 to 8 local paths, 16 MiB together; the site may upload at once |
 | `screenshot(path)` | the absolute path | Viewport PNG; never overwrites a file; needs a shown, unminimized window |
 | `opener()` | `Page` or `null` | The open page that opened this popup |
 | `close()` | `{ ok, closed?, replacement? }` | Retires the label; closing a space's last page leaves a blank page with the next label in its place |
+
+Every input call takes a final options object carrying `label`, a few words naming the step in at most 60 characters, as in `await page.click(ref, { label: "Open the details" })`. The label shows beside the agent's cursor and under the space's name while the call runs and for five seconds after it ends, and stays on that action's activity entry; a call without one leaves no label behind. Observation calls take no label, and an unknown or invalid option throws `invalid_option` before anything is sent, naming the shape it expects, as in `page.click(target, { label? })`. Keep field values, secrets and personal data out of labels.
 
 Scroll in bounded steps until something appears or nothing moves, never in an open-ended loop:
 
@@ -133,11 +137,11 @@ The client's own codes:
 | `timeout` | The request timed out. The action may still have happened |
 | `request_too_large`, `invalid_response`, `request_failed` | The body is larger than its route accepts, the answer was not what the route returns, or the request failed without a code |
 
-Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `tab_unmanaged`, `page_budget`, `space_ended` or `screenshot_unavailable`; `help("errors")` lists them all.
+Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `invalid_field`, `tab_unmanaged`, `page_budget`, `space_ended` or `screenshot_unavailable`; `help("errors")` lists them all.
 
 **Hard stops.** In `run`, these errors stop the run for good: `human_control` with reason `manual` or `handoff` (the person took over, or you handed them the space), `space_ended` with `endedBy: "person"` (they stopped the agent there), and `automation_stopped` or `not_connected` with reason `access_off`. The first one gets `hardStop: true`, catching it changes nothing, and every later call throws a copy with `hardStop: true` without sending anything. The run drops its output, prints only Kamapathy's guidance for that cause, and exits with status 3. Stop and tell the person; do not retry or call resume until they ask.
 
-**Errors a script can wait out.** A `human_control` with any other reason is a hold that only the person can answer: catch it, tell the person what is waiting for them, and call `space.waitForControl()`, which returns once control comes back, or ends with `space_ended` if the person stops the agent meanwhile. An uncaught hold ends the run with status 1 and the line `Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control <space-id> and start a new run when it returns.` `control_timeout` and `busy`, which may carry `retryAfterMs`, are retryable. `space_ended` after your own `finish` is ordinary: open or create another space.
+**Errors a script can wait out.** A `human_control` with reason `failed` is your own report: nothing new is waiting, so tell the person and stop instead of resuming. A `human_control` with any further reason is a hold that only the person can answer: catch it, tell the person what is waiting for them, and call `space.waitForControl()`, which returns once control comes back, or ends with `space_ended` if the person stops the agent meanwhile. An uncaught hold ends the run with status 1 and the line `Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control <space-id> and start a new run when it returns.` `control_timeout` and `busy`, which may carry `retryAfterMs`, are retryable. `space_ended` after your own `finish` is ordinary: open or create another space.
 
 **Where it failed.** A failed run prints the headline, `error: <code>: <message>` or `error: <Name>: <message>` for a built-in error, then `  at <label>:<line>:<column>` for the first place in the script, where the label is the file as typed, `stdin` or `-e`. A retryable error adds `Kamapathy: Nothing reached the page, so the same command can be retried.`, and one that reached the page `Kamapathy: The action reached the page before it failed. Inspect the page before retrying.` Up to two `hint:` lines follow, for a page global such as `document`, which does not exist in Node.js, or a misspelled method. A script that does not compile shows the line and a caret:
 
@@ -224,6 +228,7 @@ The person chooses the space in Kamapathy. Its tabs stay theirs until the script
 - A failed batch throws after earlier steps may already have changed the page. Inspect `error.results` and take a fresh snapshot before deciding what remains. Never rerun a whole batch, and never retry a submission or a timed-out action without checking its outcome first; a successful click is not proof of a successful submission. Retry a call unchanged only when its error has `retryable: true`.
 - Verify every consequential action by observing the result: a confirmation element, changed page state, or a new page from `tabs()`.
 - Finish every task with `finish({ keep })`, keeping only the pages the person should see.
+- Keep the person informed: `setStatus(text)` when the task starts and at each milestone, a `label` of a few words on the calls that matter, and `fail(message)` when the task cannot be done, after which you stop and tell them. Never put a field value, a secret or personal data in a label or a status.
 - Use `handoff()` when the person should continue, such as for a sign-in, and stop that script. `human_control` means the person is using the space: stop actions there. Call `resume()` only once the reason for the handoff is finished, such as the person saying they have signed in, and never while they are still working or after they took over to stop you, unless they ask; `waitForControl()` waits without taking control. A run that exits with status 3 was stopped by the person's decision: stop and tell them, and do not retry or call resume until they ask. Turning agent access off stops everything, including `resume`.
 - Ask for one of the person's own spaces with `requestSpace` only when they asked you to work there, and adopt only the pages the task needs.
 - Bound every loop by a number of steps, and keep `--timeout`, with your shell tool's timeout above it, long enough for the task.

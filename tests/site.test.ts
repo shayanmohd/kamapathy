@@ -19,3 +19,34 @@ describe("website asset links", () => {
         expect(`${file}${version ?? ""}`).toBe(`${file}?v=${stamp(file)}`);
     });
 });
+
+const readme = () =>
+  readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+// What the person is promised about an agent at work, on both front pages.
+const PROMISE =
+  "A green ring, the agent's own cursor and a short status show what an agent is doing.";
+const DIAGRAM =
+  "K-->>Y: the ring, the cursor and the agent's status show every step";
+const BULLET =
+  "Agents show a short status, label their clicks, say when they cannot finish, and keep working after you close the window until you quit.";
+
+describe("the agent promise", () => {
+  it("the site and README promise the cursor and the status", () => {
+    for (const [name, text] of [
+      ["README.md", readme()],
+      ["index.html", site("index.html")],
+    ] as const) {
+      expect(text, name).toContain(PROMISE);
+      expect(text, name).not.toContain(
+        "A green ring and a small bar show when an agent is working.",
+      );
+    }
+    expect(readme()).toContain(DIAGRAM);
+    expect(readme()).toContain(BULLET);
+    // No product but Kamapathy is named in that promise.
+    for (const sentence of [PROMISE, DIAGRAM, BULLET])
+      for (const [word] of sentence.matchAll(/\b[A-Z][A-Za-z]+\b/gu))
+        expect(["Agents", "Kamapathy"], sentence).toContain(word);
+  });
+});

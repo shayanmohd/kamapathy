@@ -25,6 +25,8 @@ Every failure is a `not_connected` error whose `reason` names the case. Only `bu
 - **Untrusted agent files** (`untrusted_files`). The agent folder, a file in it or the socket is not private to your account. Ask the person to check that folder.
 - **The connection was lost during a call** (`lost`). Kamapathy quit or restarted while the call ran, and the call may still have taken effect. Inspect the page before retrying.
 
+Kamapathy may be running without a window. While agent access is on, closing the window hides it and the agents keep working on the same instance, so commands connect as usual and `health` answers; only screenshots wait for the window, answering `screenshot_unavailable` until the person opens it from the tray icon, the Dock or a new launch. A quit is the person's decision to stop the work: it is the `quit_by_person` case above, and the client will not start Kamapathy again for ten minutes.
+
 ## Versions
 
 `node scripts/kamapathy.mjs --version` prints this client's version and API level with its Node.js, this skill's folder, and the running Kamapathy's version, API level and Electron, Chromium and Node versions, or why it did not answer. It never starts Kamapathy, and `--json` prints the same as JSON.

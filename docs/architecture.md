@@ -27,6 +27,10 @@ Popups are adopted rather than reloaded. When a page calls `window.open` or foll
 
 The renderer reports the rectangle reserved for web content. The main process positions the active native view in that rectangle, or positions two views for split view. Native views draw above the shell, so before a popover, grid or dialog covers the page the renderer asks the main process for still captures of the visible views, draws them in their place, and only then asks it to hide the views. Closing shows the views again before the captures are removed, so the page area is never blank. If a capture fails or takes longer than 300 ms, the page area is shown empty instead.
 
+The agent cursor is one more native view per window, kept above the page views. It is a transparent `WebContentsView` with sandboxing, context isolation and no preload that loads a fixed local page, a second renderer entry built beside the shell. The main process places it from the page view's origin plus the point an agent acted on times that view's zoom factor, clipped inside the page, and sends it nothing but the cleaned label and whether a press is playing. It refuses navigation and window opening, hides when the person's own pointer reaches it, and hands focus back to the page view below, so it never takes a click meant for the page. `electron/agent/cursor.ts` holds the view and its motion, and `electron/agent/presence.ts` reports each point to it.
+
+The window's lifecycle follows the agents. While agent access is on and the agent service runs, closing the window hides it instead of quitting: on macOS always, and on Windows and Linux while an agent space or a granted personal space is open. Hiding closes the person's own pages, keeps the agent views, the controller and the socket, and adds a tray icon on Windows and Linux. The tray and the macOS Dock menu list the agent spaces with their states and open the window on one; the Dock icon, a second launch and a notification show it again, after which the person's views are made as they open them. A quit while a space is the agent's own or needs the person asks first and, once confirmed, writes the private `quit` marker in the agent folder that keeps the client from starting Kamapathy for ten minutes. `electron/background.ts` owns these rules, and the tray, the menus and the window all read one status function, `agentStatus` in `src/lib/spaces.ts`, so the tray can never say something the window does not.
+
 ## Agent engine
 
 The agent server lives in `electron/agent/`. `server.ts` listens on the private socket and checks each request's origin and authority. Routes in `routes/` declare a lane and a time budget, and `scheduler.ts` runs one request at a time per space and up to six spaces at once, letting a wait step aside between checks. Each tab an agent manages gets one `TabSession` (`session/tab-session.ts`), the only code that uses Electron's debugger: it follows the tab's frames, loads, network activity and dialogs, sends fixed trusted input, and runs Kamapathy's fixed page functions in an isolated world in each web frame. `session/tab-sessions.ts` attaches a session when a managed agent tab gets its page, before the page loads, and releases it on takeover, when the tab stops being managed, when the agent's access to the space ends, when the space closes and when agent access is turned off.
@@ -66,10 +70,14 @@ Signing and publishing are disabled in the development configuration. macOS also
 | Path                                 | Responsibility                                                           |
 | ------------------------------------ | ------------------------------------------------------------------------ |
 | `src/`                               | Shared browser UI, dialogs, command palette, styling, web preview bridge |
+| `src/cursor/`                        | The agent cursor's fixed local page, drawn in its own view               |
 | `shared/`                            | Data contracts, initial state, address handling                          |
 | `shared/topsites.ts`                 | Ranks history and bookmarks into the welcome dialog's top sites          |
 | `electron/`                          | Native browser, preload, persistence                                     |
+| `electron/background.ts`             | Hiding on close, the tray and Dock menus, the quit question and marker   |
 | `electron/agent/`                    | Agent socket server, per-space lanes, routes and tab sessions            |
+| `electron/agent/presence.ts`         | A space's task state: status, labels, outcomes and cursor points         |
+| `electron/agent/cursor.ts`           | The cursor view over an agent's page, its placement and its motion       |
 | `electron/import.ts`                 | Reads bookmarks and history from other browsers, without Electron        |
 | `skills/kamapathy/`                  | Agent skill: CLI, scripting client, run and repl                         |
 | `skills/kamapathy/scripts/schema/`   | One schema for client checks, server checks, help and the API reference  |
