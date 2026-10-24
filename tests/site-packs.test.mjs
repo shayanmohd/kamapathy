@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -30,6 +31,10 @@ import {
   siteRoots,
   summarize,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
+import {
+  checkAll,
+  checkPack,
+} from "../skills/kamapathy/scripts/lib/site-check.mjs";
 import {
   KamapathyError,
   hardStopCause,
@@ -1881,5 +1886,344 @@ export const searchRepositories = (context, args) => args;
     expect(missing.message).toBe(
       `No site pack named "nope" is in Kamapathy's workspace or the skill. Looked in ${roots[0].path} (ok) and ${bundled} (missing).`,
     );
+  });
+
+  it("bundled packs pass the validator", async () => {
+    const [, bundled] = siteRoots({ KAMAPATHY_WORKSPACE: workspace });
+    expect(bundled.path).toBe(
+      resolve(
+        fileURLToPath(new URL("../skills/kamapathy/sites", import.meta.url)),
+      ),
+    );
+    // The sample packs arrive with their own tasks. Until then the folder is
+    // simply absent, and a root that cannot be read fails either way.
+    const state = await rootState(bundled);
+    expect(["ok", "missing"]).toContain(state.state);
+    const ids =
+      state.state === "ok"
+        ? (await readdir(bundled.path, { withFileTypes: true }))
+            .filter(
+              (entry) =>
+                entry.isDirectory() &&
+                !entry.name.startsWith("_") &&
+                !entry.name.startsWith("."),
+            )
+            .map((entry) => entry.name)
+            .sort()
+        : [];
+    for (const id of ids) {
+      const checked = await checkPack(join(bundled.path, id), {
+        source: "bundled",
+        id,
+      });
+      expect(checked.problems.map(problemText), id).toEqual([]);
+      expect(checked.ok, id).toBe(true);
+      expect(checked.source, id).toBe("bundled");
+    }
+  });
+
+  it("checkPack reports every rule", async () => {
+    const lines = (checked) => checked.problems.map(problemText);
+    const check = async (id, manifest, files = {}) =>
+      checkPack(await writePack(id, manifest, files), {
+        source: "workspace",
+        id,
+      });
+
+    // A pack that breaks no rule, with every kind of file.
+    const clean = await check("github", good(), {
+      "notes/overview.md": "How this site works.\n",
+      "tools/search-repositories.mjs":
+        "export const searchRepositories = () => [];\n",
+      "page-tools/repository-stats.js": "() => null\n",
+    });
+    expect(clean).toEqual({
+      id: "github",
+      source: "workspace",
+      dir: join(sites, "github"),
+      ok: true,
+      problems: [],
+    });
+
+    // A manifest problem keeps its field, and nothing else is read: the
+    // files this pack declares are all absent.
+    const manifest = await check("broken", {
+      ...good(),
+      id: "broken",
+      format: 2,
+    });
+    expect(manifest.ok).toBe(false);
+    expect(manifest.problems).toEqual([
+      { field: "format", message: "format must be 1." },
+    ]);
+
+    // A folder with no pack.json, checked with the defaults.
+    const folder = join(sites, "nothing");
+    await rm(folder, { recursive: true, force: true });
+    await mkdir(folder, { mode: 0o700 });
+    const nothing = await checkPack(folder);
+    expect(nothing.id).toBe("nothing");
+    expect(nothing.source).toBe("workspace");
+    expect(lines(nothing)).toEqual(["pack.json: pack.json is missing."]);
+
+    // The file rules, one pack per rule.
+    const notePack = (id) => ({
+      format: 1,
+      id,
+      name: id,
+      domains: [`${id}.example`],
+      notes: ["notes/overview.md"],
+    });
+    // A missing folder is named by the component that is absent, a missing
+    // file by the file itself.
+    expect(lines(await check("absent", notePack("absent")))).toEqual([
+      "notes/overview.md: notes is missing.",
+    ]);
+    expect(
+      lines(
+        await check("absent-file", notePack("absent-file"), {
+          "notes/other.md": "Another note, which nothing declares.\n",
+        }),
+      ),
+    ).toEqual(["notes/overview.md: notes/overview.md is missing."]);
+    expect(
+      lines(
+        await check("oversized", notePack("oversized"), {
+          "notes/overview.md": "x".repeat(LIMITS.note + 1),
+        }),
+      ),
+    ).toEqual(["notes/overview.md: notes/overview.md must be at most 16 KiB."]);
+    const planted = join(workspace, "planted.md");
+    await writeFile(planted, "Planted.\n", { mode: 0o600 });
+    const linked = await writePack("linked", notePack("linked"));
+    await mkdir(join(linked, "notes"), { recursive: true, mode: 0o700 });
+    await symlink(planted, join(linked, "notes", "overview.md"));
+    expect(
+      lines(await checkPack(linked, { source: "workspace", id: "linked" })),
+    ).toEqual([
+      "notes/overview.md: notes/overview.md is a link. Site packs hold only regular files and folders.",
+    ]);
+    if (posix) {
+      const shared = await check("shared", notePack("shared"), {
+        "notes/overview.md": "How this site works.\n",
+      });
+      expect(lines(shared)).toEqual([]);
+      await chmod(join(sites, "shared", "notes", "overview.md"), 0o660);
+      expect(
+        lines(await checkPack(join(sites, "shared"), { id: "shared" })),
+      ).toEqual([
+        `notes/overview.md: notes/overview.md must be owned by your account and not changeable by others. Run chmod go-w ${join(sites, "shared", "notes", "overview.md")}.`,
+      ]);
+    }
+    expect(
+      lines(
+        await check("bytes", notePack("bytes"), {
+          "notes/overview.md": Buffer.from([0x41, 0xff, 0x42]),
+        }),
+      ),
+    ).toEqual(["notes/overview.md: notes/overview.md must be UTF-8 text."]);
+
+    // Node tools: the import runs the file's own code, the export must be a
+    // function, and the tool itself is never called.
+    const imported = join(workspace, "imported.txt");
+    const called = join(workspace, "called.txt");
+    await rm(imported, { force: true });
+    await rm(called, { force: true });
+    const tool = (file, exported) => ({
+      description: "A tool.",
+      file,
+      export: exported,
+      returns: { type: "object", description: "A value." },
+    });
+    const tooled = await check(
+      "tooled",
+      {
+        format: 1,
+        id: "tooled",
+        name: "tooled",
+        domains: ["tooled.example"],
+        tools: {
+          throws_on_import: tool("tools/boom.mjs", "run"),
+          missing_export: tool("tools/extras.mjs", "absent"),
+          not_function: tool("tools/extras.mjs", "number"),
+          marks: tool("tools/marks.mjs", "marks"),
+          with_ref: tool("tools/with-ref.mjs", "withRef"),
+        },
+      },
+      {
+        "tools/boom.mjs": 'throw new Error("boom");\n',
+        "tools/extras.mjs": EXTRAS_TOOL,
+        "tools/marks.mjs": `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(imported)}, "imported");
+export const marks = () => writeFileSync(${JSON.stringify(called)}, "called");
+`,
+        "tools/with-ref.mjs": `// Click @e9 after the rows load.
+export const withRef = () => "\u200fok";
+`,
+      },
+    );
+    expect(lines(tooled)).toEqual([
+      'tools/with-ref.mjs:1: holds the temporary ref @e9. Refs change with every snapshot; use a locator such as role=button[name="Save"].',
+      "tools/with-ref.mjs:2: holds a bidirectional control (U+200F), which can hide what the text says.",
+      "tools/boom.mjs: could not be imported (boom).",
+      "tools/extras.mjs: does not export absent.",
+      "tools/extras.mjs: exports number, which is not a function.",
+    ]);
+    // The import ran the module's own code; nothing called the export.
+    expect(existsSync(imported)).toBe(true);
+    expect(existsSync(called)).toBe(false);
+
+    // A file the rules already refused is never imported, so one broken
+    // file reports one problem.
+    const linkedTool = await writePack("linked-tool", {
+      format: 1,
+      id: "linked-tool",
+      name: "linked-tool",
+      domains: ["linked-tool.example"],
+      tools: { marks: tool("tools/marks.mjs", "marks") },
+    });
+    await mkdir(join(linkedTool, "tools"), { recursive: true, mode: 0o700 });
+    await symlink(planted, join(linkedTool, "tools", "marks.mjs"));
+    expect(lines(await checkPack(linkedTool, { id: "linked-tool" }))).toEqual([
+      "tools/marks.mjs: tools/marks.mjs is a link. Site packs hold only regular files and folders.",
+    ]);
+
+    // Page tools: one function expression that compiles, after comments.
+    const pageTool = async (name, source) => {
+      const id = `page-${name}`;
+      const checked = await check(
+        id,
+        {
+          format: 1,
+          id,
+          name: id,
+          domains: [`${id}.example`],
+          pageTools: {
+            read: {
+              description: "A page tool.",
+              file: "page-tools/read.js",
+              returns: { type: "object", description: "A value." },
+            },
+          },
+        },
+        { "page-tools/read.js": source },
+      );
+      return lines(checked);
+    };
+    const refused = [
+      "page-tools/read.js: must hold one function expression, such as (args) => document.title.",
+    ];
+    expect(await pageTool("arrow", "(args) => document.title\n")).toEqual([]);
+    expect(
+      await pageTool(
+        "function",
+        "function read(args) {\n  return document.title\n}\n",
+      ),
+    ).toEqual([]);
+    expect(await pageTool("async", "async (args) => document.title\n")).toEqual(
+      [],
+    );
+    expect(await pageTool("named", "args => document.title\n")).toEqual([]);
+    expect(
+      await pageTool(
+        "commented",
+        "// Reads the title.\n/* and nothing else */\n(args) => document.title\n",
+      ),
+    ).toEqual([]);
+    expect(await pageTool("statement", "const x = 1\n")).toEqual(refused);
+    expect(await pageTool("object", "{ title: 1 }\n")).toEqual(refused);
+    expect(await pageTool("broken", "(args) => {\n  return ]\n}\n")).toEqual([
+      "page-tools/read.js:2: does not compile (Unexpected token ']').",
+    ]);
+
+    // Temporary refs and bidirectional controls in a note, with their line.
+    const twelve = `${Array.from(
+      { length: 11 },
+      (_value, index) => `Line ${index + 1}.`,
+    ).join("\n")}\nSave with @e14 after typing.\n`;
+    expect(
+      lines(
+        await check("refs", notePack("refs"), { "notes/overview.md": twelve }),
+      ),
+    ).toEqual([
+      'notes/overview.md:12: holds the temporary ref @e14. Refs change with every snapshot; use a locator such as role=button[name="Save"].',
+    ]);
+    expect(
+      lines(
+        await check("addresses", notePack("addresses"), {
+          "notes/overview.md": "Write to user@e1.example, a@e1 and x.@e1.\n",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      lines(
+        await check("bidi", notePack("bidi"), {
+          "notes/overview.md": "How this site works.\nSave with \u202eRTL.\n",
+        }),
+      ),
+    ).toEqual([
+      "notes/overview.md:2: holds a bidirectional control (U+202E), which can hide what the text says.",
+    ]);
+  });
+
+  it("checkAll reports every pack in both roots, by id or by folder", async () => {
+    const { env, roots } = await freshRoots();
+    await writePackIn(roots[0].path, "github", good(), {
+      "notes/overview.md": "How this site works.\n",
+      "tools/search-repositories.mjs":
+        "export const searchRepositories = () => [];\n",
+      "page-tools/repository-stats.js": "() => null\n",
+    });
+    await writePackIn(roots[0].path, "broken", {
+      format: 1,
+      id: "broken",
+      name: "broken",
+      domains: ["broken.example"],
+      notes: ["notes/overview.md"],
+    });
+    await writePackIn(roots[1].path, "beta", bare("beta", ["beta.example"]));
+    // A workspace folder hides the bundled pack with its id, and a folder
+    // starting with _ is no pack at all.
+    await writePackIn(
+      roots[1].path,
+      "github",
+      bare("github", ["other.example"]),
+    );
+    await writePackIn(roots[0].path, "_hidden", bare("hidden", ["h.example"]));
+
+    const all = await checkAll(env, { roots });
+    expect(all.packs.map((pack) => [pack.id, pack.source, pack.ok])).toEqual([
+      ["broken", "workspace", false],
+      ["github", "workspace", true],
+      ["beta", "bundled", true],
+    ]);
+    expect(all.packs[0].problems.map(problemText)).toEqual([
+      "notes/overview.md: notes is missing.",
+    ]);
+    expect(all.packs[1].dir).toBe(join(roots[0].path, "github"));
+    expect(all.ok).toBe(false);
+    expect(all.missing).toEqual([]);
+
+    // One id, one folder of a root, and arguments that name no pack.
+    const some = await checkAll(env, {
+      roots,
+      targets: [
+        "github",
+        join(roots[1].path, "beta"),
+        "nope",
+        join(roots[0].path, "absent"),
+      ],
+    });
+    expect(some.packs.map((pack) => [pack.id, pack.source, pack.ok])).toEqual([
+      ["github", "workspace", true],
+      ["beta", "bundled", true],
+    ]);
+    expect(some.missing).toEqual(["nope", join(roots[0].path, "absent")]);
+    expect(some.ok).toBe(false);
+
+    const one = await checkAll(env, { roots, targets: ["github"] });
+    expect(one.packs).toHaveLength(1);
+    expect(one.ok).toBe(true);
+    expect(one.missing).toEqual([]);
   });
 });
