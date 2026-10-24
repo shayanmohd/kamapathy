@@ -85,18 +85,31 @@ const kamapathy = spawn(await prepareDesktopRuntime(), [resolve("out/main/index.
   env,
   stdio: "ignore",
 });
+// Waits for Kamapathy to stop, for at most this long.
+const exited = (ms) =>
+  new Promise((done) => {
+    if (kamapathy.exitCode !== null || kamapathy.signalCode !== null) return done();
+    const timer = setTimeout(done, ms);
+    kamapathy.once("exit", () => {
+      clearTimeout(timer);
+      done();
+    });
+  });
 const checks = [];
 const passed = (name) => {
   checks.push(name);
   console.log(`PASS ${name}`);
 };
+// The teardown uses these too: a quit over working agents asks the person
+// first, and no one is here to answer a native box.
+let api;
 try {
   const connection = await poll(() => resolveSocket(env).catch(() => null), {
     timeoutMs: 60000,
     label: "Kamapathy's agent socket",
   });
   const send = socketFetch(connection);
-  const api = async (path, method = "GET", body) => {
+  api = async (path, method = "GET", body) => {
     const response = await send(path, {
       method,
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -358,10 +371,29 @@ try {
   assert.ok((await controls(popup.id)).includes("popup clicked"));
   passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
 
+  // Kamapathy stops when it is told, because nothing is left at work: a
+  // quit over a working agent would ask the person first, and this run
+  // closes its spaces instead of leaving a question no one can answer.
+  for (const item of (await json("/spaces")).spaces)
+    assert.equal((await api(`/spaces/${item.id}`, "DELETE")).status, 200);
+  kamapathy.kill();
+  await exited(5000);
+  assert.ok(
+    kamapathy.exitCode !== null || kamapathy.signalCode !== null,
+    "Kamapathy kept running after it was told to stop",
+  );
+  passed("a quit with no agent left at work stops Kamapathy without a question");
+
   console.log(`Native launch passed: ${checks.length} checks.`);
 } finally {
   kamapathy.kill();
-  await new Promise((done) => (kamapathy.exitCode === null ? kamapathy.once("exit", done) : done()));
+  // A Kamapathy holding a question open ignores the signal, so the run
+  // insists rather than waiting for an answer that cannot come.
+  await exited(5000);
+  if (kamapathy.exitCode === null && kamapathy.signalCode === null) {
+    kamapathy.kill("SIGKILL");
+    await exited(5000);
+  }
   site.close();
   site.closeAllConnections();
   await rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 });
