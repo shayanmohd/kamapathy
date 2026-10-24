@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+
 // Sign-in pages for the form script: the four form kinds, a username-first
 // step and its password step, a sign-in form in a same-origin frame and one in
 // an open shadow root without a form element, and a page whose fields refuse
@@ -90,3 +92,97 @@ for (const type of ["input", "change"])
   document.addEventListener(type, (event) => fillEvents.push(type + " " + event.target.id));
 </script>`,
 };
+
+// The site the end-to-end suites sign in to: these pages, the post the
+// sign-in form makes, and one page behind HTTP Basic auth. Nothing leaves
+// this machine, and every submission is kept so a check can read it.
+export const SIGN_IN_PASSWORD = "correct horse 1";
+export const BASIC_AUTH = {
+  realm: "Kamapathy test realm",
+  username: "basic-user",
+  password: "basic pass 1",
+};
+
+export async function startSignInSite() {
+  const posts = [];
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    const send = (body, status = 200, headers = {}) => {
+      response.writeHead(status, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        ...headers,
+      });
+      response.end(body);
+    };
+    if (url.pathname === "/passwords/basic") {
+      const header = request.headers.authorization ?? "";
+      const [name, secret] = header.startsWith("Basic ")
+        ? Buffer.from(header.slice(6), "base64").toString("utf8").split(":")
+        : [];
+      if (name !== BASIC_AUTH.username || secret !== BASIC_AUTH.password)
+        return send(
+          `<!doctype html><meta charset="utf-8"><title>Sign in needed</title><p>Sign in to read this page.</p>`,
+          401,
+          {
+            "WWW-Authenticate": `Basic realm="${BASIC_AUTH.realm}", charset="UTF-8"`,
+          },
+        );
+      return send(
+        `<!doctype html><meta charset="utf-8"><title>Basic auth done</title><h1>Basic auth done</h1><p>You are signed in.</p>`,
+      );
+    }
+    const page = signInPages[url.pathname];
+    if (request.method === "POST") {
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > 8192)
+          return send("<!doctype html><title>Too large</title>", 413);
+        chunks.push(chunk);
+      }
+      const fields = new URLSearchParams(
+        Buffer.concat(chunks).toString("utf8"),
+      );
+      posts.push({
+        path: url.pathname,
+        username: fields.get("username") ?? "",
+        password: fields.get("password") ?? "",
+      });
+      // A sign-in that worked leads to a page with no password field; a
+      // wrong password brings the same form back.
+      if (
+        url.pathname === "/passwords/sign-in" &&
+        fields.get("password") === SIGN_IN_PASSWORD
+      ) {
+        response.writeHead(303, {
+          Location: "/passwords/signed-in",
+          "Cache-Control": "no-store",
+        });
+        return response.end();
+      }
+      return page
+        ? send(page)
+        : send("<!doctype html><title>Page not found</title>", 404);
+    }
+    if (page) return send(page);
+    send(
+      '<!doctype html><meta charset="utf-8"><title>Page not found</title><p>No such page.</p>',
+      404,
+    );
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    altOrigin: `http://localhost:${port}`,
+    posts,
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+      }),
+  };
+}
