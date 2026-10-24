@@ -218,4 +218,70 @@ describe("the prompt bar", () => {
     ])
       expect(plain(bar(prompt))).not.toContain("Kamapathy remembers");
   });
+
+  it("offers saved sign-ins and a Save password box", () => {
+    const signIn = {
+      host: "files.example",
+      proxy: false,
+      retry: false,
+    } as const;
+    const prompt = pending({
+      kind: "http_sign_in",
+      signIn,
+      savedLogins: [
+        { id: "l1", username: "ada" },
+        { id: "l2", username: "zoe" },
+      ],
+      canSave: true,
+    });
+    const markup = bar(prompt);
+    // Each saved sign-in is one button, with its username bidi-isolated.
+    expect(markup).toContain("Sign in as <bdi>ada</bdi>");
+    expect(markup).toContain("Sign in as <bdi>zoe</bdi>");
+    // The box starts ticked.
+    expect(plain(markup)).toContain("Save password");
+    expect(markup).toContain('type="checkbox" checked=""');
+    // Choosing a saved sign-in sends its id and nothing else.
+    expect(promptAnswer(prompt, { allow: true, savedLoginId: "l2" })).toEqual({
+      id: "p1",
+      allow: true,
+      savedLoginId: "l2",
+    });
+    expect(
+      promptAnswer(prompt, {
+        allow: true,
+        username: "ada",
+        password: "hunter2",
+        save: true,
+      }),
+    ).toEqual({
+      id: "p1",
+      allow: true,
+      credentials: { username: "ada", password: "hunter2" },
+      save: true,
+    });
+    expect(promptAnswer(prompt, { allow: false, savedLoginId: "l2" })).toEqual({
+      id: "p1",
+      allow: false,
+    });
+
+    // Without them the form is section 7's own, and no answer carries save.
+    const bare = pending({ kind: "http_sign_in", signIn });
+    const only = bar(bare);
+    expect(only).not.toContain('type="checkbox"');
+    expect(plain(only)).not.toContain("Sign in as");
+    expect(plain(only)).not.toContain("Save password");
+    expect(
+      promptAnswer(bare, {
+        allow: true,
+        username: "ada",
+        password: "hunter2",
+        save: true,
+      }),
+    ).toEqual({
+      id: "p1",
+      allow: true,
+      credentials: { username: "ada", password: "hunter2" },
+    });
+  });
 });

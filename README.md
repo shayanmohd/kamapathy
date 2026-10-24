@@ -61,7 +61,7 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
   <tr>
     <td width="33%" valign="top">
       <h3>Bring your browser with you</h3>
-      On first launch, import bookmarks, history and, if you like, your sign-ins: a checkbox for every profile of Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera and Firefox, and Safari from the file it exports. Sign-ins join your shared sign-ins, or a new space for each profile. Later, from Settings.
+      On first launch, import bookmarks, history and, if you like, your sign-ins and saved passwords: a checkbox for every profile of Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera and Firefox, and Safari from the file it exports. Sign-ins join your shared sign-ins, or a new space for each profile. Passwords come from the Chrome-based browsers, or from a CSV file any browser or password manager exports. Later, from Settings.
     </td>
     <td width="33%" valign="top">
       <h3>Sees the whole page</h3>
@@ -206,7 +206,7 @@ The macOS and Linux script takes `--dir <folder>`, `--no-open` and, on Linux, `-
 
 </details>
 
-On first launch Kamapathy walks you through six steps: what your spaces and agent spaces are, where your data stays, importing from another browser, connecting your agent, your top sites so you can sign in once, and making Kamapathy your default browser. Import and agent setup can be skipped, sign-ins can come along with your bookmarks and history, and the import is always there later under **Settings > Browsing**.
+On first launch Kamapathy walks you through six steps: what your spaces and agent spaces are, where your data stays, importing from another browser, connecting your agent, your top sites so you can sign in once, and making Kamapathy your default browser. Import and agent setup can be skipped, sign-ins and saved passwords can come along with your bookmarks and history, and the import is always there later under **Settings > Browsing**.
 
 Once a day Kamapathy asks GitHub Releases for a newer version, sending no ID or usage data, and can download its installer for you to open. Turn this off in Settings, under Updates.
 
@@ -308,6 +308,7 @@ Controls:
 - Cross-origin frames, canvas editors and JavaScript dialogs still need a handoff: the agent asks you to continue there.
 - Agents can download an update with `upgrade`; only you install it.
 - The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. **Stop** in the agent bar ends the agent's access to that one space, and turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
+- Agents never get your saved passwords: Kamapathy doesn't offer or fill them while an agent has control, and no API reaches them. In a space you let an agent use, filling asks you first, because the agent can read that page. Nothing an agent types or fills is ever saved.
 
 The [agent guide](docs/automation.md) covers every command and its limits, and the [security model](docs/SECURITY.md) explains the trust boundary.
 
@@ -372,6 +373,10 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - The person's extensions run in agent spaces that share their sign-ins, so their content scripts can change agent pages. Isolated agent spaces never run them.
 - A frame of one of the person's extensions is a blocked `iframe` entry with `extension` and the label `Extension: <name>`, and input there returns `403 input_target_blocked` with `frame` and `extension`.
 - CDP commands aimed at an extension's frame or content-script world return `403 cdp_method_blocked` with `reason: "scope"`.
+- Kamapathy saves passwords now: it offers after you sign in, fills from a native menu under the field, and keeps them in an encrypted vault in your profile. **View > Passwords** opens the list, after Downloads, and the ⋯ menu and the command menu list it too; **Settings > Passwords**, after Browsing, holds **Offer to save passwords** and **Manage...**.
+- The import panel gains a **Passwords** checkbox, on by default for Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera, so an import from one of those now also brings its saved passwords, reading that browser's key when it has rows to decrypt. Safari's exported file brings them too, Firefox's come from a CSV file you import under Passwords, and the line at the end counts passwords only when it saved some, so an import without them reads as before.
+- A site's own sign-in box, the one that asks for a name and password, lists your saved sign-ins for it as `Sign in as <username>` and offers a **Save password** box, ticked, which saves what you typed once the sign-in works.
+- Nothing about saved passwords is on the agent API: no route, method, command, field, option or error code changes, and a path such as `GET /passwords` answers `404 route_not_found` like any other unknown route. A script that calls a password, credential or autofill method it imagined now gets one hint first, `Saved passwords are for the person only. Hand the space to them with handoff() and say what to sign in to.`
 
 </details>
 
@@ -457,6 +462,7 @@ Kamapathy's trust boundary is your operating system account. Web pages run sandb
 ## What's not here yet
 
 Kamapathy is an early preview. A password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed yet, so Kamapathy can download updates but never installs them itself, and Kamapathy hasn't had an independent security audit. Kamapathy presents itself to sites as Chromium. If Google rejects a sign-in, Kamapathy offers to continue in your default browser, or to sign in there and import the sign-in.
+Kamapathy is an early preview. Browser extensions, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed yet, so Kamapathy can download updates but never installs them itself, and Kamapathy hasn't had an independent security audit. Kamapathy presents itself to sites as Chromium. If Google rejects a sign-in, Kamapathy offers to continue in your default browser, or to sign in there and import the sign-in.
 
 ## Contributing
 

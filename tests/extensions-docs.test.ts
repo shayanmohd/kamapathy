@@ -43,7 +43,9 @@ describe("what the docs say about extensions", () => {
     expect(security).toContain("Chrome Web Store");
     expect(security).toContain("agent socket");
     expect(security).not.toContain("an extension permission model");
-    expect(security).toContain("credential manager");
+    // Section 18 shipped, so the page names the vault extensions cannot reach
+    // rather than listing a credential manager among what Kamapathy lacks.
+    expect(security).toContain("password vault");
   });
 
   it("the architecture names the host, its files and its folder", () => {

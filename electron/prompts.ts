@@ -23,10 +23,13 @@ import type {
 } from "../shared/types";
 import { isWebUrl } from "../shared/url";
 import { REQUEST_WINDOW_MS } from "./agent/receipts";
+import type { SignInChallenge, SignInPasswords } from "./passwords/sign-in";
 
 export type { DeviceKind };
 export const PROMPT_LIMIT = 8; // held prompts per space
 export const CREDENTIAL_ORIGINS = 8; // origins an agent space may store
+// The longest saved sign-in id an answer may name.
+const SAVED_LOGIN_ID = 64;
 // The most of a site's own words any prompt shows.
 const ORIGIN_TEXT = 120;
 // The chooser kinds Kamapathy opens. Electron 44.2.0 emits no
@@ -94,6 +97,8 @@ export interface PromptCenter {
   routeEnded(tabId: string): void;
   /** The agent server hands over its receipt sink while it runs. */
   setReceipts(receipts: PromptReceipts | null): void;
+  /** Section 18's saved HTTP sign-ins, for the bar to offer. */
+  setPasswords(passwords: SignInPasswords | null): void;
   answer(answer: PromptAnswer): void;
   prompts(): PendingPrompt[];
   /** The tab holding the space's oldest prompt, for space:activate. */
@@ -153,6 +158,8 @@ interface Waiting {
   answer(allow: boolean, choice?: PromptAnswer): void;
   // Whether it counts against the space's hold.
   held: boolean;
+  // An http sign-in the person may answer with a saved login.
+  signIn?: { challenge: SignInChallenge; canSave: boolean };
   drop(): void;
 }
 // A tab's request window: how many routes are running on it and when its
@@ -216,6 +223,7 @@ export function createPromptCenter(
     Map<string, { username: string; password: string }>
   >();
   let receipts: PromptReceipts | null = null;
+  let passwords: SignInPasswords | null = null;
 
   const publish = () => {
     host.state.prompts = [...waiting.values()].map((item) => item.prompt);
@@ -717,6 +725,7 @@ export function createPromptCenter(
     fields: Partial<PendingPrompt>,
     answer: (allow: boolean, choice?: PromptAnswer) => void,
     origin: string,
+    signIn?: Waiting["signIn"],
   ): boolean => {
     const agent = driving(space, tab);
     let pending = 0;
@@ -748,6 +757,7 @@ export function createPromptCenter(
       keys: [],
       answer,
       held: agent,
+      ...(signIn ? { signIn } : {}),
       drop() {
         contents.removeListener("did-start-navigation", onNavigation);
         contents.removeListener("destroyed", onGone);
@@ -755,6 +765,18 @@ export function createPromptCenter(
     });
     publish();
     return true;
+  };
+  // The person picked a saved sign-in. Main opens it and answers the page
+  // itself, so no renderer sees the password. Anything else, a cancelled
+  // confirmation included, leaves the request waiting for them.
+  const useSaved = async (id: string, item: Waiting, loginId: string) => {
+    const signIn = item.signIn;
+    if (!passwords || !signIn || loginId.length > SAVED_LOGIN_ID) return;
+    const found = await passwords
+      .useSaved(item.prompt.tabId ?? "", loginId, signIn.challenge)
+      .catch(() => undefined);
+    if (!found || waiting.get(id) !== item) return;
+    end(id, true, true, { id, allow: true, credentials: found });
   };
 
   // A server or proxy asked for a name and password. Only the person answers
@@ -806,6 +828,19 @@ export function createPromptCenter(
       settle(found.username, found.password);
       return true;
     }
+    // What section 18 matches its saved sign-ins against. A navigation of
+    // the tab's own main frame is the one that commits, which bounds what
+    // the Save password box waits for.
+    const challenge: SignInChallenge = {
+      origin,
+      realm: authInfo.realm,
+      isProxy: authInfo.isProxy,
+      mainFrame: navigation && details.isMainFrame !== false,
+    };
+    const offered =
+      passwords && !authInfo.isProxy ? passwords.savedLogins(challenge) : [];
+    const canSave =
+      !!passwords && !authInfo.isProxy && passwords.canSave(challenge);
     return raise(
       space,
       tab,
@@ -819,6 +854,8 @@ export function createPromptCenter(
           proxy: authInfo.isProxy,
           retry: details.firstAuthAttempt === false,
         },
+        ...(offered.length ? { savedLogins: offered } : {}),
+        ...(canSave ? { canSave: true as const } : {}),
       },
       (allow, choice) => {
         const given = allow ? choice?.credentials : undefined;
@@ -830,9 +867,14 @@ export function createPromptCenter(
           settle();
           return;
         }
+        // The person asked to keep what they typed. Agent credentials never
+        // come this way, so nothing of an agent's is ever saved.
+        if (canSave && choice?.save === true)
+          passwords?.saveAfterCommit(contents, challenge, given);
         settle(given.username, given.password);
       },
       origin,
+      authInfo.isProxy ? undefined : { challenge, canSave },
     );
   };
 
@@ -1032,8 +1074,16 @@ export function createPromptCenter(
     setReceipts(sink) {
       receipts = sink;
     },
+    setPasswords(sink) {
+      passwords = sink;
+    },
     answer(answer) {
       if (typeof answer?.id !== "string") return;
+      const item = waiting.get(answer.id);
+      if (item?.signIn && typeof answer.savedLoginId === "string") {
+        void useSaved(answer.id, item, answer.savedLoginId);
+        return;
+      }
       end(answer.id, answer.allow === true, true, answer);
     },
     prompts() {

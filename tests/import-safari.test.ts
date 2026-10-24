@@ -434,6 +434,62 @@ describe("Safari import", () => {
     expect(target.applyImportedCookies).not.toHaveBeenCalled();
   });
 
+  it("hands the archive's Passwords.csv to the password manager", async () => {
+    const csv =
+      "Title,URL,Username,Password,Notes,OTPAuth\r\n" +
+      "Shop,https://shop.example/,ada,secret,a note,otpauth://totp/x\r\n";
+    const archive = zip([
+      text(
+        "Export/Bookmarks.html",
+        `<DL>${anchor("https://kamapathy.app/", "Kamapathy")}</DL>`,
+      ),
+      text("Export/Safari Passwords/PASSWORDS.csv", csv),
+    ]);
+    const wanted = { bookmarks: false, history: false, passwords: true };
+
+    expect(readSafariArchive(archive, wanted).passwords?.toString("utf8")).toBe(
+      csv,
+    );
+    // Nothing reads it unless the person asked for passwords.
+    expect(
+      readSafariArchive(archive, { bookmarks: true, history: false }).passwords,
+    ).toBeUndefined();
+
+    const target = fakeTarget();
+    const merge = vi.fn(async (_csv: Buffer) => ({
+      added: 1,
+      warnings: [] as string[],
+    }));
+    const outcome = await runSafariImport(
+      target as unknown as ImportTarget,
+      archive,
+      wanted,
+      merge,
+    );
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(merge.mock.calls[0][0].toString("utf8")).toBe(csv);
+    expect(outcome).toEqual({
+      bookmarks: 0,
+      history: 0,
+      signIns: 0,
+      spaces: [],
+      warnings: [],
+      passwords: 1,
+    });
+
+    // An archive without one imports no password and warns about nothing.
+    const plain = zip([text("Export/Bookmarks.html", "<DL></DL>")]);
+    const without = await runSafariImport(
+      target as unknown as ImportTarget,
+      plain,
+      { bookmarks: true, history: false, passwords: true },
+      merge,
+    );
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(without.passwords).toBe(0);
+    expect(without.warnings).toEqual([]);
+  });
+
   it("refuses bytes and options it cannot use", async () => {
     expect(SAFARI_ARCHIVE_LIMIT).toBe(16 * 1024 * 1024);
     const archive = fixture("export-store.zip");

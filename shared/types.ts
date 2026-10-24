@@ -144,6 +144,8 @@ export interface ImportSource {
   default: boolean;
   // Sign-ins come from the Chromium family only.
   signInsAvailable: boolean;
+  // Saved passwords come from the Chromium family too.
+  passwordsAvailable: boolean;
   // macOS keeps the data folder from Kamapathy until the person allows it.
   status: "ready" | "needs_permission";
 }
@@ -168,6 +170,8 @@ export interface ImportRequest {
   bookmarks: boolean;
   history: boolean;
   signIns: SignInsTarget;
+  // Saved passwords, which go to the password manager.
+  passwords?: boolean;
 }
 export interface ImportOutcome {
   bookmarks: number;
@@ -175,6 +179,8 @@ export interface ImportOutcome {
   signIns: number;
   spaces: { id: string; name: string }[];
   warnings: string[];
+  // Logins added, only when passwords were asked for.
+  passwords?: number;
 }
 export type ImportErrorCode =
   | "import_invalid_request"
@@ -429,6 +435,9 @@ export interface PendingPrompt {
     expires: number;
   }[];
   signIn?: { host: string; realm?: string; proxy: boolean; retry: boolean };
+  // Saved sign-ins for an http_sign_in challenge: ids and usernames only.
+  savedLogins?: { id: string; username: string }[];
+  canSave?: true;
 }
 // The person's Allow or Block, kept per space, origin and permission.
 export interface SitePermission {
@@ -444,6 +453,10 @@ export interface PromptAnswer {
   deviceId?: string;
   certificateId?: string;
   credentials?: { username: string; password: string };
+  // A saved sign-in to use instead of typed credentials, and whether to
+  // save what was typed.
+  savedLoginId?: string;
+  save?: boolean;
 }
 export interface BrowserState {
   spaces: Space[];

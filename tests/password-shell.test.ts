@@ -1,12 +1,23 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { SavedLoginSummary } from "../shared/types";
+import type {
+  BrowserState,
+  PasswordPrompt,
+  PendingPrompt,
+  SavedLoginSummary,
+} from "../shared/types";
+import { initialState } from "../shared/state";
 import {
   compromisedCount,
   filterLogins,
   importSummaryLines,
+  isPasswordError,
   loginHost,
+  shownPasswordPrompt,
   sortLogins,
 } from "../src/lib/passwords";
+import { PasswordPromptBar } from "../src/components/PasswordPrompt";
 
 function login(
   origin: string,
@@ -113,5 +124,113 @@ describe("saved password rows", () => {
       "1 row was skipped.",
       "3 Chrome passwords couldn't be read.",
     ]);
+  });
+});
+
+function savePrompt(fields: Partial<PasswordPrompt> = {}): PasswordPrompt {
+  return {
+    id: "pw1",
+    tabId: "t1",
+    kind: "save",
+    host: "shop.example",
+    username: "ana",
+    ...fields,
+  };
+}
+// A section 7 prompt, which asks for the same slot.
+function sitePrompt(tabId: string): PendingPrompt {
+  return {
+    id: `s7-${tabId}`,
+    spaceId: "personal",
+    tabId,
+    kind: "location",
+    at: 1,
+    agent: false,
+  };
+}
+function shell(fields: Partial<BrowserState>): BrowserState {
+  return { ...initialState(), activeTabId: "t1", ...fields };
+}
+
+describe("the password prompt in the bar", () => {
+  it("the active tab shows its password prompt only without a section 7 prompt", () => {
+    const mine = savePrompt();
+    expect(
+      shownPasswordPrompt(
+        shell({
+          passwordPrompts: [savePrompt({ id: "pw0", tabId: "t2" }), mine],
+        }),
+      ),
+    ).toBe(mine);
+    // A section 7 prompt for the active tab takes the slot.
+    expect(
+      shownPasswordPrompt(
+        shell({ passwordPrompts: [mine], prompts: [sitePrompt("t1")] }),
+      ),
+    ).toBeUndefined();
+    // One on another tab leaves this one alone.
+    expect(
+      shownPasswordPrompt(
+        shell({ passwordPrompts: [mine], prompts: [sitePrompt("t2")] }),
+      ),
+    ).toBe(mine);
+    expect(
+      shownPasswordPrompt(
+        shell({ passwordPrompts: [savePrompt({ tabId: "t2" })] }),
+      ),
+    ).toBeUndefined();
+    expect(shownPasswordPrompt(shell({ passwordPrompts: [] }))).toBeUndefined();
+  });
+  it("password results are told apart from errors", () => {
+    expect(
+      isPasswordError({
+        error: { code: "vault_locked", message: "Saved passwords are locked." },
+      }),
+    ).toBe(true);
+    expect(isPasswordError({ ok: true })).toBe(false);
+    expect(isPasswordError([])).toBe(false);
+    expect(isPasswordError({ state: "ready", count: 2, compromised: 0 })).toBe(
+      false,
+    );
+  });
+});
+
+function bar(prompt: PasswordPrompt): string {
+  return renderToStaticMarkup(
+    createElement(PasswordPromptBar, {
+      prompt,
+      onAnswer: async () => ({ ok: true }) as const,
+    }),
+  );
+}
+
+describe("the password prompt bar", () => {
+  it("offers to save with an editable username and eight dots", () => {
+    const markup = bar(savePrompt());
+    expect(markup).toContain('class="prompt-bar');
+    expect(markup).toContain('role="region"');
+    expect(markup).toContain("Save password for <bdi>shop.example</bdi>?");
+    expect(markup).toContain(">Username<");
+    expect(markup).toContain('value="ana"');
+    expect(markup).toContain('maxLength="1000"');
+    expect(markup).toContain('dir="auto"');
+    expect(markup).toContain("••••••••");
+    expect(markup).toContain(">Save<");
+    expect(markup).toContain(">Never for this site<");
+    expect(markup).toContain(">Not now<");
+    expect(markup).not.toContain(">Update<");
+    expect(markup).not.toContain("disabled");
+  });
+  it("offers to update the saved password, with the username isolated", () => {
+    const markup = bar(
+      savePrompt({ id: "pw2", kind: "update", username: "عمر" }),
+    );
+    expect(markup).toContain(
+      "Update password for <bdi>عمر</bdi> on <bdi>shop.example</bdi>?",
+    );
+    expect(markup).toContain(">Update<");
+    expect(markup).toContain(">Not now<");
+    expect(markup).not.toContain(">Never for this site<");
+    expect(markup).not.toContain("<input");
   });
 });

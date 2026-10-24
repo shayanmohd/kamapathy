@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { permissionWords, type PromptKind } from "../../shared/permissions";
 import type { PendingPrompt, PromptAnswer, Space } from "../../shared/types";
 import { hostname } from "../../shared/url";
-import { promptBarCopy } from "../copy";
+import { passwordsCopy, promptBarCopy } from "../copy";
 import "./PromptBar.css";
 
 // What the person picked in the bar, before it becomes an answer.
@@ -12,6 +12,8 @@ export interface PromptChoice {
   certificateId?: string;
   username?: string;
   password?: string;
+  savedLoginId?: string;
+  save?: boolean;
 }
 
 // The kinds with a line of their own. Everything else asks under the plain
@@ -40,6 +42,9 @@ export function promptAnswer(
     return choice.deviceId
       ? { id: prompt.id, allow: true, deviceId: choice.deviceId }
       : block;
+  // A saved sign-in travels as its id: main opens it and answers the page.
+  if (prompt.signIn && choice.savedLoginId)
+    return { id: prompt.id, allow: true, savedLoginId: choice.savedLoginId };
   if (prompt.signIn)
     return choice.username
       ? {
@@ -49,6 +54,7 @@ export function promptAnswer(
             username: choice.username,
             password: choice.password ?? "",
           },
+          ...(prompt.canSave && choice.save ? { save: true } : {}),
         }
       : block;
   if (prompt.certificates)
@@ -56,6 +62,19 @@ export function promptAnswer(
       ? { id: prompt.id, allow: true, certificateId: choice.certificateId }
       : block;
   return { id: prompt.id, allow: true };
+}
+
+// The copy keeps its whole sentence, so the button splits on this mark to
+// show the username bidi-isolated.
+const VALUE = "\u0000";
+function signInAs(username: string) {
+  const parts = passwordsCopy.signIn.as(VALUE).split(VALUE);
+  return parts.map((part, index) => (
+    <Fragment key={index}>
+      {part}
+      {index < parts.length - 1 && <bdi>{username}</bdi>}
+    </Fragment>
+  ));
 }
 
 function heading(prompt: PendingPrompt): string {
@@ -95,6 +114,8 @@ export function PromptBar({
   const [password, setPassword] = useState("");
   const [deviceId, setDeviceId] = useState("");
   const [certificateId, setCertificateId] = useState("");
+  // The box is ticked until the person unticks it.
+  const [save, setSave] = useState(true);
   const [error, setError] = useState("");
   const { devices, certificates, signIn } = prompt;
   const permission = !devices && !certificates && !signIn;
@@ -176,6 +197,22 @@ export function PromptBar({
           ))}
         </div>
       )}
+      {!!prompt.savedLogins?.length && (
+        <div className="prompt-bar-logins">
+          {prompt.savedLogins.map((login) => (
+            <button
+              key={login.id}
+              type="button"
+              className="secondary-button"
+              onClick={() =>
+                void answer({ allow: true, savedLoginId: login.id })
+              }
+            >
+              {signInAs(login.username)}
+            </button>
+          ))}
+        </div>
+      )}
       {signIn && (
         <div className="prompt-bar-fields">
           <div className="prompt-bar-field">
@@ -202,6 +239,16 @@ export function PromptBar({
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
+            {prompt.canSave && (
+              <label className="prompt-bar-save">
+                <input
+                  type="checkbox"
+                  checked={save}
+                  onChange={(event) => setSave(event.target.checked)}
+                />
+                <span>{passwordsCopy.signIn.save}</span>
+              </label>
+            )}
           </div>
         </div>
       )}
@@ -218,6 +265,7 @@ export function PromptBar({
                 certificateId: certificate,
                 username,
                 password,
+                save,
               })
             }
           >

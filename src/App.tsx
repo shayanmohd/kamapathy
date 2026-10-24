@@ -60,6 +60,8 @@ import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
 import { AgentBar } from "./components/AgentBar";
 import { PromptBar } from "./components/PromptBar";
+import { PasswordPromptBar } from "./components/PasswordPrompt";
+import { shownPasswordPrompt } from "./lib/passwords";
 import { acknowledgeTask, agentStatus, statusLine } from "./lib/spaces";
 import { SpaceButton } from "./components/SpaceButton";
 import { SpacePopover } from "./components/SpacePopover";
@@ -179,6 +181,9 @@ export default function App() {
         item.at < oldest.at ? item : oldest,
       )
     : undefined;
+  // The active tab's offer to save a password, when section 7 has no prompt
+  // for it.
+  const passwordPrompt = shownPasswordPrompt(state);
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring =
     barStatus === "browsing" || barStatus === "idle" || barStatus === "error";
@@ -353,6 +358,7 @@ export default function App() {
     googleSignInRejected,
     scriptsOff,
     prompt?.id,
+    passwordPrompt?.id,
     ring,
     barStatus,
     toast,
@@ -797,6 +803,15 @@ export default function App() {
             space={activeSpace}
             total={spacePrompts.length}
             onAnswer={answerPrompt}
+          />
+        )}
+        {passwordPrompt && (
+          <PasswordPromptBar
+            key={passwordPrompt.id}
+            prompt={passwordPrompt}
+            onAnswer={(answer) =>
+              bridge.passwords.answer(passwordPrompt.id, answer)
+            }
           />
         )}
         <div className={`page-frame ${ring ? "agent-ring" : ""}`}>

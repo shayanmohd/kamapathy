@@ -10,6 +10,7 @@ import {
   errorText,
   importRequest,
   initialSelection,
+  passwordsAvailable,
   signInsAvailable,
   type ImportChoices,
   type Selection,
@@ -23,6 +24,7 @@ function source(id: string, extra: Partial<ImportSource> = {}): ImportSource {
     profiles: [{ id: "Default", name: "Person 1" }],
     default: false,
     signInsAvailable: true,
+    passwordsAvailable: true,
     status: "ready",
     ...extra,
   };
@@ -34,6 +36,7 @@ const choices = (extra: Partial<ImportChoices> = {}): ImportChoices => ({
   bookmarks: true,
   history: true,
   signIns: false,
+  passwords: false,
   destination: "shared",
   ...extra,
 });
@@ -138,6 +141,23 @@ describe("importRequest", () => {
     });
   });
 
+  it("sends the passwords the person asked for", () => {
+    expect(importRequest(choices())?.passwords).toBeUndefined();
+    expect(importRequest(choices({ passwords: true }))?.passwords).toBe(true);
+    // Passwords on their own are enough to import.
+    expect(
+      importRequest(
+        choices({ bookmarks: false, history: false, passwords: true }),
+      ),
+    ).toEqual({
+      profiles: [{ source: "chrome", profile: "Default" }],
+      bookmarks: false,
+      history: false,
+      signIns: "none",
+      passwords: true,
+    });
+  });
+
   it("is null when nothing is selected", () => {
     expect(importRequest(choices({ selection: selection([]) }))).toBeNull();
     expect(
@@ -166,6 +186,25 @@ describe("signInsAvailable", () => {
     ).toBe(true);
     expect(signInsAvailable(sources, selection([["chrome", []]]))).toBe(false);
     expect(signInsAvailable(sources, selection([]))).toBe(false);
+  });
+});
+
+describe("passwordsAvailable", () => {
+  it("needs a selected source that has passwords", () => {
+    const sources = [
+      source("chrome"),
+      source("firefox", { passwordsAvailable: false }),
+    ];
+    expect(
+      passwordsAvailable(sources, selection([["firefox", ["Default"]]])),
+    ).toBe(false);
+    expect(
+      passwordsAvailable(sources, selection([["chrome", ["Default"]]])),
+    ).toBe(true);
+    expect(passwordsAvailable(sources, selection([["chrome", []]]))).toBe(
+      false,
+    );
+    expect(passwordsAvailable(sources, selection([]))).toBe(false);
   });
 });
 
@@ -200,6 +239,18 @@ describe("doneLine", () => {
     expect(
       doneLine(outcome({ bookmarks: 1, history: 1, signIns: 0 }), true),
     ).toBe("Imported 1 bookmark, 1 site and 0 sign-ins.");
+  });
+
+  it("adds the passwords only when some came in", () => {
+    expect(doneLine(outcome({ passwords: 0 }), false)).toBe(
+      "Imported 2 bookmarks and 3 sites.",
+    );
+    expect(doneLine(outcome({ passwords: 4 }), false)).toBe(
+      "Imported 2 bookmarks, 3 sites and 4 passwords.",
+    );
+    expect(doneLine(outcome({ passwords: 1 }), true)).toBe(
+      "Imported 2 bookmarks, 3 sites, 1 sign-in and 1 password.",
+    );
   });
 });
 

@@ -17,6 +17,7 @@ import {
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
+import { startSignInSite } from "../tests/fixtures/sign-in-pages.mjs";
 
 const profile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-"));
 let failRecoverablePage = true;
@@ -204,6 +205,8 @@ for (const folder of [".claude", ".codex"])
 // The second profile for What's new and update checks, with its own feed.
 let updateProfile;
 let updateFeed;
+// The site section 18's checks sign in to.
+let signInSite;
 const visibleViews = () =>
   app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0]
@@ -267,6 +270,185 @@ const touchCursor = () =>
     );
     view.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
   });
+// The native parts of the password manager, answered inside the application:
+// safeStorage without the person's keyring, the reauthentication check, the
+// fill menu, the file dialog and the Trash. The handles read what the person
+// would have seen and set what they answer next.
+async function installPasswordStubs(app) {
+  await app.evaluate(
+    ({ dialog, Menu, safeStorage, shell, systemPreferences }, platform) => {
+      const record = {
+        popups: [],
+        messages: [],
+        reasons: [],
+        answers: [],
+        files: [],
+        trashed: [],
+        touchID: false,
+      };
+      globalThis.__passwords = record;
+      // A key that never leaves this process: a sealed value is its bytes
+      // reversed, so the vault file holds no plain text and no keychain is
+      // asked for one.
+      safeStorage.isAsyncEncryptionAvailable = async () => true;
+      safeStorage.encryptStringAsync = async (text) =>
+        Buffer.from(Buffer.from(text, "utf8").reverse());
+      safeStorage.decryptStringAsync = async (sealed) => ({
+        result: Buffer.from(sealed).reverse().toString("utf8"),
+        shouldReEncrypt: false,
+      });
+      if (platform === "linux")
+        safeStorage.getSelectedStorageBackend = () => "gnome_libsecret";
+      // Touch ID is off, so the check takes its confirmation path.
+      systemPreferences.canPromptTouchID = () => record.touchID;
+      systemPreferences.promptTouchID = async (reason) => {
+        record.reasons.push(reason);
+        if (!record.touchID) throw new Error("Touch ID is off in this run.");
+      };
+      dialog.showMessageBox = async (first, second) => {
+        const options = second ?? first;
+        record.messages.push(
+          [options.message, options.detail, ...(options.buttons ?? [])]
+            .filter(Boolean)
+            .join(" | "),
+        );
+        return {
+          response: record.answers.length ? record.answers.shift() : 0,
+          checkboxChecked: false,
+        };
+      };
+      dialog.showOpenDialog = async () => {
+        const path = record.files.shift();
+        return path
+          ? { canceled: false, filePaths: [path] }
+          : { canceled: true, filePaths: [] };
+      };
+      shell.trashItem = async (path) => {
+        record.trashed.push(path);
+      };
+      // The fill menu is kept instead of shown, so a check can read its
+      // items and choose one as the person would.
+      Menu.prototype.popup = function (options) {
+        record.popups.push({
+          items: this.items.map((item) => item.label),
+          x: options?.x,
+          y: options?.y,
+        });
+        globalThis.__passwordMenu = this;
+      };
+    },
+    process.platform,
+  );
+  return {
+    read: () =>
+      app.evaluate(() => {
+        const { popups, messages, reasons, trashed } = globalThis.__passwords;
+        return { popups, messages, reasons, trashed };
+      }),
+    // Forgets what was asked so far and says what the next native questions
+    // are answered with, and whether this computer offers Touch ID.
+    expect: (answers, touchID = false) =>
+      app.evaluate(
+        (_electron, [answers, touchID]) => {
+          const record = globalThis.__passwords;
+          record.popups.length = 0;
+          record.messages.length = 0;
+          record.reasons.length = 0;
+          record.answers = [...answers];
+          record.touchID = touchID;
+        },
+        [answers, touchID],
+      ),
+    offerFile: (path) =>
+      app.evaluate((_electron, path) => {
+        globalThis.__passwords.files.push(path);
+      }, path),
+    chooseFill: (index) =>
+      app.evaluate((_electron, index) => {
+        globalThis.__passwordMenu.items[index].click();
+      }, index),
+  };
+}
+// The page of a tab, in the application and as Playwright sees it. Both wait,
+// because a new document reaches them a moment after the tab says it loaded.
+const pageContents = (url) =>
+  poll(
+    () =>
+      app.evaluate(
+        ({ webContents }, url) =>
+          webContents
+            .getAllWebContents()
+            .filter((contents) => contents.getURL() === url)
+            .at(-1)?.id ?? null,
+        url,
+      ),
+    { label: `the page at ${url}` },
+  );
+const pageAt = (url) =>
+  poll(
+    () =>
+      app
+        .context()
+        .pages()
+        .filter((candidate) => candidate.url() === url)
+        .at(-1) ?? null,
+    { label: `Playwright's page at ${url}` },
+  );
+// A trusted click in the middle of an element, and text typed into whatever
+// has focus: the form script counts nothing a script did. The click waits
+// for the element and happens once. Returns its rect in CSS pixels.
+const clickInPage = (contentsId, selector) =>
+  poll(
+    () =>
+      app.evaluate(
+        async ({ webContents }, [id, selector]) => {
+          const contents = webContents.fromId(id);
+          const rect = await contents.executeJavaScript(
+            `(() => {
+              const node = document.querySelector(${JSON.stringify(selector)});
+              if (!node) return null;
+              const box = node.getBoundingClientRect();
+              return { x: box.x, y: box.y, width: box.width, height: box.height };
+            })()`,
+          );
+          if (!rect) return null;
+          contents.focus();
+          const at = {
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2),
+          };
+          for (const type of ["mouseDown", "mouseUp"])
+            contents.sendInputEvent({
+              ...at,
+              type,
+              button: "left",
+              clickCount: 1,
+            });
+          return rect;
+        },
+        [contentsId, selector],
+      ),
+    { label: `a click in ${selector}` },
+  );
+const typeInPage = (contentsId, text) =>
+  app.evaluate(
+    ({ webContents }, [id, text]) => {
+      webContents.fromId(id).insertText(text);
+    },
+    [contentsId, text],
+  );
+// An item of the application menu, clicked as Electron clicks it: the item,
+// the focused window and the event.
+const clickViewMenuItem = (label) =>
+  app.evaluate(({ BrowserWindow, Menu }, label) => {
+    const view = Menu.getApplicationMenu()?.items.find(
+      (item) => item.label === "View",
+    );
+    const item = view?.submenu?.items.find((entry) => entry.label === label);
+    if (!item) return false;
+    item.click(undefined, BrowserWindow.getAllWindows()[0]);
+    return true;
+  }, label);
 // The quit question is a native box, so it is answered inside the
 // application: the replacement records what the person would read and gives
 // back the button this check wants. The quit follows the reply, so answering
@@ -1506,6 +1688,367 @@ try {
   await overview.waitFor({ state: "detached" });
   await livePages(page, 1);
   checked("the spaces grid shows a capture of the space the person was looking at");
+  // Section 18's password manager in the window, on this temporary profile:
+  // the person signs in, saves, fills from the native menu, manages the
+  // saved password in the dialog and imports a CSV file.
+  const passwords = await installPasswordStubs(app);
+  signInSite = await startSignInSite();
+  const signInUrl = `${signInSite.origin}/passwords/sign-in`;
+  const signInHost = "127.0.0.1";
+  const personUsername = "ada@example.test";
+  const personPassword = "correct horse 1";
+  await app.evaluate(({ app }) => app.focus({ steal: true }));
+  state = await page.evaluate(
+    (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+    signInUrl,
+  );
+  const passwordTab = state.activeTabId;
+  const loadedPasswordTab = () =>
+    waitForState(
+      page,
+      (state, id) => state.tabs.some((tab) => tab.id === id && !tab.loading),
+      passwordTab,
+    );
+  await loadedPasswordTab();
+  await livePages(page, 1);
+  let signInContents = await pageContents(signInUrl);
+  await clickInPage(signInContents, "#username");
+  await typeInPage(signInContents, personUsername);
+  await clickInPage(signInContents, "#password");
+  await typeInPage(signInContents, personPassword);
+  await clickInPage(signInContents, "#submit");
+  await poll(() => signInSite.posts.length > 0, { label: "the sign-in post" });
+  assert.deepEqual(signInSite.posts.at(-1), {
+    path: "/passwords/sign-in",
+    username: personUsername,
+    password: personPassword,
+  });
+  // The post answered with the signed-in page, which has no password field,
+  // so the offer to save reaches section 7's prompt bar.
+  const savePrompt = page.getByRole("region", { name: "Passwords", exact: true });
+  await savePrompt.getByText(`Save password for ${signInHost}?`).waitFor();
+  assert.equal(
+    await savePrompt.getByLabel("Username", { exact: true }).inputValue(),
+    personUsername,
+  );
+  await savePrompt.getByRole("button", { name: "Save", exact: true }).click();
+  await savePrompt.waitFor({ state: "detached" });
+  const saved = await poll(
+    async () => {
+      const list = await page.evaluate(() => window.kamapathy.passwords.list());
+      return Array.isArray(list) && list.length === 1 ? list : null;
+    },
+    { label: "the saved login" },
+  );
+  assert.equal(saved[0].origin, signInSite.origin);
+  assert.equal(saved[0].username, personUsername);
+  const vaultFile = join(profile, "passwords", "vault.bin");
+  const vaultBytes = await readFile(vaultFile);
+  assert.equal(vaultBytes.subarray(0, 4).toString("latin1"), "KPV1");
+  for (const secret of [personUsername, personPassword])
+    assert.ok(
+      !vaultBytes.includes(Buffer.from(secret, "utf8")),
+      `the vault file holds ${secret} in plain text`,
+    );
+  if (process.platform !== "win32")
+    assert.equal(statSync(vaultFile).mode & 0o777, 0o600);
+  // A fresh visit to the same form, where the person asks for the saved
+  // password by clicking the empty username field.
+  await page.evaluate(
+    ([id, url]) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    [passwordTab, signInUrl],
+  );
+  await loadedPasswordTab();
+  signInContents = await pageContents(signInUrl);
+  const signInPage = await pageAt(signInUrl);
+  // The menu opens only while the window is focused, which this runner
+  // cannot promise, so the window says it is focused for these clicks.
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].focus();
+    globalThis.__passwordFocused = BrowserWindow.prototype.isFocused;
+    BrowserWindow.prototype.isFocused = () => true;
+  });
+  let usernameRect;
+  let fillMenu;
+  // The click comes again where the frame's script had not yet been told it
+  // may offer a fill.
+  for (let attempt = 1; attempt <= 3 && !fillMenu; attempt++) {
+    await passwords.expect([]);
+    usernameRect = await clickInPage(signInContents, "#username");
+    fillMenu = await poll(
+      async () => {
+        const { popups } = await passwords.read();
+        return popups.length ? popups : null;
+      },
+      { timeoutMs: 3000, label: "the fill menu" },
+    ).catch(() => undefined);
+  }
+  assert.equal(fillMenu?.length, 1, "the fill menu opened once");
+  assert.deepEqual(fillMenu[0].items, [
+    personUsername,
+    "",
+    "Manage passwords...",
+  ]);
+  const [passwordView] = (await visibleViews()).filter(
+    (view) => view.url === signInUrl,
+  );
+  const zoom = await app.evaluate(
+    ({ webContents }, id) => webContents.fromId(id).getZoomFactor(),
+    signInContents,
+  );
+  assert.deepEqual(
+    { x: fillMenu[0].x, y: fillMenu[0].y },
+    {
+      x: Math.round(passwordView.x + usernameRect.x * zoom),
+      y: Math.round(
+        passwordView.y + (usernameRect.y + usernameRect.height) * zoom,
+      ),
+    },
+    "the fill menu opens under the field",
+  );
+  await passwords.chooseFill(0);
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const values = await signInPage.evaluate(() => [
+          document.getElementById("username").value,
+          document.getElementById("password").value,
+        ]);
+        return values.every(Boolean) ? values : null;
+      },
+      { label: "the filled sign-in form" },
+    ),
+    [personUsername, personPassword],
+  );
+  // A personal space asks nothing before it fills.
+  assert.deepEqual((await passwords.read()).messages, []);
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.prototype.isFocused = globalThis.__passwordFocused;
+    delete globalThis.__passwordFocused;
+  });
+  checked("sign in, save, and fill on the next visit");
+  // The dialog from View > Passwords shows a password only after the check.
+  await passwords.expect([1]);
+  assert.ok(await clickViewMenuItem("Passwords"), "View has a Passwords item");
+  const passwordsDialog = page.getByRole("dialog", {
+    name: "Passwords",
+    exact: true,
+  });
+  const savedRow = passwordsDialog.locator(".passwords-row");
+  await savedRow.waitFor();
+  assert.match(await savedRow.textContent(), /127\.0\.0\.1/);
+  assert.match(await savedRow.textContent(), /ada@example\.test/);
+  await savedRow.getByRole("button", { name: "Show", exact: true }).click();
+  await savedRow
+    .getByText("Passwords stay hidden until you confirm it's you.")
+    .waitFor();
+  assert.equal(await savedRow.locator("code").count(), 0);
+  assert.deepEqual((await passwords.read()).messages, [
+    "Show passwords? | Anyone using this computer account can see saved passwords. | Show | Cancel",
+  ]);
+  await passwords.expect([0]);
+  await savedRow.getByRole("button", { name: "Show", exact: true }).click();
+  await savedRow.locator("code").getByText(personPassword).waitFor();
+  const editedPassword = "stronger horse 2";
+  const editedNote = "Signs in to the test site";
+  await savedRow.getByRole("button", { name: "Edit", exact: true }).click();
+  const passwordForm = passwordsDialog.locator("form.passwords-form");
+  await passwordForm.waitFor();
+  assert.equal(
+    await passwordForm.getByLabel("Site URL", { exact: true }).inputValue(),
+    signInSite.origin,
+  );
+  await passwordForm
+    .getByLabel("Password", { exact: true })
+    .fill(editedPassword);
+  await passwordForm.getByLabel("Note", { exact: true }).fill(editedNote);
+  await passwordForm.getByRole("button", { name: "Save", exact: true }).click();
+  await passwordForm.waitFor({ state: "detached" });
+  await savedRow.getByRole("button", { name: "Show", exact: true }).click();
+  await savedRow.locator("code").getByText(editedPassword).waitFor();
+  await savedRow.getByText(editedNote, { exact: true }).waitFor();
+  await savedRow
+    .getByRole("button", { name: "Copy username", exact: true })
+    .click();
+  await passwordsDialog.getByText("Copied", { exact: true }).waitFor();
+  assert.equal(
+    await app.evaluate(({ clipboard }) => clipboard.readText()),
+    personUsername,
+  );
+  await savedRow.getByRole("button", { name: "Delete", exact: true }).click();
+  await savedRow.getByText("Delete this password?").waitFor();
+  await savedRow.getByRole("button", { name: "Delete", exact: true }).click();
+  await passwordsDialog
+    .getByText(
+      "No saved passwords yet. Kamapathy offers to save one when you sign in.",
+    )
+    .waitFor();
+  assert.equal(await passwordsDialog.locator(".passwords-row").count(), 0);
+  checked("the dialog reveals after the check, edits and deletes");
+  // A CSV file another browser wrote: one row already saved, one that
+  // differs from a saved password, and one new.
+  const csvFile = join(profile, "passwords.csv");
+  const csvRows = [
+    { url: "https://docs.example/", username: "ada", password: "same pass 1" },
+    { url: "https://mail.example/", username: "ada", password: "file pass 2" },
+    {
+      url: "https://shop.example/",
+      username: "grace",
+      password: "new pass 3",
+    },
+  ];
+  await writeFile(
+    csvFile,
+    `${[
+      "name,url,username,password,note",
+      ...csvRows.map(
+        (row) =>
+          `${new URL(row.url).hostname},${row.url},${row.username},${row.password},`,
+      ),
+    ].join("\r\n")}\r\n`,
+  );
+  for (const login of [
+    { ...csvRows[0] },
+    { ...csvRows[1], password: "saved pass 2" },
+  ]) {
+    const added = await page.evaluate(
+      (login) => window.kamapathy.passwords.add(login),
+      login,
+    );
+    assert.ok(added?.id, JSON.stringify(added));
+  }
+  await passwords.expect([]);
+  await passwords.offerFile(csvFile);
+  await passwordsDialog
+    .getByRole("button", { name: "Import...", exact: true })
+    .click();
+  await passwordsDialog
+    .getByText("Replace saved passwords that differ")
+    .waitFor();
+  await passwordsDialog
+    .getByRole("button", { name: "Import", exact: true })
+    .click();
+  for (const line of [
+    "Imported 1 password.",
+    "1 was already saved.",
+    "1 differs from saved ones and was kept.",
+  ])
+    await passwordsDialog.getByText(line, { exact: true }).waitFor();
+  await passwordsDialog
+    .getByText(
+      "Move passwords.csv to the Trash? It holds your passwords in plain text.",
+    )
+    .waitFor();
+  await passwordsDialog
+    .getByRole("button", { name: "Move to Trash", exact: true })
+    .click();
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const { trashed } = await passwords.read();
+        return trashed.length ? trashed : null;
+      },
+      { label: "the file moved to the Trash" },
+    ),
+    [csvFile],
+  );
+  const imported = await page.evaluate(() =>
+    window.kamapathy.passwords.list(),
+  );
+  assert.equal(imported.length, 3);
+  assert.ok(
+    imported.some(
+      (login) =>
+        login.origin === "https://shop.example" && login.username === "grace",
+    ),
+    "the imported login is saved",
+  );
+  checked("CSV import counts and offers the Trash");
+  await passwordsDialog
+    .getByRole("button", { name: "Close dialog", exact: true })
+    .click();
+  await passwordsDialog.waitFor({ state: "detached" });
+  // Section 7's sign-in bar with section 18's sign-ins in it: the person
+  // types a Basic auth login once, and the bar offers it the next time.
+  const basicUrl = `${signInSite.origin}/passwords/basic`;
+  const basicRealm = "Kamapathy test realm";
+  const basicUsername = "basic-user";
+  const basicPassword = "basic pass 1";
+  // The password manager's own bar carries a class of its own, so this is
+  // section 7's.
+  const signInBar = page.locator("section.prompt-bar:not(.password-prompt)");
+  await page.evaluate(
+    ([id, url]) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    [passwordTab, basicUrl],
+  );
+  await signInBar.getByText(`The site says "${basicRealm}"`).waitFor();
+  assert.equal(
+    await signInBar.locator(".prompt-bar-logins button").count(),
+    0,
+    "nothing is saved for this realm yet",
+  );
+  await signInBar.getByLabel("Username", { exact: true }).fill(basicUsername);
+  await signInBar.getByLabel("Password", { exact: true }).fill(basicPassword);
+  assert.equal(
+    await signInBar
+      .getByRole("checkbox", { name: "Save password" })
+      .isChecked(),
+    true,
+    "Save password starts ticked",
+  );
+  await signInBar.getByRole("button", { name: "Allow", exact: true }).click();
+  await signInBar.waitFor({ state: "detached" });
+  const basicPage = await pageAt(basicUrl);
+  await basicPage.getByRole("heading", { name: "Basic auth done" }).waitFor();
+  const httpLogin = await poll(
+    async () => {
+      const list = await page.evaluate(() => window.kamapathy.passwords.list());
+      return (
+        (Array.isArray(list) && list.find((login) => login.kind === "http")) ||
+        null
+      );
+    },
+    { label: "the saved sign-in" },
+  );
+  assert.deepEqual(
+    [httpLogin.origin, httpLogin.realm, httpLogin.username],
+    [signInSite.origin, basicRealm, basicUsername],
+  );
+  // Chromium keeps a sign-in for the rest of the session, so the next tab is
+  // asked again with the auth cache emptied.
+  await app.evaluate(
+    ({ webContents }, id) => webContents.fromId(id).session.clearAuthCache(),
+    await pageContents(basicUrl),
+  );
+  state = await page.evaluate(
+    (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+    basicUrl,
+  );
+  const secondBasicTab = state.activeTabId;
+  await signInBar
+    .getByRole("button", { name: `Sign in as ${basicUsername}` })
+    .click();
+  await signInBar.waitFor({ state: "detached" });
+  // Nothing was typed this time: main answered the page with the saved
+  // values itself.
+  const secondBasicPage = await pageAt(basicUrl);
+  await secondBasicPage
+    .getByRole("heading", { name: "Basic auth done" })
+    .waitFor();
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    secondBasicTab,
+  );
+  checked("the sign-in bar uses a saved HTTP login");
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    passwordTab,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    personalTab,
+  );
+  await livePages(page, 1);
   await page.evaluate(() =>
     window.kamapathy.dispatch({
       type: "settings:update",
@@ -1727,6 +2270,131 @@ try {
     task,
   );
   checked("the agent bar and ring show who controls the space, and control moves both ways");
+  // Section 18 in a space with agent rules: the person took it over, so a
+  // fill asks first and fills nothing unless they confirm.
+  const agentSignInUrl = `${signInSite.origin}/passwords/sign-in`;
+  const agentLogin = await page.evaluate(
+    (login) => window.kamapathy.passwords.add(login),
+    {
+      url: signInSite.origin,
+      username: personUsername,
+      password: personPassword,
+    },
+  );
+  assert.ok(agentLogin?.id, JSON.stringify(agentLogin));
+  const agentSignInTab = (
+    await (
+      await api(`/spaces/${task}/tabs`, "POST", { url: agentSignInUrl })
+    ).json()
+  ).tab.id;
+  await waitForState(
+    page,
+    (state, id) => state.tabs.some((tab) => tab.id === id && !tab.loading),
+    agentSignInTab,
+  );
+  await agentBar.getByRole("button", { name: "Take over" }).click();
+  await waitForState(
+    page,
+    (state, id) =>
+      state.spaces.find((space) => space.id === id).owner === "human",
+    task,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentSignInTab,
+  );
+  await poll(
+    async () =>
+      (await visibleViews()).some((view) => view.url === agentSignInUrl),
+    { label: "the sign-in page the person took over" },
+  );
+  const agentSignInContents = await pageContents(agentSignInUrl);
+  const signInFields = () =>
+    app.evaluate(
+      ({ webContents }, id) =>
+        webContents
+          .fromId(id)
+          .executeJavaScript(
+            "[document.getElementById('username').value, document.getElementById('password').value]",
+          ),
+      agentSignInContents,
+    );
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].focus();
+    globalThis.__passwordFocused = BrowserWindow.prototype.isFocused;
+    BrowserWindow.prototype.isFocused = () => true;
+  });
+  let agentMenu;
+  // Cancel is the answer waiting for the first choice. The click comes again
+  // where the frame's script had not yet been told it may offer a fill.
+  for (let attempt = 1; attempt <= 3 && !agentMenu; attempt++) {
+    await passwords.expect([1]);
+    await clickInPage(agentSignInContents, "#username");
+    agentMenu = await poll(
+      async () => {
+        const { popups } = await passwords.read();
+        return popups.length ? popups : null;
+      },
+      { timeoutMs: 3000, label: "the fill menu in the agent space" },
+    ).catch(() => undefined);
+  }
+  assert.equal(agentMenu?.length, 1, "the fill menu opened once");
+  assert.deepEqual(agentMenu[0].items, [
+    personUsername,
+    "",
+    "Manage passwords...",
+  ]);
+  await passwords.chooseFill(0);
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const { messages } = await passwords.read();
+        return messages.length ? messages : null;
+      },
+      { label: "the question an agent space asks before filling" },
+    ),
+    [
+      "Agents can read pages in this space, including this password. | Fill | Cancel",
+    ],
+  );
+  assert.deepEqual(await signInFields(), ["", ""], "Cancel filled nothing");
+  await passwords.expect([0]);
+  await passwords.chooseFill(0);
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const values = await signInFields();
+        return values.every(Boolean) ? values : null;
+      },
+      { label: "the form filled after confirming" },
+    ),
+    [personUsername, personPassword],
+  );
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.prototype.isFocused = globalThis.__passwordFocused;
+    delete globalThis.__passwordFocused;
+  });
+  // The space goes back to the agent with the tab and the login gone.
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    agentSignInTab,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.passwords.remove(id),
+    agentLogin.id,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentTab,
+  );
+  await agentBar.getByRole("button", { name: "Let agent continue" }).click();
+  await waitForState(
+    page,
+    (state, id) =>
+      state.spaces.find((space) => space.id === id).owner === "agent",
+    task,
+  );
+  checked("an agent space confirms before filling");
   // Section 4: a full-page capture of the page the person is looking at
   // leaves its view and its scroll position where they were.
   const tallPage = `${origin}/tall`;
@@ -3310,6 +3978,7 @@ try {
   }
   await new Promise((resolve) => fixture.close(resolve));
   if (updateFeed) await updateFeed.close();
+  if (signInSite) await signInSite.close();
   for (const folder of [profile, updateProfile].filter(Boolean))
     await rm(folder, {
       recursive: true,

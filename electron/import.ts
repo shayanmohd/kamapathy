@@ -16,6 +16,7 @@ import type {
 } from "../shared/types";
 import { isWebUrl } from "../shared/url";
 import {
+  decryptValue,
   defaultRun,
   keyCache,
   readChromiumCookies,
@@ -23,6 +24,12 @@ import {
   type RunCommand,
   type SafeStorageKeys,
 } from "./import-cookies";
+import {
+  memoizeKeys,
+  readChromiumPasswords,
+  unreadableWarning,
+} from "./passwords/import-chromium";
+import type { ImportedLogin } from "./passwords/vault";
 
 export type BrowserId =
   | "chrome"
@@ -44,6 +51,7 @@ export interface ImportSource {
   profiles: ImportProfile[];
   default: boolean;
   signInsAvailable: boolean;
+  passwordsAvailable: boolean;
   status: "ready" | "needs_permission";
 }
 export interface ImportedBookmark {
@@ -97,7 +105,15 @@ export interface SelectionResult {
   history: ImportedVisit[];
   profiles: ProfileCookies[];
   warnings: string[];
+  // Section 18's saved passwords and never-saved origins, in row order.
+  logins: ImportedLogin[];
+  neverSaved: string[];
 }
+/** Section 18's merge, handed over by main: the logins and never-saved origins one import read. */
+export type MergeImportedPasswords = (
+  logins: readonly ImportedLogin[],
+  neverSaved: readonly string[],
+) => Promise<{ added: number; warnings: string[] }>;
 export interface CookieOutcome {
   written: number;
   failed: number;
@@ -495,6 +511,7 @@ export function availableBrowsers(env: ImportEnv = defaultEnv()): ImportSource[]
       profiles: blocked ? [] : profilesOf(id, dir),
       default: id === preferred,
       signInsAvailable: browsers[id].engine === "chromium",
+      passwordsAvailable: browsers[id].engine === "chromium",
       status: blocked ? "needs_permission" : "ready",
     });
   }
@@ -772,7 +789,7 @@ export function parseImportRequest(value: unknown): ImportRequest {
   } catch {
     throw invalid();
   }
-  const { profiles, bookmarks, history, signIns } = value;
+  const { profiles, bookmarks, history, signIns, passwords } = value;
   if (
     size > REQUEST_LIMIT ||
     !Array.isArray(profiles) ||
@@ -781,7 +798,8 @@ export function parseImportRequest(value: unknown): ImportRequest {
     typeof bookmarks !== "boolean" ||
     typeof history !== "boolean" ||
     !signInsTargets.includes(signIns as SignInsTarget) ||
-    (!bookmarks && !history && signIns === "none")
+    (passwords !== undefined && typeof passwords !== "boolean") ||
+    (!bookmarks && !history && signIns === "none" && passwords !== true)
   )
     throw invalid();
   const selections: ImportSelection[] = [];
@@ -807,6 +825,7 @@ export function parseImportRequest(value: unknown): ImportRequest {
     bookmarks,
     history,
     signIns: signIns as SignInsTarget,
+    ...(passwords === true ? { passwords: true } : {}),
   };
 }
 
@@ -859,7 +878,12 @@ export function resolveSelection(
 
 export async function importSelections(
   selections: readonly ImportSelection[],
-  options: { bookmarks: boolean; history: boolean; signIns: boolean },
+  options: {
+    bookmarks: boolean;
+    history: boolean;
+    signIns: boolean;
+    passwords?: boolean;
+  },
   env: ImportEnv = defaultEnv(),
 ): Promise<SelectionResult> {
   const sources = availableBrowsers(env);
@@ -885,9 +909,20 @@ export async function importSelections(
     platform: env.platform,
     run: env.command ?? defaultRun(),
   });
+  // One key read per browser serves this request's sign-ins and passwords.
+  const dataDirs = new Map<string, string>(
+    places.map((place) => [place.id, place.dataDir]),
+  );
+  const keyFor = memoizeKeys((browser: string) =>
+    keys(browser as ChromiumBrowserId, dataDirs.get(browser) ?? ""),
+  );
   const bookmarks: ImportedBookmark[] = [];
   const history: ImportedVisit[] = [];
   const profiles: ProfileCookies[] = [];
+  const logins: ImportedLogin[] = [];
+  const neverSaved: string[] = [];
+  // Rows that did not decrypt, by browser, for one warning each.
+  const unreadable = new Map<string, number>();
   const warnings: string[] = [];
   const warn = (warning: string) => {
     if (!warnings.includes(warning)) warnings.push(warning);
@@ -904,10 +939,29 @@ export async function importSelections(
     }
     readable++;
     read.result.warnings.forEach(warn);
-    if (!options.signIns || place.engine !== "chromium") continue;
+    if (place.engine !== "chromium") continue;
+    if (options.passwords) {
+      const found = await readChromiumPasswords(
+        place.profileDir,
+        place.browser,
+        {
+          key: () => keyFor(place.id),
+          decrypt: (value, key) =>
+            decryptValue(value, key as SafeStorageKeys, env.platform),
+        },
+      );
+      logins.push(...found.logins);
+      neverSaved.push(...found.neverSaved);
+      found.warnings.forEach(warn);
+      unreadable.set(
+        place.browser,
+        (unreadable.get(place.browser) ?? 0) + found.unreadable,
+      );
+    }
+    if (!options.signIns) continue;
     let keyring: SafeStorageKeys;
     try {
-      keyring = await keys(place.id as ChromiumBrowserId, place.dataDir);
+      keyring = await keyFor(place.id);
     } catch {
       warn(
         `Kamapathy could not get the sign-in key for ${place.browser} from your keychain.`,
@@ -951,11 +1005,15 @@ export async function importSelections(
         ? "1 sign-in could not be read and was left out."
         : `${skipped} sign-ins could not be read and were left out.`,
     );
+  for (const [name, count] of unreadable)
+    if (count) warn(unreadableWarning(count, name));
   return {
     bookmarks: unique(bookmarks),
     history: unique(history),
     profiles,
     warnings,
+    logins,
+    neverSaved,
   };
 }
 
@@ -984,14 +1042,17 @@ export async function runImport(
   target: ImportTarget,
   request: ImportRequest,
   env: ImportEnv = defaultEnv(),
+  mergePasswords?: MergeImportedPasswords,
 ): Promise<ImportOutcome> {
   const { signIns } = request;
+  const passwords = request.passwords === true && !!mergePasswords;
   const data = await importSelections(
     request.profiles,
     {
       bookmarks: request.bookmarks,
       history: request.history,
       signIns: signIns !== "none",
+      passwords,
     },
     env,
   );
@@ -1000,12 +1061,21 @@ export async function runImport(
     signIns !== "none" && data.profiles.some((item) => item.cookies.length)
       ? await target.applyImportedCookies(signIns, data.profiles)
       : { written: 0, spaces: [], warnings: [] };
+  const saved =
+    passwords && mergePasswords
+      ? await mergePasswords(data.logins, data.neverSaved)
+      : undefined;
   return {
     bookmarks: counts.bookmarks,
     history: counts.history,
     signIns: cookies.written,
     spaces: cookies.spaces,
-    warnings: [...data.warnings, ...cookies.warnings],
+    warnings: [
+      ...data.warnings,
+      ...cookies.warnings,
+      ...(saved?.warnings ?? []),
+    ],
+    ...(saved ? { passwords: saved.added } : {}),
   };
 }
 

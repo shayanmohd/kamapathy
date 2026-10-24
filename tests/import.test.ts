@@ -32,6 +32,7 @@ import {
   type BrowserId,
   type ImportEnv,
   type ImportTarget,
+  type MergeImportedPasswords,
 } from "../electron/import";
 import { deriveKey } from "../electron/import-cookies";
 import type { BrowserAction } from "../shared/types";
@@ -303,6 +304,7 @@ describe("browser detection", () => {
           { id: "Default", name: "Person 1" },
         ],
         signInsAvailable: true,
+        passwordsAvailable: true,
         status: "ready",
       },
       {
@@ -311,6 +313,7 @@ describe("browser detection", () => {
         default: false,
         profiles: [{ id: "Default", name: "Default" }],
         signInsAvailable: true,
+        passwordsAvailable: true,
         status: "ready",
       },
       {
@@ -319,6 +322,7 @@ describe("browser detection", () => {
         default: false,
         profiles: [],
         signInsAvailable: true,
+        passwordsAvailable: true,
         status: "ready",
       },
       {
@@ -327,6 +331,7 @@ describe("browser detection", () => {
         default: false,
         profiles: [{ id: ".", name: "Default" }],
         signInsAvailable: true,
+        passwordsAvailable: true,
         status: "ready",
       },
       {
@@ -338,6 +343,7 @@ describe("browser detection", () => {
           { id: "Profiles/a1b2c3d4.default", name: "default" },
         ],
         signInsAvailable: false,
+        passwordsAvailable: false,
         status: "ready",
       },
       {
@@ -346,6 +352,7 @@ describe("browser detection", () => {
         default: false,
         profiles: [{ id: "default", name: "Default" }],
         signInsAvailable: false,
+        passwordsAvailable: false,
         status: "ready",
       },
     ]);
@@ -392,11 +399,42 @@ describe("browser detection", () => {
     };
     const ready = { status: "ready" };
     expect(availableBrowsers(env)).toEqual([
-      { id: "chrome", name: "Google Chrome", default: false, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, ...ready },
-      { id: "brave", name: "Brave", default: true, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, ...ready },
-      { id: "firefox", name: "Firefox", default: false, profiles: [{ id: "abc.default", name: "default" }], signInsAvailable: false, ...ready },
+      { id: "chrome", name: "Google Chrome", default: false, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, passwordsAvailable: true, ...ready },
+      { id: "brave", name: "Brave", default: true, profiles: [{ id: "Default", name: "Default" }], signInsAvailable: true, passwordsAvailable: true, ...ready },
+      { id: "firefox", name: "Firefox", default: false, profiles: [{ id: "abc.default", name: "default" }], signInsAvailable: false, passwordsAvailable: false, ...ready },
     ]);
   });
+  it("sources report passwordsAvailable for the Chromium family only", () => {
+    const home = folder();
+    for (const dir of [
+      "Google/Chrome",
+      "Chromium",
+      "Microsoft Edge",
+      "BraveSoftware/Brave-Browser",
+      "Arc/User Data",
+      "Vivaldi",
+      "com.operasoftware.Opera",
+    ])
+      mkdirSync(join(support(home), dir, "Default"), { recursive: true });
+    write(join(support(home), "Firefox", "profiles.ini"), "[Profile0]\nName=default\nIsRelative=1\nPath=abc\n");
+    mkdirSync(join(support(home), "Firefox", "abc"), { recursive: true });
+    mkdirSync(join(home, "Library", "Safari"), { recursive: true });
+
+    expect(
+      availableBrowsers(mac(home)).map((source) => [source.id, source.passwordsAvailable]),
+    ).toEqual([
+      ["chrome", true],
+      ["chromium", true],
+      ["edge", true],
+      ["brave", true],
+      ["arc", true],
+      ["vivaldi", true],
+      ["opera", true],
+      ["firefox", false],
+      ["safari", false],
+    ]);
+  });
+
   it("finds nothing in an empty home", () => {
     expect(availableBrowsers(mac(folder()))).toEqual([]);
   });
@@ -672,6 +710,7 @@ describe("Firefox import", () => {
         default: false,
         profiles: [{ id: elsewhere, name: "elsewhere" }],
         signInsAvailable: false,
+        passwordsAvailable: false,
         status: "ready",
       },
     ]);
@@ -705,6 +744,7 @@ describe("Safari", () => {
           default: false,
           profiles: [{ id: "default", name: "Default" }],
           signInsAvailable: false,
+          passwordsAvailable: false,
           status: "ready",
         },
       ]);
@@ -772,6 +812,23 @@ describe("several profiles, sign-ins and permissions", () => {
     );
     const insert = db.prepare("INSERT INTO cookies VALUES (?, ?, '', ?, '/', 0, 1, 1, 1, 0, '')");
     for (const row of rows) insert.run(...row);
+    db.close();
+  }
+  function loginFile(path: string, rows: [string, string, Uint8Array, number][]) {
+    mkdirSync(dirname(path), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec(
+      "CREATE TABLE logins(id INTEGER PRIMARY KEY AUTOINCREMENT, origin_url TEXT, signon_realm TEXT, username_value TEXT, password_value BLOB, scheme INTEGER, blacklisted_by_user INTEGER, federation_url TEXT, date_created INTEGER, date_last_used INTEGER, date_password_modified INTEGER)",
+    );
+    db.exec("CREATE TABLE password_notes(parent_id INTEGER, key TEXT, value BLOB)");
+    db.exec(
+      "CREATE TABLE insecure_credentials(parent_id INTEGER, insecurity_type INTEGER, is_muted INTEGER)",
+    );
+    const insert = db.prepare(
+      "INSERT INTO logins (origin_url, signon_realm, username_value, password_value, scheme, blacklisted_by_user, federation_url, date_created, date_last_used, date_password_modified) VALUES (?, ?, ?, ?, 0, ?, '', 0, 0, 0)",
+    );
+    for (const [origin, username, password, blacklisted] of rows)
+      insert.run(origin, origin, username, password, blacklisted);
     db.close();
   }
   function fakeTarget(state: ImportTarget["state"]) {
@@ -1066,6 +1123,90 @@ describe("several profiles, sign-ins and permissions", () => {
     expect(untouched).not.toHaveBeenCalled();
     expect(plain.profiles).toEqual([]);
     expect(plain.warnings).toEqual([]);
+  });
+
+  it("import: passwords and sign-ins share one key read per browser", async () => {
+    const { home, chrome } = chromeHome();
+    const chromePassword = (value: string) => encrypt("chrome-password", value);
+    loginFile(join(chrome, "Default", "Login Data"), [
+      ["https://docs.example/", "ada", chromePassword("secret-docs"), 0],
+      ["https://never.example/", "", new Uint8Array(), 1],
+      ["https://broken.example/", "bob", garbage(9), 0],
+    ]);
+    loginFile(join(chrome, "Profile 1", "Login Data"), [
+      ["https://work.example/", "wes", chromePassword("secret-work"), 0],
+      ["https://lost.example/", "lou", garbage(11), 0],
+    ]);
+    cookieFile(join(chrome, "Default", "Network", "Cookies"), [
+      ["mail.example.com", "sid", encrypt("chrome-password", "cookie-1")],
+    ]);
+    const command = vi.fn(async (name: string) => {
+      if (name === "security") return "chrome-password\n";
+      throw new Error(`unexpected ${name}`);
+    });
+    const selections = [
+      { source: "chrome", profile: "Default" },
+      { source: "chrome", profile: "Profile 1" },
+    ];
+
+    const data = await importSelections(
+      selections,
+      { bookmarks: false, history: false, signIns: true, passwords: true },
+      { ...mac(home), command },
+    );
+
+    // One keychain prompt serves both profiles and both kinds of secret.
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(data.logins).toEqual([
+      expect.objectContaining({
+        kind: "form",
+        origin: "https://docs.example",
+        username: "ada",
+        password: "secret-docs",
+      }),
+      expect.objectContaining({
+        origin: "https://work.example",
+        username: "wes",
+        password: "secret-work",
+      }),
+    ]);
+    expect(data.neverSaved).toEqual(["https://never.example"]);
+    expect(data.profiles[0].cookies[0].value).toBe("cookie-1");
+    expect(data.warnings).toEqual([
+      "2 Google Chrome passwords couldn't be read. Export them from Google Chrome as a CSV file and import that file.",
+    ]);
+
+    const target = fakeTarget({ bookmarks: [], history: [] });
+    const merge = vi.fn<MergeImportedPasswords>(async () => ({
+      added: 2,
+      warnings: ["the vault was full"],
+    }));
+    const outcome = await runImport(
+      target,
+      { profiles: selections, bookmarks: false, history: false, signIns: "none", passwords: true },
+      { ...mac(home), command },
+      merge,
+    );
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(merge.mock.calls[0][0].map((login) => login.username)).toEqual(["ada", "wes"]);
+    expect(merge.mock.calls[0][1]).toEqual(["https://never.example"]);
+    expect(outcome.passwords).toBe(2);
+    expect(outcome.warnings).toEqual([
+      "2 Google Chrome passwords couldn't be read. Export them from Google Chrome as a CSV file and import that file.",
+      "the vault was full",
+    ]);
+
+    // Passwords left off ask for no key and report no count.
+    const untouched = vi.fn(async () => "chrome-password");
+    const plain = await runImport(
+      target,
+      { profiles: selections, bookmarks: true, history: false, signIns: "none" },
+      { ...mac(home), command: untouched },
+      merge,
+    );
+    expect(untouched).not.toHaveBeenCalled();
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(plain.passwords).toBeUndefined();
   });
 
   it("hands the sign-ins to their destination and reports what was written", async () => {

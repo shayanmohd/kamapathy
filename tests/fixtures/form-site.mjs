@@ -10,6 +10,7 @@ import { textPdf } from './pdf/index.mjs';
 import { selectorPages } from './selector-pages.mjs';
 import { snapshotPages } from './snapshot-pages.mjs';
 import { extensionPages } from './extension-pages.mjs';
+import { signInPages, SIGN_IN_PASSWORD } from './sign-in-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
@@ -61,7 +62,16 @@ export async function startFormSite() {
       if (request.method === 'GET' && url.pathname === '/pdf/links') return send('Report links', '<h1>Reports</h1><p><a id="report-link" href="/pdf/report.pdf" target="_blank">Open the report</a></p>');
       if (request.method === 'GET' && url.pathname === '/pdf/form') return send('Request the report', '<h1>Request the report</h1><form action="/pdf/posted.pdf" method="post"><input type="hidden" name="quarter" value="Q3"><button id="post-report" type="submit">Post for the report</button></form>');
       if (request.method === 'GET' && url.pathname === '/pdf/blob') return send('Build the report', '<h1>Build the report</h1><button id="open-blob">Open the blob report</button><p id="blob-status" role="status"></p>', `document.querySelector('#open-blob').onclick=async()=>{const bytes=await (await fetch('/pdf/report.pdf')).arrayBuffer();const opened=window.open(URL.createObjectURL(new Blob([bytes],{type:'application/pdf'})));document.querySelector('#blob-status').textContent=opened?'Blob report opened':'Blob report refused';};`);
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname]);
+      // The sign-in pages and the post their form makes: the right password
+      // leads to a page with no password field, a wrong one brings the form
+      // back, as the end-to-end sign-in site answers.
+      if (request.method === 'POST' && url.pathname === '/passwords/sign-in') {
+        const body = await readForm();
+        if (body.get('password') === SIGN_IN_PASSWORD) return redirect('/passwords/signed-in');
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        return response.end(signInPages['/passwords/sign-in']);
+      }
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         // A page asking for {{other}} gets this server through its other

@@ -61,6 +61,9 @@ label.import-source {
   line-height: 1.7;
   color: var(--secondary);
 }
+.import-source-note {
+  display: block;
+}
 .import-destination {
   display: grid;
   margin-top: 12px;
@@ -106,6 +109,17 @@ label.import-source {
 }
 .import-safari button {
   margin-top: 10px;
+}
+.import-safari-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  cursor: pointer;
+}
+.import-safari-choice input {
+  margin: 0;
+  accent-color: var(--text);
 }
 .import-file {
   display: none;
