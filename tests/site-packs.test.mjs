@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -23,11 +25,15 @@ import {
   readManifest,
   readTrustedFile,
   rootState,
+  runToolIn,
   siteContextFor,
   siteRoots,
   summarize,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
-import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
+import {
+  KamapathyError,
+  hardStopCause,
+} from "../skills/kamapathy/scripts/lib/errors.mjs";
 import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
 
 const posix = process.platform !== "win32";
@@ -53,7 +59,11 @@ afterAll(async () => {
 // A workspace root and a bundled root of one case's own, so no case depends
 // on the packs the skill ships.
 async function freshRoots() {
-  const base = await mkdtemp(join(tmpdir(), "kamapathy-site-roots-"));
+  // The real path, so a stack frame from a tool a case imports names the
+  // folder the pack sits in.
+  const base = await realpath(
+    await mkdtemp(join(tmpdir(), "kamapathy-site-roots-")),
+  );
   temporary.push(base);
   const home = join(base, "workspace");
   await mkdir(home, { mode: 0o700 });
@@ -481,6 +491,156 @@ const rules = [
     null,
   ],
 ];
+
+// A pack whose Node tools cover every argument type, beside a page tool
+// runSiteTool must never find.
+const argsPack = () => ({
+  format: 1,
+  id: "github",
+  name: "GitHub",
+  domains: ["github.com"],
+  tools: {
+    search_repositories: {
+      description: "Search repositories and read the first results.",
+      file: "tools/search-repositories.mjs",
+      export: "searchRepositories",
+      args: {
+        query: {
+          type: "string",
+          required: true,
+          description: "Words to search for.",
+        },
+        limit: {
+          type: "integer",
+          description: "How many results to read, 10 by default.",
+        },
+      },
+      returns: { type: "array", description: "[{ fullName, url }]" },
+    },
+    read_types: {
+      description: "Return the arguments it got, of every type.",
+      file: "tools/read-types.mjs",
+      export: "readTypes",
+      args: {
+        text: { type: "string", description: "Any string." },
+        count: { type: "number", description: "Any finite number." },
+        tags: { type: "array", description: "Any array." },
+        shape: { type: "object", description: "Any plain object." },
+        flag: { type: "boolean", description: "True or false." },
+      },
+      returns: { type: "object", description: "The arguments it got." },
+    },
+  },
+  pageTools: {
+    repository_stats: {
+      description: "Read the stars and forks of the open repository.",
+      file: "page-tools/repository-stats.js",
+      returns: { type: "object", description: "{ stars, forks }" },
+    },
+  },
+});
+
+// A tool that reports the context it ran with. Its module counts its own
+// calls and imports one module beside the workspace, which every pack
+// shares.
+const reportPack = (id, name) => ({
+  format: 1,
+  id,
+  name,
+  domains: [`${id}.example`],
+  tools: {
+    report: {
+      description: "Return the context and arguments the tool got.",
+      file: "tools/report.mjs",
+      export: "report",
+      args: { query: { type: "string", description: "Anything at all." } },
+      returns: { type: "object", description: "What the tool was given." },
+    },
+  },
+});
+
+const SHARED_MODULE = `let calls = 0;
+export const note = () => ++calls;
+`;
+const REPORT_TOOL = `import { note } from "../../../shared.mjs";
+let calls = 0;
+export const report = (context, args) => {
+  calls += 1;
+  args.query = "mutated";
+  return { ...context, args, calls, shared: note() };
+};
+`;
+
+// Tools that throw, and exports that are missing or are not functions.
+const failurePack = () => ({
+  format: 1,
+  id: "github",
+  name: "GitHub",
+  domains: ["github.com"],
+  tools: {
+    thrower: {
+      description: "Throw a TypeError of its own.",
+      file: "tools/thrower.mjs",
+      export: "thrower",
+      returns: { type: "object", description: "Nothing: it throws." },
+    },
+    stopped: {
+      description: "Throw the error a takeover raises.",
+      file: "tools/raise.mjs",
+      export: "stopped",
+      returns: { type: "object", description: "Nothing: it throws." },
+    },
+    timed_out: {
+      description: "Throw an error that can be retried.",
+      file: "tools/raise.mjs",
+      export: "timedOut",
+      returns: { type: "object", description: "Nothing: it throws." },
+    },
+    missing_export: {
+      description: "Name an export its module does not have.",
+      file: "tools/extras.mjs",
+      export: "absent",
+      returns: { type: "object", description: "Nothing: it cannot load." },
+    },
+    not_function: {
+      description: "Name an export that is not a function.",
+      file: "tools/extras.mjs",
+      export: "number",
+      returns: { type: "object", description: "Nothing: it cannot load." },
+    },
+  },
+  pageTools: {
+    repository_stats: {
+      description: "Read the stars and forks of the open repository.",
+      file: "page-tools/repository-stats.js",
+      returns: { type: "object", description: "{ stars, forks }" },
+    },
+  },
+});
+
+const THROWER_TOOL = `export function thrower() {
+  const data = { x: 1 };
+  throw new TypeError("no " + data.x);
+}
+`;
+const RAISE_TOOL = (
+  url,
+) => `import { KamapathyError } from ${JSON.stringify(url)};
+export function stopped() {
+  throw new KamapathyError("human_control", "The person has control of the space.", {
+    reason: "manual",
+  });
+}
+export function timedOut() {
+  throw new KamapathyError("timeout", "The tool's own call timed out.", {
+    retryable: true,
+    dispatched: true,
+  });
+}
+`;
+const EXTRAS_TOOL = `export const number = 5;
+export const other = () => "other";
+`;
 
 describe("site packs", () => {
   it("reads a pack.json and reports every manifest rule", async () => {
@@ -1345,5 +1505,381 @@ describe("site packs", () => {
         "kamapathy.siteContext got no target. Expected kamapathy.siteContext(target).",
     });
     expect(sent).toBe(0);
+  });
+
+  it("runSiteTool checks args before loading the tool", async () => {
+    const { env, roots } = await freshRoots();
+    // The marker sits beside the workspace, so only an import of the tool's
+    // module can write it.
+    const marker = join(dirname(roots[0].path), "imported.txt");
+    await writePackIn(roots[0].path, "github", argsPack(), {
+      "tools/search-repositories.mjs": `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker)}, "imported");
+export const searchRepositories = (context, args) => args;
+`,
+      "tools/read-types.mjs":
+        "export const readTypes = (context, args) => args;\n",
+    });
+    const page = new Page(null, {
+      id: "tab-1",
+      spaceId: "space-1",
+      url: "https://github.com/",
+      title: "GitHub",
+    });
+    const run = (tool, args) =>
+      runToolIn(env, {
+        packId: "github",
+        tool,
+        args,
+        page,
+        client: null,
+        roots,
+      });
+    const expected = {
+      search_repositories: "{ query: string, limit?: integer }",
+      read_types:
+        "{ text?: string, count?: number, tags?: array, shape?: object, flag?: boolean }",
+    };
+    class Args {
+      constructor() {
+        this.query = "kamapathy";
+      }
+    }
+    const cases = [
+      // undefined means no arguments at all, so a required one is missing.
+      ["search_repositories", undefined, ["query is required."]],
+      ["search_repositories", {}, ["query is required."]],
+      // An undefined value counts as absent; null never passes.
+      ["search_repositories", { query: undefined }, ["query is required."]],
+      ["search_repositories", { query: null }, ["query must be a string."]],
+      ["search_repositories", { query: 5 }, ["query must be a string."]],
+      [
+        "search_repositories",
+        { query: "kamapathy", limit: 1.5 },
+        ["limit must be an integer."],
+      ],
+      [
+        "search_repositories",
+        { query: "kamapathy", limit: 2 ** 53 },
+        ["limit must be an integer."],
+      ],
+      [
+        "search_repositories",
+        { query: "kamapathy", extra: 1 },
+        ["extra is not an argument of search_repositories."],
+      ],
+      [
+        "search_repositories",
+        { nope: 1 },
+        [
+          "nope is not an argument of search_repositories.",
+          "query is required.",
+        ],
+      ],
+      // Anything that is not a plain object is refused whole.
+      ["search_repositories", null, ["arguments must be an object."]],
+      ["search_repositories", [], ["arguments must be an object."]],
+      ["search_repositories", "{}", ["arguments must be an object."]],
+      ["search_repositories", new Args(), ["arguments must be an object."]],
+      [
+        "search_repositories",
+        new Map([["query", "kamapathy"]]),
+        ["arguments must be an object."],
+      ],
+      ["read_types", { count: Number.NaN }, ["count must be a number."]],
+      [
+        "read_types",
+        { count: Number.POSITIVE_INFINITY },
+        ["count must be a number."],
+      ],
+      ["read_types", { tags: {} }, ["tags must be an array."]],
+      ["read_types", { shape: [] }, ["shape must be an object."]],
+      ["read_types", { shape: new Args() }, ["shape must be an object."]],
+      ["read_types", { flag: "true" }, ["flag must be a boolean."]],
+      ["read_types", { text: 5 }, ["text must be a string."]],
+    ];
+    for (const [index, [tool, args, problems]] of cases.entries()) {
+      const failed = await run(tool, args).then(
+        () => null,
+        (error) => error,
+      );
+      const where = `case ${index}`;
+      expect(failed?.code, where).toBe("invalid_tool_args");
+      expect(failed.packId, where).toBe("github");
+      expect(failed.tool, where).toBe(tool);
+      expect(failed.problems, where).toEqual(problems);
+      expect(failed.expected, where).toBe(expected[tool]);
+      expect(failed.message, where).toBe(
+        `${tool} in the github pack got invalid arguments: ${problems[0]}`,
+      );
+    }
+    // A packId or a tool name outside its pattern is the call's own mistake.
+    for (const [packId, tool, name] of [
+      ["GitHub", "search_repositories", "packId"],
+      ["", "search_repositories", "packId"],
+      ["github", "Search", "tool"],
+      ["github", "", "tool"],
+    ]) {
+      const refused = await runToolIn(env, {
+        packId,
+        tool,
+        args: {},
+        page,
+        client: null,
+        roots,
+      }).then(
+        () => null,
+        (error) => error,
+      );
+      expect(refused?.code, `${packId} ${tool}`).toBe("invalid_argument");
+      expect(refused.entry, `${packId} ${tool}`).toBe("runSiteTool");
+      expect(refused.message, `${packId} ${tool}`).toContain(name);
+    }
+    // Nothing above imported a module, so the marker is still absent.
+    expect(existsSync(marker)).toBe(false);
+    // A tool with no required arguments takes a plain object and runs.
+    expect(await run("read_types", {})).toEqual({});
+    expect(await run("read_types", { text: "x", count: undefined })).toEqual({
+      text: "x",
+    });
+    expect(existsSync(marker)).toBe(false);
+    // The tool that passes its check is the one that loads.
+    expect(
+      await run("search_repositories", { query: "kamapathy", limit: 5 }),
+    ).toEqual({ query: "kamapathy", limit: 5 });
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("runSiteTool passes page, client and pack, and reloads only a changed file", async () => {
+    const { env, roots } = await freshRoots();
+    const home = dirname(roots[0].path);
+    await writeFile(join(home, "shared.mjs"), SHARED_MODULE, { mode: 0o600 });
+    const tool = join(roots[0].path, "github", "tools", "report.mjs");
+    await writePackIn(roots[0].path, "github", reportPack("github", "GitHub"), {
+      "tools/report.mjs": REPORT_TOOL,
+    });
+    await writePackIn(roots[0].path, "beta", reportPack("beta", "Beta"), {
+      "tools/report.mjs": REPORT_TOOL,
+    });
+    let sent = 0;
+    const fetch = () => {
+      sent += 1;
+      throw new Error("A site pack call sent a request.");
+    };
+    const client = await connect({
+      env,
+      fetch,
+      health: { status: "ok", version: "0.2.0", apiLevel: 4 },
+    });
+    const page = new Page(null, {
+      id: "tab-1",
+      spaceId: "space-1",
+      url: "https://github.example/",
+      title: "GitHub",
+    });
+    const args = { query: "keep" };
+    const first = await client.runSiteTool("github", "report", args, { page });
+    // The tool works in the page it was given, through this client, and
+    // knows only the pack's own four fields.
+    expect(first.page).toBe(page);
+    expect(first.kamapathy).toBe(client);
+    expect(first.pack).toEqual({
+      id: "github",
+      name: "GitHub",
+      dir: join(roots[0].path, "github"),
+      source: "workspace",
+    });
+    // Its arguments are a copy, so what it writes leaves the caller's
+    // object as it was.
+    expect(first.args).toEqual({ query: "mutated" });
+    expect(first.args).not.toBe(args);
+    expect(args).toEqual({ query: "keep" });
+    expect([first.calls, first.shared]).toEqual([1, 1]);
+    // An unchanged file keeps the module Node already loaded.
+    const second = await client.runSiteTool("github", "report", args, { page });
+    expect([second.calls, second.shared]).toEqual([2, 2]);
+    // Another pack's tool is its own module, over the same shared import.
+    const other = await client.runSiteTool("beta", "report", {}, { page });
+    expect([other.calls, other.shared]).toEqual([1, 3]);
+    expect(other.pack).toMatchObject({ id: "beta", name: "Beta" });
+    // An edited file loads fresh, while its own import stays loaded.
+    await writeFile(tool, `${REPORT_TOOL}// edited\n`, { mode: 0o600 });
+    const edited = await client.runSiteTool("github", "report", args, { page });
+    expect([edited.calls, edited.shared]).toEqual([1, 4]);
+    // The options must carry a Page from this client.
+    await expect(
+      client.runSiteTool("github", "report", {}, { page: { id: "tab-1" } }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "kamapathy.runSiteTool",
+    });
+    await expect(
+      client.runSiteTool("github", "report", {}, {}),
+    ).rejects.toMatchObject({ code: "invalid_option", option: "page" });
+    await expect(
+      client.runSiteTool("github", "report", {}),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(sent).toBe(0);
+  });
+
+  it("KamapathyErrors pass through tagged, other throws become site_tool_failed with at, unknown packs name the searched roots", async () => {
+    const { env, roots } = await freshRoots();
+    const errors = new URL(
+      "../skills/kamapathy/scripts/lib/errors.mjs",
+      import.meta.url,
+    ).href;
+    const dir = await writePackIn(roots[0].path, "github", failurePack(), {
+      "tools/thrower.mjs": THROWER_TOOL,
+      "tools/raise.mjs": RAISE_TOOL(errors),
+      "tools/extras.mjs": EXTRAS_TOOL,
+    });
+    const page = new Page(null, {
+      id: "tab-1",
+      spaceId: "space-1",
+      url: "https://github.com/",
+      title: "GitHub",
+    });
+    const run = (tool, packId = "github") =>
+      runToolIn(env, {
+        packId,
+        tool,
+        args: {},
+        page,
+        client: null,
+        roots,
+      }).then(
+        () => null,
+        (error) => error,
+      );
+
+    // A KamapathyError from inside is the error the run sees, with the pack
+    // and the tool added.
+    const held = await run("stopped");
+    expect(held).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+      packId: "github",
+      tool: "stopped",
+    });
+    expect(held.message).toBe("The person has control of the space.");
+    expect(hardStopCause(held)).toBe("control");
+    expect(await run("timed_out")).toMatchObject({
+      code: "timeout",
+      retryable: true,
+      dispatched: true,
+      packId: "github",
+      tool: "timed_out",
+    });
+
+    // Anything else is the tool's failure, naming the frame it threw from.
+    const failed = await run("thrower");
+    expect(failed).toMatchObject({
+      code: "site_tool_failed",
+      packId: "github",
+      tool: "thrower",
+      at: "tools/thrower.mjs:3:9",
+    });
+    expect(failed.cause).toBe("no 1");
+    expect(failed.message).toBe("The github tool thrower failed: no 1.");
+
+    // An export the module does not have, and one that is not a function,
+    // are the pack's own problem.
+    const absent = await run("missing_export");
+    expect(absent).toMatchObject({
+      code: "site_pack_invalid",
+      packId: "github",
+      dir,
+      problems: ["tools/extras.mjs: does not export absent."],
+    });
+    expect(absent.message).toBe(
+      "The github pack breaks its rules: tools/extras.mjs: does not export absent.",
+    );
+    expect(await run("not_function")).toMatchObject({
+      code: "site_pack_invalid",
+      problems: ["tools/extras.mjs: exports number, which is not a function."],
+    });
+
+    // An unknown tool names the kind, what the pack has and the other map.
+    const unknown = await run("repository_stats");
+    expect(unknown).toMatchObject({
+      code: "site_tool_not_found",
+      packId: "github",
+      tool: "repository_stats",
+      kind: "node",
+      available: [
+        "thrower",
+        "stopped",
+        "timed_out",
+        "missing_export",
+        "not_function",
+      ],
+    });
+    expect(unknown.message).toBe(
+      "The github pack has no Node tool named repository_stats. Available: thrower, stopped, timed_out, missing_export, not_function. repository_stats is a page tool. Call runPageTool.",
+    );
+    await writePackIn(roots[0].path, "quiet", bare("quiet", ["quiet.example"]));
+    expect((await run("anything", "quiet")).message).toBe(
+      "The quiet pack has no Node tool named anything. Available: none.",
+    );
+
+    // A pack that breaks its rules names the first problem and counts the
+    // rest.
+    await writePackIn(roots[0].path, "broken", {
+      format: 2,
+      id: "broken",
+      name: "",
+      domains: [],
+    });
+    const broken = await run("report", "broken");
+    expect(broken).toMatchObject({
+      code: "site_pack_invalid",
+      packId: "broken",
+      dir: join(roots[0].path, "broken"),
+      problems: [
+        "format: format must be 1.",
+        "name: name must be 1 to 48 characters.",
+        "domains: domains must list 1 to 32 hosts.",
+      ],
+    });
+    expect(broken.message).toBe(
+      "The broken pack breaks its rules: format: format must be 1. 2 more problems.",
+    );
+
+    // A workspace folder hides the pack the skill ships, broken or not.
+    await writePackIn(
+      roots[1].path,
+      "shadowed",
+      bare("shadowed", ["shadowed.example"]),
+    );
+    await writePackIn(roots[0].path, "shadowed", "{");
+    expect(await run("anything", "shadowed")).toMatchObject({
+      code: "site_pack_invalid",
+      dir: join(roots[0].path, "shadowed"),
+    });
+
+    // An id in neither root names both paths and the state each is in.
+    const bundled = join(dirname(roots[1].path), "nothing");
+    const missing = await runToolIn(env, {
+      packId: "nope",
+      tool: "report",
+      args: {},
+      page,
+      client: null,
+      roots: [roots[0], { path: bundled, source: "bundled" }],
+    }).then(
+      () => null,
+      (error) => error,
+    );
+    expect(missing).toMatchObject({
+      code: "site_pack_not_found",
+      packId: "nope",
+    });
+    expect(missing.roots).toEqual([
+      { path: roots[0].path, source: "workspace", state: "ok" },
+      { path: bundled, source: "bundled", state: "missing" },
+    ]);
+    expect(missing.message).toBe(
+      `No site pack named "nope" is in Kamapathy's workspace or the skill. Looked in ${roots[0].path} (ok) and ${bundled} (missing).`,
+    );
   });
 });

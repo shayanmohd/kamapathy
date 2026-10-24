@@ -15,7 +15,7 @@ import {
   resolveLabels,
   Session,
 } from "./lib/request.mjs";
-import { listSitePacks, siteContextFor } from "./lib/sites.mjs";
+import { listSitePacks, runToolIn, siteContextFor } from "./lib/sites.mjs";
 import { checkCall, findEntry } from "./schema/index.mjs";
 
 export { help } from "./help.mjs";
@@ -212,6 +212,12 @@ const labelOf = (options) =>
  * @property {string} path
  * @property {"workspace" | "bundled"} source
  * @property {string} problem
+ */
+/**
+ * @typedef {object} NodeToolContext What a pack's Node tool is given.
+ * @property {Page} page The page the tool works in.
+ * @property {Client} kamapathy This client.
+ * @property {{ id: string, name: string, dir: string, source: "workspace" | "bundled" }} pack
  */
 
 // Refreshes a page from a response that carries its tab.
@@ -1037,6 +1043,31 @@ export class Client {
     return this.#local("siteContext", [target], () =>
       siteContextFor(this.#session.env, siteTarget(target)),
     );
+  }
+  /**
+   * Runs a site pack's Node tool in the agent's own Node.js, with the page,
+   * this client and the pack.
+   * @param {string} packId
+   * @param {string} tool
+   * @param {object | undefined} args The arguments the tool declares.
+   * @param {{ page: Page }} options
+   * @returns {Promise<unknown>} What the tool returned.
+   */
+  runSiteTool(packId, tool, args, options) {
+    return this.#local("runSiteTool", [packId, tool, args, options], () => {
+      if (!(options.page instanceof Page))
+        throw new KamapathyError(
+          "invalid_argument",
+          'kamapathy.runSiteTool needs options.page to be a Page from this client, such as the one space.page("p1") returns.',
+        );
+      return runToolIn(this.#session.env, {
+        packId,
+        tool,
+        args,
+        page: options.page,
+        client: this,
+      });
+    });
   }
 }
 

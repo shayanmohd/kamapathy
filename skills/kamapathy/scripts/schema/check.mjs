@@ -93,6 +93,9 @@ function fits(value, field) {
       );
     case "boolean":
       return typeof value === "boolean";
+    // A Page an options field takes, such as the page a site tool works in.
+    case "page":
+      return isPageLike(value);
     case "enum":
       return field.values.includes(value);
     case "array":

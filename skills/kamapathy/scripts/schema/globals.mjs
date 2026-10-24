@@ -133,6 +133,35 @@ const context = (name, signature, kind) => ({
   errors: ["invalid_argument"],
   since: 4,
 });
+const runTool = (name, signature, kind) => ({
+  name,
+  kind,
+  signature,
+  summary: "Runs a site pack's Node tool in the agent's own Node.js.",
+  args: [
+    { name: "packId", kind: "string" },
+    { name: "tool", kind: "string" },
+    { name: "args", kind: "json", optional: true },
+    { name: "options", kind: "options" },
+  ],
+  options: {
+    page: {
+      kind: "page",
+      required: true,
+      description: "The agent page the tool works in.",
+    },
+  },
+  returns: "Promise<unknown>",
+  errors: [
+    "invalid_argument",
+    "site_pack_not_found",
+    "site_tool_not_found",
+    "site_pack_invalid",
+    "invalid_tool_args",
+    "site_tool_failed",
+  ],
+  since: 4,
+});
 
 export const GLOBALS = [
   {
@@ -153,6 +182,7 @@ export const GLOBALS = [
   request("requestSpace", "requestSpace(options)", "global"),
   packs("sitePacks", "sitePacks(target?)", "global"),
   context("siteContext", "siteContext(target)", "global"),
+  runTool("runSiteTool", "runSiteTool(packId, tool, args, options)", "global"),
   {
     name: "help",
     kind: "global",
@@ -247,4 +277,9 @@ export const CLIENT = [
   },
   packs("Client.sitePacks", "kamapathy.sitePacks(target?)", "method"),
   context("Client.siteContext", "kamapathy.siteContext(target)", "method"),
+  runTool(
+    "Client.runSiteTool",
+    "kamapathy.runSiteTool(packId, tool, args, options)",
+    "method",
+  ),
 ];

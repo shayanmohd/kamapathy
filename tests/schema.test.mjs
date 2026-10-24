@@ -995,13 +995,91 @@ describe("API schema", () => {
     expect(checkCall(entry("siteContext"), [])?.message).toBe(
       "siteContext got no target. Expected siteContext(target).",
     );
-    // The generated reference carries both forms.
+    // runSiteTool: the same declaration as a global and as a method, with
+    // the page option and the codes it raises.
+    const page = new Page(async () => {}, {
+      id: "t",
+      spaceId: "s",
+      url: "",
+      title: "",
+    });
+    for (const item of [entry("runSiteTool"), entry("Client.runSiteTool")]) {
+      expect(item, item.name).toMatchObject({
+        summary: "Runs a site pack's Node tool in the agent's own Node.js.",
+        returns: "Promise<unknown>",
+        errors: [
+          "invalid_argument",
+          "site_pack_not_found",
+          "site_tool_not_found",
+          "site_pack_invalid",
+          "invalid_tool_args",
+          "site_tool_failed",
+        ],
+        since: 4,
+      });
+      // It declares no route: the client reads the pack and runs its file.
+      expect(item.route, item.name).toBeUndefined();
+      expect(item.args, item.name).toEqual([
+        { name: "packId", kind: "string" },
+        { name: "tool", kind: "string" },
+        { name: "args", kind: "json", optional: true },
+        { name: "options", kind: "options" },
+      ]);
+      expect(item.options, item.name).toEqual({
+        page: {
+          kind: "page",
+          required: true,
+          description: "The agent page the tool works in.",
+        },
+      });
+      // A Page fits the page option, and arguments may be left out.
+      for (const args of [
+        ["github", "search_repositories", { query: "kamapathy" }, { page }],
+        ["github", "search_repositories", undefined, { page }],
+      ])
+        expect(checkCall(item, args), item.name).toBeNull();
+      expect(
+        checkCall(item, ["github", "search_repositories", {}])?.code,
+        item.name,
+      ).toBe("invalid_argument");
+      for (const options of [{}, { page: "p1" }, { page: null }, { page: 5 }])
+        expect(
+          checkCall(item, ["github", "search_repositories", {}, options])?.code,
+          `${item.name} ${JSON.stringify(options)}`,
+        ).toBe("invalid_option");
+    }
+    expect(entry("runSiteTool")).toMatchObject({
+      kind: "global",
+      signature: "runSiteTool(packId, tool, args, options)",
+    });
+    expect(entry("Client.runSiteTool")).toMatchObject({
+      kind: "method",
+      signature: "kamapathy.runSiteTool(packId, tool, args, options)",
+    });
+    // Every code it raises is client side and stays as it is on a retry.
+    for (const [code, fields] of [
+      ["site_pack_not_found", ["packId", "roots"]],
+      ["site_tool_not_found", ["packId", "tool", "kind", "available"]],
+      ["site_pack_invalid", ["packId", "dir", "problems"]],
+      ["invalid_tool_args", ["packId", "tool", "problems", "expected"]],
+      ["site_tool_failed", ["packId", "tool", "at", "cause"]],
+    ]) {
+      expect(ERRORS[code], code).toMatchObject({
+        status: null,
+        transient: false,
+        since: 4,
+      });
+      expect(ERRORS[code].fields, code).toEqual(fields);
+    }
+    // The generated reference carries every form.
     const reference = read("skills/kamapathy/references/api.md");
     for (const text of [
       "`sitePacks(target?)`",
       "`siteContext(target)`",
+      "`runSiteTool(packId, tool, args, options)`",
       "`kamapathy.sitePacks(target?)`",
       "`kamapathy.siteContext(target)`",
+      "`kamapathy.runSiteTool(packId, tool, args, options)`",
     ])
       expect(reference, text).toContain(text);
   });

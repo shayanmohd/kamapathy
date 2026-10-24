@@ -1,9 +1,10 @@
 // Site packs: the two roots a pack can live in, the files a pack may hold and
 // the rules its pack.json must pass. Reading a pack never runs its code.
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
-import { domainToASCII, fileURLToPath } from "node:url";
+import { domainToASCII, fileURLToPath, pathToFileURL } from "node:url";
 import { KamapathyError } from "./errors.mjs";
 import { line } from "./format.mjs";
 import { checkWorkspace, workspacePath } from "./workspace.mjs";
@@ -813,4 +814,298 @@ export async function siteContextFor(env, target, options) {
         });
     }
   return { url: url ?? "", host, packs: contexts, skipped };
+}
+
+const PACK_ID_EXPECTED =
+  "Expected the name of a pack's folder: 1 to 48 lowercase letters, digits and hyphens.";
+const TOOL_EXPECTED =
+  "Expected a tool name of 1 to 48 lowercase letters, digits and underscores, starting with a letter.";
+const KIND_WORDS = { node: "Node tool", page: "page tool" };
+const KIND_CALLS = { node: "runSiteTool", page: "runPageTool" };
+const ARTICLES = {
+  string: "a string",
+  number: "a number",
+  integer: "an integer",
+  boolean: "a boolean",
+  array: "an array",
+  object: "an object",
+};
+
+// A plain object, as a tool's arguments and its object values must be: an
+// array, a class instance, a Map and null are something else.
+const plainArgs = (value) =>
+  value !== null &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+// A name the call itself got wrong, so nothing is read: no pack can hold it.
+function checkName(value, { pattern, label, expected, entry }) {
+  if (typeof value === "string" && pattern.test(value)) return value;
+  throw new KamapathyError(
+    "invalid_argument",
+    `${entry} got ${shown(value)} for ${label}. ${expected}`,
+    { entry },
+  );
+}
+
+// Text from a pack or its code: one line, with nothing that can hide or
+// reorder what it says.
+const toolText = (value, limit) => cleanText(line(value)).slice(0, limit);
+const sentence = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
+// The pack, or a file it declares, breaks a rule: the first problem in the
+// message and up to LIMITS.problems of them in the error.
+function packInvalid(pack, problems) {
+  const texts = problems.slice(0, LIMITS.problems).map(problemText);
+  const more = problems.length - 1;
+  return new KamapathyError(
+    "site_pack_invalid",
+    `The ${pack.id} pack breaks its rules: ${texts[0]}${
+      more > 0 ? ` ${more} more problem${more === 1 ? "" : "s"}.` : ""
+    }`,
+    { packId: pack.id, dir: pack.dir, problems: texts },
+  );
+}
+
+// Whether a root holds this pack's folder. A link counts, so its refusal is
+// reported instead of the id reading as missing.
+async function hasPackFolder(dir) {
+  try {
+    const metadata = await lstat(dir);
+    return metadata.isDirectory() || metadata.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** The pack with this id, the workspace's before the skill's. Throws site_pack_not_found or site_pack_invalid. */
+export async function findPack(
+  env,
+  packId,
+  { entry = "runSiteTool", roots } = {},
+) {
+  const id = checkName(packId, {
+    pattern: PACK_ID,
+    label: "packId",
+    expected: PACK_ID_EXPECTED,
+    entry,
+  });
+  const states = [];
+  let found = null;
+  for (const root of roots ?? siteRoots(env)) {
+    const state = await rootState(root);
+    states.push(state);
+    if (found || state.state !== "ok") continue;
+    // The first root holding the folder wins, whether or not the pack
+    // passes its rules, so a workspace copy hides the one the skill ships.
+    const dir = join(state.path, id);
+    if (await hasPackFolder(dir)) found = { dir, source: state.source };
+  }
+  if (!found)
+    throw new KamapathyError(
+      "site_pack_not_found",
+      `No site pack named ${JSON.stringify(id)} is in Kamapathy's workspace or the skill. Looked in ${states
+        .map((state) => `${state.path} (${state.state})`)
+        .join(" and ")}.`,
+      { packId: id, roots: states },
+    );
+  const { pack, problems } = await readManifest(found.dir, {
+    source: found.source,
+    id,
+  });
+  if (!pack) throw packInvalid({ id, dir: resolve(found.dir) }, problems);
+  return pack;
+}
+
+// The tool of this kind, or site_tool_not_found naming what the pack holds
+// and the other map when the name sits there.
+function toolNamed(pack, tool, kind) {
+  const map = kind === "node" ? pack.tools : pack.pageTools;
+  const found = map.find((item) => item.name === tool);
+  if (found) return found;
+  const other = (kind === "node" ? pack.pageTools : pack.tools).find(
+    (item) => item.name === tool,
+  );
+  const available = map.map((item) => item.name);
+  throw new KamapathyError(
+    "site_tool_not_found",
+    `The ${pack.id} pack has no ${KIND_WORDS[kind]} named ${tool}. Available: ${
+      available.length ? available.join(", ") : "none"
+    }.${
+      other
+        ? ` ${tool} is a ${KIND_WORDS[other.kind]}. Call ${KIND_CALLS[other.kind]}.`
+        : ""
+    }`,
+    { packId: pack.id, tool, kind, available },
+  );
+}
+
+// Whether one value fits a declared type: an integer is safe, a number is
+// finite, an object is plain.
+function valueFits(value, type) {
+  switch (type) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return Number.isSafeInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    default:
+      return plainArgs(value);
+  }
+}
+
+// The shape the tool declares, as `{ query: string, limit?: integer }`.
+function argsShape(tool) {
+  const parts = tool.args.map(
+    (arg) => `${arg.name}${arg.required ? "" : "?"}: ${arg.type}`,
+  );
+  return parts.length ? `{ ${parts.join(", ")} }` : "{}";
+}
+
+/** `args`, or none at all, against the tool's declaration. Throws invalid_tool_args. */
+export function checkToolArgs(pack, tool, args) {
+  const given = args === undefined ? {} : args;
+  const problems = [];
+  if (!plainArgs(given)) problems.push("arguments must be an object.");
+  else {
+    for (const [name, value] of Object.entries(given))
+      if (value !== undefined && !tool.args.some((arg) => arg.name === name))
+        problems.push(`${cleanText(name)} is not an argument of ${tool.name}.`);
+    for (const arg of tool.args) {
+      const value = given[arg.name];
+      // An undefined value counts as absent; null fits no type.
+      if (value === undefined) {
+        if (arg.required) problems.push(`${arg.name} is required.`);
+      } else if (!valueFits(value, arg.type))
+        problems.push(`${arg.name} must be ${ARTICLES[arg.type]}.`);
+    }
+  }
+  if (!problems.length) return given;
+  throw new KamapathyError(
+    "invalid_tool_args",
+    `${tool.name} in the ${pack.id} pack got invalid arguments: ${problems[0]}`,
+    { packId: pack.id, tool: tool.name, problems, expected: argsShape(tool) },
+  );
+}
+
+/** The tool's own export, from a module keyed by the file's hash. Throws PackProblem. */
+export async function importToolExport(pack, tool) {
+  const buffer = await readTrustedFile(
+    { path: pack.dir, source: pack.source },
+    tool.file,
+    { owner: pack.source === "workspace", kind: "tool" },
+  );
+  const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+  // The hash in the query makes an edited file a module of its own and
+  // leaves an unchanged one with the module Node already loaded.
+  const url = `${pathToFileURL(join(pack.dir, tool.file)).href}?v=${hash}`;
+  let module;
+  try {
+    module = await import(url);
+  } catch (error) {
+    throw new PackProblem(
+      `could not be imported (${toolText(error?.message ?? error, 200)}).`,
+      { file: tool.file },
+    );
+  }
+  const exported = module[tool.export];
+  if (exported === undefined)
+    throw new PackProblem(`does not export ${tool.export}.`, {
+      file: tool.file,
+    });
+  if (typeof exported !== "function")
+    throw new PackProblem(`exports ${tool.export}, which is not a function.`, {
+      file: tool.file,
+    });
+  return exported;
+}
+
+/** The first frame inside the pack, as "tools/search-repositories.mjs:31:9". */
+export function toolFrame(stack, pack) {
+  // Node names the module by the URL the import used; a loader that reports
+  // the path instead is read too.
+  const prefixes = [`${pathToFileURL(pack.dir).href}/`, `${pack.dir}${sep}`];
+  for (const text of String(stack ?? "").split("\n"))
+    for (const prefix of prefixes) {
+      const at = text.indexOf(prefix);
+      if (at < 0) continue;
+      const rest = text.slice(at + prefix.length);
+      const end = rest.search(/[\s)]/);
+      const frame = (end < 0 ? rest : rest.slice(0, end)).replace(
+        /\?v=[0-9a-f]+(?=:)/,
+        "",
+      );
+      const found = /^(.+):(\d+):(\d+)$/.exec(frame);
+      if (found)
+        return `${found[1].split(sep).join("/")}:${found[2]}:${found[3]}`;
+    }
+  return undefined;
+}
+
+// The tool threw something of its own: its message, and the frame it threw
+// from when the stack holds one inside the pack.
+function toolFailed(pack, tool, error) {
+  const cause = toolText(
+    error instanceof Error ? error.message : String(error),
+    300,
+  );
+  const at = toolFrame(error?.stack, pack);
+  const failure = new KamapathyError(
+    "site_tool_failed",
+    `The ${pack.id} tool ${tool.name} failed: ${sentence(cause)}`,
+    { packId: pack.id, tool: tool.name, ...(at ? { at } : {}) },
+  );
+  // KamapathyError keeps Error's own cause out of its fields, so the text
+  // is set here.
+  failure.cause = cause;
+  return failure;
+}
+
+/** Finds the pack, checks the arguments, imports the export and calls it. */
+export async function runToolIn(
+  env,
+  { packId, tool, args, page, client, entry = "runSiteTool", roots },
+) {
+  // Both names are checked before anything is read.
+  const name = checkName(tool, {
+    pattern: TOOL_NAME,
+    label: "tool",
+    expected: TOOL_EXPECTED,
+    entry,
+  });
+  const pack = await findPack(env, packId, { entry, roots });
+  const declared = toolNamed(pack, name, "node");
+  const checked = checkToolArgs(pack, declared, args);
+  let run;
+  try {
+    run = await importToolExport(pack, declared);
+  } catch (error) {
+    if (error instanceof PackProblem) throw packInvalid(pack, [error]);
+    throw error;
+  }
+  const context = {
+    page,
+    kamapathy: client,
+    pack: { id: pack.id, name: pack.name, dir: pack.dir, source: pack.source },
+  };
+  // A copy, so a tool cannot change the caller's own arguments.
+  const copy = structuredClone(checked);
+  try {
+    return await run(context, copy);
+  } catch (error) {
+    // A KamapathyError is tagged in place, so the hard stop, retryable and
+    // dispatched reach the run as the tool left them.
+    if (error instanceof KamapathyError) {
+      error.packId ??= pack.id;
+      error.tool ??= declared.name;
+      throw error;
+    }
+    throw toolFailed(pack, declared, error);
+  }
 }
