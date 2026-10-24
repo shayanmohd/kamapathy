@@ -11,7 +11,8 @@ const ref = {
 };
 const selector = {
   kind: "target",
-  description: "A CSS selector matching exactly one visible element.",
+  description:
+    "A ref or selector: CSS by default, or css=, text=, role=, href= or xpath=, with an optional final >> nth=N. It must pick one element the action can take.",
 };
 const target = { ref, selector };
 const url = {
@@ -81,7 +82,50 @@ const FIELDS = {
     },
     selector: {
       ...selector,
-      description: "Read only the element this CSS selector matches.",
+      description: "Read only the element this selector matches, of any form.",
+    },
+    scope: {
+      kind: "enum",
+      values: ["page", "viewport"],
+      default: "page",
+      since: 3,
+      description:
+        "page reads everything; viewport keeps only what is on screen.",
+    },
+    root: {
+      kind: "string",
+      max: 32,
+      since: 3,
+      description:
+        "Read only this ref's subtree, or a frame ref's document. Not with selector.",
+    },
+    header: {
+      kind: "boolean",
+      default: true,
+      since: 3,
+      description: "Name the page, its space and the space's tabs.",
+    },
+    cursor: {
+      kind: "string",
+      max: 512,
+      since: 3,
+      description:
+        "The next value of an earlier part, for the part after it. Keep scope, root, selector and format.",
+    },
+    format: {
+      kind: "enum",
+      values: ["list", "outline"],
+      default: "list",
+      since: 3,
+      description:
+        "list reads text and controls; outline prints the page's structure instead of its text.",
+    },
+    locators: {
+      kind: "boolean",
+      default: false,
+      since: 3,
+      description:
+        "Give each control a locator: a selector that names it alone, which outlives refs.",
     },
   },
   click: { ...target },
@@ -138,7 +182,7 @@ const FIELDS = {
   wait: {
     selector: {
       ...selector,
-      description: "Wait until this CSS selector matches a visible element.",
+      description: "Wait until this selector matches a visible element.",
     },
     text: {
       kind: "string",
@@ -223,6 +267,66 @@ const FIELDS = {
       description: "How long between checks.",
     },
     timeoutMs: waitTimeout,
+  },
+  screenshot: {
+    fullPage: {
+      kind: "boolean",
+      default: false,
+      since: 3,
+      description: "Capture the whole scrollable document, not the viewport.",
+    },
+    clip: {
+      kind: "object",
+      since: 3,
+      description:
+        "The part to capture, in CSS pixels of the image's own space.",
+      fields: {
+        x: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Distance from the left of that space.",
+        },
+        y: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Distance from the top of that space.",
+        },
+        width: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Width in CSS pixels, above 0.",
+        },
+        height: {
+          kind: "number",
+          min: 0,
+          required: true,
+          since: 3,
+          description: "Height in CSS pixels, above 0.",
+        },
+      },
+    },
+    scale: {
+      kind: "enum",
+      values: ["css", "device"],
+      default: "css",
+      since: 3,
+      description:
+        "css gives one image pixel per CSS pixel; device keeps device pixels.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 1,
+      max: 60000,
+      default: 15000,
+      since: 3,
+      description: "Most time for the load wait and the capture together.",
+    },
   },
 };
 
@@ -552,10 +656,18 @@ export const ROUTES = [
   route(
     "GET",
     "/tabs/:id/screenshot",
-    "Captures the viewport as PNG.",
+    "Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}.",
     "image/png",
     null,
-    { budget: 30000, follow: true },
+    { budget: 15000, follow: true },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/screenshot",
+    "Captures the viewport, the whole page or a clip as PNG, at CSS or device scale.",
+    "image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio",
+    FIELDS.screenshot,
+    { budget: { field: "timeoutMs" }, follow: true, since: 3 },
   ),
   action(
     "click",

@@ -2,14 +2,16 @@ import { statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { watchLeaveGuard } from "../electron/agent/routes/navigation";
-import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
   createExtractor,
   type Extractor,
   type PdfChild,
 } from "../electron/agent/pdf/extract";
 import type { PdfPages } from "../electron/agent/pdf/worker";
+import { RefBook } from "../electron/agent/refs";
+import { watchLeaveGuard } from "../electron/agent/routes/navigation";
+import { FORMS, REF_HINT } from "../electron/agent/selectors";
+import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
   startAutomation,
   type AutomationServer,
@@ -39,8 +41,15 @@ import {
   testSocket,
 } from "./fake-automation";
 
+// The size a PNG's header reports.
+const pngSize = (image: ArrayBuffer): number[] => {
+  const png = Buffer.from(image);
+  return [png.readUInt32BE(16), png.readUInt32BE(20)];
+};
+
 describe("local automation socket", () => {
   let controller: FakeController;
+  let refs: RefBook;
   let api: AutomationServer;
   let socket: ReturnType<typeof testSocket>;
   let send: ReturnType<typeof socketFetch>;
@@ -91,10 +100,10 @@ describe("local automation socket", () => {
     const response = await request(`/spaces/${space.id}/tabs`, "POST", {
       url: "https://example.com/",
     });
-    return {
-      space,
-      tab: (await response.json()).tab as BrowserState["tabs"][number],
-    };
+    const tab = (await response.json()).tab as BrowserState["tabs"][number];
+    // The refs these checks send as a page's own: @e1 to @e4.
+    refs.record(tab.id, [1, 2, 3, 4]);
+    return { space, tab };
   };
   const uploadBody = (overrides: Record<string, unknown> = {}) => ({
     ref: "@e1",
@@ -130,6 +139,22 @@ describe("local automation socket", () => {
     await expect.poll(() => controller.accessedTabs.length).toBeGreaterThan(accessed);
     return { client, result, finish: () => client.end(encoded.slice(1)) };
   };
+  // The payload each operation travelled with, read back from the scripts the
+  // page ran. The namespace is the last argument, so the payload ends at the
+  // last comma before a string.
+  const payloads = (operation: string): Record<string, any>[] => {
+    const marker = `)(${JSON.stringify(operation)},`;
+    return controller.contents.scripts
+      .filter((script) => script.code.includes(marker))
+      .map((script) =>
+        JSON.parse(
+          script.code.slice(
+            script.code.indexOf(marker) + marker.length,
+            script.code.lastIndexOf(',"'),
+          ),
+        ),
+      );
+  };
   // One debugger attach serves a tab for as long as the agent has it.
   const expectOneAttach = () => {
     expect(controller.contents.debugger.attachCount).toBe(1);
@@ -137,8 +162,9 @@ describe("local automation socket", () => {
   };
   beforeEach(async () => {
     controller = new FakeController();
+    refs = new RefBook();
     socket = testSocket();
-    api = await startAutomation(controller, { socketPath: socket.path });
+    api = await startAutomation(controller, { socketPath: socket.path, refs });
     send = socketFetch(socket.path);
   });
   afterEach(async () => {
@@ -326,24 +352,133 @@ describe("local automation socket", () => {
     });
   });
 
-  it("rejects unavailable screenshots before capture while allowing snapshots, then recovers", async () => {
+  it("captures while hidden", async () => {
     const { tab } = await createPage();
-    controller.captureAvailable = false;
-    const unavailable = await request(`/tabs/${tab.id}/screenshot`);
-    expect(unavailable.status).toBe(409);
-    expect(await unavailable.json()).toMatchObject({
+    const page = controller.contents;
+    const response = await request(`/tabs/${tab.id}/screenshot`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-kamapathy-clip")).toBe("0,0,1200,800");
+    expect(response.headers.get("x-kamapathy-pixel-ratio")).toBe("1");
+    // The window state no longer decides: the tab's view is lent to the
+    // capture window, and the capture runs on the tab's own session.
+    expect(controller.lent).toEqual([tab.id]);
+    expect(page.captures).toEqual([
+      {
+        format: "png",
+        clip: { x: 0, y: 0, width: 1200, height: 800, scale: 1 },
+        captureBeyondViewport: false,
+        fromSurface: true,
+      },
+    ]);
+    expect(pngSize(await response.arrayBuffer())).toEqual([1200, 800]);
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+  });
+
+  it("crops to the planned size and answers 409 empty_screenshot for an empty image", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.metrics.cssVisualViewport.zoom = 1.25;
+    const response = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 0, y: 0, width: 201, height: 101 },
+    });
+    expect(response.status).toBe(200);
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 252, height: 127, scale: 0.8 },
+    });
+    // Chromium's own image is a pixel wider and taller; the answer is not.
+    expect(pngSize(await response.arrayBuffer())).toEqual([201, 101]);
+    expect(response.headers.get("x-kamapathy-clip")).toBe("0,0,201,101");
+    // The page's own zoom factor stands in for a reply without one.
+    page.metrics.cssVisualViewport.zoom = undefined;
+    page.zoom = 1.25;
+    expect((await request(`/tabs/${tab.id}/screenshot`)).status).toBe(200);
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 1500, height: 1000, scale: 0.8 },
+    });
+    controller.emptyCapture = true;
+    const empty = await request(`/tabs/${tab.id}/screenshot`, "POST", {});
+    expect(empty.status).toBe(409);
+    expect(await empty.json()).toMatchObject({
       error: {
-        code: "screenshot_unavailable",
-        message: expect.stringContaining("Restore or show the Kamapathy window"),
+        code: "empty_screenshot",
+        message: "The page has not rendered yet. Try again.",
+        retryable: true,
       },
     });
-    expect(controller.contents.captureCalls).toBe(0);
-    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
-    controller.captureAvailable = true;
-    const restored = await request(`/tabs/${tab.id}/screenshot`);
-    expect(restored.status).toBe(200);
-    expect(restored.headers.get("content-type")).toBe("image/png");
-    expect(controller.contents.captureCalls).toBe(1);
+  });
+
+  it("refuses clips and sizes the page cannot answer before lending a view", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const outside = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 1200, y: 0, width: 10, height: 10 },
+    });
+    expect(outside.status).toBe(422);
+    expect(await outside.json()).toMatchObject({
+      error: {
+        code: "clip_outside_page",
+        clip: { x: 1200, y: 0, width: 10, height: 10 },
+      },
+    });
+    page.metrics.contentSize = { width: 1200, height: 20000 };
+    const large = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      fullPage: true,
+    });
+    expect(large.status).toBe(422);
+    expect(await large.json()).toMatchObject({
+      error: {
+        code: "screenshot_too_large",
+        width: 1200,
+        height: 20000,
+        maxSide: 16384,
+        maxPixels: 33554432,
+      },
+    });
+    const zero = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      clip: { x: 0, y: 0, width: 0, height: 10 },
+    });
+    expect(zero.status).toBe(400);
+    expect((await zero.json()).error).toMatchObject({
+      code: "invalid_field",
+      field: "clip.width",
+    });
+    expect(page.captures).toEqual([]);
+    expect(controller.lent).toEqual([]);
+  });
+
+  it("answers a GET like a POST with no options and names the capture in the activity", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    expect((await request(`/tabs/${tab.id}/screenshot`)).status).toBe(200);
+    expect(
+      (await request(`/tabs/${tab.id}/screenshot`, "POST", {})).status,
+    ).toBe(200);
+    expect(page.captures[0]).toEqual(page.captures[1]);
+    page.metrics.contentSize = { width: 1200, height: 2000 };
+    const full = await request(`/tabs/${tab.id}/screenshot`, "POST", {
+      fullPage: true,
+    });
+    expect(full.status).toBe(200);
+    expect(full.headers.get("x-kamapathy-clip")).toBe("0,0,1200,2000");
+    expect(page.captures.at(-1)).toMatchObject({
+      clip: { x: 0, y: 0, width: 1200, height: 2000, scale: 1 },
+      captureBeyondViewport: true,
+    });
+    expect(
+      controller.activity
+        .filter(
+          (entry) =>
+            entry.spaceId === space.id && entry.message.includes("screenshot"),
+        )
+        .map((entry) => entry.message),
+    ).toEqual([
+      "Agent captured a page screenshot",
+      "Agent captured a page screenshot",
+      "Agent captured a full-page screenshot",
+    ]);
   });
 
   it("reports a rendering failure without leaking native capture errors", async () => {
@@ -652,7 +787,16 @@ describe("local automation socket", () => {
     const executed = controller.contents.scripts[0];
     expect(
       executed.code.includes(
-        `)("fill",${JSON.stringify({ selector, value: 'quote " and newline\n' })},`,
+        `)("fill",${JSON.stringify({
+          selector,
+          query: {
+            ast: { kind: "css", css: selector, raw: true },
+            level: "enabled",
+            mode: "strict",
+            firstRef: payloads("fill")[0].query.firstRef,
+          },
+          value: 'quote " and newline\n',
+        })},`,
       ),
     ).toBe(true);
     expect(executed.world).toBe("kamapathy");
@@ -703,10 +847,322 @@ describe("local automation socket", () => {
       { maxControls: 101 },
       { maxControls: 1.5 },
       { selector: "" },
+      { scope: "window" },
+      { header: "yes" },
+      { root: 1 },
     ]) {
       expect(
         (await request(`/tabs/${tab.id}/snapshot`, "POST", body)).status,
       ).toBe(400);
+    }
+  });
+
+  it("adds a header naming the page, space and tabs", async () => {
+    const { space, tab } = await createPage();
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    const popup = controller.openPopup(tab.id, "https://example.com/receipt");
+    const person = controller.openPersonTab(space.id);
+    // A title is cleaned like other agent text and cut at 60 characters.
+    blank.title = `‮${"x".repeat(70)}`;
+    const headerOf = async (body?: Record<string, unknown>) =>
+      (
+        await (body === undefined
+          ? request(`/tabs/${tab.id}/snapshot`)
+          : request(`/tabs/${tab.id}/snapshot`, "POST", body)
+        ).then((response) => response.json())
+      ).header;
+    const header = {
+      page: { id: tab.id, label: "p2", title: "https://example.com/" },
+      space: { id: space.id, name: "Research" },
+      tabs: [
+        {
+          id: blank.id,
+          label: "p1",
+          title: `${"x".repeat(57)}...`,
+          openedBy: "agent",
+          managed: true,
+        },
+        {
+          id: tab.id,
+          label: "p2",
+          title: "https://example.com/",
+          openedBy: "agent",
+          managed: true,
+          current: true,
+        },
+        {
+          id: popup.id,
+          label: "p3",
+          title: "https://example.com/receipt",
+          openedBy: "page",
+          managed: true,
+        },
+        {
+          id: person.id,
+          label: "p4",
+          title: "New tab",
+          openedBy: "person",
+          managed: false,
+        },
+      ],
+    };
+    // GET takes the defaults, and a batch step carries the header too.
+    expect(await headerOf()).toEqual(header);
+    expect(await headerOf({})).toEqual(header);
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [{ type: "snapshot" }],
+    });
+    expect((await batch.json()).results[0].result.header).toEqual(header);
+    expect(await headerOf({ header: false })).toBeUndefined();
+    // The budget appears only once the space is one page from its limit.
+    controller.setPageBudget(space.id, 4);
+    expect(await headerOf()).toEqual({
+      ...header,
+      budget: { used: 3, limit: 4 },
+    });
+    controller.setPageBudget(space.id, 20);
+    controller.pdfTabs.add(tab.id);
+    expect(await headerOf()).toEqual({ ...header, pdf: true });
+  });
+
+  it("refuses a root beside a selector, a malformed root and an unknown one", async () => {
+    const { tab } = await createPage();
+    const taking = (body: Record<string, unknown>) =>
+      request(`/tabs/${tab.id}/snapshot`, "POST", body);
+    const combined = await taking({ root: "@e1", selector: "#form" });
+    expect(combined.status).toBe(400);
+    expect((await combined.json()).error).toEqual({
+      code: "invalid_field",
+      message: "root and selector cannot be combined. Give one of them.",
+      field: "root",
+      expected: "a ref, without selector",
+    });
+    const malformed = await taking({ root: "@21" });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error.code).toBe("invalid_ref");
+    const unknown = await taking({ root: "@e9" });
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()).error).toMatchObject({
+      code: "unknown_ref",
+      ref: "@e9",
+    });
+    expect(controller.contents.scripts).toEqual([]);
+    // A ref written as the selector is the root it names.
+    expect((await taking({ selector: "@e1" })).status).toBe(200);
+    expect(controller.contents.scripts.at(-1)!.code).toContain('"root":"@e1"');
+  });
+
+  it("returns next until the page is covered, and refuses a cursor from another snapshot", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const whole = "Every part of this page, and then the rest of it.";
+    // A page that answers from the offsets it is given, as the real one does.
+    page.result = (code: string) => {
+      const marker = ')("snapshot",';
+      const payload = JSON.parse(
+        code.slice(
+          code.indexOf(marker) + marker.length,
+          code.lastIndexOf(',"'),
+        ),
+      );
+      const { text: from, control } = payload.offsets;
+      const text = whole.slice(from, from + payload.maxChars);
+      const left = whole.length > from + payload.maxChars;
+      return {
+        url: "https://example.com/",
+        title: "Example",
+        text,
+        interactables: [],
+        truncated: left,
+        ...(left
+          ? {
+              next: {
+                text: from + payload.maxChars,
+                control: control + 1,
+                line: 0,
+              },
+            }
+          : {}),
+      };
+    };
+    const take = async (body: Record<string, unknown>) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", body);
+      return { status: response.status, body: await response.json() };
+    };
+    const parts: string[] = [];
+    let cursor: string | undefined;
+    let first: string | undefined;
+    for (let part = 0; part < 20; part += 1) {
+      const got = await take({
+        maxChars: 12,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      expect(got.status).toBe(200);
+      parts.push(got.body.text);
+      cursor = got.body.next;
+      first ??= cursor;
+      if (cursor === undefined) break;
+      expect(cursor.startsWith("c1.")).toBe(true);
+      expect(cursor.length).toBeLessThanOrEqual(512);
+    }
+    // The parts cover the page once, and the last one carries no cursor.
+    expect(parts.join("")).toBe(whole);
+    expect(cursor).toBeUndefined();
+    const covered = Array.from(
+      { length: Math.ceil(whole.length / 12) },
+      (_unused, part) => ({ text: part * 12, control: part, line: 0 }),
+    );
+    expect(parts).toHaveLength(covered.length);
+    expect(payloads("snapshot").map((payload) => payload.offsets)).toEqual(
+      covered,
+    );
+    // A cursor is good only for the snapshot that made it.
+    const scripts = page.scripts.length;
+    const other = await take({
+      maxChars: 12,
+      cursor: first!,
+      selector: "#one",
+    });
+    expect(other.status).toBe(400);
+    expect(other.body.error).toEqual({
+      code: "invalid_cursor",
+      message:
+        "This cursor does not continue this snapshot. Ask for the snapshot again without a cursor.",
+    });
+    // The schema bounds the field; the snapshot path reads what it carries.
+    for (const [cursor, code] of [
+      ["", "invalid_field"],
+      [7, "invalid_field"],
+      [`c1.${"x".repeat(513)}`, "invalid_field"],
+      ["c1.", "invalid_cursor"],
+      ["x1.YWJj", "invalid_cursor"],
+      [`c1.${Buffer.from('{"e":0}').toString("base64url")}`, "invalid_cursor"],
+    ] as const) {
+      const refused = await take({ maxChars: 12, cursor });
+      expect(refused.status, String(cursor)).toBe(400);
+      expect(refused.body.error.code, String(cursor)).toBe(code);
+    }
+    // The bounds may change between parts; the scope may not.
+    expect((await take({ maxChars: 400, cursor: first! })).status).toBe(200);
+    expect(
+      (await take({ maxChars: 12, cursor: first!, scope: "viewport" })).status,
+    ).toBe(400);
+    expect(page.scripts).toHaveLength(scripts + 1);
+
+    // A cursor from before a same-document URL change is refused once the
+    // page answers, and one from before a navigation before it is asked.
+    page.result = {
+      url: "https://example.com/next",
+      title: "Example",
+      text: "Hello",
+      interactables: [],
+      truncated: false,
+    };
+    const moved = await take({ maxChars: 12, cursor: first! });
+    expect(moved.status).toBe(409);
+    expect(moved.body.error).toMatchObject({
+      code: "page_changed",
+      message:
+        "The page changed since this cursor's part. Take a snapshot again without a cursor.",
+    });
+    const reached = page.scripts.length;
+    page.emit("did-start-navigation", {
+      url: "https://example.com/next",
+      isSameDocument: false,
+      isMainFrame: true,
+    });
+    const navigated = await take({ maxChars: 12, cursor: first! });
+    expect(navigated.status).toBe(409);
+    expect(navigated.body.error.code).toBe("page_changed");
+    expect(page.scripts).toHaveLength(reached);
+  });
+
+  it("returns an outline instead of text, with its own parts and cursors", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const lines = [
+      "main",
+      '  heading "Plans" level=2',
+      '  button "Save" @e1',
+      '  "Terms apply"',
+    ];
+    // A page that answers an outline request from the line it is given.
+    page.result = (code: string) => {
+      const marker = ')("snapshot",';
+      const payload = JSON.parse(
+        code.slice(
+          code.indexOf(marker) + marker.length,
+          code.lastIndexOf(',"'),
+        ),
+      );
+      const shared = { url: "https://example.com/", title: "Example" };
+      if (payload.format !== "outline") {
+        const whole = "Plain text, and more of it.";
+        const from = payload.offsets.text;
+        const left = from + payload.maxChars < whole.length;
+        return {
+          ...shared,
+          text: whole.slice(from, from + payload.maxChars),
+          interactables: [],
+          truncated: left,
+          ...(left
+            ? { next: { text: from + payload.maxChars, control: 0, line: 0 } }
+            : {}),
+        };
+      }
+      const from = payload.offsets.line;
+      const shown = lines.slice(from, from + 2);
+      const left = from + shown.length < lines.length;
+      return {
+        ...shared,
+        outline: shown.join("\n"),
+        interactables: shown
+          .filter((line) => line.includes("@e"))
+          .map(() => ({ ref: "@e1", tag: "button", label: "Save" })),
+        truncated: left,
+        ...(left
+          ? { next: { text: 0, control: 0, line: from + shown.length } }
+          : {}),
+      };
+    };
+    const take = async (body: Record<string, unknown>) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", body);
+      return { status: response.status, body: await response.json() };
+    };
+    const first = await take({ format: "outline" });
+    expect(first.status).toBe(200);
+    expect(page.scripts.at(-1)!.code).toContain('"format":"outline"');
+    expect(first.body.outline).toBe(lines.slice(0, 2).join("\n"));
+    expect(first.body.text).toBeUndefined();
+    expect(first.body.interactables).toEqual([]);
+    expect(first.body.next).toMatch(/^c1\./);
+    const second = await take({ format: "outline", cursor: first.body.next });
+    expect(second.status).toBe(200);
+    expect(second.body.outline).toBe(lines.slice(2).join("\n"));
+    expect(second.body.interactables).toEqual([
+      { ref: "@e1", tag: "button", label: "Save" },
+    ]);
+    expect(second.body.next).toBeUndefined();
+    expect(payloads("snapshot").map((payload) => payload.offsets)).toEqual([
+      { text: 0, control: 0, line: 0 },
+      { text: 0, control: 0, line: 2 },
+    ]);
+    // A cursor belongs to the format that made it, either way round.
+    const list = await take({ maxChars: 12 });
+    expect(list.status).toBe(200);
+    expect(list.body.text).toBe("Plain text, ");
+    expect(list.body.next).toMatch(/^c1\./);
+    for (const [body, code] of [
+      [{ cursor: first.body.next }, "invalid_cursor"],
+      [{ format: "list", cursor: first.body.next }, "invalid_cursor"],
+      [{ format: "outline", cursor: list.body.next }, "invalid_cursor"],
+      [{ format: "tree" }, "invalid_field"],
+    ] as const) {
+      const refused = await take(body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.body.error.code, JSON.stringify(body)).toBe(code);
     }
   });
 
@@ -759,6 +1215,103 @@ describe("local automation socket", () => {
     expect(page.scripts.at(-1)!.code.endsWith(`${tab.id}:1")`)).toBe(true);
   });
 
+  it("refuses never-issued and retired refs before any page work", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const activity = controller.activity.length;
+    // The page would answer every one of these.
+    page.result = { ok: true, x: 25, y: 45, selected: 1 };
+    const bodies = (ref: string, live: string) =>
+      [
+        ["click", { ref }],
+        ["fill", { ref, value: "Ada" }],
+        ["drag", { source: { ref }, target: { ref: live } }],
+        ["drag", { source: { ref: live }, target: { ref } }],
+        ["upload", uploadBody({ ref })],
+      ] as const;
+    for (const [route, body] of bodies("@e9", "@e1")) {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(404);
+      expect((await response.json()).error, route).toEqual({
+        code: "unknown_ref",
+        message:
+          "Kamapathy never issued this ref for this page. Take a snapshot and use a ref from it.",
+        ref: "@e9",
+      });
+    }
+    refs.expireTab(tab.id);
+    // A ref the tab is issued after the retirement is live again.
+    const current = refs.reserve(1);
+    refs.record(tab.id, [current]);
+    for (const [route, body] of bodies("@e2", `@e${current}`)) {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(409);
+      expect((await response.json()).error, route).toEqual({
+        code: "stale_ref",
+        message: "Element reference is stale. Take a new snapshot.",
+        ref: "@e2",
+      });
+    }
+    expect(page.scripts).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("records only the refs a snapshot assigned", async () => {
+    const { tab } = await createPage();
+    controller.contents.result = (code: string) => {
+      const firstRef = Number(code.match(/"firstRef":(\d+)/)![1]);
+      return {
+        url: "https://example.com/",
+        title: "Example",
+        text: "Hello from the agent page",
+        interactables: [],
+        truncated: false,
+        // Two of the block, and one number outside it.
+        issued: [firstRef, firstRef + 2, firstRef + 100],
+      };
+    };
+    const response = await request(`/tabs/${tab.id}/snapshot`);
+    expect(response.status).toBe(200);
+    const firstRef = Number(
+      controller.contents.scripts.at(-1)!.code.match(/"firstRef":(\d+)/)![1],
+    );
+    expect(await response.json()).toEqual({
+      tabId: tab.id,
+      url: "https://example.com/",
+      title: "Example",
+      text: "Hello from the agent page",
+      interactables: [],
+      truncated: false,
+      header: expect.objectContaining({
+        page: expect.objectContaining({ id: tab.id }),
+      }),
+    });
+    controller.contents.result = { ok: true, x: 25, y: 45 };
+    const click = (number: number) =>
+      request(`/tabs/${tab.id}/click`, "POST", { ref: `@e${number}` });
+    expect((await click(firstRef)).status).toBe(200);
+    expect((await click(firstRef + 2)).status).toBe(200);
+    // Reserved with the block but never assigned, and past the block.
+    for (const number of [firstRef + 1, firstRef + 100]) {
+      const refused = await click(number);
+      expect(refused.status, `@e${number}`).toBe(404);
+      expect((await refused.json()).error.code).toBe("unknown_ref");
+    }
+  });
+
+  it("adds the tab's ref generation to the namespace once its refs expire", async () => {
+    const { tab } = await createPage();
+    await request(`/tabs/${tab.id}/snapshot`);
+    const namespace = () => controller.contents.scripts.at(-1)!.code;
+    expect(namespace().endsWith(`${tab.id}:0")`)).toBe(true);
+    refs.expireTab(tab.id);
+    await request(`/tabs/${tab.id}/snapshot`);
+    expect(namespace().endsWith(`${tab.id}:0:g1")`)).toBe(true);
+    await request(`/tabs/${tab.id}/snapshot`);
+    expect(namespace().endsWith(`${tab.id}:0:g1")`)).toBe(true);
+  });
+
   it("rejects ambiguous targets and propagates stale refs without falling back to a selector", async () => {
     const { tab } = await createPage();
     for (const body of [
@@ -791,6 +1344,370 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts[0].code).toContain(
       ')("fill",{"ref":"@e1","value":"test"}',
     );
+  });
+
+  it("parses every selector before the lane and answers invalid_selector with no page work", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const activity = controller.activity.length;
+    // The page would answer every one of these.
+    page.result = { ok: true, x: 25, y: 45 };
+    const refused = async (route: string, body: unknown) => {
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(400);
+      return (await response.json()).error;
+    };
+    expect(await refused("click", { selector: "@21" })).toEqual({
+      code: "invalid_selector",
+      message: "This is not a ref. Refs look like @e21.",
+      selector: "@21",
+      reason: "ref_form",
+      forms: FORMS,
+      hint: REF_HINT,
+    });
+    for (const [route, body] of [
+      ["fill", { selector: "a >> b", value: "Ada" }],
+      ["drag", { source: { ref: "@e1" }, target: { selector: "a >> b" } }],
+      ["wait", { selector: "a >> b" }],
+      ["snapshot", { selector: "a >> b" }],
+    ] as const) {
+      const error = await refused(route, body);
+      expect(error.code, route).toBe("invalid_selector");
+      expect(error.reason, route).toBe("grammar");
+      expect(error.selector, route).toBe("a >> b");
+      expect(error.forms, route).toEqual(FORMS);
+      expect(error.index, route).toBeUndefined();
+    }
+    // The whole plan is parsed, so the steps before the malformed one never run.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "click", ref: "@e1" },
+        { type: "snapshot" },
+        { type: "fill", selector: "a >> b", value: "Ada" },
+      ],
+    });
+    expect(batch.status).toBe(400);
+    expect((await batch.json()).error).toMatchObject({
+      code: "invalid_selector",
+      reason: "grammar",
+      selector: "a >> b",
+      index: 2,
+    });
+    expect(page.scripts).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("sends each action's level and strict mode with the parsed selector", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const counted = () => ({
+      ok: true,
+      mouse: page.inputs.filter(
+        (input) => input.parameters.type === "mousePressed",
+      ).length,
+      key: page.inputs.filter((input) =>
+        ["keyDown", "rawKeyDown"].includes(input.parameters.type as string),
+      ).length,
+      drag: 0,
+    });
+    page.result = (code: string) =>
+      code.includes(')("input",')
+        ? counted()
+        : code.includes(')("drag",')
+          ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
+          : code.includes(')("check",')
+            ? { ok: true, matched: true }
+            : { ok: true, x: 25, y: 45 };
+    const act = (route: string, body: unknown) =>
+      request(`/tabs/${tab.id}/${route}`, "POST", body);
+    for (const [route, body] of [
+      ["click", { selector: "#save" }],
+      ["fill", { selector: "text=Save now", value: "Ada" }],
+      ["press", { key: "Enter", selector: "role=textbox" }],
+      ["scroll", { direction: "down", selector: "href=/plans" }],
+      ["drag", { source: { selector: "#card" }, target: { selector: "#zone" } }],
+      ["wait", { selector: "xpath=//button" }],
+      ["snapshot", { selector: "#form" }],
+    ] as const)
+      expect((await act(route, body)).status, route).toBe(200);
+    const queryOf = (operation: string) => payloads(operation)[0].query;
+    const strict = (ast: unknown, level: string, extra: object = {}) => ({
+      ast,
+      level,
+      mode: "strict",
+      firstRef: expect.any(Number),
+      ...extra,
+    });
+    expect(queryOf("target")).toEqual(
+      strict({ kind: "css", css: "#save", raw: true }, "pointer-enabled"),
+    );
+    expect(queryOf("fill")).toEqual(
+      strict({ kind: "text", value: "Save now", exact: false }, "enabled"),
+    );
+    // A role selector also carries the key its picked nodes wait under.
+    expect(queryOf("focus")).toEqual(
+      strict({ kind: "role", role: "textbox" }, "enabled", {
+        picked: expect.any(String),
+      }),
+    );
+    expect(queryOf("scroll")).toEqual(
+      strict({ kind: "href", href: "/plans" }, "visible"),
+    );
+    const drag = payloads("drag")[0];
+    expect(drag.source.query).toEqual(
+      strict({ kind: "css", css: "#card", raw: true }, "pointer"),
+    );
+    expect(drag.target.query).toEqual(
+      strict({ kind: "css", css: "#zone", raw: true }, "pointer"),
+    );
+    // Today's wait route has no state of its own.
+    expect(queryOf("check")).toEqual(
+      strict({ kind: "xpath", xpath: "//button" }, "visible"),
+    );
+    expect(queryOf("snapshot")).toEqual(
+      strict({ kind: "css", css: "#form", raw: true }, "none"),
+    );
+    // Every strict resolution reserves its own candidate refs.
+    const reserved = [
+      ...["target", "fill", "focus", "scroll", "check", "snapshot"].map(
+        (operation) => queryOf(operation).firstRef,
+      ),
+      drag.source.query.firstRef,
+      drag.target.query.firstRef,
+    ];
+    expect(new Set(reserved).size).toBe(reserved.length);
+    // A ref-form selector is the ref.
+    expect((await act("click", { selector: "@e3" })).status).toBe(200);
+    expect(payloads("target").at(-1)).toEqual({ ref: "@e3" });
+  });
+
+  it("maps page resolution failures to their codes and fields without showing blocked", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const candidates = [
+      {
+        ref: "@e7",
+        tag: "button",
+        role: "button",
+        name: "Save",
+        context: "Invoice 12",
+        visible: true,
+        disabled: false,
+      },
+      {
+        ref: "@e8",
+        tag: "button",
+        role: "button",
+        name: "Save",
+        context: "Invoice 13",
+        visible: true,
+        disabled: false,
+        frame: "0",
+      },
+    ];
+    const click = async () => {
+      const response = await request(`/tabs/${tab.id}/click`, "POST", {
+        selector: ".save",
+      });
+      return { status: response.status, error: (await response.json()).error };
+    };
+    page.result = {
+      ok: false,
+      code: "no_match",
+      error:
+        "Nothing on the page matches this selector. Take a snapshot to check the page.",
+      fields: { selector: ".save" },
+    };
+    expect(await click()).toEqual({
+      status: 422,
+      error: {
+        code: "no_match",
+        message:
+          "Nothing on the page matches this selector. Take a snapshot to check the page.",
+        selector: ".save",
+        waitedMs: expect.any(Number),
+        retryable: true,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "ambiguous_match",
+      error:
+        "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+      fields: {
+        selector: ".save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates,
+      },
+    };
+    expect(await click()).toEqual({
+      status: 422,
+      error: {
+        code: "ambiguous_match",
+        message:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        selector: ".save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "invalid_selector",
+      error: "The page rejected this CSS selector.",
+      fields: { selector: ".save", reason: "css" },
+    };
+    expect(await click()).toEqual({
+      status: 400,
+      error: {
+        code: "invalid_selector",
+        message: "The page rejected this CSS selector.",
+        selector: ".save",
+        reason: "css",
+        forms: FORMS,
+      },
+    });
+    page.result = {
+      ok: false,
+      code: "stale_ref",
+      error: "Element reference is stale. Take a new snapshot.",
+      fields: { ref: "@e1" },
+    };
+    expect(await click()).toEqual({
+      status: 409,
+      error: {
+        code: "stale_ref",
+        message: "Element reference is stale. Take a new snapshot.",
+        ref: "@e1",
+      },
+    });
+    // A match the action cannot take keeps today's codes, and the page's own
+    // blocker never reaches the agent.
+    for (const [failure, status, code] of [
+      [
+        {
+          ok: false,
+          error: "Element is not visible.",
+          blocked: { blocker: "hidden" },
+        },
+        422,
+        "element_action_failed",
+      ],
+      [
+        {
+          ok: false,
+          code: "element_obscured",
+          error: "Another element covers the target.",
+          blocked: { blocker: "covered" },
+        },
+        409,
+        "element_obscured",
+      ],
+    ] as const) {
+      page.result = failure;
+      const answer = await click();
+      expect(answer.status, code).toBe(status);
+      expect(answer.error.code, code).toBe(code);
+      expect(JSON.stringify(answer), code).not.toContain("blocker");
+    }
+  });
+
+  it("accepts a candidate ref from ambiguous_match in the next request", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    let candidate = 0;
+    page.result = (code: string) => {
+      if (code.includes(')("input",'))
+        return {
+          ok: true,
+          mouse: page.inputs.filter(
+            (input) => input.parameters.type === "mousePressed",
+          ).length,
+          key: 0,
+        };
+      if (!code.includes('"selector":".save"'))
+        return { ok: true, x: 25, y: 45 };
+      candidate = Number(code.match(/"firstRef":(\d+)/)![1]);
+      return {
+        ok: false,
+        code: "ambiguous_match",
+        error:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        fields: {
+          selector: ".save",
+          count: 2,
+          visible: 2,
+          hidden: 0,
+          actionable: 2,
+          candidates: [
+            {
+              ref: `@e${candidate}`,
+              tag: "button",
+              role: "button",
+              name: "Save",
+              context: "Invoice 12",
+              visible: true,
+              disabled: false,
+            },
+          ],
+        },
+        issued: [candidate],
+      };
+    };
+    const ambiguous = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".save",
+    });
+    expect(ambiguous.status).toBe(422);
+    const ref = (await ambiguous.json()).error.candidates[0].ref;
+    expect(ref).toBe(`@e${candidate}`);
+    const accepted = await request(`/tabs/${tab.id}/click`, "POST", { ref });
+    expect(accepted.status).toBe(200);
+    expect(payloads("target").at(-1)).toEqual({ ref });
+  });
+
+  it("keeps the wait route polling while a selector is ambiguous and stops at once on invalid_selector", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // The page reports an ambiguous wait selector as a condition not yet met.
+    page.result = { ok: true, matched: false };
+    const timedOut = await request(`/tabs/${tab.id}/wait`, "POST", {
+      selector: ".save",
+      timeoutMs: 300,
+    });
+    expect(timedOut.status).toBe(408);
+    expect((await timedOut.json()).error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "condition",
+      timeoutMs: 300,
+    });
+    expect(payloads("check").length).toBeGreaterThan(1);
+    page.scripts.length = 0;
+    page.result = {
+      ok: false,
+      code: "invalid_selector",
+      error: "The page rejected this CSS selector.",
+      fields: { selector: ".save", reason: "css" },
+    };
+    const stopped = await request(`/tabs/${tab.id}/wait`, "POST", {
+      selector: ".save",
+      timeoutMs: 5000,
+    });
+    expect(stopped.status).toBe(400);
+    expect((await stopped.json()).error).toEqual({
+      code: "invalid_selector",
+      message: "The page rejected this CSS selector.",
+      selector: ".save",
+      reason: "css",
+      forms: FORMS,
+    });
+    expect(payloads("check")).toHaveLength(1);
   });
 
   it("refuses a control inside a frame from another origin as a conflict, before any input", async () => {
@@ -1083,7 +2000,7 @@ describe("local automation socket", () => {
     const screenshot = await request(`/tabs/${tab.id}/screenshot`);
     expect(screenshot.status).toBe(409);
     expect((await screenshot.json()).error.code).toBe("dialog_open");
-    expect(page.captureCalls).toBe(0);
+    expect(page.captures).toEqual([]);
     page.emitProtocol("Page.javascriptDialogClosed", {
       result: true,
       userInput: "",
@@ -2882,7 +3799,18 @@ describe("local automation socket", () => {
       drag: "mouse",
     });
     expect(controller.contents.scripts[0].code).toContain(
-      ')("drag",{"source":{"ref":"@e1"},"target":{"selector":"#zone"}}',
+      `)("drag",${JSON.stringify({
+        source: { ref: "@e1" },
+        target: {
+          selector: "#zone",
+          query: {
+            ast: { kind: "css", css: "#zone", raw: true },
+            level: "pointer",
+            mode: "strict",
+            firstRef: payloads("drag")[0].target.query.firstRef,
+          },
+        },
+      })}`,
     );
     expect(steps()).toEqual([
       "intercept true",
@@ -3205,6 +4133,14 @@ describe("local automation socket", () => {
       expect(response.status, JSON.stringify(body)).toBe(400);
     }
     expect(controller.contents.scripts).toEqual([]);
+    // A ref written as a selector is that ref.
+    controller.contents.result = { ok: true, selected: 1 };
+    const accepted = await request(`/tabs/${tab.id}/upload`, "POST", {
+      selector: "@e1",
+      files: [validFile],
+    });
+    expect(accepted.status).toBe(200);
+    expect(payloads("upload")[0].ref).toBe("@e1");
   });
 
   it("keeps ordinary requests at 64 KiB and bounds the dedicated upload body", async () => {
@@ -3693,6 +4629,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
+      "POST /tabs/:id/screenshot": {},
       "POST /tabs/:id/upload": uploadBody(),
       "POST /update/check": {},
       "POST /update/download": {},
@@ -3799,7 +4736,7 @@ describe("local automation socket", () => {
     }
     expect(page.scripts).toEqual([]);
     expect(page.inputs).toEqual([]);
-    expect(page.captureCalls).toBe(0);
+    expect(page.captures).toEqual([]);
     expect(controller.accessedTabs).toHaveLength(accessed);
     expect(controller.calls).toHaveLength(calls);
   });

@@ -45,6 +45,7 @@ const pages = {
     `<p id="ticks">Counting timer ticks</p><button id="go" onclick="this.textContent='popup clicked'">Popup button</button>`,
     `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
   ),
+  "/tall": `<!doctype html><html><body style="margin:0"><h1 style="margin:0;height:40px">Tall page</h1><div style="height:2400px"></div><p id="sizes" style="margin:0;height:20px">sizes</p><script>document.getElementById('sizes').textContent='viewport '+Math.floor(visualViewport.width)+'x'+Math.floor(visualViewport.height)+' document '+document.documentElement.scrollWidth+'x'+document.documentElement.scrollHeight;</script></body></html>`,
   "/audio": page(
     `<button id="play">Play sound</button><p id="sound">Silent</p>`,
     `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
@@ -342,11 +343,40 @@ try {
   }
   passed("native clicks land inside frames drawn at another scale");
 
-  const shot = await api(`/tabs/${click}/screenshot`);
+  // No window shows this tab, so Chromium does not paint its view and the
+  // capture runs through the capture window. The page measured its own
+  // viewport and document before anything captured it.
+  const tall = await open("/tall");
+  const measured = await poll(
+    async () =>
+      /viewport (\d+)x(\d+) document (\d+)x(\d+)/.exec((await snapshot(tall)).text),
+    { timeoutMs: 10000, label: "the tall page's own measurements" },
+  );
+  const [viewportWidth, viewportHeight, documentWidth, documentHeight] = measured
+    .slice(1)
+    .map(Number);
+  assert.ok(
+    documentHeight > viewportHeight,
+    `A document of ${documentHeight} pixels is no taller than its viewport`,
+  );
+  const shot = await api(`/tabs/${tall}/screenshot`);
   assert.equal(shot.status, 200);
   const png = Buffer.from(await shot.response.arrayBuffer());
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-  passed("screenshots capture an unwatched agent tab");
+  assert.deepEqual(
+    [png.readUInt32BE(16), png.readUInt32BE(20)],
+    [viewportWidth, viewportHeight],
+  );
+  const whole = await api(`/tabs/${tall}/screenshot`, "POST", { fullPage: true });
+  assert.equal(whole.status, 200);
+  const wholePng = Buffer.from(await whole.response.arrayBuffer());
+  assert.deepEqual(
+    [wholePng.readUInt32BE(16), wholePng.readUInt32BE(20)],
+    [documentWidth, documentHeight],
+  );
+  passed(
+    "screenshots of an unwatched agent tab come out at CSS size, and a full-page capture covers its document",
+  );
 
   const timers = await open("/timers");
   const ticked = await poll(

@@ -67,6 +67,7 @@ export interface Arg {
   kind: string;
   optional?: boolean;
   values?: readonly string[];
+  since?: number;
 }
 export interface Entry {
   name: string;
@@ -102,6 +103,11 @@ export interface Command {
   examples: readonly string[];
   since: number;
 }
+export interface SelectorForm {
+  form: string;
+  example: string;
+  matches: string;
+}
 export interface Problem {
   code: string;
   message: string;
@@ -113,6 +119,7 @@ export const COMMANDS: readonly Command[];
 export const ROUTES: readonly SchemaRoute[];
 export const ACTIONS: readonly ActionSpec[];
 export const ERRORS: Readonly<Record<string, ErrorSpec>>;
+export const SELECTOR_FORMS: readonly SelectorForm[];
 export const COMPUTE: Readonly<Record<string, (body: Record<string, unknown>) => number>>;
 
 export function routeKey(route: Pick<SchemaRoute, "method" | "path">): string;

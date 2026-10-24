@@ -21,16 +21,48 @@ const TARGET = [
   "invalid_target",
   "invalid_ref",
   "invalid_selector",
+  "unknown_ref",
   "stale_ref",
   "cross_origin_frame",
+  "no_match",
+  "ambiguous_match",
   "element_action_failed",
 ];
 const INPUT = ["element_obscured", "input_not_delivered"];
+// What a snapshot's root, scope selector or cursor can answer.
+const SCOPE = [
+  "invalid_field",
+  "invalid_ref",
+  "invalid_selector",
+  "invalid_cursor",
+  "unknown_ref",
+  "stale_ref",
+  "cross_origin_frame",
+  "no_match",
+  "ambiguous_match",
+];
 const target = (name = "target", optional = false) => ({
   name,
   kind: "target",
   ...(optional ? { optional } : {}),
 });
+// page.screenshot's options overload, listed before the path one so an object
+// never falls through to it. Its options are the route's own fields, plus the
+// file to write.
+const SHOT = { name: "options", kind: "options", optional: true, since: 3 };
+const shot = body("POST /tabs/:id/screenshot");
+const SHOT_OPTIONS = {
+  path: {
+    kind: "string",
+    max: 4096,
+    since: 3,
+    description: "Also write the PNG to this new file, which must end in .png.",
+  },
+  fullPage: shot.fullPage,
+  clip: shot.clip,
+  scale: shot.scale,
+  timeout: { ...shot.timeoutMs, field: "timeoutMs" },
+};
 
 const property = (name, signature, summary) => ({
   name,
@@ -125,7 +157,7 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<Snapshot>",
     "POST /tabs/:id/snapshot",
-    ["invalid_field", "invalid_selector"],
+    SCOPE,
     { options: body("POST /tabs/:id/snapshot") },
   ),
   method(
@@ -135,7 +167,7 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<string>",
     "POST /tabs/:id/snapshot",
-    ["invalid_field", "invalid_selector"],
+    SCOPE,
     { options: body("POST /tabs/:id/snapshot") },
   ),
   method(
@@ -225,7 +257,13 @@ export const PAGE_ENTRIES = [
     [{ name: "options", kind: "options", optional: true }],
     "Promise<{ ok: true }>",
     "POST /tabs/:id/wait",
-    ["wait_timeout", "invalid_field", "invalid_selector"],
+    [
+      "wait_timeout",
+      "invalid_field",
+      "invalid_selector",
+      "unknown_ref",
+      "stale_ref",
+    ],
     { options: body("POST /tabs/:id/wait") },
   ),
   method(
@@ -261,23 +299,31 @@ export const PAGE_ENTRIES = [
       "invalid_upload_target",
       "invalid_file_type",
       "upload_busy",
+      "unknown_ref",
       "stale_ref",
       "invalid_target",
     ],
   ),
   method(
     "Page.screenshot",
-    "page.screenshot(path)",
-    "Saves a viewport PNG. Never overwrites an existing file.",
-    [{ name: "path", kind: "string" }],
-    "Promise<string>",
-    "GET /tabs/:id/screenshot",
+    "page.screenshot(options?)",
+    "Captures the page as PNG: the viewport, the whole page or a clip, at CSS scale by default. With a path string it saves the file and returns its path.",
+    [SHOT],
+    "Promise<Buffer | string>",
+    "POST /tabs/:id/screenshot",
     [
-      "screenshot_unavailable",
       "screenshot_failed",
       "empty_screenshot",
+      "clip_outside_page",
+      "screenshot_too_large",
+      "invalid_field",
       "invalid_response",
     ],
+    {
+      expected: "page.screenshot(options?) or page.screenshot(path)",
+      overloads: [[SHOT], [{ name: "path", kind: "string" }]],
+      options: SHOT_OPTIONS,
+    },
   ),
   method(
     "Page.pdfText",

@@ -107,6 +107,40 @@ function flags(args, names) {
   }
   return values;
 }
+// A clip written x,y,width,height, as --clip takes it and the
+// X-Kamapathy-Clip header reports it, or undefined.
+function clipOf(value) {
+  const numbers = String(value ?? "")
+    .split(",")
+    .map((part) => (part.trim() === "" ? Number.NaN : Number(part)));
+  if (
+    numbers.length !== 4 ||
+    numbers.some((number) => !Number.isFinite(number))
+  )
+    return undefined;
+  const [x, y, width, height] = numbers;
+  return { x, y, width, height };
+}
+function clip(value) {
+  const parsed = clipOf(value);
+  if (!parsed)
+    throw new Error("--clip must be x,y,width,height in CSS pixels.");
+  return parsed;
+}
+// --scale css or device.
+function scale(value) {
+  if (!["css", "device"].includes(value))
+    throw new Error("--scale must be css or device.");
+  return value;
+}
+// A PNG's pixel size, from the IHDR chunk the signature is followed by.
+function pngSize(bytes) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < 24 || signature.some((byte, at) => bytes[at] !== byte))
+    return undefined;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
 // --page-budget, or else KAMAPATHY_PAGE_BUDGET when it is set.
 function budget(value, env) {
   const pageBudget =
@@ -321,7 +355,15 @@ export const PARSERS = {
     for (let index = 1; index < args.length; index++) {
       if (args[index] === "--full") body.mode = "full";
       else if (args[index] === "--selector")
-        body.selector = required(args[++index], "CSS selector");
+        body.selector = required(args[++index], "selector");
+      else if (args[index] === "--root")
+        body.root = required(args[++index], "--root");
+      else if (args[index] === "--viewport") body.scope = "viewport";
+      else if (args[index] === "--outline") body.format = "outline";
+      else if (args[index] === "--locators") body.locators = true;
+      else if (args[index] === "--no-header") body.header = false;
+      else if (args[index] === "--cursor")
+        body.cursor = required(args[++index], "--cursor");
       else if (args[index] === "--max-chars")
         body.maxChars = integer(args[++index], "maximum characters");
       else if (args[index] === "--max-controls")
@@ -432,11 +474,24 @@ export const PARSERS = {
       );
     return { path, method: "POST", body };
   },
+  // Without flags the viewport capture stays a GET; any flag posts a body.
   screenshot: (args) => {
     const output = resolve(required(args[1], "output PNG path"));
     if (!output.toLowerCase().endsWith(".png"))
       throw new Error("Screenshot output must have a .png extension.");
-    return { path: `/tabs/${tab(args[0])}/screenshot`, output };
+    const body = {};
+    for (let index = 2; index < args.length; index++) {
+      if (args[index] === "--full-page") body.fullPage = true;
+      else if (args[index] === "--clip")
+        body.clip = clip(required(args[++index], "--clip"));
+      else if (args[index] === "--scale")
+        body.scale = scale(required(args[++index], "--scale"));
+      else throw new Error(`Unknown screenshot option: ${args[index]}`);
+    }
+    const path = `/tabs/${tab(args[0])}/screenshot`;
+    return Object.keys(body).length
+      ? { path, method: "POST", body, output }
+      : { path, output };
   },
   "pdf-text": (args) => {
     const values = flags(args.slice(1), [
@@ -572,6 +627,22 @@ export async function runCli(argv, options = {}) {
     const problem = outdated(name, since, session.app);
     throw new KamapathyError(problem.code, problem.message, problem.fields);
   }
+  // Snapshot and screenshot flags reach routes and fields older apps do not
+  // have, so each is refused by name before it is sent.
+  if (["snapshot", "screenshot"].includes(name) && session.app) {
+    const route = matchRoute(method, path);
+    const refuse = (required, field) => {
+      const problem = outdated(name, required, session.app, field);
+      throw new KamapathyError(problem.code, problem.message, problem.fields);
+    };
+    if (route && route.since > session.app.apiLevel) refuse(route.since);
+    for (const [field, spec] of Object.entries(route?.body ?? {}))
+      if (
+        body?.[field] !== undefined &&
+        (spec.since ?? 1) > session.app.apiLevel
+      )
+        refuse(spec.since, field);
+  }
   // <space-id>:<label> tabs and finish's labels resolve with one tabs request.
   let target = path;
   const labeled = /^\/tabs\/([^/]+)(\/.*)?$/.exec(path);
@@ -597,11 +668,24 @@ export async function runCli(argv, options = {}) {
   if (output && response.ok) {
     if (!response.headers.get("content-type")?.startsWith("image/png"))
       throw new Error("The API did not return a PNG screenshot.");
-    await writeFile(output, Buffer.from(await response.arrayBuffer()), {
-      flag: "wx",
-    });
+    const bytes = Buffer.from(await response.arrayBuffer());
+    await writeFile(output, bytes, { flag: "wx" });
+    const size = pngSize(bytes);
+    const captured = clipOf(response.headers.get("X-Kamapathy-Clip"));
+    const ratio = Number(response.headers.get("X-Kamapathy-Pixel-Ratio"));
     stdout.write(
-      `${json ? JSON.stringify({ saved: output }) : `saved ${output}`}\n`,
+      `${
+        json
+          ? JSON.stringify({
+              saved: output,
+              ...(size ?? {}),
+              ...(captured ? { clip: captured } : {}),
+              ...(Number.isFinite(ratio) && ratio > 0
+                ? { pixelRatio: ratio }
+                : {}),
+            })
+          : `saved ${output}${size ? ` (${size.width}x${size.height})` : ""}`
+      }\n`,
     );
     return 0;
   }

@@ -1,6 +1,5 @@
 import type { WebContents } from "electron";
-import { bounded, remaining } from "../actions";
-import { ApiError, envelope, fail } from "../errors";
+import { envelope, fail } from "../errors";
 import {
   send,
   type RouteCall,
@@ -10,15 +9,17 @@ import {
 import type { TabSession } from "../session/tab-session";
 import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
+import { screenshotRoutes } from "./screenshot";
 import { checkPageBudget } from "./spaces";
 
-export function tabRoutes({
-  controller,
-  authority,
-  actions: { readyContents, evaluatePage, executeToolAction },
-  sessions,
-  navigation,
-}: RouteDeps): Record<string, RouteImpl> {
+export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
+  const {
+    controller,
+    authority,
+    actions: { evaluatePage, executeToolAction },
+    sessions,
+    navigation,
+  } = deps;
   const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
@@ -173,49 +174,7 @@ export function tabRoutes({
         return send(response, 200, { ok: true, results });
       },
     },
-    "GET /tabs/:id/screenshot": {
-      handler: async ({ response, tab, run }) => {
-        const requireCaptureWindow = () => {
-          if (!controller.canCapturePage())
-            return fail(
-              "screenshot_unavailable",
-              "Restore or show the Kamapathy window to capture a screenshot. Snapshots and page actions remain available while it is minimized or hidden.",
-            );
-        };
-        requireCaptureWindow();
-        const { contents } = await readyContents(tab!.id, remaining(run.deadline));
-        requireCaptureWindow();
-        const screenshot = await bounded(
-          contents.capturePage(undefined, { stayHidden: true }),
-          remaining(run.deadline),
-        ).catch((error: unknown) => {
-          authorizeTab(tab!.id);
-          requireCaptureWindow();
-          if (error instanceof ApiError) throw error;
-          return fail(
-            "screenshot_failed",
-            "The page could not render a screenshot. Read a snapshot or try again after the page finishes rendering.",
-          );
-        });
-        authorizeTab(tab!.id);
-        if (screenshot.isEmpty())
-          return fail(
-            "empty_screenshot",
-            "The page has not rendered yet. Try again.",
-          );
-        controller.addActivity(
-          tab!.spaceId,
-          "Agent captured a page screenshot",
-          "info",
-        );
-        response.writeHead(200, {
-          "Content-Type": "image/png",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        });
-        return response.end(screenshot.toPNG());
-      },
-    },
+    ...screenshotRoutes(deps),
     ...Object.fromEntries(
       ["click", "fill", "press", "scroll", "drag", "wait"].map((type) => [
         `POST /tabs/:id/${type}`,

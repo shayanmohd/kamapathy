@@ -348,9 +348,15 @@ Reads bounded visible text and controls with refs.
 | `mode` | one of compact, full | `"compact"` | compact keeps the page short; full reads more. |
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
-| `selector` | target |  | Read only the element this CSS selector matches. |
+| `selector` | target |  | Read only the element this selector matches, of any form. |
+| `scope` | one of page, viewport | `"page"` | page reads everything; viewport keeps only what is on screen. |
+| `root` | string of at most 32 characters |  | Read only this ref's subtree, or a frame ref's document. Not with selector. |
+| `header` | true or false | `true` | Name the page, its space and the space's tabs. |
+| `cursor` | string of at most 512 characters |  | The next value of an earlier part, for the part after it. Keep scope, root, selector and format. |
+| `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
+| `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
-Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.text(options?)`
 
@@ -361,39 +367,45 @@ The same compact text the CLI's snapshot command prints.
 | `mode` | one of compact, full | `"compact"` | compact keeps the page short; full reads more. |
 | `maxChars` | integer from 0 to 24000 |  | Most text characters to return. Defaults to 4000 compact, 24000 full. |
 | `maxControls` | integer from 0 to 100 |  | Most controls to return. Defaults to 40 compact, 100 full. |
-| `selector` | target |  | Read only the element this CSS selector matches. |
+| `selector` | target |  | Read only the element this selector matches, of any form. |
+| `scope` | one of page, viewport | `"page"` | page reads everything; viewport keeps only what is on screen. |
+| `root` | string of at most 32 characters |  | Read only this ref's subtree, or a frame ref's document. Not with selector. |
+| `header` | true or false | `true` | Name the page, its space and the space's tabs. |
+| `cursor` | string of at most 512 characters |  | The next value of an earlier part, for the part after it. Keep scope, root, selector and format. |
+| `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
+| `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
-Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.click(target)`
 
 Clicks a control.
 
-Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.fill(target, value)`
 
 Replaces the value of a field, select or editable region.
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.press(key, target?)`
 
 Presses a supported key, focusing a control first when given.
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.scroll(direction, pixels?, target?)`
 
 Scrolls the page, the panel holding a control, or the panel in the middle when the page cannot scroll.
 
-Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.drag(source, target)`
 
 Drags one element onto another with native mouse input or HTML drag and drop.
 
-Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.wait(options?)`
 
@@ -401,29 +413,37 @@ Waits for a visible element, text, or both.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
-| `selector` | target |  | Wait until this CSS selector matches a visible element. |
+| `selector` | target |  | Wait until this selector matches a visible element. |
 | `text` | string of at most 1000 characters |  | Wait until the page shows this text. |
 | `timeoutMs` | milliseconds of at most 15000 | `5000` | How long to wait. |
 
-Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_timeout`, `invalid_field`, `invalid_selector`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_timeout`, `invalid_field`, `invalid_selector`, `unknown_ref`, `stale_ref`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.batch(actions)`
 
 Runs 1 to 20 actions in order and stops at the first failure.
 
-Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `stale_ref`, `cross_origin_frame`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.upload(ref, files)`
 
 Selects local files on a file input. The site may upload them at once.
 
-Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `unknown_ref`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.screenshot(path)`
+### `page.screenshot(options?)`
 
-Saves a viewport PNG. Never overwrites an existing file.
+Captures the page as PNG: the viewport, the whole page or a clip, at CSS scale by default. With a path string it saves the file and returns its path.
 
-Returns `Promise<string>`. Route `GET /tabs/:id/screenshot`. Errors: `screenshot_unavailable`, `screenshot_failed`, `empty_screenshot`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `path` | string of at most 4096 characters |  | Also write the PNG to this new file, which must end in .png. |
+| `fullPage` | true or false | `false` | Capture the whole scrollable document, not the viewport. |
+| `clip` | object |  | The part to capture, in CSS pixels of the image's own space. |
+| `scale` | one of css, device | `"css"` | css gives one image pixel per CSS pixel; device keeps device pixels. |
+| `timeout` | milliseconds from 1 to 60000 | `15000` | Most time for the load wait and the capture together. |
+
+Returns `Promise<Buffer | string>`. Route `POST /tabs/:id/screenshot`. Errors: `screenshot_failed`, `empty_screenshot`, `clip_outside_page`, `screenshot_too_large`, `invalid_field`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.pdfText(options?)`
 
@@ -524,7 +544,7 @@ Navigate a tab
 
 Close a tab
 
-### `snapshot <tab-id> [options]`
+### `snapshot <tab-id> [--full] [--selector <selector>] [--root <ref>] [--viewport] [--outline] [--locators] [--no-header] [--cursor <cursor>] [--max-chars n] [--max-controls n] [--json]`
 
 Read bounded page text and control refs
 
@@ -560,9 +580,9 @@ Read wait options as JSON from stdin
 
 Read an actions array or {actions} JSON
 
-### `screenshot <tab-id> <file.png>`
+### `screenshot <tab-id> <file.png> [--full-page] [--clip x,y,width,height] [--scale css|device]`
 
-Save a viewport PNG without overwriting
+Save a PNG of the viewport, the whole page or a clip, without overwriting
 
 ### `pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]`
 
@@ -613,9 +633,10 @@ Show the commands, or help on one
 | POST | `/tabs/:id/wait-for-function` | `expression?`, `function?`, `arg?`, `intervalMs?`, `timeoutMs?` | Waits for a function the agent wrote to return a truthy value in the page. Returns `{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
-| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
+| POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
-| GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG. Returns `image/png`. |
+| GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}. Returns `image/png`. |
+| POST | `/tabs/:id/screenshot` | `fullPage?`, `clip?`, `scale?`, `timeoutMs?` | Captures the viewport, the whole page or a clip as PNG, at CSS or device scale. Returns `image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio`. |
 | POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
 | POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound? }`. |
 | POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound? }`. |
@@ -636,6 +657,8 @@ Show the commands, or help on one
 | `invalid_target` | 400 | not retryable |  | The action needs exactly one of ref or selector, or cannot use the target it got. |
 | `invalid_ref` | 400 | not retryable |  | The ref is not one a snapshot gives, such as @e1. |
 | `invalid_key` | 400 | not retryable | `suggestion`, `forms` | The key is not a name, character or chord Kamapathy accepts. |
+| `invalid_selector` | 400 | not retryable | `selector`, `reason`, `forms`, `hint`, `index` | The selector does not parse, or the page rejects its CSS or XPath. |
+| `invalid_cursor` | 400 | not retryable |  | The cursor is malformed or was made for another scope. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
 | `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
@@ -649,6 +672,7 @@ Show the commands, or help on one
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
+| `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -659,7 +683,7 @@ Show the commands, or help on one
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
-| `screenshot_unavailable` | 409 | not retryable |  | Screenshots need the Kamapathy window shown. |
+| `screenshot_unavailable` | 409 | not retryable |  | Retired from API level 3: screenshots work with the window hidden or minimized. |
 | `empty_screenshot` | 409 | retryable |  | The page has not rendered yet. |
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
@@ -677,7 +701,7 @@ Show the commands, or help on one
 | `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
-| `stale_ref` | 409 | not retryable |  | The ref belongs to an earlier snapshot or a control the page removed. |
+| `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
 | `element_obscured` | 409 | retryable |  | Another element covers the target. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
@@ -686,11 +710,14 @@ Show the commands, or help on one
 | `navigation_failed` | 422 | retryable when netError is ERR_INTERNET_DISCONNECTED or ERR_NETWORK_CHANGED or ERR_NETWORK_IO_SUSPENDED or ERR_NAME_RESOLUTION_FAILED or ERR_CONNECTION_REFUSED or ERR_CONNECTION_TIMED_OUT | `url`, `netError`, `errorCode`, `httpStatus`, `blockedUrl` | The navigation ended without loading a document. |
 | `navigation_download` | 422 | not retryable | `url`, `armed` | The address is a download, not a page. |
 | `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
+| `no_match` | 422 | retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
+| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
-| `invalid_selector` | 422 | not retryable |  | The selector is not valid CSS, or matches no single visible element. |
+| `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
+| `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |
 | `pdf_locked` | 422 | not retryable |  | The PDF needs a password. |
 | `pdf_unreadable` | 422 | not retryable |  | The bytes are not a PDF Kamapathy can read, or reading them failed. |

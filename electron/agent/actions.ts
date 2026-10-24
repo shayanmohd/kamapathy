@@ -6,8 +6,10 @@ import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
-import { allocateRefs } from "./refs";
+import type { RefBook } from "./refs";
+import { createResolver } from "./resolve";
 import type { AutomationController } from "./server";
+import { createSnapshots, type SnapshotRequest } from "./snapshot";
 import {
   CdpTimeoutError,
   DialogOpenError,
@@ -66,6 +68,8 @@ export function remaining(deadline: number): number {
 }
 
 export interface Actions {
+  /** The namespace a page operation of this tab's current page runs under. */
+  namespace(id: string, session: TabSession): string;
   readyContents(
     id: string,
     timeout?: number,
@@ -95,10 +99,19 @@ export function createActions(deps: {
   sessions: TabSessions;
   referenceSession: string;
   dispatchers: InputDispatchers;
+  refs: RefBook;
 }): Actions {
-  const { controller, authority, sessions, referenceSession, dispatchers } =
-    deps;
+  const {
+    controller,
+    authority,
+    sessions,
+    referenceSession,
+    dispatchers,
+    refs,
+  } = deps;
   const { authorizeTab } = authority;
+  // Targets, refs and role nodes are the resolver's business.
+  const resolver = createResolver({ refs });
   // Each page of a tab the agent controls has a debugger session from the
   // moment its view exists.
   const sessionOf = (id: string, contents: WebContents): TabSession => {
@@ -176,6 +189,12 @@ export function createActions(deps: {
     return { contents, session };
   };
 
+  // Page registries start empty once a tab's refs are retired.
+  const namespaceOf = (id: string, session: TabSession) => {
+    const generation = refs.generation(id);
+    const retired = generation ? `:g${generation}` : "";
+    return `${referenceSession}:${id}:${session.epoch}${retired}`;
+  };
   const evaluatePage = async (
     id: string,
     session: TabSession,
@@ -186,18 +205,13 @@ export function createActions(deps: {
   ) => {
     authorizeTab(id);
     const epoch = session.epoch;
-    const namespace = `${referenceSession}:${id}:${epoch}`;
-    const frameId = await session.mainFrameId({
+    const namespace = namespaceOf(id, session);
+    const result = await resolver.run(id, session, operation, payload, {
       deadline,
-      signal: step?.signal,
-    });
-    const result = await session.evaluateInFrame(frameId, operation, payload, {
-      deadline,
+      namespace,
       signal: step?.signal,
       guard: () => authorizeTab(id),
       dispatch: step?.dispatch,
-      namespace,
-      timeoutMs: remaining(deadline),
     });
     authorizeTab(id);
     if (
@@ -208,19 +222,33 @@ export function createActions(deps: {
         "page_changed",
         "The page navigated during this operation. Inspect the new page before continuing.",
       );
-    // The page's code keeps its registered status; a code the registry
-    // does not know is reported as element_action_failed.
-    if (result?.ok === false)
+    // The page's code keeps its registered status and its fields; a code the
+    // registry does not know is reported as element_action_failed, without
+    // them. The page's blocker stays inside: section 5 waits on it.
+    if (result?.ok === false) {
+      const known =
+        typeof result.code === "string" && Object.hasOwn(ERRORS, result.code);
+      const fields = result.fields;
       return fail(
-        typeof result.code === "string" && Object.hasOwn(ERRORS, result.code)
-          ? result.code
-          : "element_action_failed",
+        known ? (result.code as string) : "element_action_failed",
         typeof result.error === "string"
           ? result.error
           : "Could not interact with the element.",
+        known && fields && typeof fields === "object" && !Array.isArray(fields)
+          ? (fields as Record<string, unknown>)
+          : undefined,
       );
+    }
     return result;
   };
+  // Snapshots carry the scope rules, the locators and the header of their
+  // own.
+  const snapshots = createSnapshots({
+    controller,
+    evaluatePage,
+    resolver,
+    namespace: namespaceOf,
+  });
   const nativeInput = async (
     id: string,
     session: TabSession,
@@ -483,18 +511,13 @@ export function createActions(deps: {
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
-      const firstRef = allocateRefs();
-      result = {
-        tabId: id,
-        ...(await evaluatePage(
-          id,
-          session,
-          "snapshot",
-          { ...payload, firstRef },
-          deadline,
-          step,
-        )),
-      };
+      result = await snapshots.take(
+        id,
+        session,
+        payload as unknown as SnapshotRequest,
+        deadline,
+        step,
+      );
     } else if (action.type === "click") {
       const point = await evaluatePage(
         id,
@@ -726,6 +749,7 @@ export function createActions(deps: {
     return result;
   };
   return {
+    namespace: namespaceOf,
     readyContents,
     evaluatePage,
     executeToolAction,

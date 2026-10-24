@@ -32,14 +32,58 @@ function controlDetails(control) {
   return details.map((detail) => ` ${detail}`).join("");
 }
 
+// Which tab a header line names: its label, or its ID without one.
+const tabName = (tab) => line(tab.label ?? tab.id);
+// Who a tab belongs to: this page, a popup the page opened, or the person.
+const whose = (tab) =>
+  tab.current
+    ? " (this page)"
+    : tab.openedBy === "page"
+      ? " (popup)"
+      : tab.openedBy === "person"
+        ? " (person)"
+        : "";
+
+/** The line naming the page, its space and the space's tabs. */
+export function formatHeader(header) {
+  const tabs = (header.tabs ?? []).map(
+    (tab) =>
+      `${tabName(tab)} ${JSON.stringify(line(tab.title))}${whose(tab)}${
+        tab.managed === false ? " (unmanaged)" : ""
+      }`,
+  );
+  return [
+    `page ${tabName(header.page ?? {})} ${JSON.stringify(line(header.page?.title))}`,
+    `space ${JSON.stringify(line(header.space?.name))} ${line(header.space?.id)}`,
+    `tabs: ${tabs.join(", ")}`,
+    ...(header.budget
+      ? [
+          `budget ${Number(header.budget.used)} of ${Number(header.budget.limit)}`,
+        ]
+      : []),
+    ...(header.pdf ? ["pdf: read it with pdfText()"] : []),
+  ].join(" | ");
+}
+
 export function formatSnapshot(snapshot) {
-  const lines = [line(snapshot.title) || "Untitled page", line(snapshot.url)];
-  if (snapshot.text) lines.push("", printable(snapshot.text).trim());
-  if (snapshot.interactables?.length) {
+  const lines = [
+    snapshot.header
+      ? formatHeader(snapshot.header)
+      : line(snapshot.title) || "Untitled page",
+    line(snapshot.url),
+  ];
+  // An outline prints as sent, with its indentation and the locators the
+  // server already appended; it takes the place of the text and controls.
+  const outlined = typeof snapshot.outline === "string";
+  if (outlined && snapshot.outline.trim())
+    lines.push("", printable(snapshot.outline).replace(/\s+$/, ""));
+  else if (!outlined && snapshot.text)
+    lines.push("", printable(snapshot.text).trim());
+  if (!outlined && snapshot.interactables?.length) {
     lines.push("", "Controls:");
     for (const control of snapshot.interactables) {
       lines.push(
-        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${controlDetails(control)}`,
+        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${controlDetails(control)}${control.locator ? ` locator: ${line(control.locator)}` : ""}`,
       );
       if (control.type === "file")
         lines.push(
@@ -60,11 +104,16 @@ export function formatSnapshot(snapshot) {
       ...(snapshot.interactables?.length ? [] : [""]),
       `${Number(snapshot.omittedControls)} more controls not listed. Scope with --selector to list them.`,
     );
-  if (snapshot.truncated)
+  if (snapshot.locatorsIncomplete)
+    lines.push("Some locators were not checked in time.");
+  // A continued snapshot says where the next part starts instead of that it
+  // was cut short.
+  if (snapshot.truncated && snapshot.next === undefined)
     lines.push(
       "",
       "Truncated. Scope with --selector or request --full if needed.",
     );
+  if (snapshot.next) lines.push("", `Next part: cursor ${line(snapshot.next)}`);
   return lines.join("\n");
 }
 

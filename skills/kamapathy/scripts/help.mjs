@@ -13,6 +13,7 @@ import {
   GLOBAL_FLAGS,
   ROUTES,
   routeKey,
+  SELECTOR_FORMS,
 } from "./schema/index.mjs";
 
 const callName = (entry) => entry.signature.split("(")[0];
@@ -223,6 +224,15 @@ export function formatRoutes() {
   ].join("\n");
 }
 
+export function formatSelectors() {
+  return [
+    "Selectors",
+    ...SELECTOR_FORMS.map((form) => columns(form.example, form.matches, 40)),
+    "",
+    "Refs skip the search. Docs and help show only the css=, text=, role=, href= and xpath= spellings.",
+  ].join("\n");
+}
+
 // "kamapathy" when a launcher says so; otherwise how to run this client.
 export function programName(env = process.env) {
   return env.KAMAPATHY_PROGRAM
@@ -293,13 +303,14 @@ export function helpTopic(words, program) {
       : formatIndex();
   if (topic === "errors") return formatErrors();
   if (topic === "routes") return formatRoutes();
+  if (topic === "selectors") return formatSelectors();
   const entries = resolveNames(topic);
   if (entries.length) return entries.map(formatEntry).join("\n\n");
   throw new Error(
     `No help topic "${topic}".${closeText(
       closeMatches(topic, [
         ...COMMANDS.map((item) => [item.name, item.name]),
-        ...["api", "errors", "routes"].map((name) => [name, name]),
+        ...["api", "errors", "routes", "selectors"].map((name) => [name, name]),
         ...ENTRIES.map((entry) => [callName(entry), callName(entry)]),
       ]),
     )}`,
@@ -310,6 +321,7 @@ export function helpTopic(words, program) {
 function entryText(name) {
   if (name === "errors") return formatErrors();
   if (name === "routes") return formatRoutes();
+  if (name === "selectors") return formatSelectors();
   const entries = resolveNames(name);
   if (entries.length) return entries.map(formatEntry).join("\n\n");
   return `No help entry named "${name}".${closeText(
@@ -321,13 +333,15 @@ function entryText(name) {
       ]),
       ["errors", "errors"],
       ["routes", "routes"],
+      ["selectors", "selectors"],
     ]),
   )}`;
 }
 
 /**
  * Prints the API, or the entries and topics named.
- * @param {...string} names Such as "page.click", "errors" or "routes".
+ * @param {...string} names Such as "page.click", "selectors", "errors" or
+ * "routes".
  */
 export function help(...names) {
   console.log(names.length ? names.map(entryText).join("\n\n") : formatIndex());

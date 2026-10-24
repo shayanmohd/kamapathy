@@ -326,13 +326,39 @@ export async function describeScriptError(error, options = {}) {
   ];
 }
 
+// One line per element an ambiguous selector matched, as the error named
+// them: the ref to use, what the element is, and where it sits.
+function candidateLines(error) {
+  if (!Array.isArray(error?.candidates)) return [];
+  return error.candidates
+    .filter((candidate) => candidate && typeof candidate === "object")
+    .map((candidate) => {
+      const parts = [
+        "candidate",
+        ...(candidate.ref ? [candidate.ref] : []),
+        candidate.role || candidate.tag || "element",
+        JSON.stringify(line(candidate.name)),
+        ...(candidate.visible === false ? ["(hidden)"] : []),
+        ...(candidate.disabled ? ["[disabled]"] : []),
+        ...(candidate.frame ? [`frame ${candidate.frame}`] : []),
+        ...(candidate.context
+          ? [`in ${JSON.stringify(line(candidate.context))}`]
+          : []),
+      ];
+      return `  ${line(parts.join(" "))}`;
+    });
+}
+
 /**
- * A failed command's lines: the status line, then the retry or inspect line.
+ * A failed command's lines: the status line, the selector's hint and the
+ * candidates it matched, then the retry or inspect line.
  * @returns {string[]}
  */
 export function formatApiError(error) {
   return [
     `Kamapathy: ${error.status} ${line(error.code)}: ${line(messageOf(error))}`,
+    ...(typeof error.hint === "string" ? [`hint: ${line(error.hint)}`] : []),
+    ...candidateLines(error),
     ...[retryLine(error) ?? []].flat(),
   ];
 }

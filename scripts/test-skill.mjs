@@ -333,6 +333,16 @@ try {
   passed("standalone skill client connects automatically with no credentials");
   const original = (await chrome.evaluate(() => window.kamapathy.getState()))
     .activeTabId;
+  // Raw requests, for the fields an error carries and the headers a
+  // capture answers with.
+  const socket = await import(pathToFileURL(client).href);
+  const send = socket.socketFetch(await socket.resolveSocket(environment));
+  const callApi = (path, method = "GET", body) =>
+    send(path, {
+      method,
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
   const { space } = await json(["space", "create", "Skill form review"]);
   const { tab } = await json(["open", space.id, `${fixture.origin}/forms/new`]);
   const initial = await observe(tab.id);
@@ -566,55 +576,222 @@ try {
   passed(
     "viewport screenshots contain a real PNG and do not overwrite existing files",
   );
-  // Xvfb CI has no window manager to acknowledge native minimization.
-  // Hidden-window behavior is covered on every platform.
-  const unavailableModes = process.platform === "linux"
-    ? ["hidden"]
-    : ["minimized", "hidden"];
-  for (const mode of unavailableModes) {
-    await browser.evaluate(({ BrowserWindow }, mode) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (mode === "minimized") window.minimize();
-      else window.hide();
-    }, mode);
-    const windowUnavailable = () => browser.evaluate(({ BrowserWindow }, mode) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      return mode === "minimized" ? window.isMinimized() : !window.isVisible();
-    }, mode);
-    await poll(windowUnavailable, { timeoutMs: 5000, label: `${mode} window` });
-    const captureStarted = Date.now();
-    const unavailable = await cli(
-      ["screenshot", tab.id, join(temporary, `${mode}.png`)],
-      undefined,
-      { failure: true },
+  // Section 4 screenshots in the real app: the sizes a request asks for,
+  // measured against what the page and the app report, and captures in
+  // every window state. The spike saw a view Chromium does not paint
+  // answer slowly, with an old frame or not at all, so every capture of a
+  // view the window hides goes through the never-shown capture window.
+  const deviceScale = await browser.evaluate(({ BrowserWindow, screen }) =>
+    screen.getDisplayMatching(BrowserWindow.getAllWindows()[0].getBounds())
+      .scaleFactor,
+  );
+  const viewSizes = (url) =>
+    browser.evaluate(
+      ({ BrowserWindow }, url) =>
+        BrowserWindow.getAllWindows()
+          .flatMap((window) => window.contentView.children)
+          .filter((view) => view.webContents?.getURL() === url)
+          .map((view) => ({
+            width: view.getBounds().width,
+            height: view.getBounds().height,
+          })),
+      url,
     );
-    assert.match(unavailable.errors, /409 screenshot_unavailable/);
-    assert.match(unavailable.errors, /Restore or show the Kamapathy window/);
-    assert.ok(Date.now() - captureStarted < 5000, "Unavailable capture must fail before its 15-second rendering timeout");
-    await json(["navigate", tab.id, `${fixture.origin}/lab`]);
-    const background = await observe(tab.id);
-    await cli(["click", tab.id, ref(background, "Show delayed result")]);
-    await cli(["wait", tab.id, "--stdin"], {
-      selector: "#delayed-result",
-      text: "Delayed content ready",
-      timeoutMs: 5000,
-    });
-    assert.equal(await windowUnavailable(), true);
-    assert.equal((await chrome.evaluate(() => window.kamapathy.getState())).activeTabId, original);
-    await browser.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (window.isMinimized()) window.restore();
-      window.show();
-    });
-    await poll(() => browser.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      return window.isVisible() && !window.isMinimized();
-    }), { timeoutMs: 5000, label: "restored window" });
-    const restoredPNG = join(temporary, `${mode}-restored.png`);
-    await cli(["screenshot", tab.id, restoredPNG]);
-    assert.deepEqual([...(await readFile(restoredPNG)).subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-    passed(`${mode} capture returns restoration guidance while native actions work, then captures after restore`);
+  const shot = async (id, name, ...args) => {
+    const file = join(temporary, name);
+    const saved = await json(["screenshot", id, file, ...args]);
+    const bytes = await readFile(file);
+    assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+    assert.deepEqual(
+      [saved.width, saved.height],
+      [bytes.readUInt32BE(16), bytes.readUInt32BE(20)],
+      `${name} is not the size the client printed`,
+    );
+    return saved;
+  };
+  const shortPage = `${fixture.origin}/snapshot/links`;
+  await json(["navigate", tab.id, shortPage]);
+  const shortShot = await shot(tab.id, "short.png");
+  // A page that does not scroll fills its view, so its capture is the
+  // view's own size in CSS pixels.
+  assert.deepEqual(await viewSizes(shortPage), [
+    { width: shortShot.width, height: shortShot.height },
+  ]);
+  assert.deepEqual(
+    [shortShot.clip, shortShot.pixelRatio],
+    [{ x: 0, y: 0, width: shortShot.width, height: shortShot.height }, 1],
+  );
+  const bandsPage = `${fixture.origin}/snapshot/capture?tab=agent`;
+  await json(["navigate", tab.id, bandsPage]);
+  // The page measured its own viewport and document before anything
+  // captured it.
+  const [viewportWidth, viewportHeight, documentWidth, documentHeight] = /viewport (\d+)x(\d+) document (\d+)x(\d+)/
+    .exec((await json(["snapshot", tab.id, "--selector", "#sizes"])).text)
+    .slice(1)
+    .map(Number);
+  const viewportShot = await shot(tab.id, "viewport-css.png");
+  assert.deepEqual(
+    [viewportShot.width, viewportShot.height],
+    [viewportWidth, viewportHeight],
+  );
+  const fullShot = await shot(tab.id, "full-page.png", "--full-page");
+  assert.deepEqual(
+    [fullShot.width, fullShot.height],
+    [documentWidth, documentHeight],
+  );
+  assert.ok(
+    fullShot.height > viewportHeight * 3,
+    `A full page of ${fullShot.height} pixels is no taller than its viewport`,
+  );
+  const clipShot = await shot(tab.id, "clip.png", "--clip", "10,20,200,100");
+  assert.deepEqual(
+    [clipShot.width, clipShot.height, clipShot.clip],
+    [200, 100, { x: 10, y: 20, width: 200, height: 100 }],
+  );
+  const deviceShot = await shot(tab.id, "device.png", "--scale", "device");
+  assert.deepEqual(
+    [deviceShot.width, deviceShot.height, deviceShot.pixelRatio],
+    [
+      Math.round(viewportWidth * deviceScale),
+      Math.round(viewportHeight * deviceScale),
+      deviceScale,
+    ],
+  );
+  const offPage = await cli(
+    ["screenshot", tab.id, join(temporary, "off-page.png"), "--clip", "9000,9000,10,10"],
+    undefined,
+    { failure: true },
+  );
+  assert.match(offPage.errors, /422 clip_outside_page/);
+  passed(
+    "full-page, clipped and CSS-scaled screenshots have the expected PNG sizes",
+  );
+  // The page paints 900 pixel bands, so the color in the middle of a
+  // capture says where the page was scrolled when the frame was taken.
+  const BANDS = [
+    [255, 0, 0],
+    [0, 255, 0],
+    [0, 0, 255],
+    [255, 255, 0],
+  ];
+  const bandAt = (y, height) => Math.floor((y + height / 2) / 900);
+  const middleOf = (png) =>
+    browser.evaluate(({ nativeImage }, base64) => {
+      const image = nativeImage.createFromBuffer(Buffer.from(base64, "base64"));
+      const { width, height } = image.getSize();
+      // toBitmap gives blue, green, red and alpha per pixel.
+      const [blue, green, red] = image
+        .crop({
+          x: Math.floor(width / 2),
+          y: Math.floor(height / 2),
+          width: 1,
+          height: 1,
+        })
+        .toBitmap();
+      return { width, height, color: [red, green, blue] };
+    }, png.toString("base64"));
+  const windowStates = () =>
+    browser.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().map((window) => [
+        window.isVisible(),
+        window.isFocused(),
+        window.isMinimized(),
+      ]),
+    );
+  const captureSpace = (await json(["space", "create", "Capture review"])).space;
+  const captureTab = (
+    await json([
+      "open",
+      captureSpace.id,
+      `${fixture.origin}/snapshot/capture?tab=other`,
+    ])
+  ).tab;
+  await observe(captureTab.id);
+  const scrolledTo = async (id, direction, pixels) =>
+    (await (await callApi(`/tabs/${id}/scroll`, "POST", { direction, pixels })).json()).y;
+  const bandSeen = async (id, y) => {
+    const started = Date.now();
+    const response = await callApi(`/tabs/${id}/screenshot`);
+    const png = Buffer.from(await response.arrayBuffer());
+    assert.equal(response.status, 200, png.toString("utf8").slice(0, 300));
+    const frame = await middleOf(png);
+    const band = bandAt(y, frame.height);
+    assert.ok(
+      frame.color.every(
+        (channel, index) => Math.abs(channel - BANDS[band][index]) < 60,
+      ),
+      `A capture at ${y} shows ${frame.color} where band ${band} is ${BANDS[band]}`,
+    );
+    assert.ok(
+      Date.now() - started < 5000,
+      `A capture took ${Date.now() - started} ms`,
+    );
+    return band;
+  };
+  // Xvfb CI has no window manager to acknowledge native minimization, so
+  // Linux checks the hidden window only.
+  const windowModes =
+    process.platform === "linux" ? ["shown", "hidden"] : ["shown", "hidden", "minimized"];
+  for (const mode of windowModes) {
+    if (mode !== "shown")
+      await browser.evaluate(({ BrowserWindow }, mode) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (mode === "minimized") window.minimize();
+        else window.hide();
+      }, mode);
+    await poll(
+      async () => {
+        const [[visible, , minimized]] = await windowStates();
+        return mode === "minimized"
+          ? minimized
+          : mode === "hidden"
+            ? !visible
+            : visible && !minimized;
+      },
+      { timeoutMs: 5000, label: `the ${mode} window` },
+    );
+    const windowsBefore = await windowStates();
+    const shellBefore = await chrome.evaluate(() => window.kamapathy.getState());
+    // Two captures of one tab at different scroll positions: an old or
+    // repeated frame would show the band the page has left.
+    for (const id of mode === "shown" ? [captureTab.id, tab.id] : [captureTab.id]) {
+      await scrolledTo(id, "up", 2000);
+      await scrolledTo(id, "up", 2000);
+      const bands = [];
+      for (const step of [900, 900])
+        bands.push(await bandSeen(id, await scrolledTo(id, "down", step)));
+      assert.notEqual(
+        bands[0],
+        bands[1],
+        `Both captures with the window ${mode} show band ${bands[0]}`,
+      );
+    }
+    assert.deepEqual(await windowStates(), windowsBefore);
+    const shellAfter = await chrome.evaluate(() => window.kamapathy.getState());
+    assert.deepEqual(
+      [shellAfter.activeSpaceId, shellAfter.activeTabId],
+      [shellBefore.activeSpaceId, shellBefore.activeTabId],
+    );
+    assert.equal(shellAfter.activeTabId, original);
+    if (mode !== "shown") {
+      await browser.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (window.isMinimized()) window.restore();
+        window.show();
+      });
+      await poll(
+        async () => {
+          const [[visible, , minimized]] = await windowStates();
+          return visible && !minimized;
+        },
+        { timeoutMs: 5000, label: "the restored window" },
+      );
+    }
   }
+  await cli(["space", "close", captureSpace.id]);
+  passed(
+    "screenshots work with the window hidden or minimized and leave the active space, window visibility and focus unchanged",
+  );
   await cli(["handoff", space.id]);
   await cli(["snapshot", tab.id], undefined, { failure: true });
   await cli(["click", tab.id, "#enter-result"], undefined, { failure: true });
@@ -673,6 +850,387 @@ try {
   passed(
     "skill resume takes control back after a handoff or a takeover in Kamapathy, and page actions work again",
   );
+  // Section 4 selectors in the real app. The fixture reports the id of the
+  // control each click reached, through composedPath, so a form that
+  // matched the wrong element says so.
+  const formsPage = `${fixture.origin}/selectors/forms`;
+  await json(["navigate", tab.id, formsPage]);
+  const FORMS = [
+    ["#plain", "plain"],
+    ["css=.boxed", "prefixed"],
+    ["text=keep the draft", "worded"],
+    ['text="Publish"', "exact"],
+    ['role=button[name="Retry now"]', "roleExact"],
+    ['role=button[name*="invoice"]', "rolePart"],
+    ["href=/plans?tier=pro#faq", "addressed"],
+    ["xpath=//table//tr[2]//button", "rowTwo"],
+    ['li:has-text("Invoice 12")', "invoice12"],
+    ['button:text-is("Save")', "save"],
+    [".pick >> nth=-1", "pickLast"],
+    ["#shadowItem", "shadowItem"],
+    ["#frameItem", "frameItem"],
+  ];
+  const reached = async (selector) =>
+    (await json(["snapshot", tab.id, "--selector", selector])).text;
+  for (const [selector, id] of FORMS) {
+    const clicked = await callApi(`/tabs/${tab.id}/click`, "POST", { selector });
+    assert.equal(clicked.status, 200, `${selector}: ${await clicked.text()}`);
+    assert.equal(
+      await reached(id === "frameItem" ? "#frameStatus" : "#status"),
+      `clicked ${id}`,
+      selector,
+    );
+  }
+  // The same forms through the CLI, each click followed by a wait for the
+  // id it must have reached.
+  await json(["navigate", tab.id, formsPage]);
+  for (const group of [FORMS.slice(0, 6), FORMS.slice(6, 12)]) {
+    const batched = await json(
+      ["batch", tab.id],
+      group.flatMap(([selector, id]) => [
+        { type: "click", selector },
+        {
+          type: "wait",
+          selector: "#status",
+          text: `clicked ${id}`,
+          timeoutMs: 5000,
+        },
+      ]),
+    );
+    assert.equal(batched.ok, true, JSON.stringify(batched));
+  }
+  await cli(["click", tab.id, "#frameItem"]);
+  await cli(["wait", tab.id, "--stdin"], {
+    selector: "#frameStatus",
+    text: "clicked frameItem",
+    timeoutMs: 5000,
+  });
+  const feedBefore = (await chrome.evaluate(() => window.kamapathy.getState()))
+    .activity.length;
+  const malformed = await cli(
+    ["click", tab.id, "button:has-text(Save)"],
+    undefined,
+    { failure: true },
+  );
+  assert.match(malformed.errors, /400 invalid_selector/);
+  // A selector the main process rejects never reaches the page, so the
+  // person's feed says nothing happened.
+  assert.equal(
+    (await chrome.evaluate(() => window.kamapathy.getState())).activity.length,
+    feedBefore,
+  );
+  const unmatched = await (
+    await callApi(`/tabs/${tab.id}/click`, "POST", { selector: "#no-such-control" })
+  ).json();
+  assert.equal(unmatched.error.code, "no_match");
+  assert.equal(unmatched.error.selector, "#no-such-control");
+  assert.ok(
+    Number.isInteger(unmatched.error.waitedMs),
+    JSON.stringify(unmatched.error),
+  );
+  const several = await callApi(`/tabs/${tab.id}/click`, "POST", {
+    selector: ".pick",
+  });
+  const ambiguous = (await several.json()).error;
+  assert.equal(several.status, 422);
+  assert.deepEqual(
+    [
+      ambiguous.code,
+      ambiguous.selector,
+      ambiguous.count,
+      ambiguous.visible,
+      ambiguous.hidden,
+      ambiguous.actionable,
+      ambiguous.candidates.length,
+    ],
+    ["ambiguous_match", ".pick", 4, 3, 1, 3, 3],
+  );
+  // A candidate's ref is the way out of an ambiguous selector.
+  const candidate = ambiguous.candidates[0];
+  assert.equal(candidate.role, "button");
+  assert.equal(
+    (await callApi(`/tabs/${tab.id}/click`, "POST", { ref: candidate.ref })).status,
+    200,
+  );
+  assert.equal(await reached("#status"), "clicked pickOne");
+  const named = await cli(["click", tab.id, ".pick"], undefined, {
+    failure: true,
+  });
+  assert.match(named.errors, /422 ambiguous_match/);
+  assert.equal(
+    named.errors.split("\n").filter((line) => line.includes("candidate ")).length,
+    3,
+  );
+  for (const [selector, reason, hint] of [
+    ["@21", "ref_form", "Refs look like @e21. Take one from a snapshot."],
+    ["#1abc", "css", 'Write ids that start with a digit as [id="1abc"].'],
+  ]) {
+    const refused = await callApi(`/tabs/${tab.id}/click`, "POST", { selector });
+    const problem = (await refused.json()).error;
+    assert.equal(refused.status, 400);
+    assert.deepEqual(
+      [problem.code, problem.selector, problem.reason, problem.hint],
+      ["invalid_selector", selector, reason, hint],
+    );
+    assert.ok(problem.forms.includes('role=button[name="Save"]'), problem.forms);
+    assert.ok(
+      (await cli(["click", tab.id, selector], undefined, { failure: true })).errors.includes(
+        `hint: ${hint}`,
+      ),
+    );
+  }
+  const never = await callApi(`/tabs/${tab.id}/click`, "POST", { ref: "@e99999" });
+  assert.equal(never.status, 404);
+  assert.deepEqual(
+    (({ code, ref: reference }) => [code, reference])((await never.json()).error),
+    ["unknown_ref", "@e99999"],
+  );
+  passed("selector forms act through the API and CLI");
+  // Snapshot scopes: the viewport after a scroll, a control ref and a
+  // frame ref as roots.
+  await json(["navigate", tab.id, `${fixture.origin}/snapshot/sections`]);
+  await observe(tab.id);
+  assert.equal((await json(["scroll", tab.id, "down", "2000"])).y, 2000);
+  const inView = await json(["snapshot", tab.id, "--viewport", "--full"]);
+  assert.match(inView.text, /Middle section text/);
+  assert.match(inView.text, /Frame near text/);
+  for (const away of [
+    "Top section text",
+    "Bottom section text",
+    "Card bottom text",
+    "Frame far text",
+  ])
+    assert.ok(!inView.text.includes(away), `${away} is outside the viewport`);
+  const structure = await json(["snapshot", tab.id, "--outline", "--full"]);
+  const innerFrame = structure.interactables.find(
+    (item) => item.label === "Inner notes",
+  );
+  assert.equal(innerFrame.role, "iframe");
+  const inFrame = await json(["snapshot", tab.id, "--root", innerFrame.ref, "--full"]);
+  assert.equal(
+    inFrame.text,
+    "Frame near text\nFrame button\nFrame far text\nFrame far button",
+  );
+  const cardButton = ref(await observe(tab.id), "Card button");
+  const inCard = await json(["snapshot", tab.id, "--root", cardButton, "--full"]);
+  assert.equal(inCard.text, "Card button");
+  assert.deepEqual(
+    inCard.interactables.map((item) => item.ref),
+    [cardButton],
+  );
+  // An outline: landmarks, headings, tables, link addresses and an open
+  // dialog first.
+  await json(["navigate", tab.id, `${fixture.origin}/snapshot/outline`]);
+  const outline = (await json(["snapshot", tab.id, "--outline", "--full"])).outline;
+  for (const printed of [
+    'dialog "Confirm"',
+    "banner",
+    'navigation "Sections"',
+    'heading "Plans" level=2',
+    "listitem",
+    'table "Prices"',
+    'columnheader "Plan"',
+    "search",
+    "contentinfo",
+  ])
+    assert.ok(outline.includes(printed), `${printed} is missing from the outline`);
+  assert.match(outline, /link "Plans" @e\d+ href=\/plans\?tier=pro#faq/);
+  assert.ok(
+    outline.indexOf('dialog "Confirm"') < outline.indexOf("banner"),
+    "an open dialog prints first",
+  );
+  // Continuation: the parts cover the page once, in text and in outlines.
+  await json(["navigate", tab.id, `${fixture.origin}/snapshot/parts`]);
+  const whole = await json([
+    "snapshot",
+    tab.id,
+    "--max-chars",
+    "24000",
+    "--max-controls",
+    "100",
+  ]);
+  const bounded = ["--max-chars", "900", "--max-controls", "4"];
+  let piece = await json(["snapshot", tab.id, ...bounded]);
+  const pieces = [];
+  const labels = [];
+  for (let round = 0; ; round++) {
+    pieces.push(piece.text);
+    labels.push(...piece.interactables.map((item) => item.label));
+    assert.ok(round < 40, "the parts of one page must end");
+    if (!piece.next) break;
+    piece = await json(["snapshot", tab.id, ...bounded, "--cursor", piece.next]);
+  }
+  assert.ok(pieces.length > 1, "the page takes more than one part");
+  assert.equal(pieces.join(""), whole.text);
+  // One read of the whole page needs no ranking, so the parts hold the
+  // same controls in another order, each of them once.
+  assert.deepEqual(
+    [...labels].sort(),
+    whole.interactables.map((item) => item.label).sort(),
+  );
+  assert.match(
+    (await cli(["snapshot", tab.id, ...bounded])).output,
+    /\nNext part: cursor c1\./,
+  );
+  const outlineRefs = [];
+  let outlinePiece = await json(["snapshot", tab.id, "--outline", "--max-chars", "600"]);
+  for (let round = 0; ; round++) {
+    outlineRefs.push(...(outlinePiece.outline.match(/@e\d+/g) ?? []));
+    assert.ok(round < 40, "the outline parts of one page must end");
+    if (!outlinePiece.next) break;
+    outlinePiece = await json([
+      "snapshot",
+      tab.id,
+      "--outline",
+      "--max-chars",
+      "600",
+      "--cursor",
+      outlinePiece.next,
+    ]);
+  }
+  const wholeOutline = await json([
+    "snapshot",
+    tab.id,
+    "--outline",
+    "--max-chars",
+    "24000",
+    "--max-controls",
+    "100",
+  ]);
+  assert.equal(
+    outlineRefs.length,
+    new Set(outlineRefs).size,
+    "no control line is printed twice",
+  );
+  assert.equal(
+    outlineRefs.length,
+    (wholeOutline.outline.match(/@e\d+/g) ?? []).length,
+  );
+  assert.match(
+    (await cli(["snapshot", tab.id, "--cursor", "c1.not-a-cursor"], undefined, {
+      failure: true,
+    })).errors,
+    /400 invalid_cursor/,
+  );
+  // The header names the page, the space and the space's tabs, including
+  // one the person opened while they had control.
+  await cli(["handoff", space.id]);
+  const knownTabs = (
+    await chrome.evaluate(() => window.kamapathy.getState())
+  ).tabs.map((item) => item.id);
+  const personPage = (
+    await chrome.evaluate(
+      (input) =>
+        window.kamapathy.dispatch({
+          type: "tab:create",
+          spaceId: input.spaceId,
+          url: input.url,
+          background: true,
+        }),
+      { spaceId: space.id, url: `${fixture.origin}/` },
+    )
+  ).tabs.find((item) => !knownTabs.includes(item.id));
+  await waitForState(
+    chrome,
+    (state, id) =>
+      state.tabs.some((item) => item.id === id && !item.loading),
+    personPage.id,
+  );
+  await cli(["resume", space.id]);
+  const headed = await json(["snapshot", tab.id]);
+  assert.deepEqual(
+    [headed.header.page.id, headed.header.space.id, headed.header.space.name],
+    [tab.id, space.id, "Skill form review"],
+  );
+  assert.equal(
+    headed.header.tabs.find((item) => item.id === tab.id).current,
+    true,
+  );
+  const personEntry = headed.header.tabs.find(
+    (item) => item.id === personPage.id,
+  );
+  assert.deepEqual(
+    [personEntry.openedBy, personEntry.managed, personEntry.title],
+    ["person", false, "Kamapathy form lab"],
+  );
+  const headerLine = (await cli(["snapshot", tab.id])).output.split("\n")[0];
+  assert.ok(
+    headerLine.startsWith(`page ${headed.header.page.label} `),
+    headerLine,
+  );
+  assert.ok(headerLine.includes(`space "Skill form review" ${space.id}`), headerLine);
+  assert.ok(
+    headerLine.includes(
+      `${personEntry.label} "Kamapathy form lab" (person) (unmanaged)`,
+    ),
+    headerLine,
+  );
+  // Without a header the first line is the page title again.
+  assert.ok(
+    (await cli(["snapshot", tab.id, "--no-header"])).output.startsWith(
+      `${headed.title}\n`,
+    ),
+  );
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    personPage.id,
+  );
+  passed("snapshot scopes, outline, header and continuation");
+  // Locators name one control each, and go on naming it after the page is
+  // loaded again and in a later run.
+  const locatorPage = `${fixture.origin}/snapshot/locators`;
+  await json(["navigate", tab.id, locatorPage]);
+  const located = await json(["snapshot", tab.id, "--locators", "--full"]);
+  const locators = located.interactables
+    .filter((item) => item.locator)
+    .map((item) => item.locator);
+  assert.deepEqual(locators.slice(0, 4), [
+    'css=[data-testid="save-button"]',
+    "css=#checkout-form",
+    'role=button[name="Ship it"]',
+    'role=button[name="Archive"]',
+  ]);
+  assert.ok(
+    locators.includes('css=input[placeholder="First note"]') &&
+      locators.includes("href=/one"),
+    JSON.stringify(locators),
+  );
+  // Two links share an address, so no locator names either one alone.
+  assert.equal(
+    located.interactables.filter(
+      (item) => item.label === "Shared" && item.locator,
+    ).length,
+    0,
+  );
+  assert.ok(
+    (await cli(["snapshot", tab.id, "--locators", "--full"])).output.includes(
+      ' locator: css=[data-testid="save-button"]',
+    ),
+  );
+  await json(["navigate", tab.id, locatorPage]);
+  for (const locator of locators) {
+    await cli(["click", tab.id, locator]);
+    // A link's locator takes the page with it.
+    if (locator.startsWith("href=")) await json(["navigate", tab.id, locatorPage]);
+  }
+  const locatorScript = join(temporary, "locators.mjs");
+  await writeFile(
+    locatorScript,
+    [
+      `const page = (await (await space(${JSON.stringify(space.id)})).tabs()).find((item) => item.id === ${JSON.stringify(tab.id)});`,
+      `for (const locator of ${JSON.stringify(locators)}) {`,
+      `  await page.navigate(${JSON.stringify(locatorPage)});`,
+      "  await page.click(locator);",
+      "}",
+      `console.log("clicked ${locators.length} locators");`,
+      "",
+    ].join("\n"),
+  );
+  assert.equal(
+    (await cli(["run", locatorScript])).output,
+    `clicked ${locators.length} locators\n`,
+  );
+  passed("locators from one snapshot work after a reload and in a later run");
   // The snapshot waits for every frame of the page to finish loading.
   await json(["navigate", tab.id, `${fixture.origin}/frames/outer`]);
   await observe(tab.id);
@@ -755,7 +1313,11 @@ try {
   assert.ok(
     reference.interactables.some((control) => control.label === "Read note 18"),
   );
-  const referenceCapture = (await cli(["snapshot", tab.id, "--full"])).output;
+  // The header line carries the space's id, which is new every run, and
+  // has its own check, so the benchmark compares the page itself.
+  const referenceCapture = (
+    await cli(["snapshot", tab.id, "--full", "--no-header"])
+  ).output;
   await writeFile(join(artifacts, "kamapathy-reference.txt"), referenceCapture);
   passed(
     "full-content observation retains every reference page note and control",
@@ -1696,6 +2258,8 @@ try {
   await cli(["space", "close", runSpace.id]);
   passed("run --timeout 3000 ends a script waiting on /hold with run_timeout after its earlier output");
   // Section 11 in the real app: versions, help, diagnostics and field checks.
+  // The level comes from the one schema, so a new level needs no edit here.
+  const { API_LEVEL } = await import(pathToFileURL(join(skill, "scripts/schema/index.mjs")).href);
   const versions = (await cli(["--version"])).output;
   assert.match(versions, /API level 4/);
   assert.match(versions, new RegExp(`API level ${API_LEVEL}`));

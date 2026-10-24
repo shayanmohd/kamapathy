@@ -25,6 +25,7 @@ import {
 import { createDispatchers } from "./input/dispatch";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
+import { processRefs, type RefBook } from "./refs";
 import { createNavigation } from "./routes/navigation";
 import { pdfRoutes } from "./routes/pdf";
 import { spaceRequestRoutes } from "./routes/space-requests";
@@ -48,7 +49,18 @@ export interface AutomationController {
     options?: { isolated?: boolean; pageBudget?: number },
   ): Space;
   getWebContents(tabId: string): WebContents | undefined;
-  canCapturePage(): boolean;
+  /** Whether the tab shows a PDF. Section 16 implements it; absent is no. */
+  pdfDocument?(tabId: string): boolean;
+  /** Runs a capture with Chromium painting the tab's view, in any window state. */
+  withVisibleView<T>(tabId: string, capture: () => Promise<T>): Promise<T>;
+  /** The scale factor of the display the window is on. */
+  deviceScale(): number;
+  /** Cuts a capture down to the planned size; null for an empty image. */
+  cropPng(
+    png: Buffer,
+    width: number,
+    height: number,
+  ): { png: Buffer; width: number; height: number } | null;
   addActivity(
     spaceId: string | undefined,
     message: string,
@@ -169,9 +181,11 @@ export async function startAutomation(
     skillPath?: string;
     updates?: UpdateService;
     pdf?: { extractor?: Extractor };
+    refs?: RefBook;
   },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
+  const refs = options.refs ?? processRefs;
   const authority = createAuthority(controller);
   const scheduler = new Scheduler();
   // Each document's HTTP method, so a PDF a form returned is never fetched
@@ -202,7 +216,12 @@ export async function startAutomation(
     sessions,
     referenceSession,
     dispatchers,
+    refs,
   });
+  // Refs a closed tab was issued are nobody's, so the book forgets them.
+  const forgetClosedTabs = controller.subscribe(() =>
+    refs.retain(new Set(controller.state.tabs.map((tab) => tab.id))),
+  );
   const navigation = createNavigation({
     controller,
     authority,
@@ -425,6 +444,7 @@ export async function startAutomation(
         // The dispatchers go last, so each session's release still lets go
         // of the keys it holds.
         navigation.dispose();
+        forgetClosedTabs();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

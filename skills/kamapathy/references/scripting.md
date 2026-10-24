@@ -82,13 +82,13 @@ Popups that a page opens with `window.open`, a link or a form appear in `tabs()`
 
 ## Page
 
-Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`), `openerId`, `managed`, `url` and `title`; `navigate` refreshes them all, and `snapshot` refreshes `url` and `title`. A page the agent does not manage refuses every call below but `opener()` with `tab_unmanaged` until it is adopted. A target is a ref string such as `"@e3"` from a current snapshot, or a CSS selector string that matches exactly one visible element. Results are the parsed JSON the routes return, as [api.md](api.md) lists.
+Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`), `openerId`, `managed`, `url` and `title`; `navigate` refreshes them all, and `snapshot` refreshes `url` and `title`. A page the agent does not manage refuses every call below but `opener()` with `tab_unmanaged` until it is adopted. A target is a ref string such as `"@e3"` from a current snapshot, or a selector string of the grammar [actions.md](actions.md#selectors) lists: CSS by default, or `css=`, `text=`, `role=`, `href=` and `xpath=`, with an optional `:has-text("...")`, `:text-is("...")` or `>> nth=N` at the end. It must name one element the call can take, or the call throws `no_match` or `ambiguous_match`. Results are the parsed JSON the routes return, as [api.md](api.md) lists.
 
 | Call | Returns | Notes |
 | --- | --- | --- |
 | `navigate(url)` | the page | Complete http or https URL. Refs from before become stale |
-| `snapshot({ mode?, selector?, maxChars?, maxControls? })` | parsed snapshot | `mode` is `"compact"` (default) or `"full"`; same bounds as the CLI |
-| `text(options?)` | string | The same text the CLI's `snapshot` prints, for the same options |
+| `snapshot({ mode?, selector?, maxChars?, maxControls?, scope?, root?, format?, locators?, header?, cursor? })` | parsed snapshot | `mode` is `"compact"` (default) or `"full"`; same bounds as the CLI. Since level 3: `scope` `"page"` (default) or `"viewport"`, `root` a ref instead of `selector`, `format` `"list"` (default) or `"outline"`, `locators`, `header` (default true) and `cursor` from an earlier part's `next` |
+| `text(options?)` | string | The same text the CLI's `snapshot` prints, for the same options, header line, outline and `locator:` suffixes included |
 | `click(target)` | `{ ok, url, fallback?, rebound? }` | Visible, enabled, uncovered control |
 | `fill(target, value)` | `{ ok, rebound? }` | Text-like inputs, textareas, single selects by option value, editable text |
 | `press(key, target?)` | `{ ok, rebound? }` | Enter, Tab, Escape, Backspace, Delete, arrows, Home, End, PageUp, PageDown, Space |
@@ -97,7 +97,8 @@ Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`)
 | `wait({ selector?, text?, timeoutMs? })` | `{ ok }` | 0 to 15000 ms, default 5000 |
 | `batch(actions)` | `{ ok: true, results }` | 1 to 20 actions with the schema in actions.md; a failure throws, see below |
 | `upload(ref, files)` | `{ ok, selected }` | A file input ref and 1 to 8 local paths, 16 MiB together; the site may upload at once |
-| `screenshot(path)` | the absolute path | Viewport PNG; never overwrites a file; needs a shown, unminimized window |
+| `screenshot({ path?, fullPage?, clip?, scale?, timeout? })` | the PNG `Buffer` | The viewport, the whole page with `fullPage`, or a `clip` of `{x, y, width, height}` in CSS pixels; `scale` is `"css"` by default, unlike Playwright, and `"device"` keeps device pixels; the option is `timeout`, not `timeoutMs`; a `path` is written too, never overwriting. Level 3 |
+| `screenshot(path)` | the absolute path | Viewport PNG at CSS scale; never overwrites a file; the window may be hidden or minimized |
 | `pdfText({ from?, to?, maxChars?, timeout? })` | `{ url, title, pageCount, from, to, pages, chars, truncated, nextPage?, noText? }` | The text of a PDF the tab shows, by page: at most 500 pages and `maxChars` characters, 20000 by default; `timeout` is sent as `timeoutMs` |
 | `opener()` | `Page` or `null` | The open page that opened this popup |
 | `close()` | `{ ok, closed?, replacement? }` | Retires the label; closing a space's last page leaves a blank page with the next label in its place |
@@ -139,7 +140,7 @@ The client's own codes:
 | `timeout` | The request timed out. The action may still have happened |
 | `request_too_large`, `invalid_response`, `request_failed` | The body is larger than its route accepts, the answer was not what the route returns, or the request failed without a code |
 
-Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `tab_unmanaged`, `page_budget`, `space_ended`, `screenshot_unavailable`, `not_pdf` or `pdf_not_refetchable`; `help("errors")` lists them all.
+Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `tab_unmanaged`, `page_budget`, `space_ended`, `not_pdf` or `pdf_not_refetchable`; `help("errors")` lists them all. A target adds `invalid_selector` with its `reason`, `forms` and often a `hint`, `unknown_ref` for a ref no snapshot of that page issued, `no_match` with `waitedMs`, and `ambiguous_match` with `count`, `visible`, `hidden`, `actionable` and up to 3 `candidates` to act on. A snapshot adds `invalid_cursor` and `page_changed` for a cursor from another scope or document, and a capture adds `clip_outside_page` and `screenshot_too_large`.
 
 **Hard stops.** In `run`, these errors stop the run for good: `human_control` with reason `manual` or `handoff` (the person took over, or you handed them the space), `space_ended` with `endedBy: "person"` (they stopped the agent there), and `automation_stopped` or `not_connected` with reason `access_off`. The first one gets `hardStop: true`, catching it changes nothing, and every later call throws a copy with `hardStop: true` without sending anything. The run drops its output, prints only Kamapathy's guidance for that cause, and exits with status 3. Stop and tell the person; do not retry or call resume until they ask.
 

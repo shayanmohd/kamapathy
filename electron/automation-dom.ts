@@ -1,16 +1,27 @@
+import type { Decision, Invalid, Picked, Query } from "./agent/dom/select";
+import type { SearchAst } from "./agent/selectors";
+
 export interface SnapshotOptions {
   mode: "compact" | "full";
   selector?: string;
+  root?: string;
+  scope?: "page" | "viewport";
+  format?: "list" | "outline";
   maxChars: number;
   maxControls: number;
+  offsets?: { text: number; control: number; line: number };
+  locators?: boolean;
   firstRef: number;
 }
 export interface ElementTarget {
   ref?: string;
   selector?: string;
+  query?: Query;
 }
 export type PageOperation =
   | "snapshot"
+  | "elements"
+  | "validate"
   | "target"
   | "click"
   | "fill"
@@ -25,11 +36,15 @@ export type PageOperation =
   | "frameIndex";
 
 // This complete function is serialized into a separate Chromium world. It has no
-// imports, Node APIs, or access to the browser interface's preload bridge.
+// imports, Node APIs, or access to the browser interface's preload bridge. The
+// selector engine and the outline builder travel the same way, as arguments,
+// so operations that resolve no selector and read no outline work without them.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
   namespace: string,
+  selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
+  outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -72,10 +87,15 @@ export function pageOperation(
     if (operation !== "ready" && operation !== "frameIndex")
       world.__kamapathyReferences = registry;
   }
-  const failure = (error: string, code = "element_action_failed") => ({
+  const failure = (
+    error: string,
+    code = "element_action_failed",
+    fields?: Record<string, unknown>,
+  ) => ({
     ok: false as const,
     code,
     error,
+    ...(fields === undefined ? {} : { fields }),
   });
   // Refs this operation moved to a control the page drew again.
   const rebound: string[] = [];
@@ -117,18 +137,20 @@ export function pageOperation(
   const opaqueFrame = (element: Element) =>
     (element.localName === "iframe" || element.localName === "frame") &&
     !frameDocument(element);
-  // The frame elements around an element, outermost first, or undefined once
-  // its document is no longer shown in this page.
-  const framesOf = (element: Element) => {
+  // The frame elements around a document, outermost first, or undefined once
+  // it is no longer shown in this page.
+  const framesOfDoc = (doc: Document) => {
     const frames: Element[] = [];
-    for (let doc = docOf(element); doc !== document; ) {
-      const frame = doc.defaultView?.frameElement;
+    for (let current = doc; current !== document; ) {
+      const frame = current.defaultView?.frameElement;
       if (!frame?.isConnected) return undefined;
       frames.unshift(frame);
-      doc = docOf(frame);
+      current = docOf(frame);
     }
     return frames;
   };
+  // The same for the document an element belongs to.
+  const framesOf = (element: Element) => framesOfDoc(docOf(element));
   const live = (element: Element) =>
     element.isConnected && framesOf(element) !== undefined;
   // The frames of one document in the order a person sees them, through open
@@ -257,16 +279,15 @@ export function pageOperation(
       scaleY,
     };
   };
-  // Where an element sits in the top viewport, through the frames around it,
-  // and the part of that viewport those frames can show.
-  const placed = (element: Element) => {
-    const box = element.getBoundingClientRect();
+  // Where a box of a document sits in the top viewport, through the frames
+  // around it, and the part of that viewport those frames can show.
+  const placedRect = (doc: Document, box: DOMRect) => {
     const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
     let x = 0,
       y = 0,
       scaleX = 1,
       scaleY = 1;
-    for (const frame of framesOf(element) || []) {
+    for (const frame of framesOfDoc(doc) || []) {
       const origin = frameOrigin(frame);
       x += origin.x * scaleX;
       y += origin.y * scaleY;
@@ -292,6 +313,24 @@ export function pageOperation(
       clip,
     };
   };
+  // Where an element sits in the top viewport.
+  const placed = (element: Element) =>
+    placedRect(docOf(element), element.getBoundingClientRect());
+  // Whether a box meets the part of the viewport its frames can show.
+  const onScreenBox = (box: ReturnType<typeof placedRect>) =>
+    box.bottom > box.clip.top &&
+    box.right > box.clip.left &&
+    box.top < box.clip.bottom &&
+    box.left < box.clip.right;
+  const onScreen = (element: Element) => onScreenBox(placed(element));
+  // A control with no box of its own, such as a file input inside visible
+  // upload UI, is on screen where the element around it is.
+  const drawnOnScreen = (element: Element) =>
+    onScreen(
+      element.getClientRects().length
+        ? element
+        : element.parentElement || element,
+    );
   // What a pointer at a point of the top viewport lands on: the element's
   // frame in every document around it, then the innermost element in its
   // own document, through open shadow roots.
@@ -378,7 +417,11 @@ export function pageOperation(
     /material (icons|symbols)|google symbols/i.test(
       styleOf(parent).fontFamily,
     );
-  const pageText = (scope: Element, maximum = Infinity) => {
+  const pageText = (
+    scope: Element,
+    maximum = Infinity,
+    onlyOnScreen = false,
+  ) => {
     let text = "",
       previousBlock: Element | null = null;
     let previousRect: DOMRect | undefined;
@@ -402,6 +445,12 @@ export function pageOperation(
         (rect) => rect.width > 0 && rect.height > 0,
       );
       if (!rects.length) return;
+      // A run of text is on screen when one of its rectangles is.
+      if (
+        onlyOnScreen &&
+        !rects.some((rect) => onScreenBox(placedRect(docOf(node), rect)))
+      )
+        return;
       let block = parent;
       while (
         block.parentElement &&
@@ -437,18 +486,6 @@ export function pageOperation(
     inputElement(element) && element.type === "file" &&
     element.isConnected && !element.closest('[inert],[aria-hidden="true"]') &&
     (visible(element) || (!!element.parentElement && visible(element.parentElement)));
-  const unique = (selector: string) => {
-    try {
-      const matches = matching(selector);
-      if (matches.length !== 1)
-        return failure(
-          `Selector matched ${matches.length} elements. Use a unique selector.`,
-        );
-      return matches[0];
-    } catch {
-      return failure("Invalid CSS selector.", "invalid_selector");
-    }
-  };
   // A frame from another origin is listed so an agent knows content is
   // there, but nothing in it can be read or operated from this page.
   const reachable = (element: Element) =>
@@ -458,6 +495,202 @@ export function pageOperation(
           "cross_origin_frame",
         )
       : element;
+  const PAGE_CHANGED =
+    "The page changed during this operation. Take a new snapshot.";
+  const NO_TARGET = "Provide an element reference or a selector.";
+  const disabledElement = (element: Element) =>
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled") === "true";
+  // Whether something else draws over the middle of the part of an element
+  // a person can see. Nothing off screen and nothing without size counts.
+  const covered = (element: Element) => {
+    const box = placed(element);
+    const left = Math.max(box.clip.left, box.left),
+      right = Math.min(box.clip.right, box.right);
+    const top = Math.max(box.clip.top, box.top),
+      bottom = Math.min(box.clip.bottom, box.bottom);
+    if (right <= left || bottom <= top) return false;
+    return !within(
+      element,
+      hitAt(element, (left + right) / 2, (top + bottom) / 2),
+    );
+  };
+  const editingHost = (element: Element) => {
+    if (!html(element) || !element.isContentEditable) return false;
+    const parent = element.parentElement;
+    return !(html(parent) && parent.isContentEditable);
+  };
+  let engine: ReturnType<NonNullable<typeof selectorEngine>> | undefined;
+  const engineOf = () =>
+    (engine ||= selectorEngine!({
+      documents,
+      visible,
+      disabled: disabledElement,
+      covered,
+      editingHost,
+    }));
+  // The nodes a role resolution left for this operation, taken once.
+  const takePicked = (key: string | undefined) => {
+    const store = (
+      globalThis as unknown as { __kamapathyPicked?: Map<string, Picked[]> }
+    ).__kamapathyPicked;
+    const entries = key === undefined ? undefined : store?.get(key);
+    if (entries) store?.delete(key!);
+    return entries;
+  };
+  const pickedFor = (query: Query): readonly Picked[] | undefined | null =>
+    query.ast.kind === "role" ? (takePicked(query.picked) ?? null) : undefined;
+  // Role words agents write that name a different role here.
+  const ROLE_ALIASES: Record<string, string> = {
+    textfield: "textbox",
+    listboxoption: "option",
+    menulistoption: "option",
+    image: "img",
+  };
+  // The role word an element carries: the same word role= matches.
+  const roleOf = (element: Element): string => {
+    const explicit = (element.getAttribute("role") || "")
+      .trim()
+      .split(/\s+/)[0]
+      .toLowerCase();
+    if (explicit && explicit !== "none" && explicit !== "presentation")
+      return ROLE_ALIASES[explicit] || explicit;
+    const tag = element.localName;
+    if ((tag === "a" || tag === "area") && element.hasAttribute("href"))
+      return "link";
+    if (tag === "button" || tag === "summary") return "button";
+    if (inputElement(element)) {
+      const type = element.type;
+      if (type === "hidden") return "none";
+      if (type === "checkbox" || type === "radio") return type;
+      if (type === "range") return "slider";
+      if (type === "number") return "spinbutton";
+      if (
+        ["button", "submit", "reset", "image", "file", "color"].includes(type)
+      )
+        return "button";
+      if (element.hasAttribute("list")) return "combobox";
+      if (type === "search") return "searchbox";
+      return "textbox";
+    }
+    if (selectElement(element))
+      return element.multiple || element.size > 1 ? "listbox" : "combobox";
+    if (textAreaElement(element)) return "textbox";
+    if (tag === "option") return "option";
+    if (tag === "img") return "img";
+    if (editingHost(element)) return "textbox";
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
+    if (tag === "li") return "listitem";
+    if (tag === "table") return "table";
+    if (tag === "tr") return "row";
+    if (tag === "td") return "cell";
+    if (tag === "th")
+      return element.getAttribute("scope") === "row"
+        ? "rowheader"
+        : "columnheader";
+    if (tag === "nav") return "navigation";
+    if (tag === "main") return "main";
+    if (tag === "aside") return "complementary";
+    if (tag === "header" || tag === "footer")
+      return element.parentElement?.closest("article,aside,main,nav,section")
+        ? "generic"
+        : tag === "header"
+          ? "banner"
+          : "contentinfo";
+    if (tag === "search") return "search";
+    if (tag === "form") return "form";
+    if (tag === "section") return "region";
+    if (tag === "dialog") return "dialog";
+    if (tag === "fieldset" || tag === "details") return "group";
+    if (tag === "iframe" || tag === "frame") return "iframe";
+    return tag;
+  };
+  // The ref numbers this operation handed out, beyond a snapshot's own.
+  const issuedRefs: number[] = [];
+  // What an agent needs to tell matches apart, with a ref to act on. An
+  // element that already holds a ref keeps it.
+  const candidatesOf = (found: Element[], firstRef: number | undefined) => {
+    let next = firstRef;
+    return found.map((element) => {
+      let ref = registry.refs.get(element);
+      if (
+        (!ref || registry.elements.get(ref) !== element) &&
+        next !== undefined
+      ) {
+        ref = `@e${next}`;
+        issuedRefs.push(next++);
+        registry.refs.set(element, ref);
+        registry.elements.set(ref, element);
+      }
+      const frame = framePath(element);
+      return {
+        ...(ref === undefined ? {} : { ref }),
+        tag: element.localName,
+        role: roleOf(element),
+        name: labelOf(element).slice(0, 80),
+        context: contextOf(element).slice(0, 80),
+        visible: visible(element, true),
+        disabled: disabledElement(element),
+        ...(frame ? { frame } : {}),
+      };
+    });
+  };
+  const invalidSelector = (selector: string, result: Invalid) => {
+    const fields = {
+      selector,
+      reason: result.reason,
+      ...(result.hint === undefined ? {} : { hint: result.hint }),
+    };
+    return failure(result.message, "invalid_selector", fields);
+  };
+  // How every operation reports a resolution that gave it no element.
+  const selectFailure = (
+    selector: string,
+    decision: Exclude<Decision, { kind: "match" }>,
+    firstRef: number | undefined,
+  ) => {
+    if (decision.kind === "invalid") return invalidSelector(selector, decision);
+    if (decision.kind === "none") {
+      const fields = { selector };
+      return failure(
+        "Nothing on the page matches this selector. Take a snapshot to check the page.",
+        "no_match",
+        fields,
+      );
+    }
+    if (decision.kind === "blocked")
+      return {
+        ...failure(
+          decision.blocker === "hidden"
+            ? "Element is not visible."
+            : "Element is disabled.",
+        ),
+        blocked: { blocker: decision.blocker },
+      };
+    const { count, visible: shown, hidden } = decision.tally;
+    const fields = {
+      selector,
+      ...decision.tally,
+      candidates: candidatesOf(decision.candidates, firstRef),
+    };
+    const result = failure(
+      `Selector matched ${count} elements (${shown} visible, ${hidden} hidden). Use a ref from candidates or a more specific selector.`,
+      "ambiguous_match",
+      fields,
+    );
+    return issuedRefs.length ? { ...result, issued: issuedRefs } : result;
+  };
+  // A target the main process parsed: the engine decides, and the element it
+  // picks goes through the same checks a ref does.
+  const select = (spec: { selector: string; query: Query }) => {
+    const picked = pickedFor(spec.query);
+    if (picked === null) return failure(PAGE_CHANGED, "page_changed");
+    const decision = engineOf().decide(spec.query, picked);
+    return decision.kind === "match"
+      ? decision.element
+      : selectFailure(spec.selector, decision, spec.query.firstRef);
+  };
   const target = (spec = payload as ElementTarget) => {
     if (typeof spec.ref === "string") {
       const element = registry.elements.get(spec.ref);
@@ -474,16 +707,24 @@ export function pageOperation(
       return failure(
         "Element reference is stale. Take a new snapshot.",
         "stale_ref",
+        { ref: spec.ref },
       );
     }
-    if (typeof spec.selector === "string") {
-      const found = unique(spec.selector);
+    if (typeof spec.selector === "string" && spec.query) {
+      const found = select({ selector: spec.selector, query: spec.query });
       return isElement(found) ? reachable(found) : found;
     }
-    return failure(
-      "Provide an element reference or a unique CSS selector.",
-      "invalid_target",
-    );
+    return failure(NO_TARGET, "invalid_target");
+  };
+  // Where a listed link goes: an absolute web, mail or phone address. A
+  // script link and an address over 2,048 characters carry none.
+  const hrefOf = (element: Element) => {
+    if (!html(element) || !element.matches("a[href],area[href]")) return {};
+    const link = element as HTMLAnchorElement;
+    return ["http:", "https:", "mailto:", "tel:"].includes(link.protocol) &&
+      link.href.length <= 2048
+      ? { href: link.href }
+      : {};
   };
   const selectorFor = (element: Element) => {
     if (element.id && element.id.length <= 512) {
@@ -1046,14 +1287,74 @@ export function pageOperation(
     if (!hit || !within(host!, hit))
       return failure("Another element covers the target.", "element_obscured");
   };
+  // The boxes a run of text draws, which say whether it is rendered at all
+  // and whether the viewport shows it.
+  const textRects = (node: Text) => {
+    const range = docOf(node).createRange();
+    range.selectNodeContents(node);
+    return Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+  };
+  // A text node's rendered text, read as pageText reads it.
+  const textOf = (node: Text) => {
+    const parent = node.parentElement;
+    return !parent ||
+      parent.closest("script,style,noscript,template,input,textarea,select") ||
+      (html(parent) && parent.isContentEditable) ||
+      !visible(parent, true) ||
+      iconName(node, parent) ||
+      !textRects(node).length
+      ? ""
+      : node.textContent || "";
+  };
+  const textOnScreen = (node: Text) =>
+    textRects(node).some((rect) =>
+      onScreenBox(placedRect(docOf(node), rect)),
+    );
+  // The open dialogs and popups inside a scope, outermost first and only.
+  const popupRootsIn = (root: Element) => {
+    const roots: Element[] = [];
+    const take = (element: Element) => {
+      if (!element.matches(popup) || !visible(element)) return false;
+      roots.push(element);
+      return true;
+    };
+    if (take(root)) return roots;
+    walk(root, (node) => {
+      if (node.nodeType === 1 && take(node as Element)) return false;
+    });
+    return roots;
+  };
   if (operation === "snapshot") {
     styles = new Map();
     const options = payload as unknown as SnapshotOptions;
+    const viewport = options.scope === "viewport";
+    const outline = options.format === "outline";
+    // Where this part starts: a character of the text, a ranked control.
+    const offsets = {
+      text: options.offsets?.text || 0,
+      control: options.offsets?.control || 0,
+      line: options.offsets?.line || 0,
+    };
     let scope: Element = document.body || document.documentElement;
-    if (options.selector) {
-      const selected = unique(options.selector);
+    // A root is a ref; any other form of scope is a selector the main
+    // process parsed.
+    const scoped =
+      options.root !== undefined
+        ? { ref: options.root }
+        : options.selector !== undefined
+          ? (payload as ElementTarget)
+          : undefined;
+    if (scoped) {
+      const selected = target(scoped);
       if (!isElement(selected)) return selected;
-      scope = selected;
+      // A frame of this origin is read as its own document; one from
+      // another origin fails as any control inside it does.
+      const inner = frameDocument(selected);
+      scope = inner
+        ? inner.body || inner.documentElement || selected
+        : selected;
     }
     // A detached element's fingerprint stays, so its ref can follow the
     // control the page draws in its place.
@@ -1077,7 +1378,8 @@ export function pageOperation(
       if (
         (element.matches(query) || opaqueFrame(element)) &&
         isControl(element) &&
-        (visible(element) || uploadControl(element))
+        (visible(element) || uploadControl(element)) &&
+        (!viewport || drawnOnScreen(element))
       )
         found.push(element);
     };
@@ -1186,7 +1488,12 @@ export function pageOperation(
       ) {
         const text =
           clean(element.getAttribute("aria-label")) || ownText(element);
-        if (text && text.length <= 200 && visible(element)) {
+        if (
+          text &&
+          text.length <= 200 &&
+          visible(element) &&
+          (!viewport || drawnOnScreen(element))
+        ) {
           clickable.push(element);
           return false;
         }
@@ -1197,11 +1504,12 @@ export function pageOperation(
           .concat(clickable)
           .sort((first, second) => order.get(first)! - order.get(second)!)
       : candidates;
-    // When a page has more controls than the budget, list what a person can
-    // act on now: open dialogs and popups, then pinned bars on screen, then
-    // the rest of the screen, then everything else, keeping page order.
-    let chosen = all;
-    if (all.length > options.maxControls) {
+    // Every control is ranked, whether or not they all fit, because a part
+    // takes ranked positions and every part must rank the page alike: open
+    // dialogs and popups, then pinned bars on screen, then the rest of the
+    // screen, then everything else. An outline prints in page order, so it
+    // ranks nothing.
+    const rankControls = () => {
       const fallback = new Set(clickable);
       // The nearest fixed or sticky box around an element, if any.
       const pinned = new Map<Element, Element | null>();
@@ -1239,22 +1547,9 @@ export function pageOperation(
           box.width >= (view.innerWidth * 2) / 3
         );
       };
-      const onScreen = (element: Element) => {
-        const box = placed(element);
-        return (
-          box.bottom > box.clip.top &&
-          box.right > box.clip.left &&
-          box.top < box.clip.bottom &&
-          box.left < box.clip.right
-        );
-      };
       const rank = (element: Element) => {
         // A file input hidden inside upload UI sits where its parent is.
-        const shown = onScreen(
-          element.getClientRects().length
-            ? element
-            : element.parentElement || element,
-        );
+        const shown = drawnOnScreen(element);
         // A drawer kept rendered off screen is not an open popup.
         const open = element.parentElement?.closest(popup);
         const pin = shown ? pinOf(element) : null;
@@ -1278,28 +1573,47 @@ export function pageOperation(
                   : 4;
         return tier * 2 + (fallback.has(element) ? 1 : 0);
       };
-      chosen = all
+      return all
         .map((element, index) => ({ element, index, rank: rank(element) }))
         .sort(
           (first, second) =>
             first.rank - second.rank || first.index - second.index,
-        )
-        .slice(0, options.maxControls)
-        .sort((first, second) => first.index - second.index)
-        .map((item) => item.element);
-    }
+        );
+    };
     const limit = options.mode === "compact" ? 80 : 200;
     let nextRef = options.firstRef;
+    // The numbers this snapshot assigned, so the main process knows which
+    // refs the tab was issued.
+    const issued: number[] = [];
     let remainingOptions = 100;
     let optionsTruncated = false;
     const prints = new Map<string, Fingerprint>();
-    const interactables = chosen.map((element, index) => {
-      let ref = registry.refs.get(element);
-      if (!ref || registry.elements.get(ref) !== element) {
-        ref = `@e${nextRef++}`;
-        registry.refs.set(element, ref);
-        registry.elements.set(ref, element);
-      }
+    // The ref a control already holds, or the next number of this
+    // snapshot's block, which only a line that is kept takes.
+    const refAt = (element: Element) => {
+      const held = registry.refs.get(element);
+      if (held && registry.elements.get(held) === element)
+        return { ref: held, keep: () => {} };
+      const number = nextRef;
+      const ref = `@e${number}`;
+      return {
+        ref,
+        keep: () => {
+          nextRef = number + 1;
+          issued.push(number);
+          registry.refs.set(element, ref);
+          registry.elements.set(ref, element);
+        },
+      };
+    };
+    const refFor = (element: Element) => {
+      const made = refAt(element);
+      made.keep();
+      return made.ref;
+    };
+    // What a listing says about one control, in both formats.
+    const entryFor = (element: Element, index: number) => {
+      const ref = refFor(element);
       const label = labelOf(element);
       const hidden = secret(element);
       const value = valueOf(element);
@@ -1325,6 +1639,7 @@ export function pageOperation(
         type: element.getAttribute("type") || undefined,
         label: label.slice(0, limit),
         selector,
+        ...hrefOf(element),
         disabled:
           element.matches(":disabled") ||
           element.getAttribute("aria-disabled") === "true",
@@ -1372,87 +1687,414 @@ export function pageOperation(
           : {}),
       };
       return entry;
-    });
+    };
+    // What a locator may be built from: the control's own attributes and a
+    // link's address, for the controls a part printed. A field's value is
+    // never read.
+    const LOCATOR_ATTRIBUTES = [
+      "data-testid",
+      "data-test",
+      "data-qa",
+      "data-cy",
+      "id",
+      "name",
+      "aria-label",
+      "placeholder",
+    ];
+    const locatorSources = (
+      elements: readonly Element[],
+      entries: readonly { ref: string }[],
+    ) => {
+      if (!options.locators) return {};
+      return {
+        locatorSources: elements.map((element, index) => {
+          const attributes: Record<string, string> = {};
+          for (const name of LOCATOR_ATTRIBUTES) {
+            const value = element.getAttribute(name);
+            if (value) attributes[name] = value;
+          }
+          return {
+            ref: entries[index].ref,
+            tag: element.localName,
+            attributes,
+            ...hrefOf(element),
+          };
+        }),
+      };
+    };
     // A control that looks like another visible control, listed or not and in
     // or outside a scoped snapshot, cannot be told apart from it once it is
     // gone, so its ref never follows a redrawn control.
-    const kindOf = (print: Pick<Fingerprint, "tag" | "role" | "type">) =>
-      JSON.stringify([print.tag, print.role, print.type]);
-    const keyOf = (print: Omit<Fingerprint, "selector" | "frame" | "url">) =>
-      JSON.stringify([
-        print.tag,
-        print.role,
-        print.type,
-        print.label,
-        print.group,
-        print.context,
-      ]);
-    const lookalikes = new Map<string, number>();
-    const kinds = new Set<string>();
-    const names = new Set<string>();
-    for (const print of prints.values()) {
-      lookalikes.set(keyOf(print), (lookalikes.get(keyOf(print)) || 0) + 1);
-      kinds.add(kindOf(print));
-      names.add(kindOf(print) + print.label);
-    }
-    const others = new Set(
-      options.selector
-        ? Array.from(document.querySelectorAll(query)).filter(
-            (element) => isControl(element) && visible(element),
+    const keepFingerprints = (listedNow: readonly Element[]) => {
+      const kindOf = (print: Pick<Fingerprint, "tag" | "role" | "type">) =>
+        JSON.stringify([print.tag, print.role, print.type]);
+      const keyOf = (print: Omit<Fingerprint, "selector" | "frame" | "url">) =>
+        JSON.stringify([
+          print.tag,
+          print.role,
+          print.type,
+          print.label,
+          print.group,
+          print.context,
+        ]);
+      const lookalikes = new Map<string, number>();
+      const kinds = new Set<string>();
+      const names = new Set<string>();
+      for (const print of prints.values()) {
+        lookalikes.set(keyOf(print), (lookalikes.get(keyOf(print)) || 0) + 1);
+        kinds.add(kindOf(print));
+        names.add(kindOf(print) + print.label);
+      }
+      const others = new Set(
+        scoped || viewport
+          ? Array.from(document.querySelectorAll(query)).filter(
+              (element) => isControl(element) && visible(element),
+            )
+          : [],
+      );
+      for (const element of all) others.add(element);
+      for (const element of listedNow) others.delete(element);
+      for (const element of others) {
+        const print = {
+          tag: element.localName,
+          role: element.getAttribute("role") || "",
+          type: element.getAttribute("type") || "",
+          label: "",
+          group: "",
+          context: "",
+        };
+        if (!kinds.has(kindOf(print))) continue;
+        print.label = labelOf(element);
+        if (!names.has(kindOf(print) + print.label)) continue;
+        print.group = groupOf(element);
+        print.context = contextOf(element);
+        const count = lookalikes.get(keyOf(print));
+        if (count) lookalikes.set(keyOf(print), count + 1);
+      }
+      for (const [ref, print] of prints)
+        if (lookalikes.get(keyOf(print))! > 1)
+          registry.fingerprints.delete(ref);
+        else registry.fingerprints.set(ref, print);
+    };
+    if (outline) {
+      const items = outlineBuilder!({
+        scope,
+        walk,
+        visible,
+        controls: new Set(all),
+        inView: (element) => !viewport || drawnOnScreen(element),
+        textInView: (node) => !viewport || textOnScreen(node),
+        roleOf,
+        labelOf,
+        frameDocument,
+        opaqueFrame,
+        popupRoots: () => popupRootsIn(scope),
+        textOf,
+      });
+      const kids: number[][] = items.map(() => []);
+      for (const [at, item] of items.entries())
+        if (item.parent >= 0) kids[item.parent].push(at);
+      // Text runs on for as many lines as it needs, each a JSON string of
+      // at most 400 characters.
+      const chunksOf = (value: string) => {
+        const chunks: string[] = [];
+        for (let at = 0; at < value.length; ) {
+          let size = Math.min(398, value.length - at);
+          while (
+            size > 1 &&
+            JSON.stringify(value.slice(at, at + size)).length > 400
           )
-        : [],
-    );
-    for (const element of all) others.add(element);
-    for (const element of chosen) others.delete(element);
-    for (const element of others) {
-      const print = {
-        tag: element.localName,
-        role: element.getAttribute("role") || "",
-        type: element.getAttribute("type") || "",
-        label: "",
-        group: "",
-        context: "",
+            size -= 1;
+          chunks.push(value.slice(at, at + size));
+          at += size;
+        }
+        return chunks.length ? chunks : [""];
       };
-      if (!kinds.has(kindOf(print))) continue;
-      print.label = labelOf(element);
-      if (!names.has(kindOf(print) + print.label)) continue;
-      print.group = groupOf(element);
-      print.context = contextOf(element);
-      const count = lookalikes.get(keyOf(print));
-      if (count) lookalikes.set(keyOf(print), count + 1);
+      type Planned = { item: number; depth: number; chunk?: string };
+      const plan: Planned[] = [];
+      for (const [at, item] of items.entries())
+        if (item.text === undefined) plan.push({ item: at, depth: item.depth });
+        else
+          for (const chunk of chunksOf(item.text))
+            plan.push({ item: at, depth: item.depth, chunk });
+      // Control and frame lines are the ones maxControls bounds.
+      const counts = (line: Planned) =>
+        line.chunk === undefined &&
+        (items[line.item].control || items[line.item].frame);
+      // No control character and no newline a page wrote reaches a line.
+      const oneLine = (value: string) =>
+        value
+          .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      // One line: the role, the name, a ref for controls and frames, then
+      // the same words the text format prints after a control.
+      const render = (line: Planned) => {
+        const item = items[line.item];
+        const blank = () => {};
+        if (line.chunk !== undefined)
+          return { text: JSON.stringify(line.chunk), keep: blank };
+        const element = item.element!;
+        const name = (item.name || "").slice(0, limit);
+        const words = [oneLine(item.role || "") || element.localName];
+        if (name) words.push(JSON.stringify(name));
+        const listed = item.control || item.frame;
+        const made = listed ? refAt(element) : undefined;
+        if (made) words.push(made.ref);
+        if (item.role === "option" && !listed) {
+          const choice = element as HTMLOptionElement;
+          const select = item.parent >= 0 ? items[item.parent].element : null;
+          if (choice.value !== (item.name || ""))
+            words.push(
+              `value=${JSON.stringify(oneLine(choice.value).slice(0, limit))}`,
+            );
+          if (choice.disabled || !!choice.closest("optgroup")?.disabled)
+            words.push("[disabled]");
+          if (choice.selected && !(select && secret(select)))
+            words.push("[selected]");
+          return { text: words.join(" "), keep: blank };
+        }
+        if (disabledElement(element)) words.push("[disabled]");
+        const state = stateOf(element);
+        if (state.checked !== undefined)
+          words.push(
+            state.checked === "mixed"
+              ? "[mixed]"
+              : state.checked
+                ? "[checked]"
+                : "[unchecked]",
+          );
+        if (state.selected) words.push("[selected]");
+        if (state.expanded !== undefined)
+          words.push(state.expanded ? "[expanded]" : "[collapsed]");
+        if (state.pressed !== undefined)
+          words.push(
+            state.pressed === "mixed"
+              ? "[partly pressed]"
+              : state.pressed
+                ? "[pressed]"
+                : "[not pressed]",
+          );
+        const value = valueOf(element) || "";
+        if (
+          value &&
+          !(
+            element.getAttribute("role") === "combobox" &&
+            value === (item.name || "")
+          )
+        )
+          words.push(
+            secret(element)
+              ? "(value hidden)"
+              : `value=${JSON.stringify(value.slice(0, limit))}${value.length > limit ? " (truncated)" : ""}`,
+          );
+        const group = groupOf(element);
+        if (group) words.push(`group ${JSON.stringify(group.slice(0, limit))}`);
+        if (item.level !== undefined) words.push(`level=${item.level}`);
+        const { href } = hrefOf(element);
+        if (href) {
+          const link = element as HTMLAnchorElement;
+          words.push(
+            `href=${oneLine(
+              link.origin === location.origin
+                ? `${link.pathname}${link.search}${link.hash}`
+                : href,
+            )}`,
+          );
+        }
+        if (inputElement(element) && element.type === "file")
+          words.push(
+            `file upload: ${element.multiple ? "multiple" : "single"}${
+              element.accept
+                ? `; accepts ${oneLine(element.accept.slice(0, 256))}`
+                : ""
+            }${visible(element) ? "" : "; hidden input in visible form"}`,
+          );
+        if (opaqueFrame(element)) words.push("(not read)");
+        let cut = false;
+        if (selectElement(element)) {
+          const shown = kids[line.item].filter(
+            (kid) => items[kid].role === "option",
+          ).length;
+          cut = shown < element.options.length;
+          if (cut) words.push("(more options)");
+        }
+        return {
+          text: words.join(" "),
+          keep: made ? made.keep : blank,
+          ...(listed ? { element } : {}),
+          cut,
+        };
+      };
+      const start = Math.min(offsets.line, plan.length);
+      const lines: string[] = [];
+      const printed: Element[] = [];
+      let used = 0;
+      let taken = 0;
+      let cutOptions = false;
+      const keepLine = (
+        line: Planned,
+        made: {
+          text: string;
+          keep: () => void;
+          element?: Element;
+          cut?: boolean;
+        },
+      ) => {
+        made.keep();
+        lines.push("  ".repeat(line.depth) + made.text);
+        used += line.depth * 2 + made.text.length + 1;
+        if (made.cut) cutOptions = true;
+        if (made.element && !printed.includes(made.element))
+          printed.push(made.element);
+      };
+      // A continued part first places the printed elements around its first
+      // line, which cost characters but are not progress.
+      if (start > 0 && start < plan.length) {
+        const chain: number[] = [];
+        for (
+          let parent = items[plan[start].item].parent;
+          parent >= 0;
+          parent = items[parent].parent
+        )
+          chain.unshift(parent);
+        for (const parent of chain) {
+          const line = { item: parent, depth: items[parent].depth };
+          keepLine(line, render(line));
+        }
+      }
+      // Lines are added while they fit, and a part always adds one.
+      let at = start;
+      for (; at < plan.length; at += 1) {
+        const line = plan[at];
+        const first = at === start;
+        if (!first && counts(line) && taken >= options.maxControls) break;
+        const made = render(line);
+        if (
+          !first &&
+          used + line.depth * 2 + made.text.length + 1 > options.maxChars
+        )
+          break;
+        keepLine(line, made);
+        if (counts(line)) taken += 1;
+      }
+      const left = at < plan.length;
+      let past = 0;
+      for (let rest = at; rest < plan.length; rest += 1)
+        if (counts(plan[rest])) past += 1;
+      const interactables = printed.map((element, index) =>
+        entryFor(element, index),
+      );
+      keepFingerprints(printed);
+      return {
+        url: location.href,
+        title: document.title,
+        outline: lines.join("\n"),
+        interactables,
+        ...locatorSources(printed, interactables),
+        ...reboundResult(),
+        ...(issued.length ? { issued } : {}),
+        ...(past ? { omittedControls: past } : {}),
+        ...(left ? { next: { text: 0, control: 0, line: at } } : {}),
+        truncated: left || optionsTruncated || cutOptions,
+      };
     }
-    for (const [ref, print] of prints)
-      if (lookalikes.get(keyOf(print))! > 1) registry.fingerprints.delete(ref);
-      else registry.fingerprints.set(ref, print);
-    const omitted = all.length - chosen.length;
-    let text = pageText(scope, options.maxChars);
-    if (options.mode === "compact")
-      text = text
-        .replace(/[\t ]+/g, " ")
-        .replace(/\n\s*\n\s*\n/g, "\n\n")
-        .trim();
+    // This part's controls, back in the order a person sees them.
+    const ranked = rankControls();
+    const chosen = ranked
+      .slice(offsets.control, offsets.control + options.maxControls)
+      .sort((first, second) => first.index - second.index)
+      .map((item) => item.element);
+    const interactables = chosen.map((element, index) =>
+      entryFor(element, index),
+    );
+    keepFingerprints(chosen);
+    const omitted = Math.max(0, all.length - offsets.control - chosen.length);
+    const compact = (value: string) =>
+      options.mode === "compact"
+        ? value
+            .replace(/[\t ]+/g, " ")
+            .replace(/\n\s*\n\s*\n/g, "\n\n")
+            .trim()
+        : value;
+    // A part reads past its own end, so the normalization at its last
+    // character is the one the whole text has there. When the margin was
+    // all whitespace, it reads further, up to the whole scope.
+    const wanted = offsets.text + options.maxChars;
+    let readLimit = wanted + 256;
+    let raw = pageText(scope, readLimit, viewport);
+    let normalized = compact(raw);
+    while (raw.length > readLimit && normalized.length < wanted + 1) {
+      readLimit *= 2;
+      raw = pageText(scope, readLimit, viewport);
+      normalized = compact(raw);
+    }
+    const text = normalized.slice(offsets.text, wanted);
+    const textLeft = normalized.length > wanted;
+    // A bound of 0 cannot print its half of the page, so it never asks for
+    // it again; truncated still reports what was left out.
+    const more =
+      (textLeft && options.maxChars > 0) ||
+      (omitted > 0 && options.maxControls > 0);
     return {
       url: location.href,
       title: document.title,
-      text: text.slice(0, options.maxChars),
+      text,
       interactables,
+      ...locatorSources(chosen, interactables),
+      ...reboundResult(),
+      ...(issued.length ? { issued } : {}),
       ...(omitted ? { omittedControls: omitted } : {}),
-      truncated:
-        text.length > options.maxChars || omitted > 0 || optionsTruncated,
+      ...(more
+        ? {
+            next: {
+              text: textLeft ? offsets.text + text.length : normalized.length,
+              control: offsets.control + chosen.length,
+              line: 0,
+            },
+          }
+        : {}),
+      truncated: textLeft || omitted > 0 || optionsTruncated,
     };
   }
   if (operation === "check") {
+    const spec = payload as ElementTarget;
+    const query = spec.query;
+    const selector = typeof spec.selector === "string" ? spec.selector : "";
     let scope: Element = document.body || document.documentElement;
-    if (typeof payload.selector === "string") {
-      let matches: Element[];
-      try {
-        matches = matching(payload.selector);
-      } catch {
-        return failure("Invalid CSS selector.", "invalid_selector");
+    if (typeof spec.ref === "string") {
+      // A wait for `selector: "@eN"` waits for that element to be visible.
+      const element = target(spec);
+      if (!isElement(element)) return element;
+      if (!visible(element, true)) return { ok: true, matched: false };
+      scope = element;
+    } else if (query) {
+      const picked = pickedFor(query);
+      if (picked === null) return failure(PAGE_CHANGED, "page_changed");
+      if (query.state === "hidden" || query.state === "detached") {
+        const counts = engineOf().tally(query, picked);
+        if ("kind" in counts) return invalidSelector(selector, counts);
+        const met =
+          query.state === "hidden" ? counts.visible === 0 : counts.count === 0;
+        if (!met) return { ok: true, matched: false };
+      } else {
+        // Without a state this is today's wait route: one visible match.
+        const decision = engineOf().decide(
+          query.state ? query : { ...query, mode: "strict", level: "visible" },
+          picked,
+        );
+        if (
+          decision.kind === "invalid" ||
+          (decision.kind === "ambiguous" &&
+            query.state &&
+            query.mode === "strict")
+        )
+          return selectFailure(selector, decision, query.firstRef);
+        if (decision.kind !== "match") return { ok: true, matched: false };
+        scope = decision.element;
       }
-      if (matches.length !== 1 || !visible(matches[0], true))
-        return { ok: true, matched: false };
-      scope = matches[0];
+    } else if (spec.selector !== undefined) {
+      return failure(NO_TARGET, "invalid_target");
     }
     const text = pageText(scope);
     return {
@@ -1460,7 +2102,8 @@ export function pageOperation(
       matched:
         typeof payload.text === "string"
           ? text.includes(payload.text)
-          : typeof payload.selector === "string" ||
+          : query !== undefined ||
+            typeof spec.ref === "string" ||
             document.readyState !== "loading",
     };
   }
@@ -1508,6 +2151,33 @@ export function pageOperation(
       return failure("The element is not a frame shown in this page.");
     const around = framePath(element);
     return { ok: true, path: around ? `${around}/${index}` : `${index}` };
+  }
+  // The listed controls themselves, for the main process to read their
+  // backend nodes from.
+  if (operation === "elements") {
+    const refs = payload.refs as string[];
+    return refs.map((ref) => registry.elements.get(ref) ?? null);
+  }
+  // Whether each locator candidate names its own control alone. Every match
+  // counts, hidden ones too, so a locator stands only where it is the one
+  // way to this element.
+  if (operation === "validate") {
+    const checks = payload.checks as { ref: string; candidates: SearchAst[] }[];
+    return {
+      ok: true,
+      valid: checks.map((check) => {
+        const element = registry.elements.get(check.ref);
+        if (!element) return check.candidates.map(() => false);
+        return check.candidates.map((ast) => {
+          const found = engineOf().search(ast);
+          return (
+            found.kind === "matches" &&
+            found.matches.length === 1 &&
+            found.matches[0] === element
+          );
+        });
+      }),
+    };
   }
   if (operation === "scroll") {
     const direction = payload.direction as string;

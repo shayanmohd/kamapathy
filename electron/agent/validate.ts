@@ -4,14 +4,20 @@ import {
   API_LEVEL,
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
-import type { SnapshotOptions } from "../automation-dom";
 import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import type { Route } from "./http";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
 import type { UrlWaitBody } from "./navigation/waits";
+import {
+  MAX_SELECTOR,
+  parseSelector,
+  selectorError,
+  type SearchAst,
+} from "./selectors";
 import type { AutomationController } from "./server";
+import { MAX_CURSOR } from "./snapshot";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -195,10 +201,25 @@ export function waitForFunctionFields(body: Record<string, unknown>): {
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
+// The one ref form, in the field that carries it.
+function refField(body: Record<string, unknown>, name: string): string {
+  const ref = stringField(body, name, 32);
+  if (!/^@e[1-9]\d*$/.test(ref))
+    return fail(
+      "invalid_ref",
+      "Use an element reference from a snapshot, such as @e1.",
+    );
+  return ref;
+}
+/** A target as the page receives it: a ref, or a selector beside its AST. */
+export type TargetPayload =
+  | { ref: string }
+  | { selector: string; query: { ast: SearchAst } };
+
 export function targetFields(
   body: Record<string, unknown>,
   optional = false,
-): Record<string, unknown> {
+): TargetPayload | Record<string, never> {
   const hasRef = body.ref !== undefined,
     hasSelector = body.selector !== undefined;
   if (!hasRef && !hasSelector && optional) return {};
@@ -207,16 +228,42 @@ export function targetFields(
       "invalid_target",
       "Provide exactly one of ref or selector.",
     );
-  if (hasRef) {
-    const ref = stringField(body, "ref", 32);
-    if (!/^@e[1-9]\d*$/.test(ref))
-      return fail(
-        "invalid_ref",
-        "Use an element reference from a snapshot, such as @e1.",
-      );
-    return { ref };
+  if (hasRef) return { ref: refField(body, "ref") };
+  // The grammar is parsed here, so a selector reaches the page only as an
+  // AST. A ref written as a selector is the ref.
+  const selector = stringField(body, "selector", MAX_SELECTOR);
+  const parsed = parseSelector(selector);
+  if (!parsed.ok) throw selectorError(selector, parsed.problem);
+  return parsed.ast.kind === "ref"
+    ? { ref: parsed.ast.ref }
+    : { selector, query: { ast: parsed.ast } };
+}
+// The one grammar check that runs before the request waits for its lane, so
+// a malformed selector costs no page work, no activity and no batch step.
+export function checkSelectors(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): void {
+  if (!body) return;
+  const check = (value: unknown, index?: number) => {
+    if (typeof value !== "string") return;
+    const parsed = parseSelector(value);
+    if (!parsed.ok) throw selectorError(value, parsed.problem, index);
+  };
+  const targets = (step: Record<string, unknown>, index?: number) => {
+    check(step.selector, index);
+    for (const end of [step.source, step.target])
+      if (end && typeof end === "object" && !Array.isArray(end))
+        check((end as Record<string, unknown>).selector, index);
+  };
+  if (route.key !== "POST /tabs/:id/actions") {
+    targets(body);
+    return;
   }
-  return { selector: stringField(body, "selector", 2048) };
+  if (!Array.isArray(body.actions)) return;
+  for (const [index, step] of body.actions.entries())
+    if (step && typeof step === "object" && !Array.isArray(step))
+      targets(step as Record<string, unknown>, index);
 }
 export function parseToolAction(
   type: string,
@@ -230,25 +277,59 @@ export function parseToolAction(
     const mode = body.mode ?? "compact";
     if (mode !== "compact" && mode !== "full")
       return fail("invalid_field", "mode must be compact or full.");
-    const options: Omit<SnapshotOptions, "firstRef"> = {
+    const maxChars = integerField(
+      body,
+      "maxChars",
+      mode === "compact" ? 4000 : 24000,
+      0,
+      24000,
+    );
+    const maxControls = integerField(
+      body,
+      "maxControls",
+      mode === "compact" ? 40 : 100,
+      0,
+      100,
+    );
+    const scope = body.scope ?? "page";
+    if (scope !== "page" && scope !== "viewport")
+      return fail("invalid_field", "scope must be page or viewport.");
+    const format = body.format ?? "list";
+    if (format !== "list" && format !== "outline")
+      return fail("invalid_field", "format must be list or outline.");
+    const locators = body.locators ?? false;
+    if (typeof locators !== "boolean")
+      return fail("invalid_field", "locators must be true or false.");
+    const header = body.header ?? true;
+    if (typeof header !== "boolean")
+      return fail("invalid_field", "header must be true or false.");
+    if (body.root !== undefined && body.selector !== undefined)
+      return fail(
+        "invalid_field",
+        "root and selector cannot be combined. Give one of them.",
+        { field: "root", expected: "a ref, without selector" },
+      );
+    // A ref written as the selector is the root it names.
+    const scoped =
+      body.root === undefined
+        ? targetFields(body, true)
+        : { ref: refField(body, "root") };
+    const options: Record<string, unknown> = {
       mode,
-      maxChars: integerField(
-        body,
-        "maxChars",
-        mode === "compact" ? 4000 : 24000,
-        0,
-        24000,
-      ),
-      maxControls: integerField(
-        body,
-        "maxControls",
-        mode === "compact" ? 40 : 100,
-        0,
-        100,
-      ),
-      ...(body.selector !== undefined
-        ? { selector: stringField(body, "selector", 2048) }
+      maxChars,
+      maxControls,
+      ...("selector" in scoped
+        ? { selector: scoped.selector, query: scoped.query }
         : {}),
+      ...("ref" in scoped ? { root: scoped.ref } : {}),
+      scope,
+      format,
+      locators,
+      header,
+      // The part to continue. The snapshot path reads what it carries.
+      ...(body.cursor === undefined
+        ? {}
+        : { cursor: stringField(body, "cursor", MAX_CURSOR) }),
     };
     return { type, payload: options };
   }
@@ -325,9 +406,7 @@ export function parseToolAction(
       type,
       payload: {
         timeoutMs: integerField(body, "timeoutMs", 5000, 0, 15000),
-        ...(body.selector !== undefined
-          ? { selector: stringField(body, "selector", 2048) }
-          : {}),
+        ...targetFields(body, true),
         ...(body.text !== undefined
           ? { text: stringField(body, "text", 1000) }
           : {}),
@@ -355,6 +434,7 @@ export function validateBody(
         ? { ...problem.fields, route: route.key, apiLevel: API_LEVEL }
         : problem.fields,
     );
+  checkSelectors(route, body);
 }
 
 // The segment after /spaces or /tabs is shown as :id.
@@ -402,7 +482,7 @@ export function urlField(body: Record<string, unknown>): string {
 }
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);
-  if (!target.ref)
+  if (!("ref" in target))
     return fail("invalid_target", "Uploads require a current file input ref from a snapshot.");
   if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > 8)
     return fail("invalid_files", "Provide between 1 and 8 files.");

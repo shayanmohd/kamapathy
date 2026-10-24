@@ -2534,6 +2534,394 @@ describe("scripted sessions", () => {
     expect(help.text()).toContain("--isolated");
     expect(help.text()).toMatch(/\n  run /);
   });
+
+  // Section 4: the client and CLI reach the snapshot and screenshot options.
+  const level3 = { status: "ok", version: "0.3.0", apiLevel: 3 };
+  const level3Routes = { ...routes, "GET /spaces/space-1": { space } };
+  // A PNG whose IHDR carries the pixel size, as Chromium encodes it.
+  const pngOf = (width, height) => {
+    const bytes = Buffer.alloc(24);
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+    bytes.writeUInt32BE(13, 8);
+    bytes.write("IHDR", 12, "ascii");
+    bytes.writeUInt32BE(width, 16);
+    bytes.writeUInt32BE(height, 20);
+    return bytes;
+  };
+  const header = {
+    page: { id: "tab-1", label: "p2", title: "Checkout" },
+    space: { id: "6f1c9a2e-3b0d-4c55-9e1a-2d7b8c4f0a11", name: "Reserve a table" },
+    tabs: [
+      { id: "tab-0", label: "p1", title: "Home", openedBy: "agent", managed: true },
+      { id: "tab-1", label: "p2", title: "Checkout", openedBy: "agent", managed: true, current: true },
+      { id: "tab-2", label: "p3", title: "Receipt", openedBy: "page", managed: true },
+      { id: "tab-3", label: "p4", title: "Menu", openedBy: "person", managed: false },
+    ],
+    budget: { used: 3, limit: 4 },
+  };
+  const headerLine =
+    'page p2 "Checkout" | space "Reserve a table" 6f1c9a2e-3b0d-4c55-9e1a-2d7b8c4f0a11 | tabs: p1 "Home", p2 "Checkout" (this page), p3 "Receipt" (popup), p4 "Menu" (person) (unmanaged) | budget 3 of 4';
+
+  it("page.screenshot checks options before sending", async () => {
+    const api = fakeApi(level3Routes);
+    const client = await connect({ env, fetch: api.fetch, health: level3 });
+    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const sent = api.requests.length;
+    await expect(page.screenshot({ timeoutMs: 5000 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.screenshot",
+      option: "timeoutMs",
+      suggestion: "timeout",
+      expected: "page.screenshot(options?) or page.screenshot(path)",
+    });
+    await expect(page.screenshot({ scale: 2 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.screenshot",
+      option: "scale",
+    });
+    await expect(page.screenshot({ timeout: 0 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "timeout",
+    });
+    expect(api.requests.length).toBe(sent);
+  });
+
+  it("page.screenshot with options posts them and resolves to the PNG bytes", async () => {
+    const bytes = pngOf(640, 400);
+    const api = fakeApi({
+      ...level3Routes,
+      "POST /tabs/tab-1/screenshot": () =>
+        new Response(bytes, {
+          headers: {
+            "Content-Type": "image/png",
+            "X-Kamapathy-Clip": "0,0,640,400",
+            "X-Kamapathy-Pixel-Ratio": "1",
+          },
+        }),
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level3 });
+    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const captured = await page.screenshot({
+      fullPage: true,
+      clip: { x: 0, y: 0, width: 640, height: 400 },
+      scale: "device",
+      timeout: 3000,
+    });
+    expect(Buffer.isBuffer(captured)).toBe(true);
+    expect([...captured]).toEqual([...bytes]);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/screenshot",
+      body: { fullPage: true, clip: { x: 0, y: 0, width: 640, height: 400 }, scale: "device", timeoutMs: 3000 },
+    });
+    // The route's own field budget sets the HTTP timeout: timeout plus 5000 ms.
+    const route = schema.ROUTES.find((item) => schema.routeKey(item) === "POST /tabs/:id/screenshot");
+    expect(httpTimeout(schema.requestBudget(route, { timeoutMs: 3000 }), route)).toBe(8000);
+    expect(httpTimeout(schema.requestBudget(route, {}), route)).toBe(20000);
+    const png = `${await scratchFile()}.png`;
+    expect([...(await page.screenshot({ path: png }))]).toEqual([...bytes]);
+    expect([...(await readFile(png))]).toEqual([...bytes]);
+    expect(api.requests.at(-1).body).toEqual({});
+    await expect(page.screenshot({ path: png })).rejects.toThrow("EEXIST");
+    await expect(page.screenshot({ path: `${png}.jpg` })).rejects.toThrow(".png");
+    // A path string keeps today's GET flow and answer.
+    const saved = `${await scratchFile()}.png`;
+    expect(await page.screenshot(saved)).toBe(saved);
+    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/tabs/tab-1/screenshot", body: undefined });
+    // The options form needs level 3; the path form does not.
+    const older = fakeApi(level3Routes);
+    const old = await connect({ env, fetch: older.fetch, health: level2 });
+    const [page2] = await (await old.space("space-1")).tabs();
+    const requests = older.requests.length;
+    await expect(page2.screenshot({ fullPage: true })).rejects.toMatchObject({
+      code: "app_outdated",
+      entry: "page.screenshot",
+      required: 3,
+      available: 2,
+    });
+    await expect(page2.screenshot()).rejects.toMatchObject({ code: "app_outdated", required: 3 });
+    expect(older.requests.length).toBe(requests);
+    expect(await page2.screenshot(`${await scratchFile()}.png`)).toMatch(/\.png$/);
+  });
+
+  it("snapshot flags send scope, root, format, locators, header and cursor", async () => {
+    const api = fakeApi(level3Routes);
+    expect(
+      await runCli(
+        ["snapshot", "tab-1", "--viewport", "--root", "@e5", "--outline", "--locators", "--no-header", "--cursor", "c1.x"],
+        { env, fetch: api.fetch, health: level3, stdout: sink() },
+      ),
+    ).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({
+      mode: "compact",
+      scope: "viewport",
+      root: "@e5",
+      format: "outline",
+      locators: true,
+      header: false,
+      cursor: "c1.x",
+    });
+    const older = fakeApi(routes);
+    await expect(
+      runCli(["snapshot", "tab-1", "--viewport", "--outline"], { env, fetch: older.fetch, health: level2, stdout: sink() }),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      option: "scope",
+      required: 3,
+      available: 2,
+      message:
+        'snapshot option "scope" needs Kamapathy API level 3, and Kamapathy 0.2.0 has level 2. Ask the person to update Kamapathy, then read the skill again.',
+    });
+    expect(older.requests).toEqual([]);
+    const fetch = vi.fn();
+    for (const args of [
+      ["snapshot", "tab-1", "--root"],
+      ["snapshot", "tab-1", "--cursor"],
+      ["snapshot", "tab-1", "--scope", "viewport"],
+    ])
+      await expect(runCli(args, { env, fetch, stdout: sink() }), args.join(" ")).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("prints the header line, the outline, locators and the next cursor", async () => {
+    const outlined = {
+      tabId: "tab-1",
+      url: "https://example.test/checkout",
+      title: "Checkout",
+      header,
+      outline: [
+        'main "Checkout"',
+        '  heading "Your order" level=2',
+        "  list",
+        '    listitem "Table for two"',
+        '  link "Help" @e3 href=/help',
+        '  button "Save" @e4 locator: css=#save',
+      ].join("\n"),
+      interactables: [
+        { ref: "@e3", role: "link", label: "Help", href: "https://example.test/help" },
+        { ref: "@e4", role: "button", label: "Save", locator: "css=#save" },
+      ],
+      omittedControls: 0,
+      truncated: true,
+      next: "c1.eyJlIjoxfQ",
+    };
+    const api = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": outlined });
+    const stdout = sink();
+    expect(
+      await runCli(["snapshot", "tab-1", "--outline", "--locators"], { env, fetch: api.fetch, health: level3, stdout }),
+    ).toBe(0);
+    expect(stdout.text()).toBe(
+      [
+        headerLine,
+        "https://example.test/checkout",
+        "",
+        'main "Checkout"',
+        '  heading "Your order" level=2',
+        "  list",
+        '    listitem "Table for two"',
+        '  link "Help" @e3 href=/help',
+        '  button "Save" @e4 locator: css=#save',
+        "",
+        "Next part: cursor c1.eyJlIjoxfQ",
+        "",
+      ].join("\n"),
+    );
+    const client = await connect({ env, fetch: api.fetch, health: level3 });
+    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    expect(`${await page.text({ format: "outline", locators: true })}\n`).toBe(stdout.text());
+    // A list snapshot: locator suffixes, the unchecked-locator note, a PDF
+    // header, and no Truncated line while a cursor continues it.
+    const listed = {
+      ...outlined,
+      outline: undefined,
+      text: "Your order",
+      locatorsIncomplete: true,
+      omittedControls: 2,
+      header: { ...header, budget: undefined, pdf: true },
+    };
+    const parts = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": listed });
+    const second = sink();
+    await runCli(["snapshot", "tab-1", "--locators", "--cursor", "c1.x"], {
+      env,
+      fetch: parts.fetch,
+      health: level3,
+      stdout: second,
+    });
+    expect(second.text()).toBe(
+      [
+        `${headerLine.replace(" | budget 3 of 4", "")} | pdf: read it with pdfText()`,
+        "https://example.test/checkout",
+        "",
+        "Your order",
+        "",
+        "Controls:",
+        '@e3 link "Help"',
+        '@e4 button "Save" locator: css=#save',
+        "2 more controls not listed. Scope with --selector to list them.",
+        "Some locators were not checked in time.",
+        "",
+        "Next part: cursor c1.eyJlIjoxfQ",
+        "",
+      ].join("\n"),
+    );
+    // Without a header the title line comes back, and a last part says it was
+    // truncated.
+    const last = {
+      ...listed,
+      header: undefined,
+      next: undefined,
+      locatorsIncomplete: undefined,
+      omittedControls: 0,
+    };
+    const bare = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": last });
+    const third = sink();
+    await runCli(["snapshot", "tab-1", "--no-header"], { env, fetch: bare.fetch, health: level3, stdout: third });
+    expect(third.text().split("\n")[0]).toBe("Checkout");
+    expect(third.text()).toContain("Truncated. Scope with --selector or request --full if needed.");
+  });
+
+  it("screenshot flags post the options and print the saved size", async () => {
+    const bytes = pngOf(1280, 3200);
+    const png = `${await scratchFile()}.png`;
+    const fetch = vi.fn(
+      async () =>
+        new Response(bytes, {
+          headers: {
+            "Content-Type": "image/png",
+            "X-Kamapathy-Clip": "0,0,1280,3200",
+            "X-Kamapathy-Pixel-Ratio": "2",
+          },
+        }),
+    );
+    const stdout = sink();
+    expect(
+      await runCli(["screenshot", "tab-1", png, "--full-page", "--scale", "device"], {
+        env,
+        fetch,
+        health: level3,
+        stdout,
+      }),
+    ).toBe(0);
+    const [url, options] = fetch.mock.calls[0];
+    expect([url.pathname, options.method]).toEqual(["/tabs/tab-1/screenshot", "POST"]);
+    expect(JSON.parse(options.body)).toEqual({ fullPage: true, scale: "device" });
+    expect(stdout.text()).toBe(`saved ${png} (1280x3200)\n`);
+    const clipped = `${await scratchFile()}.png`;
+    const json = sink();
+    await runCli(["screenshot", "tab-1", clipped, "--clip", "10,20,30.5,40", "--json"], {
+      env,
+      fetch,
+      health: level3,
+      stdout: json,
+    });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ clip: { x: 10, y: 20, width: 30.5, height: 40 } });
+    expect(JSON.parse(json.text())).toEqual({
+      saved: clipped,
+      width: 1280,
+      height: 3200,
+      clip: { x: 0, y: 0, width: 1280, height: 3200 },
+      pixelRatio: 2,
+    });
+    // Without flags it stays a GET, and bytes without an IHDR print no size.
+    const plainFetch = vi.fn(
+      async () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "Content-Type": "image/png" } }),
+    );
+    const small = `${await scratchFile()}.png`;
+    const plain = sink();
+    expect(await runCli(["screenshot", "tab-1", small], { env, fetch: plainFetch, stdout: plain })).toBe(0);
+    expect(plainFetch.mock.calls[0][1].method).toBe("GET");
+    expect(plain.text()).toBe(`saved ${small}\n`);
+    // Flags are checked before anything connects.
+    const refused = vi.fn();
+    const unwritten = `${await scratchFile()}.png`;
+    for (const args of [
+      ["screenshot", "tab-1", unwritten, "--clip", "10,20,30"],
+      ["screenshot", "tab-1", unwritten, "--clip", "a,b,c,d"],
+      ["screenshot", "tab-1", unwritten, "--clip", "10,20,,40"],
+      ["screenshot", "tab-1", unwritten, "--clip"],
+      ["screenshot", "tab-1", unwritten, "--scale", "retina"],
+      ["screenshot", "tab-1", unwritten, "--crop"],
+    ])
+      await expect(runCli(args, { env, fetch: refused, stdout: sink() }), args.join(" ")).rejects.toThrow();
+    await expect(
+      runCli(["screenshot", "tab-1", unwritten, "--full-page"], { env, fetch: refused, health: level2, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "app_outdated", required: 3, available: 2 });
+    expect(refused).not.toHaveBeenCalled();
+    expect(existsSync(unwritten)).toBe(false);
+  });
+
+  it("prints invalid_selector hints and ambiguous_match candidates under the error line", async () => {
+    const stderr = sink();
+    const hinted = vi.fn(async () =>
+      Response.json(
+        {
+          error: {
+            code: "invalid_selector",
+            message: "Refs are written @e12.",
+            selector: "@21",
+            reason: "ref_form",
+            forms: [],
+            hint: 'Write a ref as @e21, or quote a selector such as [id="21"].',
+          },
+        },
+        { status: 400 },
+      ),
+    );
+    expect(await main(["click", "tab-1", "@21"], { env, fetch: hinted, stdout: sink(), stderr })).toBe(1);
+    expect(stderr.text()).toBe(
+      [
+        "Kamapathy: 400 invalid_selector: Refs are written @e12.",
+        'hint: Write a ref as @e21, or quote a selector such as [id="21"].',
+        "",
+      ].join("\n"),
+    );
+    const ambiguous = sink();
+    const many = vi.fn(async () =>
+      Response.json(
+        {
+          error: {
+            code: "ambiguous_match",
+            message:
+              "Selector matched 3 elements (2 visible, 1 hidden). Use a ref from candidates or a more specific selector.",
+            selector: "button",
+            count: 3,
+            visible: 2,
+            hidden: 1,
+            actionable: 2,
+            candidates: [
+              { ref: "@e7", tag: "button", role: "button", name: "Save", context: "Order form", visible: true, disabled: false },
+              { ref: "@e8", tag: "button", role: "button", name: "Save\ndraft", context: "", visible: true, disabled: true, frame: "#checkout" },
+              { tag: "button", role: "button", name: "Save", context: "", visible: false, disabled: false },
+            ],
+          },
+        },
+        { status: 422 },
+      ),
+    );
+    expect(await main(["click", "tab-1", "button"], { env, fetch: many, stdout: sink(), stderr: ambiguous })).toBe(1);
+    expect(ambiguous.text()).toBe(
+      [
+        "Kamapathy: 422 ambiguous_match: Selector matched 3 elements (2 visible, 1 hidden). Use a ref from candidates or a more specific selector.",
+        '  candidate @e7 button "Save" in "Order form"',
+        '  candidate @e8 button "Save draft" [disabled] frame #checkout',
+        '  candidate button "Save" (hidden)',
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("help selectors prints the forms table without connecting", async () => {
+    const fetch = vi.fn();
+    const stdout = sink();
+    expect(await runCli(["help", "selectors"], { env, fetch, stdout })).toBe(0);
+    const text = stdout.text();
+    expect(text.split("\n")[0]).toBe("Selectors");
+    for (const form of schema.SELECTOR_FORMS) expect(text, form.form).toContain(form.example);
+    expect(text).toContain(
+      "Refs skip the search. Docs and help show only the css=, text=, role=, href= and xpath= spellings.",
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("client errors and timeouts", () => {

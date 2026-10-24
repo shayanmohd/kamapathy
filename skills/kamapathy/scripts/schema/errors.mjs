@@ -40,6 +40,19 @@ export const ERRORS = {
     "The key is not a name, character or chord Kamapathy accepts.",
     ["suggestion", "forms"],
   ),
+  invalid_selector: code(
+    400,
+    false,
+    "The selector does not parse, or the page rejects its CSS or XPath.",
+    ["selector", "reason", "forms", "hint", "index"],
+  ),
+  invalid_cursor: code(
+    400,
+    false,
+    "The cursor is malformed or was made for another scope.",
+    [],
+    3,
+  ),
   invalid_action: code(
     400,
     false,
@@ -109,6 +122,13 @@ export const ERRORS = {
     "No tab in an accessible agent space has this ID.",
     ["tabId"],
   ),
+  unknown_ref: code(
+    404,
+    false,
+    "The ref was never issued for this page.",
+    ["ref"],
+    3,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -160,10 +180,11 @@ export const ERRORS = {
   ),
   tab_limit: code(409, false, "The space already has its most tabs."),
   space_limit: code(409, false, "The API already manages its most spaces."),
+  // Kept so older scripts still find the code; no route raises it.
   screenshot_unavailable: code(
     409,
     false,
-    "Screenshots need the Kamapathy window shown.",
+    "Retired from API level 3: screenshots work with the window hidden or minimized.",
   ),
   empty_screenshot: code(409, true, "The page has not rendered yet."),
   no_web_page: code(409, false, "The tab is not showing a web page."),
@@ -237,7 +258,8 @@ export const ERRORS = {
   stale_ref: code(
     409,
     false,
-    "The ref belongs to an earlier snapshot or a control the page removed.",
+    "The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired.",
+    ["ref"],
   ),
   element_obscured: code(409, true, "Another element covers the target."),
   body_too_large: code(
@@ -281,6 +303,20 @@ export const ERRORS = {
     ["name", "line", "column", "description"],
     2,
   ),
+  no_match: code(
+    422,
+    true,
+    "Nothing matched the selector by the deadline.",
+    ["selector", "waitedMs"],
+    3,
+  ),
+  ambiguous_match: code(
+    422,
+    false,
+    "The selector matched more than one element the action can take.",
+    ["selector", "count", "visible", "hidden", "actionable", "candidates"],
+    3,
+  ),
   drag_out_of_view: code(
     422,
     false,
@@ -297,10 +333,19 @@ export const ERRORS = {
     "The ref is not a file input that can take these files.",
   ),
   invalid_value: code(422, false, "The control cannot take this value."),
-  invalid_selector: code(
+  clip_outside_page: code(
     422,
     false,
-    "The selector is not valid CSS, or matches no single visible element.",
+    "The clip misses the viewport, or the document with fullPage.",
+    ["clip"],
+    3,
+  ),
+  screenshot_too_large: code(
+    422,
+    false,
+    "The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all.",
+    ["width", "height", "maxSide", "maxPixels"],
+    3,
   ),
   pdf_too_large: code(
     422,

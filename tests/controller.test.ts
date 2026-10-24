@@ -16,9 +16,11 @@ import {
 import type { BrowserWindow, Session } from "electron";
 import {
   app,
+  BaseWindow,
   clipboard,
   dialog,
   Menu,
+  screen,
   session,
   shell,
   WebContentsView,
@@ -42,14 +44,20 @@ import {
   PAGE_BUDGET,
 } from "../shared/state";
 import type { ControllerOptions } from "../electron/controller";
+import { fakePng } from "./fake-automation";
 
 vi.mock("electron", () => ({
   app: { getApplicationNameForProtocol: vi.fn(() => "") },
+  BaseWindow: vi.fn(function (options?: Record<string, unknown>) {
+    return new FakeBaseWindow(options ?? {});
+  }),
   BrowserWindow: vi.fn(),
   Menu: { buildFromTemplate: vi.fn(() => ({ popup: vi.fn() })) },
   WebContentsView: vi.fn(function (options?: { webContents?: FakeContents }) {
     return new FakeView(options?.webContents);
   }),
+  nativeImage: { createFromBuffer: vi.fn((png: Buffer) => fakeImageOf(png)) },
+  screen: { getDisplayMatching: vi.fn(() => ({ scaleFactor: 2 })) },
   nativeTheme: { themeSource: "system" },
   session: {
     fromPartition: vi.fn((partition: string) => {
@@ -162,16 +170,17 @@ class FakeContents extends EventEmitter {
     this.emit("did-stop-loading");
   }
 }
+type Bounds = { x: number; y: number; width: number; height: number };
 class FakeView {
   constructor(public webContents = new FakeContents()) {}
   visible = false;
-  bounds = { x: 0, y: 0, width: 0, height: 0 };
-  setVisible(value: boolean) {
+  bounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+  setVisible = vi.fn((value: boolean) => {
     this.visible = value;
-  }
-  setBounds(value: typeof this.bounds) {
+  });
+  setBounds = vi.fn((value: Bounds) => {
     this.bounds = value;
-  }
+  });
   setBorderRadius = vi.fn();
   getVisible() {
     return this.visible;
@@ -180,37 +189,101 @@ class FakeView {
     return this.bounds;
   }
 }
+// A View's children as Electron keeps them: addChildView appends or inserts
+// at an index, and removeChildView takes a view out.
+function contentViewFake() {
+  const children: FakeView[] = [];
+  return {
+    children,
+    addChildView: vi.fn((view: FakeView, index?: number) => {
+      children.splice(index ?? children.length, 0, view);
+    }),
+    removeChildView: vi.fn((view: FakeView) => {
+      const at = children.indexOf(view);
+      if (at >= 0) children.splice(at, 1);
+    }),
+  };
+}
+// The never-shown window a capture lends a view to.
+class FakeBaseWindow {
+  contentView = contentViewFake();
+  bounds: Bounds;
+  size: number[];
+  show = vi.fn();
+  focus = vi.fn();
+  destroy = vi.fn(() => {
+    this.destroyed = true;
+  });
+  setContentSize = vi.fn((width: number, height: number) => {
+    this.size = [width, height];
+  });
+  private destroyed = false;
+  constructor(options: Record<string, unknown>) {
+    this.bounds = {
+      x: Number(options.x ?? 0),
+      y: Number(options.y ?? 0),
+      width: Number(options.width ?? 0),
+      height: Number(options.height ?? 0),
+    };
+    this.size = [this.bounds.width, this.bounds.height];
+  }
+  setBounds(value: Bounds) {
+    this.bounds = value;
+    this.size = [value.width, value.height];
+  }
+  getBounds() {
+    return this.bounds;
+  }
+  getContentSize() {
+    return this.size;
+  }
+  isDestroyed() {
+    return this.destroyed;
+  }
+}
+// nativeImage over the fake PNGs, which carry only a size.
+function fakeImageOf(png: Buffer) {
+  const width = png.length >= 24 ? png.readUInt32BE(16) : 0;
+  const height = png.length >= 24 ? png.readUInt32BE(20) : 0;
+  return {
+    isEmpty: () => !width || !height,
+    getSize: () => ({ width, height }),
+    crop: (area: { width: number; height: number }) =>
+      fakeImageOf(fakePng(area.width, area.height)),
+    toPNG: () => fakePng(width, height),
+  };
+}
 const sessions = new Map<string, FakeSession>();
 const controllers: BrowserController[] = [];
+type WindowFake = EventEmitter & {
+  webContents: FakeContents;
+  contentView: ReturnType<typeof contentViewFake>;
+  isDestroyed: () => boolean;
+  getContentSize: () => number[];
+  getBounds: () => Bounds;
+  isVisible: () => boolean;
+  isMinimized: () => boolean;
+  show: ReturnType<typeof vi.fn>;
+  focus: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+  restore: ReturnType<typeof vi.fn>;
+};
 function controller(
   statePath = "unused-test-state.json",
   state = initialState(),
   options?: ControllerOptions,
   extensions?: ExtensionSessions,
 ) {
-  const window = new EventEmitter() as EventEmitter & {
-    webContents: FakeContents;
-    contentView: {
-      addChildView: ReturnType<typeof vi.fn>;
-      removeChildView: ReturnType<typeof vi.fn>;
-    };
-    isDestroyed: () => boolean;
-    getContentSize: () => number[];
-    isVisible: () => boolean;
-    isMinimized: () => boolean;
-    close: ReturnType<typeof vi.fn>;
-    restore: ReturnType<typeof vi.fn>;
-    show: ReturnType<typeof vi.fn>;
-    focus: ReturnType<typeof vi.fn>;
-  };
+  const window = new EventEmitter() as WindowFake;
   window.webContents = new FakeContents();
   window.close = vi.fn();
   window.restore = vi.fn();
   window.show = vi.fn();
   window.focus = vi.fn();
-  window.contentView = { addChildView: vi.fn(), removeChildView: vi.fn() };
+  window.contentView = contentViewFake();
   window.isDestroyed = () => false;
   window.getContentSize = () => [1400, 900];
+  window.getBounds = () => ({ x: 0, y: 0, width: 1400, height: 928 });
   window.isVisible = () => true;
   window.isMinimized = () => false;
   const result = new BrowserController(
@@ -247,11 +320,7 @@ function preferencesOf(page: FakeContents) {
   return calls[index][0]!.webPreferences!;
 }
 function windowOf(browser: BrowserController) {
-  return (
-    browser as unknown as {
-      window: { contentView: { removeChildView: ReturnType<typeof vi.fn> } };
-    }
-  ).window;
+  return browser.window as unknown as WindowFake;
 }
 type OpenDecision =
   | { action: "deny" }
@@ -2317,6 +2386,225 @@ describe("space thumbnails", () => {
     expect(contents(browser, latest.id).capturePage).toHaveBeenCalled();
     await browser.dispatch({ type: "space:activate", id: space.id });
     expect(browser.state.activeTabId).toBe(latest.id);
+  });
+});
+
+describe("agent captures", () => {
+  // The window the last capture lent a view to.
+  const captureWindow = () =>
+    vi.mocked(BaseWindow).mock.results.at(-1)!.value as FakeBaseWindow;
+  // A loaded page in an agent space, whose view the window keeps hidden.
+  async function backgroundTab(browser: BrowserController) {
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.state.tabs.find((item) => item.spaceId === space.id)!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: tab.id,
+      url: "https://example.com/agent",
+    });
+    const view = viewFor(contents(browser, tab.id));
+    expect(view.visible).toBe(false);
+    return { tab, view };
+  }
+
+  it("a capture of a background tab lends its view to a never-shown capture window and puts it back at its old index", async () => {
+    const browser = controller();
+    const window = windowOf(browser);
+    // The person shrank the window below the size a never-shown view keeps.
+    window.getBounds = () => ({ x: 40, y: 60, width: 900, height: 600 });
+    const first = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: first,
+      url: "https://example.com/one",
+    });
+    const shown = viewFor(contents(browser, first));
+    const { tab, view } = await backgroundTab(browser);
+    await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/two",
+      background: true,
+    });
+    const last = browser.state.tabs.at(-1)!;
+    viewFor(contents(browser, last.id));
+    const index = window.contentView.children.indexOf(view);
+    expect(index).toBe(1);
+    expect(window.contentView.children).toHaveLength(3);
+    const layout = vi.spyOn(
+      browser as unknown as { layout: () => void },
+      "layout",
+    );
+    let during: Record<string, unknown> = {};
+    expect(
+      await browser.withVisibleView(tab.id, async () => {
+        const host = captureWindow();
+        during = {
+          inMain: window.contentView.children.includes(view),
+          inHost: host.contentView.children.includes(view),
+          visible: view.visible,
+          bounds: host.bounds,
+          grown: host.setContentSize.mock.calls,
+        };
+        return "png";
+      }),
+    ).toBe("png");
+    expect(during).toEqual({
+      inMain: false,
+      inHost: true,
+      visible: true,
+      bounds: { x: 40, y: 60, width: 900, height: 600 },
+      grown: [[1200, 800]],
+    });
+    const host = captureWindow();
+    expect(vi.mocked(BaseWindow).mock.calls).toEqual([
+      [
+        {
+          show: false,
+          skipTaskbar: true,
+          frame: process.platform === "darwin",
+          titleBarStyle:
+            process.platform === "darwin" ? "hiddenInset" : "hidden",
+          x: 40,
+          y: 60,
+          width: 900,
+          height: 600,
+        },
+      ],
+    ]);
+    expect(host.contentView.children).toEqual([]);
+    expect(window.contentView.children.indexOf(view)).toBe(index);
+    expect(view.visible).toBe(false);
+    expect(view.bounds).toEqual({ x: 0, y: 0, width: 1200, height: 800 });
+    expect(layout).toHaveBeenCalledTimes(1);
+    for (const spy of [window.show, window.focus, host.show, host.focus])
+      expect(spy).not.toHaveBeenCalled();
+    expect(shown.visible).toBe(true);
+  });
+
+  it("layout and freeze leave a lent view alone while state changes", async () => {
+    const browser = controller();
+    const { tab, view } = await backgroundTab(browser);
+    let touched = 0;
+    let frames: unknown[] = [];
+    await browser.withVisibleView(tab.id, async () => {
+      const before =
+        view.setVisible.mock.calls.length + view.setBounds.mock.calls.length;
+      // Another space's agent writes activity, which lays the window out.
+      browser.addActivity("personal", "Agent opened a page", "info");
+      browser.setContentBounds({
+        x: 100,
+        y: 60,
+        width: 800,
+        height: 600,
+        hidden: false,
+      });
+      frames = await browser.freeze();
+      touched =
+        view.setVisible.mock.calls.length +
+        view.setBounds.mock.calls.length -
+        before;
+      return "png";
+    });
+    expect(touched).toBe(0);
+    expect(frames).toEqual([]);
+    expect(contents(browser, tab.id).capturePage).not.toHaveBeenCalled();
+    // The layout that follows gives it the hidden state it had.
+    expect(view.visible).toBe(false);
+  });
+
+  it("the shown tab captures in place, and the shown tab of a minimized window is lent", async () => {
+    const browser = controller();
+    const window = windowOf(browser);
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id,
+      url: "https://example.com/",
+    });
+    const view = viewFor(contents(browser, id));
+    expect(view.visible).toBe(true);
+    const visibility = view.setVisible.mock.calls.length;
+    expect(await browser.withVisibleView(id, async () => "in place")).toBe(
+      "in place",
+    );
+    expect(BaseWindow).not.toHaveBeenCalled();
+    expect(view.setVisible.mock.calls).toHaveLength(visibility);
+    expect(window.contentView.children).toContain(view);
+    // A tab with no page of its own captures as it is.
+    await browser.dispatch({ type: "tab:create", background: true });
+    const blank = browser.state.tabs.at(-1)!;
+    expect(blank.url).toBe(HOME_URL);
+    expect(await browser.withVisibleView(blank.id, async () => "no view")).toBe(
+      "no view",
+    );
+    expect(BaseWindow).not.toHaveBeenCalled();
+    // Minimized, Chromium stops painting the view where it is.
+    window.isMinimized = () => true;
+    expect(await browser.withVisibleView(id, async () => "lent")).toBe("lent");
+    expect(BaseWindow).toHaveBeenCalledTimes(1);
+    expect(captureWindow().contentView.children).toEqual([]);
+    expect(window.contentView.children).toContain(view);
+    expect(view.visible).toBe(true);
+  });
+
+  it("a tab closed during a capture is not put back, and dispose destroys the capture window", async () => {
+    const browser = controller();
+    const window = windowOf(browser);
+    const { tab, view } = await backgroundTab(browser);
+    await browser.withVisibleView(tab.id, async () => {
+      browser.closeTab(tab.id, "agent");
+      return "png";
+    });
+    const host = captureWindow();
+    expect(host.contentView.children).toEqual([]);
+    expect(window.contentView.children).not.toContain(view);
+    expect(host.destroy).not.toHaveBeenCalled();
+    browser.dispose();
+    expect(host.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a window closed during a capture takes the capture window with it", async () => {
+    const browser = controller();
+    const window = windowOf(browser);
+    const { tab, view } = await backgroundTab(browser);
+    expect(
+      await browser.withVisibleView(tab.id, async () => {
+        // The person closes the window, which disposes the controller.
+        browser.dispose();
+        return "png";
+      }),
+    ).toBe("png");
+    const host = captureWindow();
+    expect(host.destroy).toHaveBeenCalledTimes(1);
+    expect(host.contentView.children).toEqual([]);
+    expect(window.contentView.children).not.toContain(view);
+  });
+
+  it("cropPng crops from the top left, and deviceScale reads the display the window is on", async () => {
+    const browser = controller();
+    const exact = fakePng(200, 100);
+    expect(browser.cropPng(exact, 200, 100)).toEqual({
+      png: exact,
+      width: 200,
+      height: 100,
+    });
+    expect(browser.cropPng(exact, 200, 100)!.png).toBe(exact);
+    expect(browser.cropPng(fakePng(201, 101), 200, 100)).toEqual({
+      png: fakePng(200, 100),
+      width: 200,
+      height: 100,
+    });
+    // Never past the image Chromium sent.
+    expect(browser.cropPng(fakePng(100, 50), 200, 100)).toEqual({
+      png: fakePng(100, 50),
+      width: 100,
+      height: 50,
+    });
+    expect(browser.cropPng(Buffer.alloc(0), 200, 100)).toBeNull();
+    expect(browser.deviceScale()).toBe(2);
+    expect(screen.getDisplayMatching).toHaveBeenCalledWith(
+      windowOf(browser).getBounds(),
+    );
   });
 });
 

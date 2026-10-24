@@ -31,6 +31,7 @@ const {
   ENTRIES,
   ERRORS,
   ROUTES,
+  SELECTOR_FORMS,
   checkBody,
   checkCall,
   findCommand,
@@ -289,6 +290,7 @@ describe("API schema", () => {
       transient: false,
       since: 4,
     });
+    expect(ERRORS.invalid_selector.status).toBe(400);
     for (const code of [
       "not_connected",
       "timeout",
@@ -655,6 +657,42 @@ describe("API schema", () => {
       checkCall(goto, ["https://example.com/"], { apiLevel: 2 }),
     ).toBeNull();
 
+    // An argument the app predates, and the overload order that keeps a path
+    // string working while an options object is checked as options.
+    const screenshot = entry("Page.screenshot");
+    expect(screenshot.overloads[0][0]).toMatchObject({
+      kind: "options",
+      since: 3,
+    });
+    expect(checkCall(screenshot, [{}], { apiLevel: 3 })).toBeNull();
+    expect(
+      checkCall(screenshot, [{}], { apiLevel: 2, version: "0.2.0" }),
+    ).toEqual({
+      code: "app_outdated",
+      message:
+        "page.screenshot needs Kamapathy API level 3, and Kamapathy 0.2.0 has level 2. Ask the person to update Kamapathy, then read the skill again.",
+      fields: {
+        entry: "page.screenshot",
+        required: 3,
+        available: 2,
+        appVersion: "0.2.0",
+      },
+    });
+    expect(checkCall(screenshot, ["/tmp/a.png"], { apiLevel: 2 })).toBeNull();
+    expect(checkCall(screenshot, [{ timeoutMs: 5000 }])).toMatchObject({
+      code: "invalid_option",
+      fields: {
+        entry: "page.screenshot",
+        option: "timeoutMs",
+        suggestion: "timeout",
+        expected: "page.screenshot(options?) or page.screenshot(path)",
+      },
+    });
+    expect(
+      checkCall(screenshot, [{ fullPage: true }], { apiLevel: 2 }),
+    ).toMatchObject({ code: "app_outdated", fields: { option: "fullPage" } });
+    expect(checkCall(screenshot, [5])?.code).toBe("invalid_option");
+
     expect(suggest("timeout", ["selector", "timeoutMs"])).toBe("timeoutMs");
     expect(suggest("selecter", ["selector", "text"])).toBe("selector");
     expect(suggest("zzz", ["ref", "selector"])).toBeUndefined();
@@ -706,5 +744,69 @@ describe("API schema", () => {
     ).toBe(errorsBlock);
     for (const text of [apiMarkdown, routesBlock, errorsBlock])
       expect(text).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+describe("hand written docs", () => {
+  const GRAMMAR = [
+    "docs/automation.md",
+    "skills/kamapathy/references/actions.md",
+  ];
+
+  it("documents every selector form and the level the schema declares", () => {
+    for (const path of GRAMMAR) {
+      const text = read(path);
+      for (const { example } of SELECTOR_FORMS)
+        expect(text, `${path} is missing ${example}`).toContain(example);
+      // The css:, role:, href: and loc= aliases stay undocumented.
+      expect(text, `${path} documents a loc= alias`).not.toContain("loc=");
+    }
+    expect(read("docs/automation.md")).toContain(
+      `This version is level ${API_LEVEL}`,
+    );
+  });
+
+  it("names the snapshot and screenshot flags the skill promises", () => {
+    const skill = read("skills/kamapathy/SKILL.md");
+    for (const flag of [
+      "--viewport",
+      "--root",
+      "--outline",
+      "--locators",
+      "--cursor",
+      "--full-page",
+      "--clip",
+    ])
+      expect(skill, `SKILL.md is missing ${flag}`).toContain(flag);
+  });
+
+  it("drops the sentences this API level made wrong", () => {
+    const retired = [
+      ["docs/automation.md", "CSS selectors do not enter shadow roots"],
+      ["docs/automation.md", "must uniquely match"],
+      ["docs/automation.md", "Screenshots require a shown"],
+      ["docs/automation.md", "Screenshots capture the viewport, not the full"],
+      ["docs/SECURITY.md", "viewport screenshots"],
+      ["skills/kamapathy/SKILL.md", "Screenshots require a shown"],
+      ["skills/kamapathy/SKILL.md", "screenshot_unavailable"],
+      [
+        "skills/kamapathy/references/actions.md",
+        "CSS selectors must match exactly one visible element",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "CSS selectors do not enter shadow roots",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "Screenshot files contain only the current viewport",
+      ],
+      ["skills/kamapathy/references/scripting.md", "unminimized window"],
+      ["skills/kamapathy/references/scripting.md", "screenshot_unavailable"],
+    ];
+    for (const [path, sentence] of retired)
+      expect(read(path), `${path} still says ${sentence}`).not.toContain(
+        sentence,
+      );
   });
 });

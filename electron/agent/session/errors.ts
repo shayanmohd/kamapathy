@@ -45,6 +45,14 @@ export class CdpTimeoutError extends Error {
     super("The page did not respond in time.");
   }
 }
+export class CaptureFailedError extends Error {
+  constructor(
+    readonly reason:
+      "navigation" | "crashed" | "detached" | "timeout" | "failed",
+  ) {
+    super("The page could not be captured.");
+  }
+}
 export class TargetRefusedError extends Error {
   constructor(readonly method: string) {
     super(`${method} is outside this tab's session.`);
