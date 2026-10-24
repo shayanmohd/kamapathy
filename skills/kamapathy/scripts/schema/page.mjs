@@ -269,7 +269,7 @@ export const PAGE_ENTRIES = [
     "page.drag(source, target, options?)",
     "Drags one element onto another with native mouse input or HTML drag and drop.",
     [target("source"), target(), OPTIONS],
-    "Promise<{ ok: true, url, drag, rebound? }>",
+    "Promise<{ ok: true, url, drag, loading?, rebound? }>",
     "POST /tabs/:id/drag",
     [
       ...TARGET,

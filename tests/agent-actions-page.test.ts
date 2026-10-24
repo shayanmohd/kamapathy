@@ -117,6 +117,102 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     expect(await blockerOf("#name", { kind: "fill" })).toBeUndefined();
   }, 30000);
 
+  it("measures both drag ends and refuses only ends that cannot share the screen", async () => {
+    await open("/input/drag");
+    // Each end carries its own candidate refs, as the resolver reserves
+    // them per target.
+    const end = (selector: string, firstRef: number) => {
+      const base = aim(selector, {}, "pointer");
+      return { ...base, query: { ...(base.query as object), firstRef } };
+    };
+    const ends = (
+      source: string,
+      target: string,
+      extra: Record<string, unknown> = {},
+    ) =>
+      operate("actionPoint", {
+        source: end(source, 900000),
+        target: end(target, 910000),
+        kind: "drag",
+        force: false,
+        ...extra,
+      });
+    // Both ends in view: each point is the centre of what it shows.
+    const close = await ends("#card", "#zone");
+    expect(close.blocked).toBeUndefined();
+    expect(close.from).toEqual(await centreOf("card"));
+    expect(close.to).toEqual(await centreOf("zone"));
+    // A position is measured from that end's own top left corner.
+    expect(
+      await ends("#card", "#zone", {
+        sourcePosition: { x: 10, y: 20 },
+        targetPosition: { x: 4, y: 8 },
+      }),
+    ).toMatchObject({ from: { x: 50, y: 320 }, to: { x: 244, y: 308 } });
+    // Something over an end is the covered blocker, named with the end it
+    // belongs to, and force skips the check.
+    expect((await ends("#card", "#blocked")).blocked).toEqual({
+      blocker: "covered",
+      end: "target",
+      interceptor: "div#shade",
+    });
+    const forced = await ends("#card", "#blocked", { force: true });
+    expect(forced.blocked).toBeUndefined();
+    expect(forced.to).toEqual(await centreOf("blocked"));
+    // A drop inside what is dragged, and an end with no area, are refused
+    // for good.
+    expect(await ends("#card", "#inner")).toMatchObject({
+      ok: false,
+      code: "invalid_target",
+    });
+    expect(await ends("#card", "#flat")).toMatchObject({
+      ok: false,
+      code: "element_action_failed",
+    });
+    // An end below the fold that can still share the screen asks for one
+    // wheel gesture: the least that brings both ends into view.
+    const below = await ends("#card", "#near");
+    expect(below.blocked).toBeUndefined();
+    expect(below.from).toBeUndefined();
+    expect(below.scroll).toEqual({
+      x: 450,
+      y: 350,
+      deltaX: 0,
+      deltaY: 100,
+      end: "target",
+    });
+    await page.evaluate(() => scrollBy(0, 100));
+    const after = await ends("#card", "#near");
+    expect(after.scroll).toBeUndefined();
+    expect(after.from).toEqual(await centreOf("card"));
+    expect(after.to).toEqual(await centreOf("near"));
+    await page.evaluate(() => scrollTo(0, 0));
+    // Ends too far apart to share the screen are refused instead of
+    // scrolled, and a sixth gesture leaves the scrolling to the page.
+    expect(await ends("#card", "#far")).toMatchObject({
+      ok: false,
+      code: "drag_out_of_view",
+    });
+    // An end taller than the viewport can share the screen with one below
+    // the fold, so that pair scrolls instead of being refused.
+    const tall = await ends("#rail", "#near");
+    expect(tall).toMatchObject({ ok: true });
+    expect(tall.scroll).toMatchObject({ end: "target" });
+    await page.evaluate(
+      (delta: number) => scrollBy(0, delta),
+      tall.scroll.deltaY,
+    );
+    const reached = await ends("#rail", "#near");
+    expect(reached.to).toEqual(await centreOf("near"));
+    expect(reached.from).toBeDefined();
+    await page.evaluate(() => scrollTo(0, 0));
+    expect(await ends("#card", "#near", { scrolls: 6 })).toMatchObject({
+      ok: true,
+      intoView: true,
+    });
+    expect(await page.evaluate(() => scrollY)).toBeGreaterThan(0);
+  }, 30000);
+
   it("lets descendants and interactive ancestors take the hit", async () => {
     await open("/input/buttons");
     for (const selector of [

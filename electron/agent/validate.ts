@@ -15,7 +15,7 @@ import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
-import type { PointerAction, PointerKind } from "./input/actions";
+import type { DragAction, PointerAction, PointerKind } from "./input/actions";
 import type { Button } from "./input/state";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
@@ -307,6 +307,32 @@ export function pointerFields(
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
 }
+// A drag's two ends and the options the gesture takes. Both ends resolve
+// like any other target, each with its own position.
+export function dragFields(body: Record<string, unknown>): DragAction {
+  const endpoint = (name: "source" | "target") => {
+    const value = body[name];
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return fail(
+        "invalid_target",
+        `${name} must be an object with a ref or selector.`,
+      );
+    return targetFields(value as Record<string, unknown>) as TargetPayload;
+  };
+  const source = endpoint("source");
+  const target = endpoint("target");
+  const sourcePosition = positionField(body, "sourcePosition");
+  const targetPosition = positionField(body, "targetPosition");
+  return {
+    source,
+    target,
+    ...(sourcePosition === undefined ? {} : { sourcePosition }),
+    ...(targetPosition === undefined ? {} : { targetPosition }),
+    button: enumField(body, "button", BUTTONS, "left"),
+    force: booleanField(body, "force", false),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
 // The one grammar check that runs before the request waits for its lane, so
 // a malformed selector costs no page work, no activity and no batch step.
 export function checkSelectors(
@@ -440,21 +466,11 @@ function parseAction(
       },
     };
   }
-  if (type === "drag") {
-    const endpoint = (name: "source" | "target") => {
-      const value = body[name];
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        return fail(
-          "invalid_target",
-          `${name} must be an object with a ref or selector.`,
-        );
-      return targetFields(value as Record<string, unknown>);
-    };
+  if (type === "drag")
     return {
       type,
-      payload: { source: endpoint("source"), target: endpoint("target") },
+      payload: dragFields(body) as unknown as Record<string, unknown>,
     };
-  }
   if (type === "navigate") return { type, payload: navigationFields(body) };
   if (type === "reload") return { type, payload: reloadFields(body) };
   if (type === "wait-for-url") {

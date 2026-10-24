@@ -449,7 +449,7 @@ Drags one element onto another with native mouse input or HTML drag and drop.
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.wait(options?)`
 
@@ -697,7 +697,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value`, `label?` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `label?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?`, `label?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/drag` | `source`, `target`, `label?` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/drag` | `source`, `target`, `sourcePosition?`, `targetPosition?`, `button?`, `force?`, `timeoutMs?`, `label?` | Drags one element onto another, waiting until both ends can take the gesture. Returns `{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |

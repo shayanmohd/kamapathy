@@ -7,7 +7,7 @@ import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import {
   createInputActions,
-  nativeDrag,
+  type DragAction,
   type PointerAction,
   type PointerKind,
 } from "./input/actions";
@@ -387,47 +387,9 @@ export function createActions(deps: {
     } else if (action.type === "fill") {
       result = await evaluatePage(id, session, "fill", payload, deadline, step);
     } else if (action.type === "drag") {
-      const points = await evaluatePage(
-        id,
-        session,
-        "drag",
-        payload,
-        deadline,
-        step,
-      );
-      const from = points.from as Point,
-        to = points.to as Point;
-      if (!finitePoint(from) || !finitePoint(to))
-        return fail(
-          "invalid_target",
-          "The page did not provide valid drag points.",
-        );
-      const mode = await deliverNativeInput(
-        id,
-        session,
-        "mouse",
-        (armed) =>
-          nativeDrag({
-            session,
-            from,
-            to,
-            armed,
-            gesture,
-            epoch,
-            guard: () => authorizeTab(id),
-            evaluate: (operation, evaluateBy) =>
-              evaluatePage(id, session, operation, {}, evaluateBy, gesture),
-          }),
-        step,
-      );
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = {
-        ok: true,
-        url: contents.getURL(),
-        drag: mode,
-        ...reboundOf(points),
-      };
+      // Both ends wait for a layout that can take the drag, then today's
+      // engine runs in input/actions.ts.
+      result = await input.drag(id, payload as unknown as DragAction, run);
     } else if (action.type === "press") {
       let focused: Record<string, unknown> = {};
       if (payload.ref || payload.selector)

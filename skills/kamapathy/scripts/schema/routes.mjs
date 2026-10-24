@@ -263,6 +263,17 @@ const FIELDS = {
       required: true,
       description: "The element to drop on: a ref or selector.",
     },
+    sourcePosition: {
+      ...position,
+      description: "Where in the source to press, instead of its centre.",
+    },
+    targetPosition: {
+      ...position,
+      description: "Where in the target to drop, instead of its centre.",
+    },
+    button,
+    force,
+    timeoutMs: actionTimeout,
     label,
   },
   wait: {
@@ -830,8 +841,9 @@ export const ROUTES = [
   ),
   action(
     "drag",
-    "Drags one element onto another.",
-    "{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Drags one element onto another, waiting until both ends can take the gesture.",
+    "{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "dragBudget", maxMs: 75100 } },
   ),
   action("wait", "Waits for a visible element, text, or both.", "{ ok: true }"),
   route(

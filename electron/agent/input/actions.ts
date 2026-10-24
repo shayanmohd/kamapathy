@@ -27,6 +27,7 @@ import type { Step } from "../session/types";
 import type { TargetPayload } from "../validate";
 import type { InputDispatcher, InputDispatchers } from "./dispatch";
 import { checkPointerTarget } from "./guards";
+import { inputMarker } from "./marker";
 import type { InputCommand } from "./keys";
 import { BUTTON_BITS, type Button } from "./state";
 import {
@@ -165,11 +166,14 @@ export async function scrollToPoint(deps: {
 // Presses on the source, moves past the distance pages wait for before a
 // drag starts (4 pixels in Chromium, 5 to 8 in pointer libraries), then on to
 // the target in steps. An HTML drag the page starts is intercepted, so no
-// operating system drag begins, and is moved with drag events instead.
+// operating system drag begins, and is moved with drag events instead. Only
+// the left button starts an HTML drag, so a middle or right drag is a plain
+// mouse drag.
 export async function nativeDrag(deps: {
   session: TabSession;
   from: Point;
   to: Point;
+  button: Button;
   armed: Record<string, unknown>;
   gesture: Step;
   epoch: number;
@@ -179,14 +183,19 @@ export async function nativeDrag(deps: {
     deadline: number,
   ): Promise<Record<string, unknown>>;
 }): Promise<"html5" | "mouse"> {
-  const { session, from, to, armed, gesture, epoch, guard, evaluate } = deps;
+  const { session, from, to, button, armed, gesture, epoch, guard, evaluate } =
+    deps;
   guard();
+  const intercepts = button === "left";
+  const bit = BUTTON_BITS[button];
   let data: unknown;
   let intercepted = () => {};
-  const stopListening = session.on("Input.dragIntercepted", (event) => {
-    data = event.params.data;
-    intercepted();
-  });
+  const stopListening = intercepts
+    ? session.on("Input.dragIntercepted", (event) => {
+        data = event.params.data;
+        intercepted();
+      })
+    : () => {};
   let dragging = false;
   let dropped = false;
   let last = from;
@@ -211,7 +220,7 @@ export async function nativeDrag(deps: {
         type,
         x: point.x,
         y: point.y,
-        button: type === "mouseMoved" && !buttons ? "none" : "left",
+        button: type === "mouseMoved" && !buttons ? "none" : button,
         buttons,
         ...(type === "mouseMoved" ? {} : { clickCount: 1 }),
       },
@@ -225,19 +234,20 @@ export async function nativeDrag(deps: {
     );
   const wait = () => new Promise((resolve) => setTimeout(resolve, 16));
   try {
-    try {
-      // No guard: a takeover here is reported by the first mouse event.
-      await session.send(
-        "Input.setInterceptDrags",
-        { enabled: true },
-        { deadline: gesture.deadline, dispatch: gesture.dispatch },
-      );
-    } catch {
-      return fail(
-        "drag_unavailable",
-        "Kamapathy could not take over drags in this tab.",
-      );
-    }
+    if (intercepts)
+      try {
+        // No guard: a takeover here is reported by the first mouse event.
+        await session.send(
+          "Input.setInterceptDrags",
+          { enabled: true },
+          { deadline: gesture.deadline, dispatch: gesture.dispatch },
+        );
+      } catch {
+        return fail(
+          "drag_unavailable",
+          "Kamapathy could not take over drags in this tab.",
+        );
+      }
     const dx = to.x - from.x,
       dy = to.y - from.y;
     const distance = Math.hypot(dx, dy);
@@ -250,32 +260,34 @@ export async function nativeDrag(deps: {
     }));
     path.push(to);
     await mouse("mouseMoved", from, 0);
-    await mouse("mousePressed", from, 1);
-    await mouse("mouseMoved", start, 1);
+    await mouse("mousePressed", from, bit);
+    await mouse("mouseMoved", start, bit);
     last = start;
     // The page decides in its dragstart handlers whether an HTML drag
     // starts. Its data reaches Kamapathy shortly after.
-    await evaluate("frame", gesture.deadline);
-    const counts = await evaluate("input", gesture.deadline);
-    if (
-      data === undefined &&
-      typeof armed.drag === "number" &&
-      typeof counts.drag === "number" &&
-      counts.drag > armed.drag
-    ) {
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 2000);
-        intercepted = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-      });
-      if (data === undefined) {
-        await mouse("mouseReleased", start, 0, true);
-        return fail(
-          "drag_not_delivered",
-          "The page started a drag that Kamapathy could not move. Inspect the page before retrying.",
-        );
+    if (intercepts) {
+      await evaluate("frame", gesture.deadline);
+      const counts = await evaluate("input", gesture.deadline);
+      if (
+        data === undefined &&
+        typeof armed.drag === "number" &&
+        typeof counts.drag === "number" &&
+        counts.drag > armed.drag
+      ) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2000);
+          intercepted = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+        if (data === undefined) {
+          await mouse("mouseReleased", start, 0, true);
+          return fail(
+            "drag_not_delivered",
+            "The page started a drag that Kamapathy could not move. Inspect the page before retrying.",
+          );
+        }
       }
     }
     if (data !== undefined) {
@@ -288,7 +300,7 @@ export async function nativeDrag(deps: {
       else if (data !== undefined) {
         dragging = true;
         await drag("dragEnter", point);
-      } else await mouse("mouseMoved", point, 1);
+      } else await mouse("mouseMoved", point, bit);
       last = point;
     }
     await wait();
@@ -311,13 +323,14 @@ export async function nativeDrag(deps: {
           { deadline: Date.now() + 2000, timeoutMs: 2000 },
         )
         .catch(() => {});
-    await session
-      .send(
-        "Input.setInterceptDrags",
-        { enabled: false },
-        { deadline: Date.now() + 2000, timeoutMs: 2000 },
-      )
-      .catch(() => {});
+    if (intercepts)
+      await session
+        .send(
+          "Input.setInterceptDrags",
+          { enabled: false },
+          { deadline: Date.now() + 2000, timeoutMs: 2000 },
+        )
+        .catch(() => {});
     stopListening();
   }
 }
@@ -341,10 +354,25 @@ export interface InputActionDeps {
   dispatchers: InputDispatchers;
   platform?: NodeJS.Platform;
 }
+/** One drag as its route parsed it. */
+export interface DragAction {
+  source: TargetPayload;
+  target: TargetPayload;
+  sourcePosition?: Point;
+  targetPosition?: Point;
+  button: Button;
+  force: boolean;
+  timeoutMs: number;
+}
 export interface InputActions {
   pointer(
     id: string,
     action: PointerAction,
+    run: Run,
+  ): Promise<Record<string, unknown>>;
+  drag(
+    id: string,
+    action: DragAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
 }
@@ -362,6 +390,8 @@ type PointerOutcome = {
   rebound?: string[];
   pressed: boolean;
 };
+// What one drag ended with: the way the page took it, and the refs it moved.
+type DragOutcome = { mode: "html5" | "mouse"; rebound?: string[] };
 
 export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
@@ -642,5 +672,225 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       ...(outcome.rebound ? { rebound: outcome.rebound } : {}),
     };
   };
-  return { pointer };
+  // Today's drag engine on the attempt loop: both ends are measured in one
+  // look, in hover mode with their own positions, and the gesture itself is
+  // unchanged.
+  const drag = async (id: string, action: DragAction, run: Run) => {
+    const { button, force } = action;
+    const guard = () => {
+      authorizeTab(id);
+    };
+    const step: Step = {
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    };
+    // A gesture runs to its end even if the client goes away.
+    const gesture: Step = {
+      deadline: run.deadline,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const { contents, session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      false,
+      run.park,
+    );
+    const dispatcher = actions.dispatcher(id, session);
+    // Both ends travel in one payload, so the page measures them against one
+    // layout, and each counts its matches at the drag level.
+    const ends = [action.source, action.target];
+    for (const end of ends) {
+      const query = (end as { query?: { level?: Level } }).query;
+      if (query) query.level = ACTION_LEVELS.drag;
+    }
+    const payload: Record<string, unknown> = {
+      source: action.source,
+      target: action.target,
+      kind: "drag",
+      force,
+      ...(action.sourcePosition
+        ? { sourcePosition: action.sourcePosition }
+        : {}),
+      ...(action.targetPosition
+        ? { targetPosition: action.targetPosition }
+        : {}),
+    };
+    const evaluate = (
+      operation: "actionPoint" | "stableBox" | "input" | "frame",
+      body: Record<string, unknown>,
+      at: Step = step,
+      deadline = run.deadline,
+    ) => actions.evaluatePage(id, session, operation, body, deadline, at);
+    // The two points, with a selector that matched nothing folded into the
+    // blocker the loop waits out. Either end's selector may be the one.
+    const look = async (
+      context: AttemptContext,
+      at: Step = step,
+    ): Promise<Record<string, unknown>> => {
+      try {
+        return await evaluate(
+          "actionPoint",
+          { ...payload, scrolls: context.scrolls },
+          at,
+        );
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.code !== "no_match")
+          throw error;
+        const selector = error.fields.selector;
+        return {
+          ok: true,
+          blocked: {
+            blocker: "no_match",
+            ...(typeof selector === "string" ? { selector } : {}),
+          },
+        };
+      }
+    };
+    const measured = (found: Record<string, unknown>) =>
+      finitePoint(found.from) && finitePoint(found.to);
+    // Each end must hold still, as hover's one does.
+    const unstable = async (): Promise<LoopBlocker | undefined> => {
+      for (const end of ends) {
+        const box = await evaluate("stableBox", { ...end });
+        if (box.blocked) return box.blocked as LoopBlocker;
+      }
+      return undefined;
+    };
+    // After a wheel gesture each end gets two frames at a time to come to
+    // rest before it is measured again.
+    const holdStill = async () => {
+      const until = Date.now() + SCROLL_SETTLE_MS;
+      for (const end of ends)
+        for (;;) {
+          const box = await evaluate("stableBox", { ...end });
+          if (!box.blocked || Date.now() >= until) break;
+        }
+    };
+    const aim = (point: Point, press: boolean) =>
+      checkPointerTarget(session, point, step, { button, press, ...platform });
+    // The end a blocker belongs to reads as its detail, so a timeout says
+    // which of the two was not ready.
+    const stop = (blocked: unknown): AttemptResult<DragOutcome> => {
+      const { end, ...rest } = blocked as LoopBlocker & { end?: string };
+      return {
+        done: false,
+        blocked: {
+          ...rest,
+          ...(rest.detail === undefined && end ? { detail: end } : {}),
+        } as LoopBlocker,
+      };
+    };
+    // The counters the gesture was armed with, which the drag compares
+    // against to tell an HTML drag the page started.
+    let armed: Record<string, unknown> = {};
+
+    const attempt = async (
+      context: AttemptContext,
+    ): Promise<AttemptResult<DragOutcome>> => {
+      let found = await look(context);
+      // The wheel brings both ends into view; after six gestures the page
+      // scrolls the end that is off screen itself.
+      while (found.scroll && context.scrolls < MAX_SCROLL_GESTURES) {
+        await scrollToPoint({
+          request: found.scroll as ScrollRequest,
+          dispatcher,
+          step,
+        });
+        context.scrolls += 1;
+        await holdStill();
+        found = await look(context);
+      }
+      if (found.blocked) return stop(found.blocked);
+      // Still off screen, or scrolled by the page itself: the next attempt
+      // measures again.
+      if (!measured(found)) return { done: false };
+      if (!force) {
+        const moving = await unstable();
+        if (moving) return stop(moving);
+        found = await look(context);
+        if (found.blocked) return stop(found.blocked);
+        if (!measured(found)) return { done: false };
+      }
+      const from = found.from as Point;
+      const to = found.to as Point;
+      // The press lands on the source and the drop on the target, so both
+      // points go through section 5's guards.
+      await aim(from, true);
+      await aim(to, false);
+      const epoch = session.epoch;
+      const mode = await confirmDelivery({
+        kind: "mouse",
+        counters: async () => (armed = await evaluate("input", {})),
+        frames: async () => {
+          await evaluate(
+            "frame",
+            {},
+            step,
+            Math.min(step.deadline, Date.now() + 2000),
+          );
+        },
+        epoch: () => session.epoch,
+        budget: step.deadline,
+        deliver: async () => {
+          // A gesture the page never received is sent again, so the ends are
+          // checked once more and nothing is repeated if they moved.
+          if (context.gesture.committed) {
+            const again = await look(context, gesture);
+            if (again.blocked || !measured(again)) context.gesture.refuse();
+          }
+          context.gesture.press();
+          // The shell reads the marker, so no native menu follows the
+          // button this gesture holds and no pane takes its moves.
+          const done = inputMarker.begin(contents);
+          inputMarker.markPointer(contents);
+          try {
+            return await nativeDrag({
+              session,
+              from,
+              to,
+              button,
+              armed,
+              gesture,
+              epoch,
+              guard,
+              evaluate: (operation, deadline) =>
+                evaluate(operation, {}, gesture, deadline),
+            });
+          } finally {
+            done();
+          }
+        },
+      });
+      return { done: true, value: { mode, ...reboundOf(found) } };
+    };
+
+    const outcome = await runAttempts<DragOutcome>(
+      {
+        timeoutMs: action.timeoutMs,
+        deadline: run.deadline,
+        park: run.park,
+        signal: run.signal,
+        action: "drag",
+      },
+      attempt,
+    );
+    // The page's own handlers, then a load the drop started.
+    const settled = await settleAfterInput({
+      contents,
+      park: run.park,
+      budget: run.deadline,
+      guard,
+    });
+    return {
+      ok: true,
+      url: contents.getURL(),
+      drag: outcome.mode,
+      ...settled,
+      ...(outcome.rebound ? { rebound: outcome.rebound } : {}),
+    };
+  };
+  return { pointer, drag };
 }

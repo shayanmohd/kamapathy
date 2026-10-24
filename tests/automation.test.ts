@@ -1443,7 +1443,7 @@ describe("local automation socket", () => {
     page.result = (code: string) =>
       code.includes(')("input",')
         ? counted()
-        : code.includes(')("drag",')
+        : code.includes(')("actionPoint",') && code.includes('"kind":"drag"')
           ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
           : code.includes(')("check",')
             ? { ok: true, matched: true }
@@ -1483,7 +1483,7 @@ describe("local automation socket", () => {
     expect(queryOf("scroll")).toEqual(
       strict({ kind: "href", href: "/plans" }, "visible"),
     );
-    const drag = payloads("drag")[0];
+    const drag = payloads("actionPoint")[1];
     expect(drag.source.query).toEqual(
       strict({ kind: "css", css: "#card", raw: true }, "pointer"),
     );
@@ -4316,7 +4316,7 @@ describe("local automation socket", () => {
   // A page answering drag, input-count and frame operations. `dragging`
   // reports whether the page started an HTML drag.
   const dragPage = (dragging: () => boolean) => (code: string) =>
-    code.includes(')("drag",')
+    code.includes(')("actionPoint",')
       ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
       : code.includes(')("input",')
         ? {
@@ -4365,20 +4365,11 @@ describe("local automation socket", () => {
       url: "https://example.com/",
       drag: "mouse",
     });
-    expect(controller.contents.scripts[0].code).toContain(
-      `)("drag",${JSON.stringify({
-        source: { ref: "@e1" },
-        target: {
-          selector: "#zone",
-          query: {
-            ast: { kind: "css", css: "#zone", raw: true },
-            level: "pointer",
-            mode: "strict",
-            firstRef: payloads("drag")[0].target.query.firstRef,
-          },
-        },
-      })}`,
-    );
+    expect(payloads("actionPoint")[0]).toMatchObject({
+      source: { ref: "@e1" },
+      target: { selector: "#zone" },
+      kind: "drag",
+    });
     expect(steps()).toEqual([
       "intercept true",
       "mouseMoved",
@@ -4497,6 +4488,298 @@ describe("local automation socket", () => {
     expectOneAttach();
   });
 
+  it("drags both ends with their positions, a button and force", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    const response = await request(`/tabs/${tab.id}/drag`, "POST", {
+      ...dragBody,
+      sourcePosition: { x: 4, y: 6 },
+      targetPosition: { x: 8, y: 2 },
+      force: true,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      drag: "mouse",
+    });
+    // One look measures both ends against the same layout, with their
+    // positions and the strictness a drag counts matches at.
+    const measured = payloads("actionPoint")[0];
+    expect(measured).toEqual({
+      source: { ref: "@e1" },
+      target: {
+        selector: "#zone",
+        query: {
+          ast: { kind: "css", css: "#zone", raw: true },
+          level: "pointer",
+          mode: "strict",
+          firstRef: measured.target.query.firstRef,
+        },
+      },
+      kind: "drag",
+      force: true,
+      sourcePosition: { x: 4, y: 6 },
+      targetPosition: { x: 8, y: 2 },
+      scrolls: 0,
+    });
+    // force skips the stability wait as well as the pointer check.
+    expect(payloads("stableBox")).toEqual([]);
+    // The press lands on the source point and the release on the target's.
+    const mouse = page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => input.parameters);
+    expect(mouse[1]).toMatchObject({
+      type: "mousePressed",
+      x: 10,
+      y: 20,
+      button: "left",
+      buttons: 1,
+    });
+    expect(mouse.at(-1)).toMatchObject({
+      type: "mouseReleased",
+      x: 110,
+      y: 220,
+    });
+    // A right drag presses the right button and intercepts no HTML drag.
+    page.inputs = [];
+    const right = await request(`/tabs/${tab.id}/drag`, "POST", {
+      ...dragBody,
+      button: "right",
+    });
+    expect(right.status).toBe(200);
+    expect((await right.json()).drag).toBe("mouse");
+    expect(steps()).not.toContain("intercept true");
+    expect(
+      page.inputs
+        .filter((input) => input.parameters.type !== "mouseMoved")
+        .map((input) => [input.parameters.type, input.parameters.button]),
+    ).toEqual([
+      ["mousePressed", "right"],
+      ["mouseReleased", "right"],
+    ]);
+    // The shell's marker saw the agent's pointer, so the right button it
+    // pressed opens no native menu.
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+  });
+
+  it("waits for both ends and then presses once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    let looks = 0;
+    page.result = (code: string) => {
+      if (!code.includes(')("actionPoint",')) return base(code);
+      looks += 1;
+      return looks <= 2
+        ? {
+            ok: true,
+            blocked: {
+              blocker: "covered",
+              end: "source",
+              interceptor: "div#shade",
+            },
+          }
+        : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+    };
+    const dragged = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    expect(dragged.status).toBe(200);
+    // Two covered looks, the look that measures, and the look after the
+    // stability wait.
+    expect(looks).toBe(4);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+    // Both ends must hold still before the press.
+    expect(payloads("stableBox")).toEqual([
+      { ref: "@e1" },
+      expect.objectContaining({ selector: "#zone" }),
+    ]);
+    // Two ends that cannot share the screen is permanent: no press, 422.
+    page.inputs = [];
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? {
+            ok: false,
+            code: "drag_out_of_view",
+            error:
+              "Scroll so the source and target are both on screen, then drag again.",
+          }
+        : base(code);
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", dragBody),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error.code).toBe("drag_out_of_view");
+    expect(page.inputs).toEqual([]);
+    // A blocker that only shows after the press ends the drag with what it
+    // already sent, and names the end it found.
+    page.inputs = [];
+    let pressed = false;
+    page.result = (code: string) => {
+      if (code.includes(')("actionPoint",'))
+        return pressed
+          ? { ok: true, blocked: { blocker: "covered", end: "target" } }
+          : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: 0, key: 0, drag: 0 };
+      return { ok: true };
+    };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mousePressed") pressed = true;
+    };
+    const obscured = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", dragBody),
+    );
+    expect(obscured.status).toBe(409);
+    expect(obscured.error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+      dispatched: true,
+    });
+    expect(obscured.error.retryable).toBeUndefined();
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
+  it("brings both ends into view with a wheel gesture before it presses", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    let looks = 0;
+    page.result = (code: string) => {
+      if (!code.includes(')("actionPoint",')) return base(code);
+      looks += 1;
+      return looks === 1
+        ? {
+            ok: true,
+            scroll: { x: 600, y: 400, deltaX: 0, deltaY: 80, end: "target" },
+          }
+        : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+    };
+    const response = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    expect(response.status).toBe(200);
+    // The gesture the page asked for goes out first, and the next look is
+    // told how many have gone out.
+    expect(page.inputs[0].parameters).toMatchObject({
+      type: "mouseWheel",
+      x: 600,
+      y: 400,
+      deltaY: 80,
+    });
+    expect(payloads("actionPoint")[1]).toMatchObject({ scrolls: 1 });
+    // Both ends come to rest after the gesture, and both are checked again
+    // before the press.
+    expect(looks).toBe(3);
+    expect(payloads("stableBox")).toHaveLength(4);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
+  it("ends a staying blocker as 504 action_timeout naming the end", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? { ok: true, blocked: { blocker: "covered", end: "target" } }
+        : base(code);
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", {
+        ...dragBody,
+        timeoutMs: 120,
+      }),
+    );
+    expect(status).toBe(504);
+    expect(error).toMatchObject({
+      code: "action_timeout",
+      message:
+        "drag timed out after 120 ms: Another element covers the target.",
+      awaited: "actionable",
+      blocker: "covered",
+      detail: "target",
+      timeoutMs: 120,
+      retryable: true,
+    });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("waits for a load the drop started before it answers", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mouseReleased")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const response = await answering;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      drag: "mouse",
+    });
+  });
+
+  it("refuses undeclared and bad drag fields", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/drag`, "POST", body));
+    // A drag presses once and counts no gesture delay, so it declares
+    // neither field.
+    for (const field of ["clickCount", "delayMs"])
+      expect(
+        (await refuse({ ...dragBody, [field]: 1 })).error,
+        field,
+      ).toMatchObject({
+        code: "unknown_field",
+        field,
+        route: "POST /tabs/:id/drag",
+      });
+    for (const [body, field] of [
+      [{ ...dragBody, sourcePosition: { y: 3 } }, "sourcePosition.x"],
+      [{ ...dragBody, targetPosition: { x: 10001, y: 0 } }, "targetPosition.x"],
+      [{ ...dragBody, button: "back" }, "button"],
+      [{ ...dragBody, force: "yes" }, "force"],
+      [{ ...dragBody, timeoutMs: 60001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await refuse(body as Record<string, unknown>);
+      expect(status, field).toBe(400);
+      expect(error, field).toMatchObject({ code: "invalid_field", field });
+    }
+    expect(page.inputs).toEqual([]);
+    // Today's body still drags, and a batch step takes the new fields.
+    expect(
+      (await request(`/tabs/${tab.id}/drag`, "POST", dragBody)).status,
+    ).toBe(200);
+    const batch = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          {
+            type: "drag",
+            ...dragBody,
+            button: "middle",
+            force: true,
+            timeoutMs: 1000,
+          },
+        ],
+      })
+    ).json();
+    expect(batch.ok).toBe(true);
+    expect(batch.results[0].result.drag).toBe("mouse");
+  });
+
   it("clicks a control drawn with no size in the page, without native input, and reports it", async () => {
     const { tab } = await createPage();
     controller.contents.result = (code: string) =>
@@ -4525,17 +4808,17 @@ describe("local automation socket", () => {
   it("reports refs the page moved to a redrawn control for clicks, key presses and drags", async () => {
     const { tab } = await createPage();
     controller.contents.result = (code: string) =>
-      code.includes(')("actionPoint",')
-        ? { ok: true, x: 25, y: 45, rebound: ["@e1"] }
-        : code.includes(')("focus",')
-          ? { ok: true, rebound: ["@e2"] }
-          : code.includes(')("drag",')
-            ? {
-                ok: true,
-                from: { x: 10, y: 20 },
-                to: { x: 110, y: 220 },
-                rebound: ["@e3", "@e4"],
-              }
+      code.includes('"kind":"drag"')
+        ? {
+            ok: true,
+            from: { x: 10, y: 20 },
+            to: { x: 110, y: 220 },
+            rebound: ["@e3", "@e4"],
+          }
+        : code.includes(')("actionPoint",')
+          ? { ok: true, x: 25, y: 45, rebound: ["@e1"] }
+          : code.includes(')("focus",')
+            ? { ok: true, rebound: ["@e2"] }
             : code.includes(')("input",')
               ? {
                   ok: true,
@@ -7068,7 +7351,7 @@ describe("local automation socket", () => {
             interactables: [],
             truncated: false,
           }
-        : code.includes(')("drag",')
+        : code.includes('"kind":"drag"')
           ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
           : { ok: true, x: 25, y: 45 };
     for (const [type, body] of [

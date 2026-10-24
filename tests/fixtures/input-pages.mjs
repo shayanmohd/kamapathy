@@ -180,6 +180,27 @@ const step = () => {
 };
 requestAnimationFrame(step);
 </script>`,
+  "/input/drag": `<!doctype html><meta charset="utf-8"><title>Drag</title>
+<style>
+body{font:14px sans-serif;margin:0;height:1600px}
+div{box-sizing:border-box;position:absolute}
+#card{left:40px;top:300px;width:120px;height:40px;background:#dde}
+#inner{left:8px;top:8px;width:40px;height:20px;background:#ccd}
+#zone{left:240px;top:300px;width:160px;height:40px;background:#edd}
+#blocked{left:40px;top:400px;width:160px;height:40px;background:#efe}
+#shade{left:20px;top:380px;width:220px;height:80px;background:rgba(0,0,0,.3)}
+#near{left:300px;top:760px;width:160px;height:40px;background:#eef}
+#far{left:300px;top:1500px;width:160px;height:40px;background:#fee}
+#rail{left:700px;top:0;width:80px;height:1200px}
+#flat{left:600px;top:300px;width:0;height:0}
+</style>
+<div id="card" draggable="true">Card<div id="inner"></div></div>
+<div id="zone">Drop zone</div>
+<div id="blocked">Covered zone</div><div id="shade"></div>
+<div id="near">Near zone</div>
+<div id="far">Far zone</div>
+<div id="rail">Rail</div>
+<div id="flat"></div>`,
   "/input/stalled": `<!doctype html><meta charset="utf-8"><title>Stalled frames</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
 <button id="waiting" type="button">Waiting for a frame</button>

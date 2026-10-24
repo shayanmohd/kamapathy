@@ -157,6 +157,7 @@ export function actionOperations(
   const NEEDS_ENABLED = [
     "click",
     "dblclick",
+    "drag",
     "fill",
     "select",
     "focus",
@@ -691,6 +692,64 @@ export function actionOperations(
     );
   };
 
+  const spanOf = (first: Box, second: Box): Box => ({
+    left: Math.min(first.left, second.left),
+    top: Math.min(first.top, second.top),
+    right: Math.max(first.right, second.right),
+    bottom: Math.max(first.bottom, second.bottom),
+  });
+  const fits = (shown: Box, box: Box) =>
+    box.right - box.left <= shown.right - shown.left &&
+    box.bottom - box.top <= shown.bottom - shown.top;
+  // Whether some scroll offset has both boxes meeting what is shown, which
+  // is what a drag across the screen needs. Two boxes further apart than the
+  // viewport can never meet it together, however tall either one is.
+  const shareable = (shown: Box, first: Box, second: Box) =>
+    Math.max(first.left, second.left) - Math.min(first.right, second.right) <
+      shown.right - shown.left &&
+    Math.max(first.top, second.top) - Math.min(first.bottom, second.bottom) <
+      shown.bottom - shown.top;
+  const inside = (shown: Box, box: Box) =>
+    box.left >= shown.left &&
+    box.right <= shown.right &&
+    box.top >= shown.top &&
+    box.bottom <= shown.bottom;
+  // How far a scroller has to move to show a box it can hold.
+  const shiftTo = (low: number, high: number, from: number, to: number) =>
+    high > to ? high - to : low < from ? low - from : 0;
+  // The gesture that brings both ends of a drag into view: the least move
+  // that shows the box around the two of them, since centring one end would
+  // push the other out. A pair too large for what a step shows falls back to
+  // centring the end that is off screen.
+  const dragAsk = (element: Element, span: Box): Ask | undefined => {
+    const needing = chainOf(element).filter(
+      (step) => !inside(stepBox(step), span),
+    );
+    if (!needing.length) return undefined;
+    const roomy = needing.filter(stepRoom);
+    const step = roomy.length ? roomy[0] : needing[needing.length - 1];
+    const shown = stepBox(step);
+    if (area(shown) <= 0 || !fits(shown, span)) return askFor(step);
+    const map = mapOf(step.doc);
+    const box = toLocal(map, span);
+    const view = toLocal(map, shown);
+    const node = scrollerOf(step);
+    const frame = host.framePath(step.container || step.doc.documentElement);
+    const where = middleOf(shown);
+    return {
+      request: {
+        x: where.x,
+        y: where.y,
+        deltaX: shiftTo(box.left, box.right, view.left, view.right),
+        deltaY: shiftTo(box.top, box.bottom, view.top, view.bottom),
+        ...(frame ? { frame } : {}),
+      },
+      node,
+      left: node.scrollLeft,
+      top: node.scrollTop,
+    };
+  };
+
   const blockedResult = (
     stop: Blocked,
     rest: Record<string, unknown> = {},
@@ -712,7 +771,104 @@ export function actionOperations(
       setTimeout(once, STALL_MS);
     });
 
+  // Both ends of a drag, measured in one layout so the two points belong
+  // to the same page. The source keeps today's rules: it must be enabled,
+  // the drop must lie outside it, and neither end can be acted on without
+  // an area of its own.
+  type DragEnd = "source" | "target";
+  const dragPoints = (payload: Record<string, unknown>) => {
+    const source = host.select(payload.source);
+    if (!host.isElement(source)) return source;
+    const destination = host.select(payload.target);
+    if (!host.isElement(destination)) return destination;
+    if (host.within(source, destination))
+      return failure(
+        "Drag onto an element outside the one being dragged.",
+        "invalid_target",
+      );
+    if (host.emptyBox(source) || host.emptyBox(destination))
+      return failure("Element has no area to drag from or onto.");
+    const stopped = (stop: Blocked, end: DragEnd) => {
+      const blocked: Blocked & { end: DragEnd } = { ...stop, end };
+      return blockedResult(blocked);
+    };
+    const ends = [
+      {
+        end: "source" as DragEnd,
+        element: source,
+        kind: "drag" as ActionKind,
+        position: payload.sourcePosition as Point | undefined,
+      },
+      {
+        end: "target" as DragEnd,
+        element: destination,
+        kind: "hover" as ActionKind,
+        position: payload.targetPosition as Point | undefined,
+      },
+    ];
+    for (const { end, element, kind } of ends) {
+      const stop = firstBlocker(element, kind);
+      if (stop) return stopped(stop, end);
+    }
+    const boxes = ends.map(({ element }) => borderBox(element));
+    const outOfView = () =>
+      failure(
+        "Scroll so the source and target are both on screen, then drag again.",
+        "drag_out_of_view",
+      );
+    const force = payload.force === true;
+    const scrolls = typeof payload.scrolls === "number" ? payload.scrolls : 0;
+    const spots: Point[] = [];
+    for (const { end, element, position } of ends) {
+      const clip = clipOf(element);
+      const shown = visiblePoint(element, clip);
+      if (!shown) {
+        // A pair too far apart to share the screen is refused for good; one
+        // that is merely off screen is scrolled in.
+        if (!shareable(topViewport(), boxes[0], boxes[1])) return outOfView();
+        const ask = dragAsk(element, spanOf(boxes[0], boxes[1]));
+        if (!ask) return outOfView();
+        // Six gestures, or one that moved nothing, and the page scrolls
+        // this end itself.
+        if (scrolls >= MAX_SCROLLS || unmoved(ask)) {
+          forget();
+          element.scrollIntoView({
+            block: "center",
+            inline: "center",
+            behavior: "instant",
+          });
+          return {
+            ok: true as const,
+            intoView: true as const,
+            ...host.reboundResult(),
+          };
+        }
+        mark(ask);
+        return {
+          ok: true as const,
+          scroll: { ...ask.request, end },
+          ...host.reboundResult(),
+        };
+      }
+      const spot =
+        position === undefined ? shown : positioned(element, position, clip);
+      if (!spot) return stopped({ blocker: "outside_viewport" }, end);
+      spots.push(spot);
+    }
+    forget();
+    const [from, to] = spots;
+    const measured = { ok: true as const, from, to, ...host.reboundResult() };
+    if (force) return measured;
+    for (const [index, { end, element }] of ends.entries()) {
+      const hit = host.hitAt(element, spots[index].x, spots[index].y);
+      if (!accepts(element, hit))
+        return { ...measured, blocked: { ...coveredBy(hit), end } };
+    }
+    return measured;
+  };
+
   const actionPoint = (payload: Record<string, unknown>) => {
+    if (payload.kind === "drag") return dragPoints(payload);
     const found = host.select(payload);
     if (!host.isElement(found)) return found;
     const element = found;
