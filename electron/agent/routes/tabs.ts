@@ -9,6 +9,7 @@ import {
 import type { TabSession } from "../session/tab-session";
 import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
+import { cdpRoutes } from "./cdp";
 import { screenshotRoutes } from "./screenshot";
 import { scriptRoutes } from "./scripts";
 import { checkPageBudget } from "./spaces";
@@ -196,6 +197,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     },
     ...screenshotRoutes(deps),
     ...scriptRoutes(deps),
+    ...cdpRoutes(deps),
     ...Object.fromEntries(
       ["click", "fill", "press", "scroll", "drag", "wait"].map((type) => [
         `POST /tabs/:id/${type}`,

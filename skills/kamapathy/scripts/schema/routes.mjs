@@ -422,6 +422,16 @@ const FIELDS = {
         "How long the request and its body may take. Above 60000 ms only with stream.",
     },
   },
+  events: {
+    max: {
+      kind: "integer",
+      min: 1,
+      max: 10000,
+      default: 10000,
+      since: 4,
+      description: "How many of the oldest events to take.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -829,6 +839,14 @@ export const ROUTES = [
       follow: true,
       since: 4,
     },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/events",
+    "Drains the protocol events recorded for this tab.",
+    "{ ok: true, events, dropped, gaps, remaining }",
+    FIELDS.events,
+    { lane: "none", budget: 10000, since: 4 },
   ),
   route(
     "GET",

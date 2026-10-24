@@ -448,6 +448,7 @@ A capture reaching past the current visual viewport, which is any full page and 
 | POST | `/tabs/:id/wait-for-function` | `expression?`, `function?`, `arg?`, `intervalMs?`, `timeoutMs?` | Waits for a function the agent wrote to return a truthy value in the page. Returns `{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }`. |
 | POST | `/tabs/:id/evaluate` | `expression?`, `function?`, `arg?`, `timeoutMs?` | Runs the agent's own expression or function in the page's main frame. Returns `{ ok: true, tab: TabView, value?: json } or { ok: true, tab: TabView, unserializable } or { ok: true, tab: TabView }`. |
 | POST | `/tabs/:id/fetch` | `url`, `method?`, `headers?`, `body?`, `cache?`, `credentials?`, `integrity?`, `keepalive?`, `mode?`, `redirect?`, `referrer?`, `referrerPolicy?`, `stream?`, `timeoutMs?` | Fetches a URL from the page, with its cookies, origin and CORS. Returns `{ ok: true, tab: TabView, response: { ok, status, statusText, url, redirected, type, headers, body } }, or NDJSON head, data and end lines with stream`. |
+| POST | `/tabs/:id/events` | `max?` | Drains the protocol events recorded for this tab. Returns `{ ok: true, events, dropped, gaps, remaining }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
@@ -513,7 +514,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_files` | 400 | not retryable |  | The upload has no files, too many, or a malformed one. |
 | `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
-| `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
+| `cdp_method_blocked` | 403 | not retryable | `method`, `reason`, `param` | The protocol command reaches beyond this tab's own page and frames. |
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |

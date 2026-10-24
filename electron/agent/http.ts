@@ -10,6 +10,7 @@ import type { Authority } from "./authority";
 import type { Dialogs } from "./dialogs";
 import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
+import type { EventRecording } from "./events";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
 import type { PageScripts } from "./page-scripts";
@@ -117,6 +118,8 @@ export interface RouteDeps {
   presence: AgentPresence;
   /** Section 8's Page scripts gate, shared by every call it gates. */
   pageScripts: PageScripts;
+  /** Section 8's recording control, which the events route drains. */
+  events: EventRecording;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

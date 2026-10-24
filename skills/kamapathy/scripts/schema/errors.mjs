@@ -86,7 +86,7 @@ export const ERRORS = {
     403,
     false,
     "The protocol command reaches beyond this tab's own page and frames.",
-    ["method", "reason"],
+    ["method", "reason", "param"],
   ),
   agent_scripts_off: code(
     403,

@@ -476,6 +476,29 @@ describe("event redaction", () => {
         { name: "Content-Type", value: "text/html" },
       ],
     });
+    // Audits carries a Set-Cookie line of its own, however deep.
+    const issue = event("Audits.issueAdded", {
+      issue: {
+        code: "CookieIssue",
+        details: {
+          cookieIssueDetails: {
+            rawCookieLine: "a=1; Path=/",
+            cookieWarningReasons: ["WarnSameSiteUnspecified"],
+          },
+        },
+      },
+    });
+    expect(redact(issue, { fromAgent: true })?.params).toEqual({
+      issue: {
+        code: "CookieIssue",
+        details: {
+          cookieIssueDetails: {
+            rawCookieLine: "(hidden)",
+            cookieWarningReasons: ["WarnSameSiteUnspecified"],
+          },
+        },
+      },
+    });
     // An event with nothing to hide is the event itself.
     const plain = event("Network.loadingFinished", {
       requestId: "1",

@@ -771,6 +771,10 @@ export function urlField(body: Record<string, unknown>): string {
     );
   return new URL(value).href;
 }
+// How many of a tab's recorded events one drain takes.
+export function eventFields(body: Record<string, unknown>): { max: number } {
+  return { max: integerField(body, "max", 10000, 1, 10000) };
+}
 export function expectationFields(body: Record<string, unknown>): {
   event: ExpectationEvent;
   timeoutMs: number;

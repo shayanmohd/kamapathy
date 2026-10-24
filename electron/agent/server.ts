@@ -20,6 +20,7 @@ import { activeSpace, createAuthority } from "./authority";
 import { createDialogs } from "./dialogs";
 import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
+import { createEventRecording } from "./events";
 import { createExpectations } from "./expectations";
 import {
   buildRoutes,
@@ -267,6 +268,13 @@ export async function startAutomation(
   const referenceSession = randomBytes(12).toString("hex");
   // The person's switch over every call that runs the agent's own code.
   const pageScripts = createPageScripts(controller);
+  // Recording follows the switch and control, and the events route drains it.
+  const events = createEventRecording({
+    controller,
+    authority,
+    sessions,
+    pageScripts,
+  });
   const presence = createPresence({ controller, authority });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
@@ -359,6 +367,7 @@ export async function startAutomation(
     downloads,
     presence,
     pageScripts,
+    events,
   });
   const deps: RouteDeps = {
     controller,
@@ -373,6 +382,7 @@ export async function startAutomation(
     downloads,
     presence,
     pageScripts,
+    events,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -620,6 +630,7 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        events.dispose();
         pageScripts.dispose();
         // A pending wait is answered before its tab session is released.
         expectations.endAll("access_off");

@@ -4034,11 +4034,22 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     });
     session.events.setRecording(true);
     expect(session.events.recording).toBe(true);
+    // Section 8's redactor is told whose session each event came from.
+    const sources: [string, boolean][] = [];
+    session.events.setRedactor((event, source) => {
+      sources.push([event.method, source.fromAgent]);
+      return event;
+    });
     cdp.event("Page.lifecycleEvent", lifecycle);
     cdp.event("Network.requestWillBeSent", request, "child-1");
     cdp.event("Runtime.consoleAPICalled", consoleCall);
     cdp.event("Runtime.consoleAPICalled", consoleCall, agent);
     cdp.event("Page.lifecycleEvent", lifecycle, "another-tab");
+    expect(sources).toEqual([
+      ["Page.lifecycleEvent", false],
+      ["Network.requestWillBeSent", false],
+      ["Runtime.consoleAPICalled", true],
+    ]);
     expect(session.events.drain(10)).toEqual({
       events: [
         { method: "Page.lifecycleEvent", params: lifecycle, at: Date.now() },

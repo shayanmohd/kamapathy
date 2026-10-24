@@ -237,10 +237,15 @@ export class TabSession {
   private pending = new Set<Pending>();
   private waiters = new Set<() => void>();
   private readonly buffer: EventBuffer;
-  readonly events: Pick<
-    EventBuffer,
-    "recording" | "setRecording" | "setRedactor" | "drain"
-  >;
+  readonly events: Pick<EventBuffer, "recording" | "setRecording" | "drain"> & {
+    /** Section 8's redactor, told whose session the event came from. */
+    setRedactor(
+      redact: (
+        event: CdpEvent,
+        source: { fromAgent: boolean },
+      ) => CdpEvent | null,
+    ): void;
+  };
   private shown?: DialogInfo;
   private scripts = new Map<string, InitScript>();
   private scriptCount = 0;
@@ -297,7 +302,22 @@ export class TabSession {
       this.ending.abort(new TabClosedError());
     });
     this.buffer = options.buffer;
-    this.events = this.buffer;
+    const buffer = this.buffer;
+    this.events = {
+      get recording() {
+        return buffer.recording;
+      },
+      setRecording: (on, reason) => buffer.setRecording(on, reason),
+      // Only this session knows which of its sessions are an agent's.
+      setRedactor: (redact) =>
+        buffer.setRedactor((event) =>
+          redact(event, {
+            fromAgent:
+              event.sessionId !== undefined && this.agents.has(event.sessionId),
+          }),
+        ),
+      drain: (max) => buffer.drain(max),
+    };
     // A lost debugger takes its script identifiers, agent sessions, target id
     // and dialog with it, and leaves a gap in the events recorded until a
     // setup completes again.

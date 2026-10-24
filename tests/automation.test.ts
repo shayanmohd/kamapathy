@@ -4512,6 +4512,77 @@ describe("local automation socket", () => {
     expect(JSON.stringify(lines)).not.toContain("old document");
   });
 
+  // Section 8's events route: the tab's recorded protocol events, drained
+  // outside every queue.
+  const drainEvents = (tabId: string, body: Record<string, unknown> = {}) => {
+    const done = request(`/tabs/${tabId}/events`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+
+  it("events answers outside the space's queue", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    for (const max of [0, 10001, 1.5]) {
+      const { status, error } = await failure(
+        await drainEvents(tab.id, { max }),
+      );
+      expect(status, String(max)).toBe(400);
+      expect(error, String(max)).toMatchObject({
+        code: "invalid_field",
+        field: "max",
+      });
+    }
+    page.debugger.event("Network.loadingFinished", {
+      requestId: "1",
+      encodedDataLength: 5,
+    });
+    page.debugger.event("Page.loadEventFired", { timestamp: 1 });
+    // A pending evaluate holds the space's lane, and the drain answers now.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    const drained = await drainEvents(tab.id, { max: 1 });
+    expect(drained.status).toBe(200);
+    expect(await drained.json()).toEqual({
+      ok: true,
+      events: [
+        {
+          time: expect.any(Number),
+          method: "Network.loadingFinished",
+          params: { requestId: "1", encodedDataLength: 5 },
+        },
+      ],
+      dropped: 0,
+      gaps: [],
+      remaining: 1,
+    });
+    running.release();
+    expect((await running.done).status).toBe(200);
+  });
+
+  it("events answers 403 while Page scripts are off", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.event("Page.loadEventFired", { timestamp: 1 });
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const off = await failure(await drainEvents(tab.id));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    // The switch-off emptied the log, so nothing waits for the switch.
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    expect(await (await drainEvents(tab.id)).json()).toEqual({
+      ok: true,
+      events: [],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -5930,6 +6001,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/wait-for-function": { expression: "true" },
       "POST /tabs/:id/evaluate": { expression: "true" },
       "POST /tabs/:id/fetch": { url: "/api/cart" },
+      "POST /tabs/:id/events": { max: 10 },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },
