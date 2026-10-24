@@ -80,7 +80,7 @@ node scripts/kamapathy.mjs space request --reason "Read the order in your shop t
 
 The request waits up to its timeout, 5000 to 600000 ms and 600000 by default. **Allow** grants the chosen space and answers with the space, all of its tabs and the active one, which a script reads with `space.userPage()`. **Don't allow** answers `403 request_declined`, and no answer `504 request_timeout`, which is not retryable because asking again interrupts the person. At most 3 requests wait at once, and for 60 seconds after a decline new requests answer `429 busy` with `retryAfterMs`. A request disappears when its client disconnects, and until the person allows one, no answer says which spaces they have.
 
-A granted space follows agent rules for as long as the grant lasts: Kamapathy records no history there, opens its popups in the background, keeps its pages painting, denies downloads and permission prompts, and disables its sign-ins switch. Every tab already in it is the person's and unmanaged, so the agent adopts a page before acting on it. The grant ends when the agent finishes, when the person chooses **Stop** or **Stop agent access**, when agent access is turned off and when Kamapathy quits, and it is never saved. Finishing never deletes a personal space.
+A granted space follows agent rules for as long as the grant lasts: Kamapathy records no history there, opens its popups in the background, keeps its pages painting, holds permission prompts for the person, keeps only downloads an agent armed, and disables its sign-ins switch. Every tab already in it is the person's and unmanaged, so the agent adopts a page before acting on it. The grant ends when the agent finishes, when the person chooses **Stop** or **Stop agent access**, when agent access is turned off and when Kamapathy quits, and it is never saved. Finishing never deletes a personal space.
 
 ## Interact with a page
 
@@ -231,11 +231,112 @@ Replace the example ID, ref, and path with the actual values. Upload accepts onl
 
 The standalone command accepts 1 to 8 regular files, at most 16 MiB in total. It is not available inside a batch. The client reads the selected files locally and sends their basenames, MIME types, and base64 bytes through the local agent socket. The API receives bytes in memory and does not read arbitrary paths from the browser machine. Keep private local paths and file contents out of page fields, prompts, and public logs.
 
-The server permits one file transfer at a time and checks ownership before receiving the body and again before applying it. Navigation during transfer invalidates the operation. Only `POST /tabs/:id/upload` accepts up to 24 MiB of JSON to accommodate base64 encoding; the 64 KiB bound remains in place for all other routes. Its body is `{ "ref": "@e8", "files": [{ "name": "report.pdf", "type": "application/pdf", "data": "<base64 bytes>" }] }`. Use the CLI to encode files rather than placing their content in agent prompts.
+The server permits one file transfer at a time and checks ownership before receiving the body and again before applying it. Navigation during transfer invalidates the operation. Only the three file routes accept up to 24 MiB of JSON to accommodate base64 encoding; the 64 KiB bound remains in place for all other routes. Its body is `{ "ref": "@e8", "files": [{ "name": "report.pdf", "type": "application/pdf", "data": "<base64 bytes>" }] }`. Use the CLI to encode files rather than placing their content in agent prompts.
 
 Selection sets the input's files and dispatches input and change events. A site can begin uploading immediately, so the user's authorization must cover transmission before running the command. The response `{ "ok": true, "selected": 1 }` confirms selection, not server acceptance or publication. Inspect the site's progress and final receipt before continuing. After a timeout or error, check whether the site already received the files before retrying or submitting again.
 
-This action does not open a native file chooser or expose native file handles. Sites that require those mechanisms or trusted chooser events may reject it. It does not add directory upload support.
+`set-input-files <tab-id> <target> [file...]` (`page.setInputFiles(target, files, { timeout })`, `POST /tabs/:id/set-input-files`) puts files on the input a target names, where `upload` needs a current file-input ref:
+
+```sh
+node scripts/kamapathy.mjs set-input-files <tab-id> 'button:has-text("Attach")' ./report.pdf
+node scripts/kamapathy.mjs set-input-files <tab-id> @e8
+```
+
+The target is any ref or selector of the grammar above, including one that matches a hidden element, and Kamapathy retargets from it to the input a person would use: the input itself, the control a `label` names, the control of the nearest enclosing label, or the single file input inside the match, through open shadow roots. A match holding no file input answers `422 invalid_upload_target`, and one holding several answers `422 multiple_file_inputs` with their `count`. The input must be attached, enabled, not a directory picker and outside `[inert]`, and its single or multiple setting and its accepted types are checked as `upload` checks them. `--timeout <ms>` bounds the wait for the target, 3000 ms by default and 0 to 60000 ms, where 0 looks once.
+
+It takes 0 to 8 files, 16 MiB in total, read and sent as bytes the way `upload` reads them, and it shares the one file transfer, so a second file request answers `429 upload_busy`. No file at all, `[]` in a script, clears the input's selection. The answer is `{ "ok": true, "selected": 1 }` with the action's receipt fields, which the CLI prints under `ok: selected 1`. It is not a batch step, and a file-input ref is never rebound.
+
+Agent-controlled tabs always intercept the file chooser, so no native panel can open on the person's screen. An action that opens a chooser nothing armed fails with `422 file_chooser_opened` after the chooser closes and the input gets the `cancel` event a person's own cancel sends: `This action opened a file chooser, which Kamapathy closed. Use setInputFiles for a file input on the page, or call waitForEvent("filechooser") before the action when the page creates the input.` For a page that creates its input in a click handler, arm `waitForEvent("filechooser")` first; [Popups, dialogs and downloads](#popups-dialogs-and-downloads) describes the file chooser that answers the wait. Native file handles and directory pickers stay unsupported, and no route reads or returns a path on the browser machine.
+
+## Popups, dialogs and downloads
+
+Every action reports what it caused. `click`, `fill`, `press`, `scroll`, `drag`, `upload` and `set-input-files`, as routes and as batch steps, add these fields to their answer, each only when it applies, so a script no longer polls `tabs` to find out:
+
+| Field | What it says |
+| --- | --- |
+| `popups: [{ id, label, url }]` | The tabs this tab opened during the action; a `url` may still be `about:blank` |
+| `dialog: { type, message, defaultValue?, answer, promptText? }` | The first JavaScript dialog answered in this tab |
+| `moreDialogs: <n>` | How many further dialogs were answered |
+| `download: { id, suggestedFilename, url }` | A download the action started and Kamapathy kept, because a wait was armed |
+| `download: { blocked: true, suggestedFilename, url }` | A download the action started and Kamapathy cancelled, because nothing was armed |
+| `deniedRequests: [{ origin, permission }]` | Requests Kamapathy refused in this tab since its last receipt, as [Requests for the person](#requests-for-the-person) describes |
+
+A receipt covers the route from its entry until 50 ms after its last page step, so a popup a timer opens just after the click still belongs to it; popups from another tab never do, and raw pointer and key steps add no wait of their own. A single command prints the receipt under the action's own line, as `opened p3 <tab-id> <url>`, `confirm "Delete this?" accepted`, `and 2 more dialogs`, `download <id> report.pdf` or `download blocked report.pdf`, and `refused location for https://shop.example`.
+
+### Waiting for an event
+
+`page.waitForEvent(event, { timeout })` takes `"popup"`, `"download"`, `"filechooser"` or `"dialog"` and resolves with a `Page`, a `Download`, a `FileChooser` or the dialog record. Arm it before the action that causes the event:
+
+```js
+const next = page.waitForEvent("popup");
+await page.click("#share");
+const popup = await next;
+```
+
+The client sends the arm the moment `waitForEvent` is called and holds every later call on that page, a second arm included, until Kamapathy has acknowledged it, so the click cannot outrun the arm; an arm that fails fails the call waiting behind it. `timeout` is 1 to 60000 ms, 10000 by default, counted from arming, and a wait that runs out answers `504 expectation_timeout` with `awaited: "event"`, the `event` and its `timeoutMs`. `timeout: 0` is refused by the client with `invalid_option`, since no event can have arrived at arming. One wait runs per tab and event, and a second answers `409 expectation_pending`. A takeover, a closed tab, a space that ends, `DELETE /expectations/:id` and agent access going off all end a wait.
+
+From a shell the arm and the wait are two commands, because the action runs between them: `expect <tab-id> <event>` prints `expectation <id> <event> <tab-id>` and arms for 60000 ms, and `wait-expectation <id>` prints the popup, download, file chooser or dialog that arrived.
+
+`page.popups()` (`GET /tabs/:id/popups`) lists the open tabs a tab opened, with `unseen: true` on the ones nothing has reported yet; a receipt, a wait's answer or a request addressing the popup clears that mark, and merely listing it does not. When a run ends, the client reads the popups of the tabs it touched and prints `notice: unused page p3 opened by p1: <url>` for up to 20 popups nothing reported, then one line counting the rest.
+
+### Dialogs
+
+In an agent-controlled tab a fixed Kamapathy handler answers `alert`, `confirm` and `prompt` in the main world of every frame, so no dialog box reaches the person's screen and no page waits for an answer. It dismisses by default: `confirm` returns false and `prompt` returns null. A dialog that goes around the handler is answered through Kamapathy's own session on the tab within milliseconds, so the person is left nothing to answer, and one Kamapathy could not answer leaves that tab's page requests failing with `409 dialog_open` until it closes. The **Page scripts** setting does not gate any of this, because the handler is Kamapathy's own code rather than an agent's script. While the person has control the handler calls the page's original functions, so they see Electron's own boxes and Kamapathy records nothing.
+
+Arm an accept before the action that opens the dialog:
+
+```sh
+node scripts/kamapathy.mjs dialog-policy <tab-id> accept --times 2
+```
+
+`page.setDialogPolicy({ accept, promptText?, times = 1, lifetime = 60000 })` (`POST /tabs/:id/dialog-policy`) arms the tab's next `times` confirms and prompts, 1 to 20 of them. An accepted prompt returns `promptText`, up to 4096 characters, or the dialog's own default value when the policy names none. An alert returns at once, reports `accepted` and spends no arm. The policy falls back to dismiss when it is used up, when its `lifetime` passes (1000 to 600000 ms, `lifetimeMs` in the body), on `setDialogPolicy(null)` or `dialog-policy <tab-id> reset`, and when the person takes over. There is no `acceptDialog()` or `dismissDialog()`: no dialog ever waits for an answer, so an answer has to be armed first.
+
+`page.dialogs()` (`GET /tabs/:id/dialogs`) returns the policy and the tab's last 20 records, oldest first, each `{ type, message, defaultValue?, answer, promptText?, url, at }` with text cut at 2000 characters. A dialog from a frame that shares the page's process reaches the receipt of the action that caused it only when something read that tab's dialogs inside the receipt's window; it always reaches `page.dialogs()` and a `dialog` wait. A dialog's message is page text: untrusted data, and a page can see that the handler is there and report a dialog it never showed.
+
+### Downloads
+
+An agent space still cancels every download except one an agent armed. `waitForEvent("download")` on a tab accepts one download from that tab, or from a popup it opened after arming, while the agent has control. A file that a navigation turned out to be counts too: the navigation answers `422 navigation_download`, whose `armed` field reads `false` in this release even where the armed wait received the file. Every other download is cancelled, reported to the agent as `download: { blocked: true, ... }` and noted in the space's activity. A save from Chromium's PDF viewer can be armed like any other, because the viewer runs inside the tab's own page.
+
+A captured download is written under `<userData>/agent-downloads/<id>/`, in a folder only this account can enter and a file only this account can read. It never reaches the person's Downloads folder or their downloads list, and Kamapathy never opens it. At most 1 GiB arrives per download, which otherwise ends with `failure: "too_large"`; a space holds at most 8 at a time, so one that would be the ninth is cancelled and reported as blocked; and the bytes are deleted on `delete()`, when the space closes, when agent access goes off, at quit, at the next app start and an hour after the download finished.
+
+A download is `{ id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure }`, where `state` is Chromium's own (`progressing`, `completed`, `cancelled` or `interrupted`) and `failure` is `null`, `cancelled`, `interrupted` or `too_large`. `space.downloads()` lists what a space holds, newest first, and a run deletes the downloads it received when it ends.
+
+The client's `Download` carries `url()`, `suggestedFilename()` and `page()`, and:
+
+- `saveAs(path, { timeout })` waits for the download, then writes its bytes to `path` on the computer the script runs on: an exclusive create at mode 0600, missing folders made, and the client's own `file_exists` instead of overwriting anything. It returns the absolute path.
+- `path()` keeps a private copy on the client side instead, removed by `delete()` and when the process ends.
+- `failure()`, `cancel()` and `delete()`.
+
+Both of those wait with `POST /downloads/:id/wait` in 30-second polls until the download stops running or `timeout` passes, which is what is left of the run by default, and `GET /downloads/:id/content` then streams the bytes with their `Content-Length`. Bytes over the socket are the only way a download leaves Kamapathy: no route returns a path on the browser machine. Four streams and sixteen waits run at once across the server, and a stream that stops early, because the person took the space or the download was deleted, removes the partial file and raises the client's `download_interrupted`.
+
+From a shell, `download <tab-id> <target> <path>` arms the wait, clicks the target and saves the file in one command, printing `saved <path> (<bytes> bytes)`. `downloads <space-id>`, `save-download <id> <path>`, `cancel-download <id>` and `delete-download <id>` work on the downloads a space already holds.
+
+## Requests for the person
+
+Some things only the person can answer. Kamapathy asks them in one bar above the page, in every space, and no agent answers for them.
+
+| What a site asks for in an agent-controlled tab | What happens |
+| --- | --- |
+| Location, notifications, camera, microphone, camera and microphone together, MIDI | Held for the person when it arrives inside the tab's request window, and otherwise refused this once and reported |
+| A USB or HID device | Held for the person |
+| A server or proxy sign-in | Held, unless the space's stored credentials answer it; a cross-origin subresource challenge is cancelled |
+| A client certificate | Held when a certificate matches, and nothing is sent otherwise |
+| A serial port or a Bluetooth device | Refused in this build |
+| Clipboard, fullscreen, pointer or keyboard lock, screen capture, speakers, everything else | Refused |
+
+A tab's request window opens when a route that returns a receipt enters, which is the input and file routes above and their batch steps, and closes 5000 ms after that route ends, so a request a page makes because of an agent's action reaches the person while one that follows no action does not interrupt them. A navigation opens no window in this release, so a site that asks on load, before any action, is refused and reported in the next receipt; click the link or act on the page when the person should be asked.
+
+Chromium 152 asks for MIDI with system-exclusive access even where a page wants plain MIDI, which is not one of the five permissions a tab can hold, so a MIDI request in an agent tab is refused and reported, while a personal space asks the person for it.
+
+Serial ports and Bluetooth devices are refused in every space in this build, and a Bluetooth pairing always: Electron 44 stops answering while either request waits, so Kamapathy refuses it at once instead. They can be offered only after a signed build has been tested again.
+
+A held request gives the space to the person. Its other requests then answer `409 human_control` with `reason` `permission`, `device`, `http_auth` or `client_certificate` and a `prompt` naming what was asked (`location`, `notifications`, `camera`, `microphone`, `camera_microphone`, `midi`, `usb`, `hid`, `http_sign_in`, `proxy_sign_in` or `client_certificate`), Kamapathy shows **Needs you**, and opening the space shows the tab whose request has waited longest. Tell the person what the site asked for, then wait with `wait-for-control <space-id>` (`space.waitForControl()`). Answering the space's last waiting request releases the hold, so control returns to the agent unless the person took the space over meanwhile, when only **Let agent continue** or `resume` gives it back. A request whose page navigates or closes is denied and releases its hold the same way. A space holds at most 8 requests at once, and a waiting request has no deadline of its own.
+
+A refused request is not an error of the action that caused it. Kamapathy adds it to the tab's log once per origin and permission, the tab's next receipt reports it in `deniedRequests`, and the space's activity says `A site's request for location was refused.` The page's own code sees a plain refusal. Nothing an agent sends grants a permission, picks a device, signs in or chooses a certificate.
+
+The bar asks one request at a time, the oldest first, and says how many wait behind it. In a personal space **Allow** and **Block** are saved for that space, origin and permission and answer the same question again after a restart, up to 1000 of them; Settings > Site permissions lists them with Remove and Remove all, and removing one means the site is asked again. An agent space's answers last while the space is open, a device grant until Kamapathy quits, and a sign-in or a certificate is never saved. Waiting requests are never written to disk.
+
+`space.setHTTPCredentials({ origin, username, password })` (`POST /spaces/:id/http-credentials`, `http-credentials <space-id> <origin> --stdin`) lets an agent answer a server sign-in itself, for exactly one http or https origin of its own space. The username is 1 to 256 characters and the password at most 1024, a space stores at most 8 origins, and an origin carrying a path or another scheme answers `400 invalid_field`. The credentials answer the first challenge from that origin in the space's agent-controlled pages; a repeat, any proxy challenge and every certificate request go to the person. They are held in memory only, never returned, printed or logged, and cleared by `setHTTPCredentials(null)`, `http-credentials <space-id> clear`, the space closing and agent access going off. The CLI reads them as JSON on standard input and prints only `ok: <origin>`.
 
 ## Read a PDF
 
@@ -356,7 +457,7 @@ Node.js 22.13.0 alone reads three things differently, in `run` as in its own `--
 | `approval` | Kamapathy is asking the person to approve `<prompt>`. Wait for control. |
 | `permission`, `device`, `http_auth`, `client_certificate` | The site asked for `<prompt>`, and only the person can answer. Wait for control. |
 
-This version of Kamapathy records `manual`, `handoff` and `failed`. The other reasons are part of the API so that clients handle them: the last two rows are holds, which only the person's answer ends.
+This version of Kamapathy records `manual`, `handoff`, `failed` and the four reasons of the last row, the holds [Requests for the person](#requests-for-the-person) describes; only the person's answer ends a hold. `approval` is part of the API so that clients handle it.
 
 Control returns to the agent in two ways. The person can choose **Let agent continue** in the bar under the space's page, or in the Spaces menu, or the agent can take control back with `resume`. `resume` changes the owner to agent and records an activity entry saying the agent took control back. It passes the person's control after `manual`, `handoff` and `failed`, and answers `human_control` for a hold or an approval. It works on any space the running API server created or was granted, including one the person took over. A resume sent while the agent already has control changes nothing, and if the person takes over before that request runs, it returns `human_control` instead of taking the space back. It cannot reach personal spaces the person has not granted, agent spaces never granted to the running server, spaces from an earlier server session, or a space whose access ended.
 
@@ -461,6 +562,8 @@ A capture reaching past the current visual viewport, which is any full page and 
 | POST | `/tabs/:id/drag` | `source`, `target`, `label?` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/set-input-files` | `ref?`, `selector?`, `files`, `timeoutMs?` | Puts files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/file-choosers/:id/files` | `files` | Files bytes on the input of a file chooser an armed wait received, even one the page has removed. An empty list cancels the chooser. Returns `{ ok: true, selected }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |
 | POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
 | POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
@@ -523,6 +626,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
 | `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `download_not_found` | 404 | not retryable |  | No held download has this ID: it was deleted, its space closed, or an hour passed since it finished. |
+| `file_chooser_not_found` | 404 | not retryable |  | No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -569,6 +673,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
+| `multiple_file_inputs` | 422 | not retryable | `count` | The target holds several file inputs, so none of them is the one to file. |
+| `file_chooser_opened` | 422 | not retryable |  | An action opened a file chooser no wait was armed for, so Kamapathy closed it. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
@@ -613,6 +719,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_tool_args` | client | not retryable | `packId`, `tool`, `problems`, `expected` | The arguments do not match the tool's declaration. |
 | `site_tool_failed` | client | not retryable | `packId`, `tool`, `at`, `cause` | The Node tool threw an error of its own. |
 | `helpers_failed` | client | not retryable | `path`, `export`, `cause` | helpers.mjs could not be loaded or its exports installed. |
+| `file_exists` | client | not retryable | `path` | The file a download would be written to exists, so nothing was written. |
+| `download_interrupted` | client | not retryable | `downloadId`, `path` | A download's bytes stopped arriving, so the incomplete file was removed. |
 <!-- /generated:errors -->
 
 ## Versions and API levels
@@ -626,18 +734,18 @@ The client compares levels after its health check. A call, option or command the
 - The server listens only on a Unix socket in a private directory, or a Windows named pipe, never on a network port. Browsers cannot open either, and it also rejects Origin and Sec-Fetch-Site headers. There is no CORS access.
 - There is no token. Any program running under your account can use the API while agent access is on; other accounts cannot open the socket. This is the same boundary as other local developer tools, and it is not a defense against an already compromised account. Turn agent access off in Settings to refuse all agents.
 - Spaces created through the current API server are accessible until the agent finishes them or the person stops it. An agent space created in the interface starts under human control; choose **Let agent continue** to grant the running API access to it. A personal space is reachable only once the person grants it, with **Let an agent use this space** or by allowing a request, and then follows agent rules until the grant ends. Restarting the API does not reclaim older spaces unless you explicitly grant access again.
-- Agent spaces share the person's sign-ins by default, so a site they are signed in to works for the agent too. A space created with `isolated: true`, or every agent space while **Isolate agent spaces** is on in Settings, gets a temporary session of its own instead; sign in inside that space when a site needs it. Agent spaces never see tabs in other spaces and deny downloads and permission prompts. They are excluded from the persisted session, history, and activity state, unless the person keeps one as a personal space after its agent finished or was stopped.
+- Agent spaces share the person's sign-ins by default, so a site they are signed in to works for the agent too. A space created with `isolated: true`, or every agent space while **Isolate agent spaces** is on in Settings, gets a temporary session of its own instead; sign in inside that space when a site needs it. Agent spaces never see tabs in other spaces, hold permission prompts for you, keep only downloads an agent armed. They are excluded from the persisted session, history, and activity state, unless the person keeps one as a personal space after its agent finished or was stopped.
 - The person's extensions run in agent spaces that share their sign-ins, so a content script can change a page an agent works on and the extension sees that page's traffic. An agent space created with `isolated: true`, or any agent space while **Isolate agent spaces** is on, has a temporary session and never runs them. An extension's own frames are blocked entries labeled `Extension: <name>`, and its popups and windows are not tabs, so no route reaches them.
 - Kamapathy keeps one internal debugger session on each page an agent manages while the agent controls its space, and releases it when you take over or stop the agent, when the agent releases the page or finishes, when the space closes and when agent access is turned off. Other tabs, including the person's tabs in a granted space until the agent adopts them, never get one. Through it Kamapathy follows frames, loads, network activity and dialogs, sends fixed trusted input (Chromium's Input commands), and runs its fixed page functions in an isolated world it creates in each web frame. There is no arbitrary JavaScript, CDP, Node.js, shell, filesystem, or browser-wide debugging endpoint. Developer tools can stay open on an agent tab while the agent works; pausing the page there stalls agent requests until they time out.
 - Pages see a Chromium 152 browser without Electron or Kamapathy tokens. Files on this computer open only in personal spaces and are never listed to agents; a tab showing one answers `404 tab_not_found`.
-- Snapshots are bounded summaries built from the DOM; role selectors and locators read Chromium's accessibility tree through Kamapathy's internal session on the agent tab. They read through open shadow roots and same-origin frames, list a frame from another origin without reading it, and do not enter closed shadow roots, PDF documents, or canvas interfaces. PDFs show in Chromium's viewer, whose frames agents never enter; pdf/text reads them. If a JavaScript dialog is open on an agent tab, requests for that tab fail at once with `409 dialog_open`, which names it; hand off to the person to close it. A page whose process stopped returns `409 page_crashed` until it loads again. Site compatibility varies.
+- Snapshots are bounded summaries built from the DOM; role selectors and locators read Chromium's accessibility tree through Kamapathy's internal session on the agent tab. They read through open shadow roots and same-origin frames, list a frame from another origin without reading it, and do not enter closed shadow roots, PDF documents, or canvas interfaces. PDFs show in Chromium's viewer, whose frames agents never enter; pdf/text reads them. In agent tabs, a fixed handler answers JavaScript alert, confirm, and prompt dialogs without showing a box. It dismisses them unless an agent armed `setDialogPolicy`, and the action's result reports each answer. A dialog Kamapathy could not answer leaves that tab's requests failing at once with `409 dialog_open`, which names it; hand off to the person to close it. A page whose process stopped returns `409 page_crashed` until it loads again. Site compatibility varies.
 - Scripts run in the agent's own Node.js, never inside Kamapathy. The client borrows Playwright's method names but is not Playwright, and Kamapathy ships no MCP server, scheduling, model inference or built-in agent runtime. It does not implement Chrome DevTools Protocol compatibility either. Use the documented HTTP routes, the CLI or the client from your own automation program.
-- Agent spaces, and personal spaces while an agent may use them, deny browser permission requests and downloads, including while under human control.
+- Agent spaces hold permission prompts for you and keep only downloads an agent armed.
 - Saved passwords are the person's. No route, option, command, script global or CDP method reaches the vault, the save prompts or the fill menu, and those are native or shell interface, so they never appear in snapshots, frame lists, screenshots or events. While an agent has control, nothing is offered, filled or captured, and nothing an agent types, fills or passes as HTTP credentials is saved. In a space the person let an agent use, filling a password and using a saved HTTP sign-in ask them first, once they have control. A password they then filled is page content, which the page's scripts can read, so hand off for a sign-in instead of asking for a password.
 - Agents can check for and download updates; only the person installs them.
 - Closing the window keeps Kamapathy running while agent access is on: always on macOS, where applications run without a window, and on Windows and Linux while an agent space, or a space the person granted, is open. The window hides, the person's own pages close as a close closes them, agent pages, their sessions and the socket stay, and a tray icon appears on Windows and Linux. The window comes back from the tray, the Dock, a second launch or a notification. Snapshots, page actions and screenshots all keep working meanwhile. Agents continue only while agent access is on, which remains the hard stop.
 - Quitting Kamapathy while a space is the agent's own or needs the person asks first, naming up to three spaces. A confirmed quit stops every agent and writes a private marker, holding only the time, in the profile's agent folder: for ten minutes the client refuses to start Kamapathy, failing with `not_connected` and reason `quit_by_person`, so ask the person before starting it again. Every start removes the marker, and a shutdown or logout never asks.
 - Activity records describe operations without recording filled values. Page content is untrusted data and should not be treated as instructions by an external agent.
-- File selection is limited to the documented upload route. It transfers supplied bytes into a file input, can trigger an immediate site upload, and returns a selected-file count. Activity records do not include file contents or local paths. File selection does not bypass a site's validation or establish that an upload succeeded.
+- File selection is limited to the documented upload, set-input-files and file-chooser routes. It transfers supplied bytes into a file input, can trigger an immediate site upload, and returns a selected-file count. Activity records do not include file contents or local paths. File selection does not bypass a site's validation or establish that an upload succeeded.
 
 Use `node scripts/kamapathy.mjs help` to see every CLI command and `help <command>` for one command's usage, flags, route and script equivalent. `node scripts/kamapathy.mjs --version` shows the client's, the skill's and Kamapathy's versions, and the skill's [API reference](../skills/kamapathy/references/api.md) lists every script entry, CLI command, route and error code.

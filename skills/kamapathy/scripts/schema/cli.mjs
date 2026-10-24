@@ -24,6 +24,15 @@ const TARGET = {
   description:
     "A ref such as @e3 from a current snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=.",
 };
+const FILE = {
+  name: "file",
+  description:
+    "A local file to put on the input, up to 8 of them and 16 MiB together.",
+};
+const DOWNLOAD_ID = {
+  name: "id",
+  description: "A download ID from downloads or an armed download wait.",
+};
 // The action commands take a label anywhere in their arguments.
 const LABEL = {
   name: "--label",
@@ -554,6 +563,245 @@ export const COMMANDS = [
       script: "page.pdfText",
       examples: ["pdf-text 8c1f2e04:p2 --from 3"],
       since: 3,
+    },
+  ),
+  command(
+    "expect",
+    "Events and dialogs",
+    "expect <tab-id> <event> [--timeout <ms>]",
+    "Arm a wait for the tab's next popup, download, file chooser or dialog, before the action that causes it",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "event",
+          description: "popup, download, filechooser or dialog.",
+        },
+      ],
+      flags: [
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description: "How long the arm lasts, 1 to 60000, 60000 by default.",
+          since: 2,
+        },
+      ],
+      route: "POST /tabs/:id/expectations",
+      script: "page.waitForEvent",
+      examples: ["expect 8c1f2e04:p2 popup"],
+      since: 2,
+    },
+  ),
+  command(
+    "wait-expectation",
+    "Events and dialogs",
+    "wait-expectation <id>",
+    "Wait for an armed event and print the popup, download, file chooser or dialog that arrived",
+    {
+      arguments: [
+        { name: "id", description: "An expectation ID from expect." },
+      ],
+      route: "POST /expectations/:id/wait",
+      examples: ["wait-expectation 4f2a9c71b3d05e68"],
+      since: 2,
+    },
+  ),
+  command(
+    "dialog-policy",
+    "Events and dialogs",
+    "dialog-policy <tab-id> accept|dismiss|reset [--times <n>] [--lifetime <ms>] [--prompt-stdin]",
+    "Arm how the tab answers its next confirms and prompts, or clear the policy with reset",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "answer",
+          description:
+            "accept answers yes, dismiss answers no, reset clears the policy.",
+        },
+      ],
+      flags: [
+        {
+          name: "--times",
+          value: "<n>",
+          description:
+            "How many confirms or prompts to answer, 1 to 20, 1 by default.",
+          since: 2,
+        },
+        {
+          name: "--lifetime",
+          value: "<ms>",
+          description:
+            "How long the policy lasts, 1000 to 600000, 60000 by default.",
+          since: 2,
+        },
+        {
+          name: "--prompt-stdin",
+          description:
+            "Read what an accepted prompt returns from standard input.",
+          since: 2,
+        },
+      ],
+      stdin: "What an accepted prompt returns, with --prompt-stdin.",
+      route: "POST /tabs/:id/dialog-policy",
+      script: "page.setDialogPolicy",
+      examples: ["dialog-policy 8c1f2e04:p2 accept --times 2"],
+      since: 2,
+    },
+  ),
+  command(
+    "dialogs",
+    "Events and dialogs",
+    "dialogs <tab-id>",
+    "Print the tab's dialog policy and the dialogs Kamapathy answered in it",
+    {
+      arguments: [TAB_ID],
+      route: "GET /tabs/:id/dialogs",
+      script: "page.dialogs",
+      since: 2,
+    },
+  ),
+  command(
+    "set-input-files",
+    "Page actions",
+    "set-input-files <tab-id> <target> [file...]",
+    "Put files on the file input a ref or selector names, hidden ones included; no file clears the selection",
+    {
+      arguments: [TAB_ID, TARGET, FILE],
+      route: "POST /tabs/:id/set-input-files",
+      script: "page.setInputFiles",
+      examples: ["set-input-files 8c1f2e04:p2 #resume ./resume.pdf"],
+      since: 2,
+    },
+  ),
+  command(
+    "set-files",
+    "Page actions",
+    "set-files <chooser-id> [file...]",
+    "Put files on the input of a file chooser an armed wait received; no file cancels the chooser",
+    {
+      arguments: [
+        {
+          name: "chooser-id",
+          description: "A file chooser ID from wait-expectation.",
+        },
+        FILE,
+      ],
+      route: "POST /file-choosers/:id/files",
+      script: "fileChooser.setFiles",
+      since: 2,
+    },
+  ),
+  command(
+    "download",
+    "Downloads",
+    "download <tab-id> <target> <path> [--timeout <ms>]",
+    "Arm a download wait, click the target, and save the file that arrives to a new path",
+    {
+      arguments: [
+        TAB_ID,
+        TARGET,
+        {
+          name: "path",
+          description: "A new file to write; it is never overwritten.",
+        },
+      ],
+      flags: [
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long to wait for the download, 1 to 60000, 60000 by default.",
+          since: 2,
+        },
+      ],
+      route: "GET /downloads/:id/content",
+      script: "download.saveAs",
+      examples: ["download 8c1f2e04:p2 text=Export ./export.csv"],
+      since: 2,
+    },
+  ),
+  command(
+    "downloads",
+    "Downloads",
+    "downloads <space-id>",
+    "List the downloads a space holds, newest first",
+    {
+      arguments: [SPACE_ID],
+      route: "GET /spaces/:id/downloads",
+      script: "space.downloads",
+      since: 2,
+    },
+  ),
+  command(
+    "save-download",
+    "Downloads",
+    "save-download <id> <path>",
+    "Wait for a held download to finish and write its bytes to a new path",
+    {
+      arguments: [
+        DOWNLOAD_ID,
+        {
+          name: "path",
+          description: "A new file to write; it is never overwritten.",
+        },
+      ],
+      route: "GET /downloads/:id/content",
+      script: "download.saveAs",
+      since: 2,
+    },
+  ),
+  command(
+    "cancel-download",
+    "Downloads",
+    "cancel-download <id>",
+    "Stop a download that is still running",
+    {
+      arguments: [DOWNLOAD_ID],
+      route: "POST /downloads/:id/cancel",
+      script: "download.cancel",
+      since: 2,
+    },
+  ),
+  command(
+    "delete-download",
+    "Downloads",
+    "delete-download <id>",
+    "Delete a held download's bytes from the browser's profile",
+    {
+      arguments: [DOWNLOAD_ID],
+      route: "DELETE /downloads/:id",
+      script: "download.delete",
+      since: 2,
+    },
+  ),
+  command(
+    "http-credentials",
+    "Spaces",
+    "http-credentials <space-id> <origin> --stdin | http-credentials <space-id> clear",
+    "Store a name and password for one origin in memory, to answer its first server sign-in in this space, or forget every origin",
+    {
+      arguments: [
+        SPACE_ID,
+        {
+          name: "origin",
+          description:
+            "An http or https origin such as https://example.com, with no path, or clear to forget them all.",
+        },
+      ],
+      flags: [
+        {
+          name: "--stdin",
+          description:
+            "Read JSON with username and password from standard input.",
+          since: 2,
+        },
+      ],
+      stdin: "JSON with a username and a password, with --stdin.",
+      route: "POST /spaces/:id/http-credentials",
+      script: "space.setHTTPCredentials",
+      examples: ["http-credentials 8c1f2e04 https://intranet.example --stdin"],
+      since: 2,
     },
   ),
   command(

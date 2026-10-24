@@ -30,11 +30,12 @@ describe("what the docs say about extensions", () => {
     expect(readme).toContain(
       'CDP commands aimed at an extension\'s frame or content-script world return `403 cdp_method_blocked` with `reason: "scope"`.',
     );
-    // They are no longer missing.
+    // Neither they nor the password manager are missing any more.
     expect(readme).toContain(
-      "A password manager, sync, an ad blocker and DRM playback are not part of it yet.",
+      "Sync, an ad blocker and DRM playback are not part of it yet.",
     );
     expect(readme).not.toContain("Browser extensions, a password manager");
+    expect(readme).not.toContain("A password manager, sync");
   });
 
   it("the security model has an Extensions section and keeps section 18's words", () => {

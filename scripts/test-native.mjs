@@ -15,6 +15,7 @@ import {
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { framePages } from "../tests/fixtures/frame-pages.mjs";
+import { promptPages, ATTACHMENT } from "../tests/fixtures/prompt-pages.mjs";
 
 const page = (body, script = "") =>
   `<!doctype html><html><body style="margin:20px">${body}<script>${script}</script></body></html>`;
@@ -58,6 +59,7 @@ const pages = {
     `new Image().src='/identity/pixel.png';new Worker('/identity/worker.js');navigator.serviceWorker.register('/identity/sw.js').catch(()=>{});(async()=>{await fetch('/identity/from-page');const hints=await navigator.userAgentData.getHighEntropyValues(['fullVersionList']);await fetch('/report',{method:'POST',body:JSON.stringify({userAgent:navigator.userAgent,brands:navigator.userAgentData.brands,fullVersionList:hints.fullVersionList,pdfViewerEnabled:navigator.pdfViewerEnabled})});document.getElementById('identity').textContent='Identity reported';})();`,
   ),
   ...framePages,
+  "/prompts/download": promptPages["/prompts/download"],
 };
 // Each identity request's own User-Agent and Sec-CH-UA, by path.
 const IDENTITY_PATHS = [
@@ -90,6 +92,15 @@ silence.write("data", 36, "ascii");
 silence.writeUInt32LE(8000, 40);
 const site = createServer(async (request, response) => {
   const path = new URL(request.url, "http://x").pathname;
+  // The small attachment the download check compares bytes with.
+  if (path === "/prompts/file.txt") {
+    response.writeHead(200, {
+      "Content-Type": ATTACHMENT.type,
+      "Content-Disposition": `attachment; filename="${ATTACHMENT.name}"`,
+      "Cache-Control": "no-store",
+    });
+    return response.end(ATTACHMENT.body);
+  }
   if (path === "/silence.wav") {
     response.writeHead(200, { "Content-Type": "audio/wav" });
     return response.end(silence);
@@ -448,6 +459,39 @@ try {
   assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
   assert.ok((await controls(popup.id)).includes("popup clicked"));
   passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
+
+  // Section 7: a download an agent armed in a tab nobody watches is kept,
+  // and its bytes come back as the site served them.
+  const attachment = await open("/prompts/download");
+  await poll(async () => (await controls(attachment)).includes("Download the notes"), {
+    timeoutMs: 10000,
+    label: "the download fixture",
+  });
+  const armedDownload = (
+    await json(`/tabs/${attachment}/expectations`, "POST", { event: "download" })
+  ).expectation;
+  const started = await api(`/tabs/${attachment}/click`, "POST", {
+    selector: "#attachment-link",
+  });
+  assert.equal(started.status, 200, JSON.stringify(await started.response.json()));
+  const reportedDownload = (
+    await json(`/expectations/${armedDownload.id}/wait`, "POST", {})
+  ).download;
+  assert.equal(reportedDownload.suggestedFilename, ATTACHMENT.name);
+  const finishedDownload = (
+    await json(`/downloads/${reportedDownload.id}/wait`, "POST", {})
+  ).download;
+  assert.deepEqual(
+    [finishedDownload.state, finishedDownload.failure, finishedDownload.receivedBytes],
+    ["completed", null, Buffer.byteLength(ATTACHMENT.body)],
+  );
+  const downloadContent = await api(`/downloads/${reportedDownload.id}/content`);
+  assert.equal(downloadContent.status, 200);
+  assert.equal(
+    Buffer.from(await downloadContent.response.arrayBuffer()).toString("utf8"),
+    ATTACHMENT.body,
+  );
+  passed("an armed download in an unwatched agent tab is captured and streams its bytes");
 
   // Section 16: what every request tells a site about this browser.
   await open("/identity");

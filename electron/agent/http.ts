@@ -10,10 +10,12 @@ import type { Authority } from "./authority";
 import type { Dialogs } from "./dialogs";
 import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
+import type { FileChoosers } from "./file-choosers";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
+import type { RefBook } from "./refs";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
 import type { TabLog } from "./tab-log";
@@ -113,7 +115,11 @@ export interface RouteDeps {
   expectations: Expectations;
   dialogs: Dialogs;
   downloads: Downloads;
+  choosers: FileChoosers;
   presence: AgentPresence;
+  // The ref numbers a route may hand out, for the file routes, which name
+  // the input they picked between two page steps.
+  refs: RefBook;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

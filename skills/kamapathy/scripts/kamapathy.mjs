@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatResult, line, printable } from "./lib/format.mjs";
 import {
+  readFiles,
   readInput,
   readJson,
   readUploadFiles,
@@ -21,7 +22,7 @@ import {
   Session,
   takeNotices,
 } from "./lib/request.mjs";
-import { connect } from "./api.mjs";
+import { connect, Download, Page } from "./api.mjs";
 import { formatApiError } from "./diagnostics.mjs";
 import {
   formatCommand,
@@ -49,6 +50,7 @@ import {
   findCommand,
   matchRoute,
   outdated,
+  requestBudget,
 } from "./schema/index.mjs";
 
 export { formatResult, formatSnapshot } from "./lib/format.mjs";
@@ -79,6 +81,10 @@ function integer(value, label, minimum = 0) {
   return parsed;
 }
 const UPLOAD_LIMIT = 24 * 1024 * 1024;
+const EVENTS = matchRoute("POST", "/tabs/:id/expectations").body.event.values;
+const POLICY = matchRoute("POST", "/tabs/:id/dialog-policy").body;
+// A route's own time budget, for a long poll the transport must outlast.
+const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
 
 // A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
@@ -158,6 +164,31 @@ function takeLabel(args) {
     label = required(args[++index], "--label");
   }
   return { rest, label: label === undefined ? {} : { label } };
+}
+
+// The session the commands that drive the client themselves work through.
+const ownSession = ({ env, fetch, connect, health }) =>
+  new Session({ env, fetch, connect, health });
+
+// The page a <tab-id> or <space-id>:<label> names, resolved once.
+async function pageFor(session, value) {
+  const labeled = LABELED.exec(value);
+  if (!labeled) return new Page(session, { id: value });
+  const [found] = await resolveLabels(session, labeled[1], [labeled[2]]);
+  return new Page(session, found);
+}
+
+// What a saved download prints: the file written and how much it holds.
+async function saved(path, options) {
+  const { size } = await stat(path);
+  (options.stdout || process.stdout).write(
+    `${
+      options.json
+        ? JSON.stringify({ saved: path, bytes: size })
+        : `saved ${path} (${size} bytes)`
+    }\n`,
+  );
+  return 0;
 }
 
 // --page-budget, or else KAMAPATHY_PAGE_BUDGET when it is set.
@@ -657,6 +688,153 @@ export const PARSERS = {
       },
     };
   },
+  // The CLI arms for a minute by default, to cover the agent's pause
+  // between commands.
+  expect: (args) => {
+    const path = `/tabs/${tab(args[0])}/expectations`;
+    const event = required(args[1], "event");
+    if (!EVENTS.includes(event))
+      throw new Error(`Use expect <tab-id> ${EVENTS.join("|")}.`);
+    const { "--timeout": timeout } = flags(args.slice(2), ["--timeout"]);
+    return {
+      path,
+      method: "POST",
+      body: {
+        event,
+        timeoutMs:
+          timeout === undefined
+            ? 60000
+            : bounded(timeout, "--timeout", 1, 60000),
+      },
+    };
+  },
+  "wait-expectation": (args) => {
+    if (args.length > 1) throw new Error("Use wait-expectation <id>.");
+    const path = `/expectations/${identifier(args[0])}/wait`;
+    return { path, method: "POST", body: {}, budgetMs: budgetOf("POST", path) };
+  },
+  "dialog-policy": async (args, { stdin, stdinTimeoutMs }) => {
+    const [id, answer, ...rest] = args;
+    if (!["accept", "dismiss", "reset"].includes(answer))
+      throw new Error("Use dialog-policy <tab-id> accept|dismiss|reset.");
+    const path = `/tabs/${tab(id)}/dialog-policy`;
+    const fromStdin = rest.includes("--prompt-stdin");
+    const values = flags(
+      rest.filter((argument) => argument !== "--prompt-stdin"),
+      ["--times", "--lifetime"],
+    );
+    if (answer === "reset") {
+      if (fromStdin || Object.keys(values).length)
+        throw new Error("dialog-policy reset takes no other options.");
+      return { path, method: "DELETE" };
+    }
+    let promptText;
+    if (fromStdin) {
+      promptText = await readInput(stdin || process.stdin, {
+        timeoutMs: stdinTimeoutMs,
+      });
+      if (promptText.length > POLICY.promptText.max)
+        throw new Error(
+          `The prompt text must be at most ${POLICY.promptText.max} characters.`,
+        );
+    }
+    return {
+      path,
+      method: "POST",
+      body: {
+        accept: answer === "accept",
+        ...(values["--times"] === undefined
+          ? {}
+          : { times: bounded(values["--times"], "--times", 1, 20) }),
+        ...(values["--lifetime"] === undefined
+          ? {}
+          : {
+              lifetimeMs: bounded(
+                values["--lifetime"],
+                "--lifetime",
+                1000,
+                600000,
+              ),
+            }),
+        ...(promptText === undefined ? {} : { promptText }),
+      },
+    };
+  },
+  dialogs: (args) => ({ path: `/tabs/${tab(args[0])}/dialogs` }),
+  "set-input-files": async (args) => ({
+    path: `/tabs/${tab(args[0])}/set-input-files`,
+    method: "POST",
+    body: { ...target(args[1]), files: await readFiles(args.slice(2)) },
+    limit: UPLOAD_LIMIT,
+  }),
+  "set-files": async (args) => ({
+    path: `/file-choosers/${identifier(args[0])}/files`,
+    method: "POST",
+    body: { files: await readFiles(args.slice(1)) },
+    limit: UPLOAD_LIMIT,
+  }),
+  // One command for the whole path: arm the wait, click, then save what
+  // arrives. Nothing downloaded fails with the wait's own error.
+  download: async (args, options) => {
+    const [id, selector, output, ...rest] = args;
+    const where = resolve(required(output, "output path"));
+    const chosen = required(selector, "element ref or CSS selector");
+    const { "--timeout": timeout } = flags(rest, ["--timeout"]);
+    const timeoutMs =
+      timeout === undefined ? 60000 : bounded(timeout, "--timeout", 1, 60000);
+    const session = ownSession(options);
+    const page = await pageFor(session, tab(id));
+    const next = page.waitForEvent("download", { timeout: timeoutMs });
+    try {
+      await page.click(chosen);
+    } catch (error) {
+      // The arm's own failure is already this error.
+      next.catch(() => {});
+      throw error;
+    }
+    const download = await next;
+    return saved(await download.saveAs(where), options);
+  },
+  downloads: (args) => ({ path: `/spaces/${identifier(args[0])}/downloads` }),
+  "save-download": async (args, options) => {
+    const id = identifier(args[0]);
+    const where = resolve(required(args[1], "output path"));
+    if (args.length > 2) throw new Error("Use save-download <id> <path>.");
+    const session = ownSession(options);
+    const { download } = await session.request(`/downloads/${id}`);
+    return saved(await new Download(session, download).saveAs(where), options);
+  },
+  "cancel-download": (args) => ({
+    path: `/downloads/${identifier(args[0])}/cancel`,
+    method: "POST",
+    body: {},
+  }),
+  "delete-download": (args) => ({
+    path: `/downloads/${identifier(args[0])}`,
+    method: "DELETE",
+  }),
+  // The name and password come from standard input, never from the command
+  // line, and nothing prints them back.
+  "http-credentials": async (args, { stdin, stdinTimeoutMs }) => {
+    const path = `/spaces/${identifier(args[0])}/http-credentials`;
+    const usage =
+      "Use http-credentials <space-id> <origin> --stdin and pipe JSON with a username and a password, or http-credentials <space-id> clear.";
+    if (args[1] === "clear") {
+      if (args.length > 2) throw new Error(usage);
+      return { path, method: "DELETE" };
+    }
+    const origin = required(args[1], "origin");
+    if (args[2] !== "--stdin" || args.length > 3) throw new Error(usage);
+    const given = await readJson(stdin || process.stdin, {
+      timeoutMs: stdinTimeoutMs,
+    });
+    const { username, password } = given ?? {};
+    if (typeof username !== "string" || typeof password !== "string")
+      throw new Error(
+        "Standard input must be a JSON object with a username and a password.",
+      );
+    return { path, method: "POST", body: { origin, username, password } };
+  },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {
     const input = options.stdin || process.stdin;
@@ -772,7 +950,7 @@ export async function runCli(argv, options = {}) {
     json,
   });
   if (typeof parsed === "number") return parsed;
-  const { path, method = "GET", body, output, limit } = parsed;
+  const { path, method = "GET", body, output, limit, budgetMs } = parsed;
   // Piped wait options and batches are checked before anything connects.
   if (name === "wait" || name === "batch") {
     const problem = checkBody(matchRoute(method, path), body);
@@ -834,7 +1012,12 @@ export async function runCli(argv, options = {}) {
       ),
     };
   }
-  const response = await session.send(target, { method, body: sent, limit });
+  const response = await session.send(target, {
+    method,
+    body: sent,
+    limit,
+    budgetMs,
+  });
   if (output && response.ok) {
     if (!response.headers.get("content-type")?.startsWith("image/png"))
       throw new Error("The API did not return a PNG screenshot.");

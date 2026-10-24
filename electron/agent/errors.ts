@@ -49,6 +49,9 @@ export const fail = (
 ): never => {
   throw new ApiError(code, message, fields);
 };
+// An action that opened a file chooser nothing was waiting for. Kamapathy
+// closed it before it appeared, so the action cannot go on.
+export class FileChooserOpenedError extends Error {}
 // What a tab session's error means to the agent. Other errors have no
 // meaning of their own and stay unknown.
 export function toApiError(error: unknown): ApiError | undefined {
@@ -68,6 +71,11 @@ export function toApiError(error: unknown): ApiError | undefined {
       },
     );
   }
+  if (error instanceof FileChooserOpenedError)
+    return new ApiError(
+      "file_chooser_opened",
+      'This action opened a file chooser, which Kamapathy closed. Use setInputFiles for a file input on the page, or call waitForEvent("filechooser") before the action when the page creates the input.',
+    );
   if (error instanceof SessionLostError)
     return new ApiError(
       "debugger_busy",

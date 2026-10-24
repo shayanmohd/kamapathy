@@ -3,30 +3,97 @@
 // the local socket; nothing here runs inside a page. Each method checks its
 // arguments against the schema before anything is sent. The site pack calls
 // send nothing at all: they read the workspace and the skill.
-import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { rmSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatSnapshot } from "./lib/format.mjs";
-import { readUploadFiles, target, uploadRef } from "./lib/input.mjs";
+import { readFiles, readUploadFiles, target, uploadRef } from "./lib/input.mjs";
 import {
   isLabel,
   pageBudgetFrom,
   resolveLabels,
   Session,
+  streamTo,
 } from "./lib/request.mjs";
 import { listSitePacks, runToolIn, siteContextFor } from "./lib/sites.mjs";
-import { checkCall, findEntry } from "./schema/index.mjs";
+import {
+  checkBody,
+  checkCall,
+  findEntry,
+  matchRoute,
+  requestBudget,
+} from "./schema/index.mjs";
 
 export { help } from "./help.mjs";
 export { KamapathyError } from "./lib/errors.mjs";
 export * as schema from "./schema/index.mjs";
 
 const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
+// Popups a run names one by one before it counts the rest.
+const POPUP_NOTICES = 20;
+// How long a download wait may take outside a run, which has its own
+// deadline: section 3's default run time.
+const DOWNLOAD_WAIT_MS = 300000;
 
 // The label an input method was given, for its body.
 const labelOf = (options) =>
   options?.label === undefined ? {} : { label: options.label };
+
+// Local files as a route takes them. A path this computer cannot use is the
+// call's own invalid_files, before anything is sent.
+async function fileBodies(paths) {
+  try {
+    return await readFiles(paths);
+  } catch (error) {
+    if (error instanceof KamapathyError) throw error;
+    throw new KamapathyError("invalid_files", error.message);
+  }
+}
+
+// The downloads each session took bytes from, deleted when its run ends.
+const received = new WeakMap();
+function receivedIn(session) {
+  const held = received.get(session) ?? new Set();
+  received.set(session, held);
+  return held;
+}
+
+// The labels a session has seen, so the end-of-run notices name a page the
+// way the script does.
+const labels = new WeakMap();
+function rememberLabel(session, tab) {
+  if (typeof tab?.id !== "string" || typeof tab?.label !== "string") return;
+  const known = labels.get(session) ?? new Map();
+  known.set(tab.id, tab.label);
+  labels.set(session, known);
+}
+const labelOrId = (session, id) => labels.get(session)?.get(id) ?? id;
+
+// The private folders path() wrote into. delete() removes its own, and
+// leaving the process removes whatever is left.
+const copies = new Set();
+let sweeping = false;
+function rememberCopy(folder) {
+  copies.add(folder);
+  if (sweeping) return;
+  sweeping = true;
+  process.once("exit", () => {
+    for (const path of copies)
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {}
+  });
+}
+
+// What a private copy is called: the name the site suggested as a bare file
+// name, or the download's id when that is nothing to call a file.
+function copyName({ id, suggestedFilename }) {
+  const name = basename(String(suggestedFilename ?? "")).replace(/[/\\]/g, "");
+  return name && name !== "." && name !== ".." ? name : id;
+}
 
 /**
  * @typedef {"@e1" | string} Target A ref such as "@e3" from a current
@@ -133,6 +200,23 @@ const labelOf = (options) =>
  * @property {"compact" | "full"} [mode]
  * @property {number} [maxChars]
  * @property {number} [maxControls]
+ */
+/**
+ * @typedef {object} DialogRecord One dialog Kamapathy answered in a tab.
+ * @property {"alert" | "confirm" | "prompt" | "beforeunload"} type
+ * @property {string} message
+ * @property {string} [defaultValue]
+ * @property {"accepted" | "dismissed"} answer
+ * @property {string} [promptText] What an accepted prompt returned.
+ * @property {string} url
+ * @property {number} at
+ */
+/**
+ * @typedef {object} DialogPolicy How a tab answers its next dialogs.
+ * @property {boolean} accept
+ * @property {string} [promptText]
+ * @property {number} remaining Confirms and prompts the policy still answers.
+ * @property {number} expiresAt
  */
 /**
  * @typedef {object} UpdateRelease The release an update check found.
@@ -262,6 +346,27 @@ function stopped(status) {
   });
 }
 
+// A route's own time budget, for a long poll that outlasts the transport's
+// default timeout.
+const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
+
+// How long a wait of several polls may still take: the rest of the run's
+// time, or a single command's own allowance.
+const timeLeft = (session) =>
+  session.deadline
+    ? Math.max(session.deadline - Date.now(), 0)
+    : DOWNLOAD_WAIT_MS;
+
+// The dialog policy as its route takes it: the client's lifetime is the
+// route's lifetimeMs, and a key the client does not define travels as it is
+// so the route's own check names it.
+function dialogPolicyBody({ lifetime, ...rest }) {
+  return {
+    ...rest,
+    ...(lifetime === undefined ? {} : { lifetimeMs: lifetime }),
+  };
+}
+
 // The absolute file a screenshot writes, which must end in .png.
 function pngPath(path) {
   const output = resolve(path);
@@ -301,6 +406,8 @@ async function call(session, name, args, send) {
 /** One tab in an agent space. */
 export class Page {
   #session;
+  /** @type {Promise<object> | null} The arm later calls wait for. */
+  #armed = null;
   /**
    * @param {Session} session
    * @param {{ id: string, spaceId?: string, url: string, title: string }} tab
@@ -323,21 +430,29 @@ export class Page {
     this.url = tab.url;
     /** @type {string} Last known title; navigate and snapshot refresh it. */
     this.title = tab.title;
+    rememberLabel(session, tab);
   }
   [REFRESH](tab) {
     for (const key of PAGE_FIELDS)
       if (tab[key] !== undefined) this[key] = tab[key];
+    rememberLabel(this.#session, this);
     return this;
+  }
+  // A page from space.page(label) finds its tab on first use, once.
+  async #find() {
+    if (this.id !== undefined) return;
+    const [tab] = await resolveLabels(this.#session, this.spaceId, [
+      this.label,
+    ]);
+    this[REFRESH](tab);
   }
   #call(name, args, send) {
     return call(this.#session, `Page.${name}`, args, async () => {
-      // A page from space.page(label) finds its tab on first use, once.
-      if (this.id === undefined) {
-        const [tab] = await resolveLabels(this.#session, this.spaceId, [
-          this.label,
-        ]);
-        this[REFRESH](tab);
-      }
+      // A live arm is acknowledged before anything else is sent, so the
+      // action that causes the event cannot outrun it; an arm that fails
+      // fails the call behind it instead of letting it run unarmed.
+      if (this.#armed) await this.#armed;
+      await this.#find();
       return send();
     });
   }
@@ -493,6 +608,32 @@ export class Page {
     );
   }
   /**
+   * Puts local files on the file input a target names, retargeting from a
+   * label or the panel around it, hidden inputs included.
+   * @param {Target} element A ref or any selector, hidden or not.
+   * @param {string[]} files 0 to 8 paths, at most 16 MiB together. An empty
+   * list clears the selection.
+   * @param {{ timeout?: number }} [options] How long to wait for the target,
+   * 3000 by default.
+   * @returns {Promise<{ ok: true, selected: number }>} With what the action
+   * caused.
+   */
+  setInputFiles(element, files, options = {}) {
+    return this.#call("setInputFiles", [element, files, options], async () =>
+      this.#post(
+        "set-input-files",
+        {
+          ...target(element),
+          files: await fileBodies(files),
+          ...(options.timeout === undefined
+            ? {}
+            : { timeoutMs: options.timeout }),
+        },
+        { limit: UPLOAD_BODY_LIMIT },
+      ),
+    );
+  }
+  /**
    * Captures the page as PNG: the viewport, the whole page or a clip, at CSS
    * scale by default. Never overwrites an existing file.
    * @param {ScreenshotOptions | string} [target] Options, or a .png path.
@@ -537,6 +678,123 @@ export class Page {
     });
   }
   /**
+   * Arms a wait for the tab's next popup, download, file chooser or dialog.
+   * The arm is sent as this is called and every later call on this page
+   * waits for it, so `const next = page.waitForEvent("popup")` before
+   * `await page.click("#share")` cannot miss the popup.
+   * @param {"popup" | "download" | "filechooser" | "dialog"} event
+   * @param {{ timeout?: number }} [options] 1 to 60000 ms, 10000 by default.
+   * @returns {Promise<Page | Download | FileChooser | DialogRecord>}
+   */
+  waitForEvent(event, options = {}) {
+    // A second arm queues behind the first, so the barrier covers both.
+    const previous = this.#armed;
+    const armed = call(
+      this.#session,
+      "Page.waitForEvent",
+      [event, options],
+      async () => {
+        if (previous) await previous;
+        await this.#find();
+        const { expectation } = await this.#post("expectations", {
+          event,
+          ...(options.timeout === undefined
+            ? {}
+            : { timeoutMs: options.timeout }),
+        });
+        return expectation;
+      },
+    );
+    this.#armed = armed;
+    const settled = () => {
+      if (this.#armed === armed) this.#armed = null;
+    };
+    return armed.then(
+      (expectation) => {
+        settled();
+        // The poll is the wait itself, so it passes no barrier of its own.
+        return call(
+          this.#session,
+          "Page.waitForEvent",
+          [event, options],
+          async () => {
+            const path = `/expectations/${expectation.id}/wait`;
+            return this.#event(
+              await this.#session.request(path, {
+                method: "POST",
+                body: {},
+                budgetMs: budgetOf("POST", path),
+              }),
+            );
+          },
+        );
+      },
+      (error) => {
+        settled();
+        throw error;
+      },
+    );
+  }
+  // What an armed wait answers with: a Page, a Download, a FileChooser, or
+  // the dialog record as Kamapathy recorded it.
+  #event(answer) {
+    if (answer.popup) return this.#popup(answer.popup);
+    if (answer.download) return new Download(this.#session, answer.download);
+    if (answer.fileChooser)
+      return new FileChooser(this.#session, answer.fileChooser);
+    if (answer.dialog) return answer.dialog;
+    throw new KamapathyError(
+      "invalid_response",
+      "The wait answered with no popup, download, file chooser or dialog.",
+    );
+  }
+  // A page this page opened, from a wait's answer or the popup list, which
+  // name neither the space nor the opener.
+  #popup(tab) {
+    return new Page(this.#session, {
+      spaceId: this.spaceId,
+      openerId: this.id,
+      openedBy: "page",
+      ...tab,
+    });
+  }
+  /** @returns {Promise<Page[]>} The open tabs this tab opened. */
+  popups() {
+    return this.#call("popups", [], async () => {
+      const { popups } = await this.#session.request(`/tabs/${this.id}/popups`);
+      return popups.map((tab) => this.#popup(tab));
+    });
+  }
+  /**
+   * Arms how the tab answers its next confirms and prompts, before the
+   * action that opens one, or clears the policy with null.
+   * @param {{ accept: boolean, promptText?: string, times?: number,
+   *           lifetime?: number } | null} policy
+   * @returns {Promise<{ policy: DialogPolicy | null }>}
+   */
+  setDialogPolicy(policy) {
+    return this.#call("setDialogPolicy", [policy], () => {
+      const path = `/tabs/${this.id}/dialog-policy`;
+      if (policy === null)
+        return this.#session.request(path, { method: "DELETE" });
+      const body = dialogPolicyBody(policy);
+      const problem = checkBody(matchRoute("POST", path), body);
+      if (problem)
+        throw new KamapathyError(problem.code, problem.message, problem.fields);
+      return this.#post("dialog-policy", body);
+    });
+  }
+  /**
+   * The tab's dialog policy and the last 20 dialogs Kamapathy answered in
+   * it, oldest first.
+   * @returns {Promise<{ policy: DialogPolicy | null, dialogs: DialogRecord[] }>}
+   */
+  dialogs() {
+    return this.#call("dialogs", [], () =>
+      this.#session.request(`/tabs/${this.id}/dialogs`),
+    );
+  }
+  /**
    * The open page that opened this popup.
    * @returns {Promise<Page | null>}
    */
@@ -554,6 +812,223 @@ export class Page {
   close() {
     return this.#call("close", [], () =>
       this.#session.request(`/tabs/${this.id}`, { method: "DELETE" }),
+    );
+  }
+}
+
+/** One download Kamapathy holds for the agent in its space. */
+export class Download {
+  #session;
+  #data;
+  /** @type {{ folder: string, file: string } | null} The copy path() wrote. */
+  #copy = null;
+  /**
+   * @param {Session} session
+   * @param {{ id: string, tabId: string, url: string, suggestedFilename: string,
+   *   mimeType: string, state: string, receivedBytes: number,
+   *   totalBytes: number, failure: string | null }} download
+   */
+  constructor(session, download) {
+    this.#session = session;
+    this.#data = download;
+  }
+  /** @returns {string} The address the download came from. */
+  url() {
+    return this.#data.url;
+  }
+  /** @returns {string} The file name the site suggested. */
+  suggestedFilename() {
+    return this.#data.suggestedFilename;
+  }
+  /** @returns {Page} The page it started in, which may since have closed. */
+  page() {
+    return new Page(this.#session, { id: this.#data.tabId });
+  }
+  #stream(path, mode) {
+    const from = `/downloads/${this.#data.id}/content`;
+    return streamTo(this.#session, path, {
+      from,
+      downloadId: this.#data.id,
+      mode,
+      budgetMs: budgetOf("GET", from),
+    });
+  }
+  // Waits in long polls until the record stops progressing: the caller's
+  // timeout, or what is left of the run, bounds the whole wait. A download
+  // that failed has no bytes, and says so.
+  async #ready(timeout) {
+    const limit = timeout ?? timeLeft(this.#session);
+    const until = Date.now() + limit;
+    const path = `/downloads/${this.#data.id}/wait`;
+    while (this.#data.state === "progressing") {
+      const left = until - Date.now();
+      if (left <= 0)
+        throw new KamapathyError(
+          "download_timeout",
+          `The download was still running after ${limit} ms. Wait for it again, or cancel it.`,
+          {
+            awaited: "download",
+            downloadId: this.#data.id,
+            receivedBytes: this.#data.receivedBytes,
+            totalBytes: this.#data.totalBytes,
+            timeoutMs: limit,
+            retryable: true,
+          },
+        );
+      const timeoutMs = Math.max(Math.min(30000, left), 1);
+      try {
+        const { download } = await this.#session.request(path, {
+          method: "POST",
+          body: { timeoutMs },
+          budgetMs: timeoutMs,
+        });
+        this.#data = download;
+      } catch (error) {
+        // Kamapathy's own poll ran out; what it saw carries over and the
+        // next one asks again.
+        if (
+          !(error instanceof KamapathyError) ||
+          error.code !== "download_timeout"
+        )
+          throw error;
+        this.#data = {
+          ...this.#data,
+          receivedBytes: error.receivedBytes ?? this.#data.receivedBytes,
+          totalBytes: error.totalBytes ?? this.#data.totalBytes,
+        };
+      }
+    }
+    const failure =
+      this.#data.failure ??
+      (this.#data.state === "completed" ? null : this.#data.state);
+    if (failure)
+      throw new KamapathyError(
+        "download_failed",
+        `This download ended as ${failure}, so it has no bytes to read.`,
+        { failure },
+      );
+  }
+  /**
+   * Waits for the download, then writes its bytes to a new file at mode
+   * 0600, creating missing folders. It never overwrites.
+   * @param {string} path Where to write, on this computer.
+   * @param {{ timeout?: number }} [options] How long to wait for the
+   * download, what is left of the run by default.
+   * @returns {Promise<string>} The absolute path written.
+   */
+  saveAs(path, options = {}) {
+    return call(this.#session, "Download.saveAs", [path, options], async () => {
+      const output = resolve(path);
+      await this.#ready(options.timeout);
+      await mkdir(dirname(output), { recursive: true });
+      await this.#stream(output, 0o600);
+      receivedIn(this.#session).add(this.#data.id);
+      return output;
+    });
+  }
+  /**
+   * A private copy of the download on this computer, in a folder only this
+   * account can read.
+   * @returns {Promise<string>} The copy's path, which delete() removes.
+   */
+  path() {
+    return call(this.#session, "Download.path", [], async () => {
+      if (this.#copy) return this.#copy.file;
+      await this.#ready();
+      const folder = await mkdtemp(join(tmpdir(), "kamapathy-download-"));
+      const file = join(folder, copyName(this.#data));
+      try {
+        await this.#stream(file, 0o600);
+      } catch (error) {
+        await rm(folder, { recursive: true, force: true });
+        throw error;
+      }
+      this.#copy = { folder, file };
+      rememberCopy(folder);
+      receivedIn(this.#session).add(this.#data.id);
+      return file;
+    });
+  }
+  /**
+   * Why the download did not finish, read again while it still runs.
+   * @returns {Promise<null | "cancelled" | "interrupted" | "too_large">}
+   */
+  failure() {
+    return call(this.#session, "Download.failure", [], async () => {
+      if (this.#data.state === "progressing") {
+        const { download } = await this.#session.request(
+          `/downloads/${this.#data.id}`,
+        );
+        this.#data = download;
+      }
+      return this.#data.failure ?? null;
+    });
+  }
+  /** Stops a download still running. @returns {Promise<{ download: object }>} */
+  cancel() {
+    return call(this.#session, "Download.cancel", [], async () => {
+      const result = await this.#session.request(
+        `/downloads/${this.#data.id}/cancel`,
+        { method: "POST", body: {} },
+      );
+      if (result.download) this.#data = result.download;
+      return result;
+    });
+  }
+  /**
+   * Deletes the download's bytes from the browser's profile, and the
+   * private copy path() wrote.
+   * @returns {Promise<{ ok: true }>}
+   */
+  delete() {
+    return call(this.#session, "Download.delete", [], async () => {
+      const copy = this.#copy;
+      this.#copy = null;
+      if (copy) {
+        copies.delete(copy.folder);
+        await rm(copy.folder, { recursive: true, force: true });
+      }
+      receivedIn(this.#session).delete(this.#data.id);
+      return this.#session.request(`/downloads/${this.#data.id}`, {
+        method: "DELETE",
+      });
+    });
+  }
+}
+
+/** A file chooser Kamapathy held back while a wait was armed. */
+export class FileChooser {
+  #session;
+  #data;
+  /**
+   * @param {Session} session
+   * @param {{ id: string, tabId: string, multiple: boolean, accept: string[] }} chooser
+   */
+  constructor(session, chooser) {
+    this.#session = session;
+    this.#data = chooser;
+  }
+  /** @returns {Page} The page whose chooser this is. */
+  page() {
+    return new Page(this.#session, { id: this.#data.tabId });
+  }
+  /** @returns {boolean} Whether the input takes more than one file. */
+  isMultiple() {
+    return this.#data.multiple === true;
+  }
+  /**
+   * Puts local files on the chooser's input, even one the page has removed.
+   * @param {string[]} files 0 to 8 paths, at most 16 MiB together. An empty
+   * list cancels the chooser.
+   * @returns {Promise<{ ok: true, selected: number }>}
+   */
+  setFiles(files) {
+    return call(this.#session, "FileChooser.setFiles", [files], async () =>
+      this.#session.request(`/file-choosers/${this.#data.id}/files`, {
+        method: "POST",
+        body: { files: await fileBodies(files) },
+        limit: UPLOAD_BODY_LIMIT,
+      }),
     );
   }
 }
@@ -784,6 +1259,37 @@ export class Space {
       this.state = result.state;
       this.status = result.status;
       return result;
+    });
+  }
+  /**
+   * The downloads this space holds, newest first.
+   * @returns {Promise<Download[]>}
+   */
+  downloads() {
+    return this.#call("downloads", [], async () => {
+      const { downloads } = await this.#session.request(
+        `/spaces/${this.id}/downloads`,
+      );
+      return downloads.map((item) => new Download(this.#session, item));
+    });
+  }
+  /**
+   * Stores a name and password for one origin, in Kamapathy's memory only,
+   * to answer the first server sign-in from that origin in this space's own
+   * pages.
+   * @param {{ origin: string, username: string, password: string } | null} credentials
+   * null forgets every origin the space stored.
+   * @returns {Promise<{ ok: true, origin?: string }>}
+   */
+  setHTTPCredentials(credentials) {
+    return this.#call("setHTTPCredentials", [credentials], () => {
+      const path = `/spaces/${this.id}/http-credentials`;
+      if (credentials === null)
+        return this.#session.request(path, { method: "DELETE" });
+      const problem = checkBody(matchRoute("POST", path), credentials);
+      if (problem)
+        throw new KamapathyError(problem.code, problem.message, problem.fields);
+      return this.#session.request(path, { method: "POST", body: credentials });
     });
   }
   /**
@@ -1087,6 +1593,53 @@ export async function connect({ env, lazy = false, connect, fetch, health, sessi
     new Session({ env: env || process.env, fetch, connect, health, lazy });
   // run and the REPL pass their session in, and they announce an update.
   if (session) session.announceUpdate = true;
+  installEndHooks(current);
   if (!lazy) await current.ready();
   return new Client(current);
+}
+
+// The two hooks a run's end step runs for this client, in this order: the
+// popups nothing reported, then the downloads it took bytes from. Each is
+// best effort, and a tab or download that answers nothing changes nothing.
+const hooked = new WeakSet();
+function installEndHooks(session) {
+  if (hooked.has(session)) return;
+  hooked.add(session);
+  session.onRunEnd(async ({ touched, signal }) => {
+    const unseen = new Map();
+    for (const id of touched) {
+      if (signal.aborted) return;
+      try {
+        const { popups } = await session.request(`/tabs/${id}/popups`);
+        for (const popup of popups ?? [])
+          if (popup.unseen && !unseen.has(popup.id))
+            unseen.set(popup.id, { popup, openedBy: id });
+      } catch {}
+    }
+    const listed = [...unseen.values()];
+    for (const { popup, openedBy } of listed.slice(0, POPUP_NOTICES))
+      session.notice(
+        `popup:${popup.id}`,
+        `unused page ${popup.label ?? popup.id} opened by ${labelOrId(
+          session,
+          openedBy,
+        )}: ${popup.url}`,
+      );
+    const rest = listed.length - POPUP_NOTICES;
+    if (rest > 0)
+      session.notice(
+        "popups:more",
+        `and ${rest} more unused ${rest === 1 ? "page" : "pages"} this run opened`,
+      );
+  });
+  session.onRunEnd(async ({ signal }) => {
+    const held = receivedIn(session);
+    for (const id of [...held]) {
+      if (signal.aborted) return;
+      held.delete(id);
+      try {
+        await session.request(`/downloads/${id}`, { method: "DELETE" });
+      } catch {}
+    }
+  });
 }

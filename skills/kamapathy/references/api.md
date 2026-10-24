@@ -333,6 +333,18 @@ Reports that the task cannot be done and hands the space to the person.
 
 Returns `Promise<{ ok: true, owner: "human", state: "failed", status: string }>`. Route `POST /spaces/:id/fail`. Errors: `invalid_field`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 3.
 
+### `space.downloads()`
+
+The downloads this space holds, newest first. Only downloads an agent armed are kept.
+
+Returns `Promise<Download[]>`. Route `GET /spaces/:id/downloads`. Errors: `human_control`, `space_not_found`, `automation_stopped`. Since API level 2.
+
+### `space.setHTTPCredentials(credentials)`
+
+Stores a name and password for one http or https origin, in memory only, to answer the first server sign-in from that origin in this space's own pages, or forgets every origin with null. A repeat, a proxy sign-in and a certificate request always go to the person.
+
+Returns `Promise<{ ok: true, origin?: string }>`. Route `POST /spaces/:id/http-credentials`. Errors: `invalid_field`, `unknown_field`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 2.
+
 ### `space.handoff()`
 
 Pauses automation so the person can continue, for example to sign in.
@@ -519,6 +531,16 @@ Selects local files on a file input. The site may upload them at once.
 
 Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `unknown_ref`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
+### `page.setInputFiles(target, files, options?)`
+
+Puts 0 to 8 local files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the selection.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds of at most 60000 | `3000` | How long to wait for the target. 0 looks once. |
+
+Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/set-input-files`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `multiple_file_inputs`, `upload_busy`, `file_chooser_opened`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
 ### `page.screenshot(options?)`
 
 Captures the page as PNG: the viewport, the whole page or a clip, at CSS scale by default. With a path string it saves the file and returns its path.
@@ -546,6 +568,34 @@ Reads a PDF's text by page. Continue from nextPage.
 
 Returns `Promise<PdfText>`. Route `POST /tabs/:id/pdf/text`. Errors: `not_pdf`, `pdf_not_refetchable`, `pdf_too_large`, `pdf_locked`, `pdf_unreadable`, `pdf_fetch_failed`, `page_out_of_range`, `pdf_timeout`, `busy`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 3.
 
+### `page.waitForEvent(event, options?)`
+
+Arms a wait for the tab's next popup, download, file chooser or dialog. The arm is sent as the method is called, and later calls on the page wait for it, so the action that causes the event cannot outrun it.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 1 to 60000 | `10000` | How long to wait for the event, counted from arming. |
+
+Returns `Promise<Page | Download | FileChooser | DialogRecord>`. Route `POST /tabs/:id/expectations`. Errors: `expectation_pending`, `expectation_not_found`, `expectation_timeout`, `invalid_field`, `space_ended`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.popups()`
+
+The open tabs this tab opened, in the order Kamapathy lists them. Listing them leaves them marked new.
+
+Returns `Promise<Page[]>`. Route `GET /tabs/:id/popups`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.setDialogPolicy(policy)`
+
+Arms how the tab answers its next confirms and prompts, before the action that opens one: { accept, promptText?, times = 1, lifetime = 60000 }, or null to clear it. Without a policy, confirms are dismissed and prompts return nothing.
+
+Returns `Promise<{ policy: DialogPolicy | null }>`. Route `POST /tabs/:id/dialog-policy`. Errors: `invalid_field`, `unknown_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.dialogs()`
+
+The tab's dialog policy and the last 20 dialogs Kamapathy answered in it, oldest first.
+
+Returns `Promise<{ policy: DialogPolicy | null, dialogs: DialogRecord[] }>`. Route `GET /tabs/:id/dialogs`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
 ### `page.opener()`
 
 The open page that opened this popup, or null.
@@ -557,6 +607,80 @@ Returns `Promise<Page | null>`. Route `GET /spaces/:id/tabs`. Errors: `human_con
 Closes the tab.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+## Download
+
+### `download.url()`
+
+The address the download came from.
+
+Returns `string`. Since API level 2.
+
+### `download.suggestedFilename()`
+
+The file name the site suggested.
+
+Returns `string`. Since API level 2.
+
+### `download.page()`
+
+The page the download started in, which may since have closed.
+
+Returns `Page`. Since API level 2.
+
+### `download.saveAs(path, options?)`
+
+Waits for the download, then writes its bytes to a new file at mode 0600, creating missing folders. It never overwrites, and the path is this computer's.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 1 to 3600000 |  | How long to wait for the download to finish. What is left of the run by default. |
+
+Returns `Promise<string>`. Route `GET /downloads/:id/content`. Errors: `download_timeout`, `download_failed`, `download_not_finished`, `download_interrupted`, `file_exists`, `busy`, `download_not_found`, `human_control`, `space_ended`, `automation_stopped`. Since API level 2.
+
+### `download.path()`
+
+A private copy of the download on this computer, in a folder only this account can read. delete() and leaving the process remove it.
+
+Returns `Promise<string>`. Route `GET /downloads/:id/content`. Errors: `download_timeout`, `download_failed`, `download_not_finished`, `download_interrupted`, `busy`, `download_not_found`, `human_control`, `space_ended`, `automation_stopped`. Since API level 2.
+
+### `download.failure()`
+
+Why the download did not finish, or null while it is running or once it is complete.
+
+Returns `Promise<null | "cancelled" | "interrupted" | "too_large">`. Route `GET /downloads/:id`. Errors: `download_not_found`, `human_control`, `space_ended`, `automation_stopped`. Since API level 2.
+
+### `download.cancel()`
+
+Stops a download that is still running. A finished one is left as it is.
+
+Returns `Promise<{ download: DownloadRecord }>`. Route `POST /downloads/:id/cancel`. Errors: `download_not_found`, `human_control`, `space_ended`, `automation_stopped`. Since API level 2.
+
+### `download.delete()`
+
+Deletes the download's bytes from the browser's profile, and the private copy path() wrote.
+
+Returns `Promise<{ ok: true }>`. Route `DELETE /downloads/:id`. Errors: `download_not_found`, `human_control`, `space_ended`, `automation_stopped`. Since API level 2.
+
+## File chooser
+
+### `fileChooser.page()`
+
+The page whose file chooser this is.
+
+Returns `Page`. Since API level 2.
+
+### `fileChooser.isMultiple()`
+
+Whether the input takes more than one file.
+
+Returns `boolean`. Since API level 2.
+
+### `fileChooser.setFiles(files)`
+
+Puts 0 to 8 local files on the chooser's input, even one the page has removed. An empty list cancels the chooser.
+
+Returns `Promise<{ ok: true, selected: number }>`. Route `POST /file-choosers/:id/files`. Errors: `file_chooser_not_found`, `invalid_files`, `invalid_file_type`, `files_too_large`, `invalid_upload_target`, `upload_busy`, `human_control`, `tab_unmanaged`, `tab_closed`, `page_changed`, `automation_stopped`. Since API level 2.
 
 ## CLI commands
 
@@ -684,6 +808,54 @@ Save a PNG of the viewport, the whole page or a clip, without overwriting
 
 Read a PDF's text by page
 
+### `expect <tab-id> <event> [--timeout <ms>]`
+
+Arm a wait for the tab's next popup, download, file chooser or dialog, before the action that causes it
+
+### `wait-expectation <id>`
+
+Wait for an armed event and print the popup, download, file chooser or dialog that arrived
+
+### `dialog-policy <tab-id> accept|dismiss|reset [--times <n>] [--lifetime <ms>] [--prompt-stdin]`
+
+Arm how the tab answers its next confirms and prompts, or clear the policy with reset
+
+### `dialogs <tab-id>`
+
+Print the tab's dialog policy and the dialogs Kamapathy answered in it
+
+### `set-input-files <tab-id> <target> [file...]`
+
+Put files on the file input a ref or selector names, hidden ones included; no file clears the selection
+
+### `set-files <chooser-id> [file...]`
+
+Put files on the input of a file chooser an armed wait received; no file cancels the chooser
+
+### `download <tab-id> <target> <path> [--timeout <ms>]`
+
+Arm a download wait, click the target, and save the file that arrives to a new path
+
+### `downloads <space-id>`
+
+List the downloads a space holds, newest first
+
+### `save-download <id> <path>`
+
+Wait for a held download to finish and write its bytes to a new path
+
+### `cancel-download <id>`
+
+Stop a download that is still running
+
+### `delete-download <id>`
+
+Delete a held download's bytes from the browser's profile
+
+### `http-credentials <space-id> <origin> --stdin | http-credentials <space-id> clear`
+
+Store a name and password for one origin in memory, to answer its first server sign-in in this space, or forget every origin
+
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
 Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself
@@ -750,6 +922,8 @@ Show the commands, or help on one
 | POST | `/tabs/:id/drag` | `source`, `target`, `label?` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/set-input-files` | `ref?`, `selector?`, `files`, `timeoutMs?` | Puts files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/file-choosers/:id/files` | `files` | Files bytes on the input of a file chooser an armed wait received, even one the page has removed. An empty list cancels the chooser. Returns `{ ok: true, selected }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |
 | POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
 | POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
@@ -796,6 +970,7 @@ Show the commands, or help on one
 | `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
 | `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `download_not_found` | 404 | not retryable |  | No held download has this ID: it was deleted, its space closed, or an hour passed since it finished. |
+| `file_chooser_not_found` | 404 | not retryable |  | No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -842,6 +1017,8 @@ Show the commands, or help on one
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
+| `multiple_file_inputs` | 422 | not retryable | `count` | The target holds several file inputs, so none of them is the one to file. |
+| `file_chooser_opened` | 422 | not retryable |  | An action opened a file chooser no wait was armed for, so Kamapathy closed it. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
@@ -886,3 +1063,5 @@ Show the commands, or help on one
 | `invalid_tool_args` | client | not retryable | `packId`, `tool`, `problems`, `expected` | The arguments do not match the tool's declaration. |
 | `site_tool_failed` | client | not retryable | `packId`, `tool`, `at`, `cause` | The Node tool threw an error of its own. |
 | `helpers_failed` | client | not retryable | `path`, `export`, `cause` | helpers.mjs could not be loaded or its exports installed. |
+| `file_exists` | client | not retryable | `path` | The file a download would be written to exists, so nothing was written. |
+| `download_interrupted` | client | not retryable | `downloadId`, `path` | A download's bytes stopped arriving, so the incomplete file was removed. |

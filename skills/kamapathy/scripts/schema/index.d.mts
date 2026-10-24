@@ -119,6 +119,7 @@ export interface Problem {
 }
 
 export const ENTRIES: readonly Entry[];
+export const OBJECTS: readonly Entry[];
 export const COMMANDS: readonly Command[];
 export const ROUTES: readonly SchemaRoute[];
 export const ACTIONS: readonly ActionSpec[];

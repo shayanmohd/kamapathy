@@ -10,6 +10,7 @@ import {
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
+import { MAX_INPUT_FILES } from "./dom/files";
 import { WAIT_POLL_MS } from "./downloads";
 import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
@@ -620,12 +621,24 @@ export function credentialFields(body: Record<string, unknown>): {
     return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
   return { origin: parsed.origin, username, password };
 }
-export function uploadFields(body: Record<string, unknown>) {
-  const target = targetFields(body);
-  if (!("ref" in target))
-    return fail("invalid_target", "Uploads require a current file input ref from a snapshot.");
-  if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > 8)
-    return fail("invalid_files", "Provide between 1 and 8 files.");
+// The files of an upload or a file input: metadata and canonical base64, read
+// once so both routes keep the same rules.
+export function filesField(
+  body: Record<string, unknown>,
+  options: { min: number; max: number },
+) {
+  const { min, max } = options;
+  if (
+    !Array.isArray(body.files) ||
+    body.files.length < min ||
+    body.files.length > max
+  )
+    return fail(
+      "invalid_files",
+      min === 0
+        ? `Provide at most ${max} files.`
+        : `Provide between ${min} and ${max} files.`,
+    );
   let total = 0;
   const files = body.files.map((entry: unknown) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))
@@ -648,5 +661,26 @@ export function uploadFields(body: Record<string, unknown>) {
       return fail("files_too_large", "Files must total at most 16 MiB per upload.");
     return { name, type, data };
   });
-  return { ...target, files };
+  return files;
+}
+export function uploadFields(body: Record<string, unknown>) {
+  const target = targetFields(body);
+  if (!("ref" in target))
+    return fail("invalid_target", "Uploads require a current file input ref from a snapshot.");
+  return { ...target, files: filesField(body, { min: 1, max: MAX_INPUT_FILES }) };
+}
+// setInputFiles takes any target, a hidden one included, and an empty list
+// that clears the input.
+export function setInputFilesFields(body: Record<string, unknown>) {
+  return {
+    ...targetFields(body),
+    files: filesField(body, { min: 0, max: MAX_INPUT_FILES }),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
+// A file chooser names its own input, so its body carries the files alone.
+export function chooserFilesFields(body: Record<string, unknown>): {
+  files: { name: string; type: string; data: string }[];
+} {
+  return { files: filesField(body, { min: 0, max: MAX_INPUT_FILES }) };
 }

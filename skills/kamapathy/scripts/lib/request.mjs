@@ -1,6 +1,7 @@
 // One Session per client: it finds Kamapathy when first needed, sends each
 // call as one request with its own timeout, and keeps what a run needs
 // afterwards.
+import { open, rm } from "node:fs/promises";
 import {
   API_LEVEL,
   CLIENT_VERSION,
@@ -107,6 +108,8 @@ export class Session {
     this.launched = false;
     this.health = health ?? null;
     this.hardStop = null;
+    /** @type {number | null} When a run must end, as epoch milliseconds. */
+    this.deadline = null;
     /** @type {string[]} Tab ids the run used, in first-use order. */
     this.touched = [];
     this.endHooks = [];
@@ -295,6 +298,66 @@ export class Session {
   }
   rearm() {
     this.#controller = new AbortController();
+  }
+}
+
+/**
+ * Writes a byte response to one new file. The file is created first, so a
+ * path already taken costs no bytes, and a stream that ends before
+ * Content-Length leaves nothing behind.
+ * @param {Session} session
+ * @param {string} path An absolute path whose folder exists.
+ * @param {{ from: string, downloadId?: string, mode?: number, budgetMs?: number }} options
+ * `from` is the route to read.
+ * @returns {Promise<number>} The bytes written.
+ */
+export async function streamTo(
+  session,
+  path,
+  { from, downloadId, mode = 0o600, budgetMs } = {},
+) {
+  const held = downloadId === undefined ? {} : { downloadId };
+  let file;
+  try {
+    file = await open(path, "wx", mode);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    throw new KamapathyError(
+      "file_exists",
+      `${path} already exists, so nothing was written. Choose another path or remove that file first.`,
+      { path },
+    );
+  }
+  let written = 0;
+  try {
+    const response = await session.request(from, {
+      response: "stream",
+      budgetMs,
+    });
+    const length = response.headers.get("content-length");
+    const expected = /^\d+$/.test(length ?? "") ? Number(length) : undefined;
+    for await (const chunk of response.body) {
+      await file.write(chunk);
+      written += chunk.length;
+    }
+    if (expected !== undefined && written !== expected)
+      throw new KamapathyError(
+        "download_interrupted",
+        "Kamapathy stopped sending these bytes, so the file was incomplete and was removed. The space may have left the agent.",
+        { ...held, path },
+      );
+    await file.close();
+    file = undefined;
+    return written;
+  } catch (error) {
+    await file?.close().catch(() => {});
+    await rm(path, { force: true });
+    if (error instanceof KamapathyError) throw error;
+    throw new KamapathyError(
+      "download_interrupted",
+      "Reading these bytes failed, so the incomplete file was removed. The space may have left the agent.",
+      { ...held, path },
+    );
   }
 }
 

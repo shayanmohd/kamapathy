@@ -237,6 +237,30 @@ export const SPACE = [
     },
   ),
   method(
+    "Space.downloads",
+    "space.downloads()",
+    "The downloads this space holds, newest first. Only downloads an agent armed are kept.",
+    [],
+    "Promise<Download[]>",
+    "GET /spaces/:id/downloads",
+    ["human_control"],
+    { since: 2 },
+  ),
+  method(
+    "Space.setHTTPCredentials",
+    "space.setHTTPCredentials(credentials)",
+    "Stores a name and password for one http or https origin, in memory only, to answer the first server sign-in from that origin in this space's own pages, or forgets every origin with null. A repeat, a proxy sign-in and a certificate request always go to the person.",
+    [{ name: "credentials", kind: "credentials" }],
+    "Promise<{ ok: true, origin?: string }>",
+    "POST /spaces/:id/http-credentials",
+    ["invalid_field", "unknown_field", "human_control"],
+    {
+      expected:
+        "space.setHTTPCredentials({ origin, username, password }) or space.setHTTPCredentials(null)",
+      since: 2,
+    },
+  ),
+  method(
     "Space.handoff",
     "space.handoff()",
     "Pauses automation so the person can continue, for example to sign in.",

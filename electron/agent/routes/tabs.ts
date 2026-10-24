@@ -1,11 +1,12 @@
 import type { WebContents } from "electron";
-import { envelope, fail } from "../errors";
+import { envelope, fail, FileChooserOpenedError } from "../errors";
 import {
   send,
   type RouteCall,
   type RouteDeps,
   type RouteImpl,
 } from "../http";
+import type { ReceiptFields, ReceiptScope } from "../receipts";
 import type { TabSession } from "../session/tab-session";
 import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
@@ -16,18 +17,93 @@ import { checkPageBudget } from "./spaces";
 // batch steps. A wait or a snapshot changes nothing, so neither gets one.
 const RECEIPT_ACTIONS = ["click", "fill", "press", "scroll", "drag"];
 
+// One file transfer at a time, so the bytes of two never pile up in memory.
+// upload and set-input-files share this slot, which keeps upload_busy
+// meaning one thing. Every reservation is released in the router's finally.
+let uploading = false;
+export function takeTransfer(): (() => void) | undefined {
+  if (uploading) return undefined;
+  uploading = true;
+  return () => {
+    uploading = false;
+  };
+}
+// The receipt wrapper every action goes through, with the file chooser
+// guard after the page work: an action that opened a chooser nothing was
+// waiting for never answers, since the page is left waiting for files.
+export function withReceipt<T extends object>(
+  deps: Pick<RouteDeps, "receipts" | "choosers">,
+  tabId: string,
+  work: (scope: ReceiptScope) => Promise<T>,
+  options?: { settleMs?: number },
+): Promise<T & ReceiptFields> {
+  return deps.receipts.with(
+    tabId,
+    async (scope) => {
+      const result = await work(scope);
+      if (deps.choosers.openedSince(tabId, scope.fromSeq))
+        throw new FileChooserOpenedError();
+      return result;
+    },
+    options,
+  );
+}
+/** The page and session a transfer reserved. */
+export interface Transfer {
+  contents: WebContents;
+  session: TabSession;
+  epoch: number;
+}
+type TransferDeps = Pick<RouteDeps, "controller" | "sessions">;
+// Reserves the one transfer and looks up the page it will run on, before any
+// bytes are read.
+export function beginTransfer(
+  deps: TransferDeps,
+  tabId: string,
+): { prepared: Transfer; release(): void } {
+  const release = takeTransfer();
+  if (!release)
+    return fail("upload_busy", "Another file transfer is in progress.");
+  try {
+    const contents = deps.controller.getWebContents(tabId);
+    if (!contents || contents.isDestroyed())
+      return fail("no_web_page", "Open a web page before uploading files.");
+    const session = deps.sessions.get(tabId);
+    if (!session || session.contents !== contents)
+      return fail(
+        "debugger_busy",
+        "Kamapathy lost its connection to this tab. Try again shortly.",
+        { reason: "unavailable" },
+      );
+    return { prepared: { contents, session, epoch: session.epoch }, release };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+/** Whether the page and session the transfer reserved are still the tab's. */
+export function sameTransfer(
+  deps: TransferDeps,
+  tabId: string,
+  transfer: Transfer,
+): boolean {
+  return (
+    !transfer.contents.isDestroyed() &&
+    deps.controller.getWebContents(tabId) === transfer.contents &&
+    deps.sessions.get(tabId) === transfer.session &&
+    transfer.session.epoch === transfer.epoch
+  );
+}
+
 export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
   const {
     controller,
     authority,
     actions: { evaluatePage, executeToolAction },
-    sessions,
     navigation,
-    receipts,
     presence,
   } = deps;
   const { authorizeTab, authorizeSpace } = authority;
-  let uploading = false;
   // One scope per action, so its result names the popups, dialogs, download
   // and refused requests that action caused.
   const runAction = (
@@ -36,7 +112,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     run: RouteCall["run"],
   ) =>
     RECEIPT_ACTIONS.includes(action.type)
-      ? receipts.with(tabId, () => executeToolAction(tabId, action, run))
+      ? withReceipt(deps, tabId, () => executeToolAction(tabId, action, run))
       : executeToolAction(tabId, action, run);
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
     send(
@@ -201,59 +277,19 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       ]),
     ),
     "POST /tabs/:id/upload": {
-      // Only this fixed route accepts a larger body. Reserve one transfer
+      // Only the file routes accept a larger body. Reserve the one transfer
       // before reading bytes, so concurrent uploads cannot multiply memory.
-      beforeBody: ({ tab }) => {
-        if (uploading)
-          return fail(
-            "upload_busy",
-            "Another file transfer is in progress.",
-          );
-        uploading = true;
-        const release = () => {
-          uploading = false;
-        };
-        try {
-          const contents = controller.getWebContents(tab!.id);
-          if (!contents || contents.isDestroyed())
-            return fail(
-              "no_web_page",
-              "Open a web page before uploading files.",
-            );
-          const session = sessions.get(tab!.id);
-          if (!session || session.contents !== contents)
-            return fail(
-              "debugger_busy",
-              "Kamapathy lost its connection to this tab. Try again shortly.",
-              { reason: "unavailable" },
-            );
-          return {
-            prepared: { contents, session, epoch: session.epoch },
-            release,
-          };
-        } catch (error) {
-          release();
-          throw error;
-        }
-      },
+      beforeBody: ({ tab }) => beginTransfer(deps, tab!.id),
       handler: async ({ response, body, tab, run, prepared }) => {
-        const { contents, session, epoch } = prepared as {
-          contents: WebContents;
-          session: TabSession;
-          epoch: number;
-        };
-        if (
-          contents.isDestroyed() ||
-          controller.getWebContents(tab!.id) !== contents ||
-          sessions.get(tab!.id) !== session ||
-          session.epoch !== epoch
-        )
+        const transfer = prepared as Transfer;
+        if (!sameTransfer(deps, tab!.id, transfer))
           return fail(
             "page_changed",
             "The page changed during the transfer. Take a fresh snapshot.",
           );
+        const { session } = transfer;
         const payload = uploadFields(body!);
-        const result = await receipts.with(tab!.id, async () => {
+        const result = await withReceipt(deps, tab!.id, async () => {
           const selected = await evaluatePage(
             tab!.id,
             session,

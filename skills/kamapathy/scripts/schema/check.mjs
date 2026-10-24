@@ -288,6 +288,25 @@ function argumentFits(value, arg) {
       return (
         Array.isArray(value) && value.every((item) => typeof item === "string")
       );
+    // A dialog policy, or null to clear it. Its fields travel as a body, so
+    // the route's own check names them before the request goes out.
+    case "dialogPolicy":
+      return (
+        value === null || (plain(value) && typeof value.accept === "boolean")
+      );
+    // Local file paths for a file input. An empty list is a selection too.
+    case "files":
+      return (
+        Array.isArray(value) &&
+        value.length <= (arg.max ?? 8) &&
+        value.every((item) => typeof item === "string" && item.trim() !== "")
+      );
+    // Credentials for one origin, or null to forget them. Their fields
+    // travel as a body, so the route's own check names them.
+    case "credentials":
+      return (
+        value === null || (plain(value) && typeof value.origin === "string")
+      );
     // A Page, a tab id or a label.
     case "page":
       return typeof value === "string"

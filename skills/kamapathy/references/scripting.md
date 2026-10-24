@@ -71,6 +71,8 @@ A page argument is a `Page`, a tab ID or a label such as `"p2"`. Labels are neve
 | `tabs()` | `Page[]` | `GET /spaces/:id/tabs`; every tab, the person's included |
 | `adopt(page)` | `Page` | `POST /tabs/:id/adopt`; makes a page the agent did not open its own, keeping its label, within the page budget |
 | `release(page)` | `Page` | `POST /tabs/:id/release`; gives such a page back to the person, still open; `release_refused` for a page the agent opened |
+| `downloads()` | `Download[]` | `GET /spaces/:id/downloads`; the downloads this space holds, newest first, which are only the ones an agent armed |
+| `setHTTPCredentials(credentials)` | `{ ok, origin? }` | `POST`, `DELETE /spaces/:id/http-credentials`; `{ origin, username, password }` stores a name and password for one http or https origin of this space, in memory only, and `null` forgets every origin. They answer the first server challenge from that origin in this space's own pages; a repeat, any proxy challenge and every certificate request go to the person |
 | `setStatus(text)` | `{ ok, status? }` | `POST /spaces/:id/status`; shows the person what the agent is doing, in at most 120 characters; `null` or `""` clears it, and `status` follows |
 | `fail(message)` | `{ ok, owner: "human", state: "failed", status }` | `POST /spaces/:id/fail`; reports that the task cannot be done, in at most 300 characters, and hands the space to the person with the message as its status; later calls throw `human_control` with `reason: "failed"` until `resume` or the person's Let agent continue |
 | `handoff()` | `{ ok, owner: "human" }` | `POST /spaces/:id/handoff` |
@@ -99,6 +101,11 @@ Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`)
 | `wait({ selector?, text?, timeoutMs? })` | `{ ok }` | 0 to 15000 ms, default 5000 |
 | `batch(actions)` | `{ ok: true, results }` | 1 to 20 actions with the schema in actions.md; a failure throws, see below |
 | `upload(ref, files)` | `{ ok, selected }` | A file input ref and 1 to 8 local paths, 16 MiB together; the site may upload at once |
+| `setInputFiles(target, files, options?)` | `{ ok, selected }` and the receipt fields | Any ref or selector, including one that matches a hidden element, retargeted to the file input a person would use: the input itself, a label's control, the nearest enclosing label's control, or the single file input inside the match. 0 to 8 local paths, 16 MiB together, and `[]` clears the input; `timeout` waits for the target, 3000 ms by default |
+| `waitForEvent(event, options?)` | `Page`, `Download`, `FileChooser` or the dialog record | `"popup"`, `"download"`, `"filechooser"` or `"dialog"`. Call it before the action that causes the event: the arm is sent as the method is called, and every later call on this page waits for the arm. `timeout` is 1 to 60000 ms, 10000 by default, counted from arming, and `timeout: 0` throws `invalid_option` |
+| `popups()` | `Page[]` | The open tabs this tab opened. Listing them leaves them marked new |
+| `setDialogPolicy(policy)` | `{ policy }` | `{ accept, promptText?, times = 1, lifetime = 60000 }` arms the tab's next `times` confirms and prompts, 1 to 20 of them, and `null` clears it. Without a policy a confirm returns false and a prompt returns null, and an accepted prompt returns `promptText` or the dialog's own default |
+| `dialogs()` | `{ policy, dialogs }` | The policy and the last 20 dialogs Kamapathy answered in this tab, oldest first, each `{ type, message, defaultValue?, answer, promptText?, url, at }` |
 | `screenshot({ path?, fullPage?, clip?, scale?, timeout? })` | the PNG `Buffer` | The viewport, the whole page with `fullPage`, or a `clip` of `{x, y, width, height}` in CSS pixels; `scale` is `"css"` by default, unlike Playwright, and `"device"` keeps device pixels; the option is `timeout`, not `timeoutMs`; a `path` is written too, never overwriting. Level 3 |
 | `screenshot(path)` | the absolute path | Viewport PNG at CSS scale; never overwrites a file; the window may be hidden or minimized |
 | `pdfText({ from?, to?, maxChars?, timeout? })` | `{ url, title, pageCount, from, to, pages, chars, truncated, nextPage?, noText? }` | The text of a PDF the tab shows, by page: at most 500 pages and `maxChars` characters, 20000 by default; `timeout` is sent as `timeoutMs` |
@@ -106,6 +113,8 @@ Fields: `id`, `label`, `spaceId`, `openedBy` (`"agent"`, `"page"` or `"person"`)
 | `close()` | `{ ok, closed?, replacement? }` | Retires the label; closing a space's last page leaves a blank page with the next label in its place |
 
 Every input call takes a final options object carrying `label`, a few words naming the step in at most 60 characters, as in `await page.click(ref, { label: "Open the details" })`. The label shows beside the agent's cursor and under the space's name while the call runs and for five seconds after it ends, and stays on that action's activity entry; a call without one leaves no label behind. Observation calls take no label, and an unknown or invalid option throws `invalid_option` before anything is sent, naming the shape it expects, as in `page.click(target, { label? })`. Keep field values, secrets and personal data out of labels.
+
+`click`, `fill`, `press`, `scroll`, `drag`, `upload` and `setInputFiles`, as calls and as batch steps, also report what the action caused, each field only when it applies: `popups: [{ id, label, url }]` for the tabs this tab opened, `dialog` and `moreDialogs` for the dialogs Kamapathy answered in it, `download: { id, suggestedFilename, url }` for a file it kept or `{ blocked: true, suggestedFilename, url }` for one it cancelled because nothing was armed, and `deniedRequests: [{ origin, permission }]` for the requests it refused the site since this tab's last result. When a run ends it reads the popups of the tabs it touched, prints `notice: unused page p3 opened by p1: <url>` for up to 20 popups nothing reported and one line counting the rest, and deletes the downloads it received.
 
 Scroll in bounded steps until something appears or nothing moves, never in an open-ended loop:
 
@@ -121,6 +130,31 @@ for (let step = 0; step < 20; step++) {
 }
 console.log(found ? "Found the older posts." : "Stopped without finding the older posts.");
 ```
+
+## Download
+
+A `Download` comes from `waitForEvent("download")` or `space.downloads()`, and only a download an agent armed is ever kept. Its record is `{ id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure }`, where `state` is `"progressing"`, `"completed"`, `"cancelled"` or `"interrupted"` and `failure` is `null`, `"cancelled"`, `"interrupted"` or `"too_large"`. The bytes stay in a private folder under Kamapathy's profile until they are read; no route returns a path on the browser machine.
+
+| Call | Returns | Route |
+| --- | --- | --- |
+| `url()` | string | None: the address the download came from |
+| `suggestedFilename()` | string | None: the name the site suggested |
+| `page()` | `Page` | None: the page it started in, which may since have closed |
+| `saveAs(path, { timeout? })` | the absolute path written | `POST /downloads/:id/wait` in 30-second polls, then `GET /downloads/:id/content`; an exclusive create at mode 0600 with missing folders made, `file_exists` instead of overwriting anything, and `download_interrupted` when the bytes stop arriving. `timeout` is what is left of the run by default |
+| `path()` | the absolute path of a private copy | The same two routes; the copy sits in a folder only this account can read and goes with `delete()` or the end of the process |
+| `failure()` | `null` or the failure string | `GET /downloads/:id` |
+| `cancel()` | `{ download }` | `POST /downloads/:id/cancel`; a finished download is left as it is |
+| `delete()` | `{ ok }` | `DELETE /downloads/:id`; it also removes the copy `path()` wrote |
+
+## File chooser
+
+A `FileChooser` comes from `waitForEvent("filechooser")`. Every file chooser in an agent-controlled tab is intercepted, so no native panel reaches the person's screen: an action that opens a chooser nothing armed fails with `file_chooser_opened` after the input gets a `cancel` event. A chooser is valid until it is used, for 60 seconds, until its frame navigates and until the person takes over; `setFiles` on one that has gone answers `file_chooser_not_found`.
+
+| Call | Returns | Route |
+| --- | --- | --- |
+| `page()` | `Page` | None: the page whose file chooser this is |
+| `isMultiple()` | boolean | None: whether the input takes more than one file |
+| `setFiles(files)` | `{ ok, selected }` | `POST /file-choosers/:id/files`; 0 to 8 local paths, 16 MiB together, on the chooser's own input even after the page removed it, and `[]` cancels the chooser |
 
 ## Errors
 
@@ -142,13 +176,15 @@ The client's own codes:
 | `invalid_argument` | Arguments are missing, extra or of the wrong kind; `entry`, `expected`. `space.finish()` without `keep` throws `space.finish got no options. Expected { keep: "all" \| page[] }.` before sending anything |
 | `app_outdated` | The running Kamapathy predates this call or option; `entry`, `option`, `required`, `available`, `appVersion`. Ask the person to update Kamapathy, and never work around it |
 | `timeout` | The request timed out. The action may still have happened |
+| `file_exists` | A download would have overwritten a file, so nothing was written; `path` |
+| `download_interrupted` | A download's bytes stopped arriving, because the person took the space or it was deleted, so the incomplete file was removed; `downloadId`, `path` |
 | `request_too_large`, `invalid_response`, `request_failed` | The body is larger than its route accepts, the answer was not what the route returns, or the request failed without a code |
 
-Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `invalid_field`, `tab_unmanaged`, `page_budget`, `space_ended`, `not_pdf` or `pdf_not_refetchable`; `help("errors")` lists them all. A target adds `invalid_selector` with its `reason`, `forms` and often a `hint`, `unknown_ref` for a ref no snapshot of that page issued, `no_match` with `waitedMs`, and `ambiguous_match` with `count`, `visible`, `hidden`, `actionable` and up to 3 `candidates` to act on. A snapshot adds `invalid_cursor` and `page_changed` for a cursor from another scope or document, and a capture adds `clip_outside_page` and `screenshot_too_large`.
+Errors from Kamapathy keep their codes, such as `stale_ref`, `human_control`, `element_obscured`, `invalid_target`, `invalid_field`, `tab_unmanaged`, `page_budget`, `space_ended`, `not_pdf` or `pdf_not_refetchable`; `help("errors")` lists them all. A target adds `invalid_selector` with its `reason`, `forms` and often a `hint`, `unknown_ref` for a ref no snapshot of that page issued, `no_match` with `waitedMs`, and `ambiguous_match` with `count`, `visible`, `hidden`, `actionable` and up to 3 `candidates` to act on. A snapshot adds `invalid_cursor` and `page_changed` for a cursor from another scope or document, and a capture adds `clip_outside_page` and `screenshot_too_large`. An event wait adds `expectation_pending`, `expectation_not_found` and `expectation_timeout`; a download adds `download_not_found`, `download_limit`, `download_not_finished`, `download_failed` and `download_timeout`; and a file call adds `multiple_file_inputs`, `file_chooser_opened` and `file_chooser_not_found`.
 
 **Hard stops.** In `run`, these errors stop the run for good: `human_control` with reason `manual` or `handoff` (the person took over, or you handed them the space), `space_ended` with `endedBy: "person"` (they stopped the agent there), and `automation_stopped` or `not_connected` with reason `access_off`. The first one gets `hardStop: true`, catching it changes nothing, and every later call throws a copy with `hardStop: true` without sending anything. The run drops its output, prints only Kamapathy's guidance for that cause, and exits with status 3. Stop and tell the person; do not retry or call resume until they ask.
 
-**Errors a script can wait out.** A `human_control` with reason `failed` is your own report: nothing new is waiting, so tell the person and stop instead of resuming. A `human_control` with any further reason is a hold that only the person can answer: catch it, tell the person what is waiting for them, and call `space.waitForControl()`, which returns once control comes back, or ends with `space_ended` if the person stops the agent meanwhile. An uncaught hold ends the run with status 1 and the line `Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control <space-id> and start a new run when it returns.` `control_timeout` and `busy`, which may carry `retryAfterMs`, are retryable. `space_ended` after your own `finish` is ordinary: open or create another space.
+**Errors a script can wait out.** A `human_control` with reason `failed` is your own report: nothing new is waiting, so tell the person and stop instead of resuming. A `human_control` with any further reason is a hold that only the person can answer: catch it, tell the person what is waiting for them, and call `space.waitForControl()`, which returns once control comes back, or ends with `space_ended` if the person stops the agent meanwhile. An uncaught hold ends the run with status 1 and the line `Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control <space-id> and start a new run when it returns.` `control_timeout` and `busy`, which may carry `retryAfterMs`, are retryable, and so are `upload_busy`, once the other file transfer ends, and `download_timeout`, which carries the bytes so far: ask again to keep waiting for that download. `expectation_timeout`, `expectation_pending`, `download_limit` and `file_chooser_opened` are not. Arm one wait per tab and event before the action that causes it, delete a held download when the space already holds eight, and use `setInputFiles` for an input the page already has. `space_ended` after your own `finish` is ordinary: open or create another space.
 
 **Where it failed.** A failed run prints the headline, `error: <code>: <message>` or `error: <Name>: <message>` for a built-in error, then `  at <label>:<line>:<column>` for the first place in the script, where the label is the file as typed, `stdin` or `-e`. A retryable error adds `Kamapathy: Nothing reached the page, so the same command can be retried.`, and one that reached the page `Kamapathy: The action reached the page before it failed. Inspect the page before retrying.` Up to two `hint:` lines follow, for a page global such as `document`, which does not exist in Node.js, or a misspelled method. A script that does not compile shows the line and a caret:
 

@@ -143,6 +143,13 @@ export const ERRORS = {
     [],
     2,
   ),
+  file_chooser_not_found: code(
+    404,
+    false,
+    "No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out.",
+    [],
+    2,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -373,6 +380,20 @@ export const ERRORS = {
     422,
     false,
     "The ref is not a file input that can take these files.",
+  ),
+  multiple_file_inputs: code(
+    422,
+    false,
+    "The target holds several file inputs, so none of them is the one to file.",
+    ["count"],
+    2,
+  ),
+  file_chooser_opened: code(
+    422,
+    false,
+    "An action opened a file chooser no wait was armed for, so Kamapathy closed it.",
+    [],
+    2,
   ),
   invalid_value: code(422, false, "The control cannot take this value."),
   clip_outside_page: code(
@@ -652,6 +673,20 @@ export const ERRORS = {
     "helpers.mjs could not be loaded or its exports installed.",
     ["path", "export", "cause"],
     4,
+  ),
+  file_exists: code(
+    null,
+    false,
+    "The file a download would be written to exists, so nothing was written.",
+    ["path"],
+    2,
+  ),
+  download_interrupted: code(
+    null,
+    false,
+    "A download's bytes stopped arriving, so the incomplete file was removed.",
+    ["downloadId", "path"],
+    2,
   ),
 };
 

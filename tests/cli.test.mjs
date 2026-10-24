@@ -21,7 +21,7 @@ import {
   runCli,
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
-import { KamapathyError, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
+import { Download, FileChooser, KamapathyError, Page, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
 import { httpTimeout, queueNotice, takeNotices } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
@@ -1460,6 +1460,919 @@ describe("scripted sessions", () => {
     });
   });
 
+  // Section 7's waits: the arm is sent when waitForEvent is called, later
+  // calls on the page wait for it, and the long poll answers with the event.
+  const dialogRecord = {
+    type: "confirm",
+    message: "Delete this file?",
+    answer: "dismissed",
+    url: "https://example.test/reserve",
+    at: 1700,
+  };
+
+  it("waitForEvent refuses timeout 0 with invalid_option before anything is sent", async () => {
+    const api = fakeApi(sectionTwo);
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    const sent = api.requests.length;
+    await expect(page.waitForEvent("popup", { timeout: 0 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.waitForEvent",
+      option: "timeout",
+      message:
+        "page.waitForEvent got an invalid option: timeout must be an integer from 1 to 60000. Expected page.waitForEvent(event, { timeout? }).",
+    });
+    await expect(page.waitForEvent("popup", { timeoutMs: 1000 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "timeoutMs",
+      suggestion: "timeout",
+    });
+    await expect(page.waitForEvent("pop")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.waitForEvent",
+    });
+    expect(api.requests.length).toBe(sent);
+  });
+
+  it("waitForEvent arms first and holds later calls on that page until the arm is acknowledged, then long-polls and resolves with a Page for a popup and the record for a dialog", async () => {
+    let acknowledge;
+    const held = new Promise((done) => {
+      acknowledge = done;
+    });
+    let arms = 0;
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": async (body) => {
+        arms += 1;
+        if (arms === 1) await held;
+        return Response.json(
+          {
+            expectation: {
+              id: body.event === "popup" ? "x1" : "x2",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 2000,
+            },
+          },
+          { status: 201 },
+        );
+      },
+      "POST /expectations/x1/wait": { popup: labeled[1] },
+      "POST /expectations/x2/wait": { dialog: dialogRecord },
+      "GET /tabs/tab-1/popups": {
+        popups: [{ id: "tab-2", label: "p2", url: "https://example.test/slots", openedAt: 10, unseen: true }],
+      },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    await page.snapshot();
+    const sent = api.requests.length;
+    // The arm leaves with the call itself; a second arm and the click queue
+    // behind it.
+    const next = page.waitForEvent("popup");
+    const alsoWaiting = page.waitForEvent("dialog");
+    const clicked = page.click("@e2");
+    await new Promise((done) => setImmediate(done));
+    expect(paths(api).slice(sent)).toEqual(["POST /tabs/tab-1/expectations"]);
+    acknowledge();
+    const popup = await next;
+    expect(await alsoWaiting).toEqual(dialogRecord);
+    expect(await clicked).toMatchObject({ ok: true });
+    // The first arm goes out alone; the rest follow once it is acknowledged.
+    const after = paths(api).slice(sent);
+    expect(after[0]).toBe("POST /tabs/tab-1/expectations");
+    expect([...after.slice(1)].sort()).toEqual([
+      "POST /expectations/x1/wait",
+      "POST /expectations/x2/wait",
+      "POST /tabs/tab-1/click",
+      "POST /tabs/tab-1/expectations",
+    ]);
+    expect(api.requests[sent].body).toEqual({ event: "popup" });
+    expect(api.requests.find((item) => item.path === "/expectations/x1/wait").body).toEqual({});
+    expect(popup).toBeInstanceOf(Page);
+    expect(popup).toMatchObject({
+      id: "tab-2",
+      label: "p2",
+      spaceId: "space-1",
+      openerId: "tab-1",
+      url: "https://example.test/slots",
+    });
+    // A dialog wait answers with the record as it was sent, and the client's
+    // timeout travels as the route's timeoutMs.
+    expect(await page.waitForEvent("dialog", { timeout: 5000 })).toEqual(dialogRecord);
+    expect(api.requests.at(-2).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    // With no arm live a call goes straight out, and popups lists the pages
+    // this page opened without clearing them.
+    const idle = api.requests.length;
+    await page.click("@e2");
+    const opened = await page.popups();
+    expect(paths(api).slice(idle)).toEqual(["POST /tabs/tab-1/click", "GET /tabs/tab-1/popups"]);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toBeInstanceOf(Page);
+    expect(opened[0]).toMatchObject({ id: "tab-2", label: "p2", spaceId: "space-1", openerId: "tab-1" });
+  });
+
+  it("a wait that times out throws expectation_timeout with awaited, event and timeoutMs, and a second wait for the same event throws expectation_pending", async () => {
+    let arm = (body) =>
+      Response.json(
+        { expectation: { id: "x9", event: body.event, tabId: "tab-1", expiresAt: 2000 } },
+        { status: 201 },
+      );
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) => arm(body),
+      "POST /expectations/x9/wait": () =>
+        Response.json(
+          {
+            error: {
+              code: "expectation_timeout",
+              message: "No popup arrived within 5000 ms. Arm another wait before the action that causes it.",
+              awaited: "event",
+              event: "popup",
+              timeoutMs: 5000,
+            },
+          },
+          { status: 504 },
+        ),
+    });
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const client = await connect({ env, fetch: api.fetch, health: level2 });
+      const page = (await client.space("space-1")).page("p1");
+      await expect(page.waitForEvent("popup", { timeout: 5000 })).rejects.toMatchObject({
+        code: "expectation_timeout",
+        entry: "page.waitForEvent",
+        awaited: "event",
+        event: "popup",
+        timeoutMs: 5000,
+        status: 504,
+      });
+      // The poll keeps the route's own budget whatever the caller's timeout,
+      // so the server answers the timeout instead of the transport.
+      expect(timeouts).toHaveBeenLastCalledWith(65000);
+      // A second arm for the same event is refused, and the call queued
+      // behind the failed arm fails with it instead of running unarmed.
+      arm = () =>
+        Response.json(
+          {
+            error: {
+              code: "expectation_pending",
+              message: "This page is already waiting for a popup. Wait for it, or cancel that wait before arming another.",
+              event: "popup",
+              expectationId: "x9",
+            },
+          },
+          { status: 409 },
+        );
+      const clicks = paths(api).filter((item) => item === "POST /tabs/tab-1/click").length;
+      const failing = page.waitForEvent("popup");
+      const queued = page.click("@e2");
+      await expect(failing).rejects.toMatchObject({
+        code: "expectation_pending",
+        event: "popup",
+        expectationId: "x9",
+      });
+      await expect(queued).rejects.toMatchObject({ code: "expectation_pending" });
+      expect(paths(api).filter((item) => item === "POST /tabs/tab-1/click").length).toBe(clicks);
+      // The failed arm is cleared, so the next call sends as usual.
+      expect(await page.click("@e2")).toMatchObject({ ok: true });
+    } finally {
+      timeouts.mockRestore();
+    }
+  });
+
+  it("setDialogPolicy sends accept, promptText, times and lifetimeMs, setDialogPolicy(null) sends DELETE, and dialogs() returns the policy and records", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/dialog-policy": (body) =>
+        Response.json({
+          policy: {
+            accept: body.accept,
+            ...(body.promptText === undefined ? {} : { promptText: body.promptText }),
+            remaining: body.times ?? 1,
+            expiresAt: 5000,
+          },
+        }),
+      "DELETE /tabs/tab-1/dialog-policy": { policy: null },
+      "GET /tabs/tab-1/dialogs": { policy: { accept: true, remaining: 2, expiresAt: 5000 }, dialogs: [dialogRecord] },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    expect(
+      await page.setDialogPolicy({ accept: true, promptText: "Avery Quinn", times: 2, lifetime: 120000 }),
+    ).toEqual({ policy: { accept: true, promptText: "Avery Quinn", remaining: 2, expiresAt: 5000 } });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/dialog-policy",
+      body: { accept: true, promptText: "Avery Quinn", times: 2, lifetimeMs: 120000 },
+    });
+    await page.setDialogPolicy({ accept: false });
+    expect(api.requests.at(-1).body).toEqual({ accept: false });
+    expect(await page.setDialogPolicy(null)).toEqual({ policy: null });
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    expect(await page.dialogs()).toEqual({
+      policy: { accept: true, remaining: 2, expiresAt: 5000 },
+      dialogs: [dialogRecord],
+    });
+    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/tabs/tab-1/dialogs", body: undefined });
+    // A policy that is neither a plain object with an accept nor null, and a
+    // field outside its range, are refused before anything is sent.
+    const sent = api.requests.length;
+    for (const policy of ["accept", 1, {}, { accept: "yes" }, [], undefined])
+      await expect(page.setDialogPolicy(policy), String(policy)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.setDialogPolicy",
+        expected: "page.setDialogPolicy({ accept, promptText?, times?, lifetime? }) or page.setDialogPolicy(null)",
+      });
+    await expect(page.setDialogPolicy({ accept: true, lifetime: 999 })).rejects.toMatchObject({
+      code: "invalid_field",
+      field: "lifetimeMs",
+      entry: "page.setDialogPolicy",
+    });
+    await expect(page.setDialogPolicy({ accept: true, times: 21 })).rejects.toMatchObject({
+      code: "invalid_field",
+      field: "times",
+    });
+    await expect(page.setDialogPolicy({ accept: true, promtText: "Avery" })).rejects.toMatchObject({
+      code: "unknown_field",
+      field: "promtText",
+      suggestion: "promptText",
+    });
+    expect(api.requests.length).toBe(sent);
+  });
+
+  it("expect, wait-expectation, dialog-policy and dialogs print their lines, and an action prints its receipt lines in order", async () => {
+    const receipt = {
+      ok: true,
+      url: "https://example.test/reserve",
+      popups: [{ id: "tab-3", label: "p3", url: "https://example.test/share" }],
+      dialog: dialogRecord,
+      moreDialogs: 2,
+      download: { id: "d1", suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" },
+      deniedRequests: [{ origin: "https://maps.example", permission: "location" }],
+    };
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) =>
+        Response.json({ expectation: { id: "x1", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+      "POST /expectations/x1/wait": { popup: labeled[1] },
+      "POST /expectations/x2/wait": { dialog: dialogRecord },
+      "POST /expectations/x3/wait": {
+        download: {
+          id: "d1",
+          tabId: "tab-1",
+          url: "https://example.test/report.pdf",
+          suggestedFilename: "report.pdf",
+          mimeType: "application/pdf",
+          state: "progressing",
+          receivedBytes: 0,
+          totalBytes: 10,
+          failure: null,
+        },
+      },
+      "POST /expectations/x4/wait": { fileChooser: { id: "c1", tabId: "tab-1", multiple: true, accept: [".pdf"] } },
+      "POST /tabs/tab-1/dialog-policy": (body) =>
+        Response.json({ policy: { accept: body.accept, remaining: body.times ?? 1, expiresAt: 9 } }),
+      "DELETE /tabs/tab-1/dialog-policy": { policy: null },
+      "GET /tabs/tab-1/dialogs": {
+        policy: { accept: false, remaining: 1, expiresAt: 9 },
+        dialogs: [
+          dialogRecord,
+          {
+            type: "prompt",
+            message: "Your name?",
+            defaultValue: "",
+            answer: "accepted",
+            promptText: "Avery",
+            url: "https://example.test/reserve",
+            at: 1800,
+          },
+        ],
+      },
+      "POST /tabs/tab-1/click": () => Response.json(receipt),
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const armed = sink();
+    expect(await runCli(["expect", "tab-1", "popup"], { ...options, stdout: armed })).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ event: "popup", timeoutMs: 60000 });
+    expect(armed.text()).toBe("expectation x1 popup tab-1\n");
+    const timed = sink();
+    await runCli(["expect", "tab-1", "dialog", "--timeout", "5000"], { ...options, stdout: timed });
+    expect(api.requests.at(-1).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    expect(timed.text()).toBe("expectation x1 dialog tab-1\n");
+    for (const [id, printed] of [
+      ["x1", "popup p2 tab-2 https://example.test/slots\n"],
+      ["x2", 'dialog confirm "Delete this file?" dismissed\n'],
+      ["x3", "download d1 report.pdf\n"],
+      ["x4", "file-chooser c1 multiple\n"],
+    ]) {
+      const stdout = sink();
+      expect(await runCli(["wait-expectation", id], { ...options, stdout }), id).toBe(0);
+      expect(api.requests.at(-1), id).toEqual({ method: "POST", path: `/expectations/${id}/wait`, body: {} });
+      expect(stdout.text(), id).toBe(printed);
+    }
+    const policy = sink();
+    expect(
+      await runCli(["dialog-policy", "tab-1", "accept", "--times", "2", "--lifetime", "120000", "--prompt-stdin"], {
+        ...options,
+        stdin: Readable.from(["Avery Quinn"]),
+        stdout: policy,
+      }),
+    ).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ accept: true, times: 2, lifetimeMs: 120000, promptText: "Avery Quinn" });
+    expect(policy.text()).toBe("policy accept 2 left\n");
+    const dismissed = sink();
+    await runCli(["dialog-policy", "tab-1", "dismiss"], { ...options, stdout: dismissed });
+    expect(api.requests.at(-1).body).toEqual({ accept: false });
+    expect(dismissed.text()).toBe("policy dismiss 1 left\n");
+    const cleared = sink();
+    await runCli(["dialog-policy", "tab-1", "reset"], { ...options, stdout: cleared });
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    expect(cleared.text()).toBe("policy none\n");
+    const logged = sink();
+    expect(await runCli(["dialogs", "tab-1"], { ...options, stdout: logged })).toBe(0);
+    expect(logged.text()).toBe(
+      ['policy dismiss 1 left', 'confirm "Delete this file?" dismissed', 'prompt "Your name?" accepted', ""].join("\n"),
+    );
+    const asJson = sink();
+    await runCli(["dialogs", "tab-1", "--json"], { ...options, stdout: asJson });
+    expect(JSON.parse(asJson.text()).dialogs).toHaveLength(2);
+    // An action prints its own line, then what it caused, in one order.
+    const clicked = sink();
+    expect(await runCli(["click", "tab-1", "@e2"], { ...options, stdout: clicked })).toBe(0);
+    expect(clicked.text()).toBe(
+      [
+        "ok",
+        "opened p3 tab-3 https://example.test/share",
+        'confirm "Delete this file?" dismissed',
+        "and 2 more dialogs",
+        "download d1 report.pdf",
+        "refused location for https://maps.example",
+        "",
+      ].join("\n"),
+    );
+    // A blocked download says so, and one further dialog reads as one.
+    const blocked = sink();
+    receipt.download = { blocked: true, suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" };
+    receipt.moreDialogs = 1;
+    receipt.popups = [{ id: "tab-3", url: "https://example.test/share" }];
+    await runCli(["click", "tab-1", "@e2"], { ...options, stdout: blocked });
+    expect(blocked.text()).toBe(
+      [
+        "ok",
+        "opened tab-3 tab-3 https://example.test/share",
+        'confirm "Delete this file?" dismissed',
+        "and 1 more dialog",
+        "download blocked report.pdf",
+        "refused location for https://maps.example",
+        "",
+      ].join("\n"),
+    );
+    // Bad arguments never reach the socket.
+    const sent = api.requests.length;
+    for (const [args, message] of [
+      [["expect", "tab-1", "popup", "--timeout", "0"], "--timeout must be an integer from 1 to 60000."],
+      [["expect", "tab-1", "pop"], "Use expect <tab-id> popup|download|filechooser|dialog."],
+      [["dialog-policy", "tab-1", "maybe"], "Use dialog-policy <tab-id> accept|dismiss|reset."],
+      [["dialog-policy", "tab-1", "reset", "--times", "2"], "dialog-policy reset takes no other options."],
+      [["dialog-policy", "tab-1", "accept", "--times", "21"], "--times must be an integer from 1 to 20."],
+      [["dialog-policy", "tab-1", "accept", "--lifetime", "999"], "--lifetime must be an integer from 1000 to 600000."],
+    ])
+      await expect(runCli(args, { ...options, stdout: sink() }), args.join(" ")).rejects.toThrow(message);
+    expect(api.requests.length).toBe(sent);
+    const help = sink();
+    expect(await runCli(["help", "expect"], { env, stdout: help })).toBe(0);
+    expect(help.text()).toContain("expect <tab-id> <event> [--timeout <ms>]");
+    expect(help.text()).toContain("Route: POST /tabs/:id/expectations");
+    const commands = sink();
+    await runCli(["help"], { env, stdout: commands });
+    for (const usage of [
+      "wait-expectation <id>",
+      "dialog-policy <tab-id> accept|dismiss|reset",
+      "dialogs <tab-id>",
+    ])
+      expect(commands.text()).toContain(usage);
+  });
+
+  // Section 7's downloads, file inputs, choosers and credentials.
+  const heldDownload = {
+    id: "d1",
+    tabId: "tab-1",
+    url: "https://example.test/report.pdf",
+    suggestedFilename: "report.pdf",
+    mimeType: "application/pdf",
+    state: "progressing",
+    receivedBytes: 0,
+    totalBytes: 4,
+    failure: null,
+  };
+  const doneDownload = { ...heldDownload, state: "completed", receivedBytes: 4, totalBytes: 4 };
+  const otherDownload = {
+    ...heldDownload,
+    id: "d2",
+    suggestedFilename: "slides.pdf",
+    receivedBytes: 1,
+    totalBytes: 10,
+  };
+  const downloadBytes = Buffer.from([1, 2, 3, 4]);
+  const bytesRoute = (bytes = downloadBytes, length = bytes.length) => () =>
+    new Response(bytes, {
+      headers: { "Content-Type": "application/octet-stream", "Content-Length": String(length) },
+    });
+  const scratchDirectory = async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kamapathy-download-test-"));
+    directories.push(directory);
+    return directory;
+  };
+
+  it("a Download waits in 30-second polls until it finishes, writes mode 0600 through missing folders, and path() gives a private copy delete() removes", async () => {
+    let waits = 0;
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /spaces/space-1/downloads": { downloads: [heldDownload] },
+      "GET /downloads/d1": { download: heldDownload },
+      "POST /downloads/d1/wait": () => {
+        waits += 1;
+        return waits === 1
+          ? refusal(504, {
+              code: "download_timeout",
+              message: "The download is still running.",
+              awaited: "download",
+              downloadId: "d1",
+              receivedBytes: 2,
+              totalBytes: 4,
+              timeoutMs: 30000,
+              retryable: true,
+            })()
+          : Response.json({ download: doneDownload });
+      },
+      "GET /downloads/d1/content": bytesRoute(),
+      "DELETE /downloads/d1": { ok: true },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const space = await client.space("space-1");
+    const [download] = await space.downloads();
+    expect(download).toBeInstanceOf(Download);
+    expect([download.url(), download.suggestedFilename()]).toEqual([heldDownload.url, "report.pdf"]);
+    expect(download.page()).toBeInstanceOf(Page);
+    expect(download.page().id).toBe("tab-1");
+    // A record still progressing is refreshed before failure() answers.
+    expect(await download.failure()).toBeNull();
+    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/downloads/d1", body: undefined });
+    const directory = await scratchDirectory();
+    const output = join(directory, "nested", "deep", "report.pdf");
+    const mark = api.requests.length;
+    expect(await download.saveAs(output)).toBe(output);
+    expect(await readFile(output)).toEqual(downloadBytes);
+    if (posix) expect((await stat(output)).mode & 0o777).toBe(0o600);
+    // Two 30-second polls, the server's own timeout asking again, then bytes.
+    expect(paths(api).slice(mark)).toEqual([
+      "POST /downloads/d1/wait",
+      "POST /downloads/d1/wait",
+      "GET /downloads/d1/content",
+    ]);
+    expect(api.requests.slice(mark, mark + 2).map((item) => item.body)).toEqual([
+      { timeoutMs: 30000 },
+      { timeoutMs: 30000 },
+    ]);
+    // The record is finished now, so nothing waits again, and the file stays.
+    const written = api.requests.length;
+    await expect(download.saveAs(output)).rejects.toMatchObject({ code: "file_exists", path: output });
+    expect(paths(api).slice(written)).toEqual([]);
+    expect(await readFile(output)).toEqual(downloadBytes);
+    expect(await download.failure()).toBeNull();
+    // path() keeps a private copy of its own, which delete() removes.
+    const copy = await download.path();
+    expect(await readFile(copy)).toEqual(downloadBytes);
+    expect(copy).not.toBe(output);
+    expect(await download.path()).toBe(copy);
+    if (posix) {
+      expect((await stat(copy)).mode & 0o777).toBe(0o600);
+      expect((await stat(dirname(copy))).mode & 0o777).toBe(0o700);
+    }
+    expect(await download.delete()).toEqual({ ok: true });
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/downloads/d1", body: undefined });
+    expect(existsSync(copy)).toBe(false);
+    expect(existsSync(output)).toBe(true);
+  });
+
+  it("a Download that failed throws download_failed, and cancel reports the record", async () => {
+    const cancelled = { ...heldDownload, state: "cancelled", failure: "cancelled" };
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /spaces/space-1/downloads": { downloads: [heldDownload] },
+      "POST /downloads/d1/cancel": { download: cancelled },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const [download] = await (await client.space("space-1")).downloads();
+    expect(await download.cancel()).toEqual({ download: cancelled });
+    expect(await download.failure()).toBe("cancelled");
+    const directory = await scratchDirectory();
+    await expect(download.saveAs(join(directory, "report.pdf"))).rejects.toMatchObject({
+      code: "download_failed",
+      failure: "cancelled",
+      entry: "download.saveAs",
+    });
+    expect(existsSync(join(directory, "report.pdf"))).toBe(false);
+  });
+
+  it("a stream that stops short removes the partial file and throws download_interrupted", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /spaces/space-1/downloads": { downloads: [doneDownload] },
+      "GET /downloads/d1/content": bytesRoute(Buffer.from([1, 2]), 4),
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const [download] = await (await client.space("space-1")).downloads();
+    const directory = await scratchDirectory();
+    const output = join(directory, "report.pdf");
+    await expect(download.saveAs(output)).rejects.toMatchObject({
+      code: "download_interrupted",
+      downloadId: "d1",
+      path: output,
+    });
+    expect(existsSync(output)).toBe(false);
+    // The same goes for the private copy, and nothing is left behind.
+    await expect(download.path()).rejects.toMatchObject({ code: "download_interrupted" });
+  });
+
+  it("save-download never overwrites", async () => {
+    const existing = await scratchFile();
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /downloads/d1": { download: doneDownload },
+      "GET /downloads/d1/content": bytesRoute(),
+      "DELETE /downloads/d1": { ok: true },
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    await expect(runCli(["save-download", "d1", existing], { ...options, stdout: sink() })).rejects.toMatchObject({
+      code: "file_exists",
+      path: existing,
+    });
+    expect(await readFile(existing)).toEqual(Buffer.from("{}"));
+    const target = `${existing}.pdf`;
+    const stdout = sink();
+    expect(await runCli(["save-download", "d1", target], { ...options, stdout })).toBe(0);
+    expect(stdout.text()).toBe(`saved ${target} (4 bytes)\n`);
+    expect(await readFile(target)).toEqual(downloadBytes);
+    const deleted = sink();
+    expect(await runCli(["delete-download", "d1"], { ...options, stdout: deleted })).toBe(0);
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/downloads/d1", body: undefined });
+    expect(deleted.text()).toBe("ok\n");
+  });
+
+  it("space.downloads lists Download objects and download arms, clicks and saves in one command", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "GET /spaces/space-1/downloads": { downloads: [doneDownload, otherDownload] },
+      "POST /tabs/tab-1/expectations": (body) =>
+        Response.json({ expectation: { id: "x3", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+      "POST /expectations/x3/wait": { download: doneDownload },
+      "GET /downloads/d1/content": bytesRoute(),
+      "POST /downloads/d1/cancel": { download: { ...doneDownload, state: "cancelled", failure: "cancelled" } },
+      "DELETE /downloads/d1": { ok: true },
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const client = await connect(options);
+    const list = await (await client.space("space-1")).downloads();
+    expect(list.map((item) => item instanceof Download)).toEqual([true, true]);
+    expect(list.map((item) => item.suggestedFilename())).toEqual(["report.pdf", "slides.pdf"]);
+    const listed = sink();
+    expect(await runCli(["downloads", "space-1"], { ...options, stdout: listed })).toBe(0);
+    expect(listed.text()).toBe(["d1 completed 4/4 report.pdf", "d2 progressing 1/10 slides.pdf", ""].join("\n"));
+    const stopped = sink();
+    expect(await runCli(["cancel-download", "d1"], { ...options, stdout: stopped })).toBe(0);
+    expect(stopped.text()).toBe("d1 cancelled 4/4 report.pdf\n");
+    // One command arms the wait, clicks, waits for the file and saves it.
+    const directory = await scratchDirectory();
+    const output = join(directory, "report.pdf");
+    const mark = api.requests.length;
+    const stdout = sink();
+    expect(await runCli(["download", "tab-1", "@e2", output], { ...options, stdout })).toBe(0);
+    expect(stdout.text()).toBe(`saved ${output} (4 bytes)\n`);
+    expect(await readFile(output)).toEqual(downloadBytes);
+    const after = paths(api).slice(mark);
+    expect(after[0]).toBe("POST /tabs/tab-1/expectations");
+    expect([...after.slice(1, 3)].sort()).toEqual(["POST /expectations/x3/wait", "POST /tabs/tab-1/click"]);
+    expect(after.slice(3)).toEqual(["GET /downloads/d1/content"]);
+    expect(api.requests[mark].body).toEqual({ event: "download", timeoutMs: 60000 });
+    // The arm follows --timeout, and nothing downloaded reads as the wait's
+    // own error.
+    const timed = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) =>
+        Response.json({ expectation: { id: "x3", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+      "POST /expectations/x3/wait": refusal(504, {
+        code: "expectation_timeout",
+        message: "No download arrived within 5000 ms.",
+        awaited: "event",
+        event: "download",
+        timeoutMs: 5000,
+      }),
+    });
+    await expect(
+      runCli(["download", "space-1:p1", "@e2", join(directory, "other.pdf"), "--timeout", "5000"], {
+        env,
+        fetch: timed.fetch,
+        health: level2,
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({ code: "expectation_timeout", event: "download" });
+    expect(timed.requests.find((item) => item.path === "/tabs/tab-1/expectations").body).toEqual({
+      event: "download",
+      timeoutMs: 5000,
+    });
+    expect(existsSync(join(directory, "other.pdf"))).toBe(false);
+  });
+
+  it("setInputFiles sends 0 to 8 files with their bytes, refuses 9 and a folder, and accepts a selector or a ref", async () => {
+    const prefix = await scratchFile();
+    const files = [`${prefix}.png`, `${prefix}.csv`];
+    const bytes = [Buffer.from([137, 80, 78, 71]), Buffer.from("a,b\n1,2\n")];
+    await Promise.all(files.map((path, index) => writeFile(path, bytes[index])));
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/set-input-files": (body) =>
+        Response.json({
+          ok: true,
+          selected: body.files.length,
+          ...(body.files.length
+            ? { popups: [{ id: "tab-3", label: "p3", url: "https://example.test/share" }] }
+            : {}),
+        }),
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const client = await connect(options);
+    const page = (await client.space("space-1")).page("p1");
+    expect(await page.setInputFiles("#resume", files)).toMatchObject({ ok: true, selected: 2 });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/set-input-files",
+      body: {
+        selector: "#resume",
+        files: [
+          { name: "fixture.json.png", type: "image/png", data: bytes[0].toString("base64") },
+          { name: "fixture.json.csv", type: "text/csv", data: bytes[1].toString("base64") },
+        ],
+      },
+    });
+    // A ref travels as ref, the timeout as timeoutMs, and an empty list clears.
+    expect(await page.setInputFiles("@e3", [], { timeout: 1000 })).toMatchObject({ ok: true, selected: 0 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e3", files: [], timeoutMs: 1000 });
+    // Nine files, a folder and a bad target never leave this computer.
+    const folder = await scratchDirectory();
+    const sent = api.requests.length;
+    await expect(page.setInputFiles("@e3", Array(9).fill(files[0]))).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.setInputFiles",
+      expected: "page.setInputFiles(target, files, { timeout? }) with 0 to 8 file paths",
+    });
+    await expect(page.setInputFiles("@e3", [folder])).rejects.toMatchObject({
+      code: "invalid_files",
+      entry: "page.setInputFiles",
+    });
+    await expect(page.setInputFiles("", files)).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(page.setInputFiles("@e3", files, { timeoutMs: 1000 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "timeoutMs",
+      suggestion: "timeout",
+    });
+    expect(api.requests.length).toBe(sent);
+    for (const [index, path] of files.entries()) expect(await readFile(path)).toEqual(bytes[index]);
+    // The CLI sends the same body and prints the receipt under its own line.
+    const stdout = sink();
+    expect(await runCli(["set-input-files", "tab-1", "#resume", ...files], { ...options, stdout })).toBe(0);
+    expect(stdout.text()).toBe(["ok: selected 2", "opened p3 tab-3 https://example.test/share", ""].join("\n"));
+    expect(api.requests.at(-1).body.files).toHaveLength(2);
+    expect(JSON.stringify(api.requests.at(-1).body)).not.toContain(prefix);
+    const cleared = sink();
+    expect(await runCli(["set-input-files", "tab-1", "@e3"], { ...options, stdout: cleared })).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e3", files: [] });
+    expect(cleared.text()).toBe("ok: selected 0\n");
+    const refused = sink();
+    await expect(
+      runCli(["set-input-files", "tab-1", "@e3", ...Array(9).fill(files[0])], { ...options, stdout: refused }),
+    ).rejects.toThrow("Select at most 8 file paths.");
+  });
+
+  it("a chooser's setFiles sends the same body, and FileChooser.isMultiple and page() read the arm's answer", async () => {
+    const file = await scratchFile();
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) =>
+        Response.json({ expectation: { id: "x4", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+      "POST /expectations/x4/wait": { fileChooser: { id: "c1", tabId: "tab-1", multiple: true, accept: [".pdf"] } },
+      "POST /file-choosers/c1/files": (body) => Response.json({ ok: true, selected: body.files.length }),
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const client = await connect(options);
+    const page = (await client.space("space-1")).page("p1");
+    const chooser = await page.waitForEvent("filechooser");
+    expect(chooser).toBeInstanceOf(FileChooser);
+    expect(chooser.isMultiple()).toBe(true);
+    expect(chooser.page()).toBeInstanceOf(Page);
+    expect(chooser.page().id).toBe("tab-1");
+    expect(await chooser.setFiles([file])).toEqual({ ok: true, selected: 1 });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/file-choosers/c1/files",
+      body: {
+        files: [{ name: "fixture.json", type: "application/json", data: Buffer.from("{}").toString("base64") }],
+      },
+    });
+    // An empty list cancels the chooser, and the same limits apply.
+    expect(await chooser.setFiles([])).toEqual({ ok: true, selected: 0 });
+    expect(api.requests.at(-1).body).toEqual({ files: [] });
+    const sent = api.requests.length;
+    await expect(chooser.setFiles(Array(9).fill(file))).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "fileChooser.setFiles",
+      expected: "fileChooser.setFiles(files) with 0 to 8 file paths",
+    });
+    await expect(chooser.setFiles("one")).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(api.requests.length).toBe(sent);
+    const stdout = sink();
+    expect(await runCli(["set-files", "c1", file], { ...options, stdout })).toBe(0);
+    expect(stdout.text()).toBe("ok: selected 1\n");
+    expect(api.requests.at(-1).path).toBe("/file-choosers/c1/files");
+    const cancelled = sink();
+    expect(await runCli(["set-files", "c1"], { ...options, stdout: cancelled })).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ files: [] });
+    expect(cancelled.text()).toBe("ok: selected 0\n");
+  });
+
+  it("http-credentials never echoes", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /spaces/space-1/http-credentials": (body) => Response.json({ ok: true, origin: body.origin }),
+      "DELETE /spaces/space-1/http-credentials": { ok: true },
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const client = await connect(options);
+    const space = await client.space("space-1");
+    expect(
+      await space.setHTTPCredentials({ origin: "https://example.test", username: "avery", password: "hunter2" }),
+    ).toEqual({ ok: true, origin: "https://example.test" });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/spaces/space-1/http-credentials",
+      body: { origin: "https://example.test", username: "avery", password: "hunter2" },
+    });
+    expect(await space.setHTTPCredentials(null)).toEqual({ ok: true });
+    expect(api.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: "/spaces/space-1/http-credentials",
+      body: undefined,
+    });
+    // A shape the route would refuse never leaves, and no message names a value.
+    const sent = api.requests.length;
+    for (const value of ["https://example.test", 5, [], undefined])
+      await expect(space.setHTTPCredentials(value), String(value)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "space.setHTTPCredentials",
+        expected:
+          "space.setHTTPCredentials({ origin, username, password }) or space.setHTTPCredentials(null)",
+      });
+    await expect(space.setHTTPCredentials({ origin: "https://example.test" })).rejects.toMatchObject({
+      code: "invalid_field",
+      field: "username",
+    });
+    await expect(
+      space.setHTTPCredentials({ origin: "https://example.test", username: "avery", password: "x", extra: 1 }),
+    ).rejects.toMatchObject({ code: "unknown_field", field: "extra" });
+    expect(api.requests.length).toBe(sent);
+    // The CLI prints the origin only, as text and as JSON.
+    const credentials = () => Readable.from([JSON.stringify({ username: "avery", password: "hunter2" })]);
+    const stdout = sink();
+    const stderr = sink();
+    expect(
+      await runCli(["http-credentials", "space-1", "https://example.test", "--stdin"], {
+        ...options,
+        stdin: credentials(),
+        stdout,
+        stderr,
+      }),
+    ).toBe(0);
+    expect(stdout.text()).toBe("ok: https://example.test\n");
+    const asJson = sink();
+    await runCli(["http-credentials", "space-1", "https://example.test", "--stdin", "--json"], {
+      ...options,
+      stdin: credentials(),
+      stdout: asJson,
+    });
+    expect(JSON.parse(asJson.text())).toEqual({ ok: true, origin: "https://example.test" });
+    const cleared = sink();
+    expect(await runCli(["http-credentials", "space-1", "clear"], { ...options, stdout: cleared })).toBe(0);
+    expect(api.requests.at(-1).method).toBe("DELETE");
+    expect(cleared.text()).toBe("ok: credentials cleared\n");
+    // A refusal names the field, never the name or the password.
+    const failing = fakeApi({
+      ...sectionTwo,
+      "POST /spaces/space-1/http-credentials": refusal(400, {
+        code: "invalid_field",
+        message: "origin must be an http or https origin with no path.",
+        field: "origin",
+      }),
+    });
+    const out = sink();
+    const failed = sink();
+    expect(
+      await main(["http-credentials", "space-1", "not-an-origin", "--stdin"], {
+        env,
+        fetch: failing.fetch,
+        health: level2,
+        stdin: credentials(),
+        stdout: out,
+        stderr: failed,
+      }),
+    ).toBe(1);
+    expect(failed.text()).toContain("invalid_field");
+    for (const text of [stdout.text(), stderr.text(), asJson.text(), cleared.text(), out.text(), failed.text()]) {
+      expect(text).not.toContain("hunter2");
+      expect(text).not.toContain("avery");
+    }
+    // Usage is refused before anything connects.
+    const unsent = failing.requests.length;
+    for (const args of [
+      ["http-credentials", "space-1"],
+      ["http-credentials", "space-1", "https://example.test"],
+      ["http-credentials", "space-1", "clear", "--stdin"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: failing.fetch, health: level2, stdin: credentials(), stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(failing.requests.length).toBe(unsent);
+  });
+
+  it("run notes up to 20 unseen popups once each, then one counting line, and deletes the downloads it received", async () => {
+    const opened = Array.from({ length: 23 }, (_, index) => ({
+      id: `tab-${index + 10}`,
+      label: `p${index + 10}`,
+      url: `https://example.test/p${index + 10}`,
+      openedAt: index,
+      ...(index < 22 ? { unseen: true } : {}),
+    }));
+    const directory = await scratchDirectory();
+    const output = join(directory, "report.pdf");
+    const table = {
+      ...sectionTwo,
+      "GET /tabs/tab-1/popups": { popups: opened },
+      // The same popup listed by a second tab is noticed once.
+      "GET /tabs/tab-2/popups": { popups: [opened[0]] },
+      "GET /spaces/space-1/downloads": { downloads: [doneDownload] },
+      "GET /downloads/d1/content": bytesRoute(),
+      "DELETE /downloads/d1": { ok: true },
+    };
+    const run = await runIn(
+      `const home = await space("space-1");
+      const page = (await home.tabs())[0];
+      await page.click("@e2");
+      await home.adopt("p2");
+      const [file] = await home.downloads();
+      await file.saveAs(${JSON.stringify(output)});`,
+      table,
+    );
+    expect(run.status).toBe(0);
+    expect(await readFile(output)).toEqual(downloadBytes);
+    const notices = run.stderr.split("\n").filter(Boolean);
+    expect(notices).toHaveLength(21);
+    expect(notices[0]).toBe("notice: unused page p10 opened by p1: https://example.test/p10");
+    expect(notices.at(-1)).toBe("notice: and 2 more unused pages this run opened");
+    // Both touched tabs are read, and what the run received is deleted.
+    const ending = paths(run.api).slice(paths(run.api).indexOf("GET /tabs/tab-1/popups"));
+    expect(ending).toEqual(["GET /tabs/tab-1/popups", "GET /tabs/tab-2/popups", "DELETE /downloads/d1"]);
+  });
+
+  it("the end-of-run hooks ignore what Kamapathy refuses and delete nothing the script already deleted", async () => {
+    const table = {
+      ...sectionTwo,
+      "GET /tabs/tab-1/popups": refusal(404, { code: "tab_not_found", message: "Agent tab was not found." }),
+      "GET /tabs/tab-2/popups": {
+        popups: [{ id: "tab-9", label: "p9", url: "https://example.test/p9", openedAt: 1, unseen: true }],
+      },
+      "GET /spaces/space-1/downloads": { downloads: [doneDownload] },
+      "GET /downloads/d1/content": bytesRoute(),
+      "DELETE /downloads/d1": { ok: true },
+    };
+    const run = await runIn(
+      `const home = await space("space-1");
+      const page = (await home.tabs())[0];
+      await page.click("@e2");
+      await home.adopt("p2");
+      const [file] = await home.downloads();
+      globalThis.__scripted = { copy: await file.path() };
+      await file.delete();`,
+      table,
+    );
+    expect(run.status).toBe(0);
+    // A tab that refuses the read does not stop the next one, and the run
+    // deletes the download once.
+    expect(run.stderr).toBe("notice: unused page p9 opened by p2: https://example.test/p9\n");
+    expect(paths(run.api).filter((item) => item === "DELETE /downloads/d1")).toEqual(["DELETE /downloads/d1"]);
+    expect(existsSync(globalThis.__scripted.copy)).toBe(false);
+  });
+
   it("asks for an isolated space only when told to", async () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });
@@ -1805,7 +2718,8 @@ describe("scripted sessions", () => {
       },
     );
     expect(run).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
-    expect(paths(run.api).slice(-2)).toEqual(["POST /spaces/space-1/wait-for-control", "POST /tabs/tab-1/fill"]);
+    expect(paths(run.api).slice(-3, -1)).toEqual(["POST /spaces/space-1/wait-for-control", "POST /tabs/tab-1/fill"]);
+    expect(paths(run.api).at(-1)).toBe("GET /tabs/tab-1/popups");
   });
 
   it("the person's Stop is a hard stop with its own guidance, also when it ends a waitForControl; space_ended after the agent's own finish is an ordinary error", async () => {

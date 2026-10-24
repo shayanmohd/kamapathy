@@ -33,7 +33,9 @@ export type PageOperation =
   | "input"
   | "frame"
   | "ready"
-  | "frameIndex";
+  | "frameIndex"
+  | "retargetFile"
+  | "applyFiles";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
@@ -45,6 +47,7 @@ export function pageOperation(
   namespace: string,
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
   outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
+  fileOperations?: typeof import("./agent/dom/files").fileOperation,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -635,6 +638,18 @@ export function pageOperation(
         ...(frame ? { frame } : {}),
       };
     });
+  };
+  // A ref for one element, from the number this call reserved. An element
+  // that already holds a ref keeps it.
+  const refOf = (element: Element, next: number | undefined) => {
+    const held = registry.refs.get(element);
+    if (held && registry.elements.get(held) === element) return held;
+    if (next === undefined) return undefined;
+    const ref = `@e${next}`;
+    issuedRefs.push(next);
+    registry.refs.set(element, ref);
+    registry.elements.set(ref, element);
+    return ref;
   };
   const invalidSelector = (selector: string, result: Invalid) => {
     const fields = {
@@ -2373,6 +2388,25 @@ export function pageOperation(
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
     return { ok: true, selected: files.length };
+  }
+  // Retargeting runs here because only the page can see shadow roots. The
+  // walk and the checks live in dom/files.ts, which the file chooser calls on
+  // a node of its own.
+  if (operation === "retargetFile") {
+    if (!fileOperations)
+      return failure("This operation is not available on this page.");
+    const chosen = fileOperations(
+      operation,
+      payload,
+      namespace,
+      element,
+      (input) => refOf(input, payload.firstRef as number | undefined),
+    );
+    return {
+      ...chosen,
+      ...reboundResult(),
+      ...(issuedRefs.length ? { issued: issuedRefs } : {}),
+    };
   }
   if (!visible(element)) return failure("Element is not visible.");
   if (

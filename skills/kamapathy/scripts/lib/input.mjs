@@ -67,11 +67,26 @@ export function uploadRef(value) {
   return value;
 }
 
-// Reads 1 to 8 regular files for an upload body: basenames, MIME types and
-// base64 bytes. Errors never disclose the local paths.
+// Reads 1 to 8 regular files for an upload body.
 export async function readUploadFiles(paths) {
   if (paths.length < 1 || paths.length > 8)
     throw new Error("Upload requires between 1 and 8 selected file paths.");
+  return readFiles(paths, { min: 1 });
+}
+
+// Reads min to max regular files for a file input: basenames, MIME types and
+// base64 bytes, bytes in total at most. Errors never disclose the local
+// paths.
+export async function readFiles(
+  paths,
+  { min = 0, max = 8, bytes: limit = 16 * 1024 * 1024 } = {},
+) {
+  if (paths.length < min || paths.length > max)
+    throw new Error(
+      min > 0
+        ? `Select between ${min} and ${max} file paths.`
+        : `Select at most ${max} file paths.`,
+    );
   const mime = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -98,8 +113,10 @@ export async function readUploadFiles(paths) {
           (constants.O_NONBLOCK || 0),
       );
       const stat = await file.stat();
-      if (!stat.isFile() || stat.size > 16 * 1024 * 1024 - total)
-        throw new Error("Select regular files totaling at most 16 MiB.");
+      if (!stat.isFile() || stat.size > limit - total)
+        throw new Error(
+          `Select regular files totaling at most ${Math.floor(limit / (1024 * 1024))} MiB.`,
+        );
       // Read a bounded allocation even if another process grows the file.
       const bytes = Buffer.alloc(stat.size + 1);
       let length = 0;
