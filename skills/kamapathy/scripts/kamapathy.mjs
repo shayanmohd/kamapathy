@@ -103,6 +103,22 @@ function flags(args, names) {
   }
   return values;
 }
+// --label and its value, taken out of an action command's arguments
+// wherever they sit, with the rest left in order.
+function takeLabel(args) {
+  const rest = [];
+  let label;
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] !== "--label") {
+      rest.push(args[index]);
+      continue;
+    }
+    if (label !== undefined)
+      throw new Error("Give --label once. Run help for usage.");
+    label = required(args[++index], "--label");
+  }
+  return { rest, label: label === undefined ? {} : { label } };
+}
 // --page-budget, or else KAMAPATHY_PAGE_BUDGET when it is set.
 function budget(value, env) {
   const pageBudget =
@@ -216,6 +232,28 @@ export const PARSERS = {
     method: "POST",
     body: {},
   }),
+  // A text or --clear, never both and never neither.
+  status: (args) => {
+    const rest = args.filter((argument) => argument !== "--clear");
+    const clear = rest.length < args.length;
+    if (clear === (rest[1] !== undefined) || rest.length > 2)
+      throw new Error(
+        "Use status <space-id> <text>, or status <space-id> --clear.",
+      );
+    return {
+      path: `/spaces/${identifier(rest[0])}/status`,
+      method: "POST",
+      body: { text: clear ? "" : rest[1] },
+    };
+  },
+  fail: (args) => {
+    if (args.length > 2) throw new Error("Use fail <space-id> <message>.");
+    return {
+      path: `/spaces/${identifier(args[0])}/fail`,
+      method: "POST",
+      body: { message: required(args[1], "message") },
+    };
+  },
   tabs: (args) => ({ path: `/spaces/${identifier(args[0])}/tabs` }),
   "new-page": (args) => ({
     path: `/spaces/${identifier(args[0])}/tabs`,
@@ -272,24 +310,29 @@ export const PARSERS = {
       body,
     };
   },
-  click: (args) => ({
-    path: `/tabs/${tab(args[0])}/click`,
-    method: "POST",
-    body: target(args[1]),
-  }),
+  click: (args) => {
+    const { rest, label } = takeLabel(args);
+    return {
+      path: `/tabs/${tab(rest[0])}/click`,
+      method: "POST",
+      body: { ...target(rest[1]), ...label },
+    };
+  },
   fill: async (args, { stdin, stdinTimeoutMs }) => {
-    if (args[2] !== "--stdin")
+    const { rest, label } = takeLabel(args);
+    if (rest[2] !== "--stdin")
       throw new Error(
         "Use fill <tab-id> <ref-or-selector> --stdin and pipe the field value.",
       );
     return {
-      path: `/tabs/${tab(args[0])}/fill`,
+      path: `/tabs/${tab(rest[0])}/fill`,
       method: "POST",
       body: {
-        ...target(args[1]),
+        ...target(rest[1]),
         value: await readInput(stdin || process.stdin, {
           timeoutMs: stdinTimeoutMs,
         }),
+        ...label,
       },
     };
   },
@@ -302,23 +345,29 @@ export const PARSERS = {
     },
     limit: UPLOAD_LIMIT,
   }),
-  press: (args) => ({
-    path: `/tabs/${tab(args[0])}/press`,
-    method: "POST",
-    body: {
-      key: required(args[1], "key"),
-      ...(args[2] ? target(args[2]) : {}),
-    },
-  }),
-  drag: (args) => {
-    if (args.length > 3)
-      throw new Error("Use drag <tab-id> <source> <target>.");
+  press: (args) => {
+    const { rest, label } = takeLabel(args);
     return {
-      path: `/tabs/${tab(args[0])}/drag`,
+      path: `/tabs/${tab(rest[0])}/press`,
       method: "POST",
       body: {
-        source: target(required(args[1], "drag source")),
-        target: target(required(args[2], "drag target")),
+        key: required(rest[1], "key"),
+        ...(rest[2] ? target(rest[2]) : {}),
+        ...label,
+      },
+    };
+  },
+  drag: (args) => {
+    const { rest, label } = takeLabel(args);
+    if (rest.length > 3)
+      throw new Error("Use drag <tab-id> <source> <target>.");
+    return {
+      path: `/tabs/${tab(rest[0])}/drag`,
+      method: "POST",
+      body: {
+        source: target(required(rest[1], "drag source")),
+        target: target(required(rest[2], "drag target")),
+        ...label,
       },
     };
   },
@@ -326,19 +375,21 @@ export const PARSERS = {
     // Pixels come before the optional target; a target alone is also fine.
     // No CSS selector starts with a digit, a sign, or a dot before a digit,
     // so those are pixels. A class selector such as .panel is a target.
-    const pixels = /^[-+]?\.?\d/.test(args[2] || "");
-    const scrolled = pixels ? args[3] : args[2];
-    if (args.length > (pixels ? 4 : 3))
+    const { rest, label } = takeLabel(args);
+    const pixels = /^[-+]?\.?\d/.test(rest[2] || "");
+    const scrolled = pixels ? rest[3] : rest[2];
+    if (rest.length > (pixels ? 4 : 3))
       throw new Error(
         "Use scroll <tab-id> <direction> [pixels] [ref-or-selector].",
       );
     return {
-      path: `/tabs/${tab(args[0])}/scroll`,
+      path: `/tabs/${tab(rest[0])}/scroll`,
       method: "POST",
       body: {
-        direction: required(args[1], "direction"),
-        ...(pixels ? { pixels: integer(args[2], "pixels", 1) } : {}),
+        direction: required(rest[1], "direction"),
+        ...(pixels ? { pixels: integer(rest[2], "pixels", 1) } : {}),
         ...(scrolled ? target(scrolled) : {}),
+        ...label,
       },
     };
   },

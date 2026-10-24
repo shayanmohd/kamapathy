@@ -2238,7 +2238,7 @@ describe("scripted sessions", () => {
       }
     }
     expect(await help(["help", "api"])).toContain("Kamapathy script API");
-    expect(await help(["help", "api", "page.click"])).toContain("page.click(target)");
+    expect(await help(["help", "api", "page.click"])).toContain("page.click(target, options?)");
     expect(await help(["help", "errors"])).toContain("human_control");
     expect(await help(["help", "routes"])).toContain("POST /tabs/:id/click");
     expect(await help(["help", "page.wait"])).toContain("page.wait(options?)");
@@ -2346,7 +2346,7 @@ describe("scripted sessions", () => {
     expect(run.status).toBe(0);
     expect(run.stdout).toContain(`Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`);
     expect(run.stdout).toContain('help("page.click") shows one entry; help("errors") lists error codes.');
-    expect(run.stdout).toContain("page.click(target)\n");
+    expect(run.stdout).toContain("page.click(target, options?)\n");
     expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click.');
     expect(run.stdout).toContain("space.close()\n");
     expect(run.stdout).toContain("page.close()\n");
@@ -2382,6 +2382,187 @@ describe("scripted sessions", () => {
     await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
     expect(help.text()).toContain("--isolated");
     expect(help.text()).toMatch(/\n  run /);
+  });
+
+  it("status, --clear, fail and --label anywhere reach their routes, and spaces prints state and status", async () => {
+    const level3 = { status: "ok", version: "0.2.0", apiLevel: 3 };
+    const set = sink();
+    const status = vi.fn(async () => Response.json({ ok: true, status: "Comparing prices" }));
+    expect(await runCli(["status", "space-1", "Comparing prices"], { env, fetch: status, health: level3, stdout: set })).toBe(0);
+    expect(status).toHaveBeenCalledTimes(1);
+    const [url, options] = status.mock.calls[0];
+    expect([url.pathname, options.method]).toEqual(["/spaces/space-1/status", "POST"]);
+    expect(JSON.parse(options.body)).toEqual({ text: "Comparing prices" });
+    expect(set.text()).toBe('ok: status "Comparing prices"\n');
+    const cleared = sink();
+    const clear = vi.fn(async () => Response.json({ ok: true }));
+    expect(await runCli(["status", "space-1", "--clear"], { env, fetch: clear, health: level3, stdout: cleared })).toBe(0);
+    expect(JSON.parse(clear.mock.calls[0][1].body)).toEqual({ text: "" });
+    expect(cleared.text()).toBe("ok: status cleared\n");
+    const failed = sink();
+    const reported = { ok: true, owner: "human", state: "failed", status: "The site needs a phone number" };
+    const fail = vi.fn(async () => Response.json(reported));
+    expect(await runCli(["fail", "space-1", "The site needs a phone number"], { env, fetch: fail, health: level3, stdout: failed })).toBe(0);
+    expect(fail.mock.calls[0][0].pathname).toBe("/spaces/space-1/fail");
+    expect(JSON.parse(fail.mock.calls[0][1].body)).toEqual({ message: "The site needs a phone number" });
+    expect(failed.text()).toBe("ok: failure reported, the person has control\n");
+    const json = sink();
+    await runCli(["fail", "space-1", "No number", "--json"], { env, fetch: fail, health: level3, stdout: json });
+    expect(JSON.parse(json.text())).toEqual(reported);
+    // A status needs either a text or --clear, never both and never neither.
+    const unused = vi.fn();
+    for (const args of [["status", "space-1", "Later", "--clear"], ["status", "space-1"], ["fail", "space-1"]]) {
+      const stderr = sink();
+      expect(await main(args, { env, fetch: unused, health: level3, stderr }), args.join(" ")).toBe(1);
+      expect(stderr.text(), args.join(" ")).toContain("Kamapathy: ");
+    }
+    expect(unused).not.toHaveBeenCalled();
+    // --label is read wherever it sits, and reaches the body once.
+    for (const args of [
+      ["click", "--label", "Add to cart", "tab-1", "@e2"],
+      ["click", "tab-1", "--label", "Add to cart", "@e2"],
+      ["click", "tab-1", "@e2", "--label", "Add to cart"],
+    ]) {
+      const labeled = vi.fn(async () => Response.json({ ok: true, url: tab.url }));
+      expect(await runCli(args, { env, fetch: labeled, health: level3, stdout: sink() }), args.join(" ")).toBe(0);
+      expect(labeled.mock.calls[0][0].pathname).toBe("/tabs/tab-1/click");
+      expect(JSON.parse(labeled.mock.calls[0][1].body)).toEqual({ ref: "@e2", label: "Add to cart" });
+    }
+    for (const [args, body] of [
+      [["fill", "tab-1", "@e1", "--label", "Name the guest", "--stdin"], { ref: "@e1", value: "Avery Quinn", label: "Name the guest" }],
+      [["press", "--label", "Submit the form", "tab-1", "Enter"], { key: "Enter", label: "Submit the form" }],
+      [["press", "tab-1", "Enter", "@e1", "--label", "Submit the form"], { key: "Enter", ref: "@e1", label: "Submit the form" }],
+      [["scroll", "tab-1", "down", "--label", "Read the terms"], { direction: "down", label: "Read the terms" }],
+      [["scroll", "tab-1", "down", "300", "@e1", "--label", "Read the terms"], { direction: "down", pixels: 300, ref: "@e1", label: "Read the terms" }],
+      [["scroll", "--label", "Read the panel", "tab-1", "down", ".panel"], { direction: "down", selector: ".panel", label: "Read the panel" }],
+      [["drag", "tab-1", "@e1", "--label", "Reorder the list", "#zone"], { source: { ref: "@e1" }, target: { selector: "#zone" }, label: "Reorder the list" }],
+    ]) {
+      const labeled = vi.fn(async () => Response.json({ ok: true, url: tab.url }));
+      expect(
+        await runCli(args, { env, fetch: labeled, health: level3, stdin: Readable.from(["Avery Quinn"]), stdout: sink() }),
+        args.join(" "),
+      ).toBe(0);
+      expect(JSON.parse(labeled.mock.calls[0][1].body), args.join(" ")).toEqual(body);
+    }
+    // Commands without a label keep today's unknown-option error.
+    const refused = sink();
+    expect(await main(["wait-for-control", "space-1", "--label", "Waiting"], { env, fetch: unused, health: level3, stderr: refused })).toBe(1);
+    expect(refused.text()).toBe("Kamapathy: Unknown option: --label. Run help for usage.\n");
+    const twice = sink();
+    expect(await main(["click", "tab-1", "@e2", "--label", "One", "--label", "Two"], { env, fetch: unused, health: level3, stderr: twice })).toBe(1);
+    expect(twice.text()).toContain("--label");
+    expect(unused).not.toHaveBeenCalled();
+    // Each listed space shows its state and the status the person reads.
+    const listed = sink();
+    await runCli(["spaces"], {
+      env,
+      health: level3,
+      fetch: vi.fn(async () =>
+        Response.json({
+          spaces: [
+            { ...space, state: "failed", status: "The site needs a phone number" },
+            { ...space, id: "space-2", state: "needs-you" },
+            { ...space, id: "space-3", status: "Comparing prices" },
+            { ...space, id: "space-4" },
+          ],
+        }),
+      ),
+      stdout: listed,
+    });
+    expect(listed.text()).toBe(
+      [
+        'space-1 "Research" agent shared failed status "The site needs a phone number"',
+        'space-2 "Research" agent shared needs-you',
+        'space-3 "Research" agent shared status "Comparing prices"',
+        'space-4 "Research" agent shared',
+        "",
+      ].join("\n"),
+    );
+    const help = sink();
+    await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
+    expect(help.text()).toContain("status <space-id> <text> | status <space-id> --clear");
+    expect(help.text()).toContain("fail <space-id> <message>");
+  });
+
+  it("the client keeps space.status and space.state in step and refuses bad arguments before connecting", async () => {
+    const level3 = { status: "ok", version: "0.2.0", apiLevel: 3 };
+    const api = fakeApi({
+      ...routes,
+      "GET /spaces": { spaces: [{ ...space, status: "Comparing prices", state: "needs-you" }] },
+      "POST /spaces/space-1/status": (body) =>
+        Response.json({ ok: true, ...(body.text ? { status: body.text } : {}) }),
+      "POST /spaces/space-1/fail": {
+        ok: true,
+        owner: "human",
+        state: "failed",
+        status: "The site needs a phone number",
+      },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level3 });
+    const [research] = await client.spaces();
+    expect([research.status, research.state]).toEqual(["Comparing prices", "needs-you"]);
+    expect(await research.setStatus("Checking three sites")).toEqual({ ok: true, status: "Checking three sites" });
+    expect(research.status).toBe("Checking three sites");
+    for (const text of [null, ""]) {
+      expect(await research.setStatus(text), String(text)).toEqual({ ok: true });
+      expect(research.status, String(text)).toBeUndefined();
+    }
+    expect(await research.fail("The site needs a phone number")).toEqual({
+      ok: true,
+      owner: "human",
+      state: "failed",
+      status: "The site needs a phone number",
+    });
+    expect([research.owner, research.state, research.status]).toEqual([
+      "human",
+      "failed",
+      "The site needs a phone number",
+    ]);
+    // A label on every input method reaches its body.
+    const page = await research.open("https://example.test/reserve");
+    await page.click("@e2", { label: "Check availability" });
+    await page.fill("@e1", "Avery Quinn", { label: "Name the guest" });
+    await page.press("Enter", "@e1", { label: "Submit the form" });
+    await page.press("Escape", undefined, { label: "Close the dialog" });
+    await page.scroll("down", 300, "@e1", { label: "Read the terms" });
+    await page.scroll("down", ".panel", { label: "Read the panel" });
+    await page.drag("@e1", "#zone", { label: "Reorder the list" });
+    await page.click("@e2");
+    expect(api.requests).toEqual([
+      { method: "GET", path: "/spaces", body: undefined },
+      { method: "POST", path: "/spaces/space-1/status", body: { text: "Checking three sites" } },
+      { method: "POST", path: "/spaces/space-1/status", body: { text: "" } },
+      { method: "POST", path: "/spaces/space-1/status", body: { text: "" } },
+      { method: "POST", path: "/spaces/space-1/fail", body: { message: "The site needs a phone number" } },
+      { method: "POST", path: "/spaces/space-1/tabs", body: { url: "https://example.test/reserve" } },
+      { method: "POST", path: "/tabs/tab-1/click", body: { ref: "@e2", label: "Check availability" } },
+      { method: "POST", path: "/tabs/tab-1/fill", body: { ref: "@e1", value: "Avery Quinn", label: "Name the guest" } },
+      { method: "POST", path: "/tabs/tab-1/press", body: { key: "Enter", ref: "@e1", label: "Submit the form" } },
+      { method: "POST", path: "/tabs/tab-1/press", body: { key: "Escape", label: "Close the dialog" } },
+      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", pixels: 300, ref: "@e1", label: "Read the terms" } },
+      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", selector: ".panel", label: "Read the panel" } },
+      { method: "POST", path: "/tabs/tab-1/drag", body: { source: { ref: "@e1" }, target: { selector: "#zone" }, label: "Reorder the list" } },
+      { method: "POST", path: "/tabs/tab-1/click", body: { ref: "@e2" } },
+    ]);
+    // Bad arguments never reach the socket.
+    const sent = api.requests.length;
+    await expect(research.setStatus("x".repeat(121))).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "space.setStatus",
+    });
+    await expect(research.setStatus(5)).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(research.fail("")).rejects.toMatchObject({ code: "invalid_argument", entry: "space.fail" });
+    await expect(page.click("@e2", { label: "x".repeat(61) })).rejects.toMatchObject({ code: "invalid_option" });
+    expect(api.requests).toHaveLength(sent);
+    expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { label: "x".repeat(61) }])).toMatchObject({
+      code: "invalid_option",
+      message:
+        "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { label? }).",
+    });
+    expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { labl: "Add to cart" }])).toMatchObject({
+      message:
+        'page.click got unknown option "labl". Expected page.click(target, { label? }). Did you mean "label"?',
+    });
   });
 });
 

@@ -105,6 +105,14 @@ const signIns = (space) =>
       ? " shared"
       : "";
 
+// How a listed space stands and the status the person reads, after its owner.
+const task = (space) =>
+  `${space.state ? ` ${line(space.state)}` : ""}${
+    space.status === undefined
+      ? ""
+      : ` status ${JSON.stringify(line(space.status))}`
+  }`;
+
 // One tab per line: its label, ID, origin and flags, or, from a Kamapathy
 // without labels, its ID, title and URL. An opener in tabs is named by its
 // label.
@@ -141,6 +149,11 @@ const boundaryLines = (data) => [
 export function formatResult(data, command) {
   if (data && "interactables" in data && "url" in data)
     return formatSnapshot(data);
+  if (command === "status")
+    return data.status === undefined
+      ? "ok: status cleared"
+      : `ok: status ${JSON.stringify(line(data.status))}`;
+  if (command === "fail") return "ok: failure reported, the person has control";
   if (command === "space finish")
     return [
       `ok: space ${line(data.spaceId)} finished${data.closedSpace ? " and closed" : ""}`,
@@ -162,7 +175,7 @@ export function formatResult(data, command) {
       ? data.spaces
           .map(
             (space) =>
-              `${space.id} ${JSON.stringify(line(space.name))} ${line(space.owner)}${signIns(space)}`,
+              `${space.id} ${JSON.stringify(line(space.name))} ${line(space.owner)}${signIns(space)}${task(space)}`,
           )
           .join("\n")
       : "No agent spaces.";

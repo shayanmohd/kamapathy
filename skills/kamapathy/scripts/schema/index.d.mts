@@ -65,6 +65,9 @@ export interface Arg {
   kind: string;
   optional?: boolean;
   values?: readonly string[];
+  min?: number;
+  max?: number;
+  nullable?: boolean;
 }
 export interface Entry {
   name: string;

@@ -504,29 +504,37 @@ describe("API schema", () => {
     const click = entry("Page.click");
     expect(checkCall(click, [])).toEqual({
       code: "invalid_argument",
-      message: "page.click got no target. Expected page.click(target).",
-      fields: { entry: "page.click", expected: "page.click(target)" },
+      message:
+        "page.click got no target. Expected page.click(target, { label? }).",
+      fields: {
+        entry: "page.click",
+        expected: "page.click(target, { label? })",
+      },
     });
     expect(checkCall(click, ["#a", "#b"])?.message).toBe(
-      "page.click got 2 arguments. Expected page.click(target).",
+      "page.click got a string instead of an options object. Expected page.click(target, { label? }).",
     );
     expect(checkCall(click, [42])?.message).toBe(
-      "page.click got a number for target. Expected page.click(target).",
+      "page.click got a number for target. Expected page.click(target, { label? }).",
     );
     expect(checkCall(click, ["@e1", undefined])).toBeNull();
+    expect(checkCall(click, ["@e1", { label: "Add to cart" }])).toBeNull();
     const scroll = entry("Page.scroll");
     for (const args of [
       ["down"],
       ["down", 300],
       ["down", ".panel"],
       ["down", 300, "#list"],
+      ["down", 300, "#list", { label: "Read the terms" }],
+      ["down", ".panel", { label: "Read the panel" }],
+      ["down", undefined, undefined, { label: "Read the page" }],
     ])
       expect(checkCall(scroll, args), JSON.stringify(args)).toBeNull();
     expect(checkCall(scroll, ["sideways"])?.message).toBe(
-      'page.scroll got "sideways" for direction. Expected page.scroll(direction, pixels?, target?) or page.scroll(direction, target).',
+      'page.scroll got "sideways" for direction. Expected page.scroll(direction, pixels?, target?, { label? }) or page.scroll(direction, target, { label? }).',
     );
     expect(checkCall(scroll, ["down", 300, "#list", 1])?.code).toBe(
-      "invalid_argument",
+      "invalid_option",
     );
     expect(
       checkCall(entry("Page.batch"), [[{ type: "wait", timeout: 5 }]]),
@@ -683,6 +691,114 @@ describe("API schema", () => {
           );
         expect(row, type).toContain("`label?`");
       }
+  });
+
+  it("the new members and commands are declared at level 3", () => {
+    for (const [name, returns] of [
+      ["Space.status", "string | undefined"],
+      ["Space.state", '"needs-you" | "done" | "failed" | "error" | undefined'],
+    ]) {
+      const item = entry(name);
+      expect(item, name).toMatchObject({ kind: "property", since: 3, returns });
+      expect(item.signature, name).toBe(`space.${name.slice(6)}`);
+    }
+    const setStatus = entry("Space.setStatus");
+    expect(setStatus).toMatchObject({
+      kind: "method",
+      signature: "space.setStatus(text)",
+      returns: "Promise<{ ok: true, status?: string }>",
+      route: "POST /spaces/:id/status",
+      since: 3,
+    });
+    const fail = entry("Space.fail");
+    expect(fail).toMatchObject({
+      kind: "method",
+      signature: "space.fail(message)",
+      returns:
+        'Promise<{ ok: true, owner: "human", state: "failed", status: string }>',
+      route: "POST /spaces/:id/fail",
+      since: 3,
+    });
+    for (const item of [setStatus, fail])
+      expect(item.errors, item.name).toEqual(
+        expect.arrayContaining([
+          "invalid_field",
+          "human_control",
+          "space_not_found",
+          "automation_stopped",
+        ]),
+      );
+    // The text and the message are bounded before anything connects.
+    for (const text of [null, "", "x".repeat(120)])
+      expect(checkCall(setStatus, [text]), String(text)).toBeNull();
+    expect(checkCall(setStatus, ["x".repeat(121)])).toEqual({
+      code: "invalid_argument",
+      message:
+        "space.setStatus got a string for text. Expected space.setStatus(text) with at most 120 characters, or null to clear.",
+      fields: {
+        entry: "space.setStatus",
+        expected:
+          "space.setStatus(text) with at most 120 characters, or null to clear",
+      },
+    });
+    expect(checkCall(setStatus, [5])?.code).toBe("invalid_argument");
+    expect(checkCall(setStatus, [])?.message).toBe(
+      "space.setStatus got no text. Expected space.setStatus(text) with at most 120 characters, or null to clear.",
+    );
+    expect(checkCall(fail, ["No phone number"])).toBeNull();
+    expect(checkCall(fail, [""])).toMatchObject({
+      code: "invalid_argument",
+      message:
+        "space.fail got an empty string for message. Expected space.fail(message) with 1 to 300 characters.",
+    });
+    for (const message of [null, "x".repeat(301)])
+      expect(checkCall(fail, [message])?.code, String(message)).toBe(
+        "invalid_argument",
+      );
+    // The commands and the flag.
+    expect(findCommand("status")).toMatchObject({
+      group: "Spaces",
+      usage: "status <space-id> <text> | status <space-id> --clear",
+      route: "POST /spaces/:id/status",
+      script: "space.setStatus",
+      since: 3,
+    });
+    expect(findCommand("status").flags.map((flag) => flag.name)).toEqual([
+      "--clear",
+    ]);
+    expect(findCommand("fail")).toMatchObject({
+      group: "Spaces",
+      usage: "fail <space-id> <message>",
+      route: "POST /spaces/:id/fail",
+      script: "space.fail",
+      since: 3,
+    });
+    for (const name of ["click", "fill", "press", "scroll", "drag"]) {
+      const command = findCommand(name);
+      const flag = command.flags.find((item) => item.name === "--label");
+      expect(flag, name).toMatchObject({ value: "<text>", since: 3 });
+      expect(typeof flag.description, name).toBe("string");
+      expect(command.usage, name).toContain("[--label <text>]");
+    }
+    // Each new member is found by canonical, instance-style and bare name.
+    const names = (query) => resolveNames(query).map((item) => item.name);
+    for (const name of ["status", "state", "setStatus", "fail"]) {
+      expect(names(`Space.${name}`), name).toEqual([`Space.${name}`]);
+      expect(names(`space.${name}`), name).toEqual([`Space.${name}`]);
+      expect(names(name), name).toEqual([`Space.${name}`]);
+    }
+    // The generated reference carries the members and the commands.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`space.setStatus(text)`",
+      "`space.fail(message)`",
+      "`space.status`",
+      "`space.state`",
+      "`status <space-id> <text> | status <space-id> --clear`",
+      "`fail <space-id> <message>`",
+      "`page.click(target, options?)`",
+    ])
+      expect(reference, text).toContain(text);
   });
 
   it("resolves help names in every accepted form", () => {
