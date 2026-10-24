@@ -23,7 +23,8 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
 
 /**
  * @typedef {"@e1" | string} Target A ref such as "@e3" from a current
- * snapshot, or a CSS selector matching exactly one visible element.
+ * snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=, with an
+ * optional final `>> nth=N`. It must pick one element the action can take.
  */
 /**
  * @typedef {object} Control
@@ -40,24 +41,63 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
  * @property {boolean} [pressed]
  * @property {boolean} [disabled]
  * @property {string} [group]
+ * @property {string} [href] A link's absolute address.
+ * @property {string} [locator] A selector naming this control alone.
  * @property {{ value: string, label: string, disabled?: boolean, selected?: boolean }[]} [options]
+ */
+/**
+ * @typedef {object} SnapshotTab
+ * @property {string} id
+ * @property {string} [label]
+ * @property {string} title
+ * @property {"agent" | "page" | "person"} [openedBy]
+ * @property {boolean} managed
+ * @property {true} [current]
+ */
+/**
+ * @typedef {object} SnapshotHeader
+ * @property {{ id: string, label?: string, title: string }} page
+ * @property {{ id: string, name: string }} space
+ * @property {SnapshotTab[]} tabs
+ * @property {{ used: number, limit: number }} [budget] Near the page budget.
+ * @property {true} [pdf]
  */
 /**
  * @typedef {object} Snapshot
  * @property {string} tabId
  * @property {string} url
  * @property {string} title
- * @property {string} text
+ * @property {string} [text] The page's text, in the list format.
+ * @property {string} [outline] The page's structure, in the outline format.
  * @property {Control[]} interactables
  * @property {number} [omittedControls]
  * @property {boolean} truncated
+ * @property {SnapshotHeader} [header]
+ * @property {string} [next] Pass back as `cursor` for the next part.
+ * @property {string[]} [rebound]
+ * @property {true} [locatorsIncomplete]
  */
 /**
  * @typedef {object} SnapshotOptions
  * @property {"compact" | "full"} [mode] Compact is the default.
- * @property {string} [selector] Scope to one uniquely matching element.
+ * @property {string} [selector] Scope to one matching element, of any form.
  * @property {number} [maxChars] 0 to 24000.
  * @property {number} [maxControls] 0 to 100.
+ * @property {"page" | "viewport"} [scope] Page is the default.
+ * @property {string} [root] Scope to a ref's subtree or a frame's document.
+ * @property {"list" | "outline"} [format] List is the default.
+ * @property {boolean} [locators] Give each control a durable locator.
+ * @property {boolean} [header] Name the page, space and tabs. On by default.
+ * @property {string} [cursor] An earlier part's `next`.
+ */
+/**
+ * @typedef {object} ScreenshotOptions
+ * @property {string} [path] Also write the PNG to this new .png file.
+ * @property {boolean} [fullPage] Capture the whole scrollable document.
+ * @property {{ x: number, y: number, width: number, height: number }} [clip]
+ * The part to capture, in CSS pixels of the image's own space.
+ * @property {"css" | "device"} [scale] CSS is the default.
+ * @property {number} [timeout] 1 to 60000 ms, default 15000.
  */
 /**
  * @typedef {object} WaitOptions
@@ -100,6 +140,14 @@ const PAGE_FIELDS = [
   "url",
   "title",
 ];
+
+// The absolute file a screenshot writes, which must end in .png.
+function pngPath(path) {
+  const output = resolve(path);
+  if (!output.toLowerCase().endsWith(".png"))
+    throw new Error("Screenshot output must have a .png extension.");
+  return output;
+}
 
 // A synchronous method's check, against the app's level when it is known.
 function checkNow(session, name, args) {
@@ -308,20 +356,32 @@ export class Page {
     );
   }
   /**
-   * Saves a viewport PNG. Never overwrites an existing file.
-   * @param {string} path Ends with .png.
-   * @returns {Promise<string>} The absolute path written.
+   * Captures the page as PNG: the viewport, the whole page or a clip, at CSS
+   * scale by default. Never overwrites an existing file.
+   * @param {ScreenshotOptions | string} [target] Options, or a .png path.
+   * @returns {Promise<Buffer | string>} The PNG bytes, or the absolute path
+   * written when a path string is given.
    */
-  screenshot(path) {
-    return this.#call("screenshot", [path], async () => {
-      const output = resolve(path);
-      if (!output.toLowerCase().endsWith(".png"))
-        throw new Error("Screenshot output must have a .png extension.");
-      const bytes = await this.#session.request(`/tabs/${this.id}/screenshot`, {
-        response: "png",
-      });
-      await writeFile(output, bytes, { flag: "wx" });
-      return output;
+  screenshot(target = {}) {
+    return this.#call("screenshot", [target], async () => {
+      if (typeof target === "string") {
+        const output = pngPath(target);
+        const bytes = await this.#session.request(
+          `/tabs/${this.id}/screenshot`,
+          { response: "png" },
+        );
+        await writeFile(output, bytes, { flag: "wx" });
+        return output;
+      }
+      const { path, timeout, ...rest } = target;
+      const output = path === undefined ? undefined : pngPath(path);
+      const bytes = await this.#post(
+        "screenshot",
+        { ...rest, ...(timeout === undefined ? {} : { timeoutMs: timeout }) },
+        { response: "png" },
+      );
+      if (output !== undefined) await writeFile(output, bytes, { flag: "wx" });
+      return bytes;
     });
   }
   /**

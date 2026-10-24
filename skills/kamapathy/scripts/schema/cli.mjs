@@ -21,7 +21,8 @@ const TAB_ID = {
 };
 const TARGET = {
   name: "ref-or-selector",
-  description: "A ref such as @e3 from a current snapshot, or a CSS selector.",
+  description:
+    "A ref such as @e3 from a current snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=.",
 };
 
 export const COMMANDS = [
@@ -238,7 +239,7 @@ export const COMMANDS = [
   command(
     "snapshot",
     "Page actions",
-    "snapshot <tab-id> [options]",
+    "snapshot <tab-id> [--full] [--selector <selector>] [--root <ref>] [--viewport] [--outline] [--locators] [--no-header] [--cursor <cursor>] [--max-chars n] [--max-controls n] [--json]",
     "Read bounded page text and control refs",
     {
       arguments: [TAB_ID],
@@ -246,8 +247,41 @@ export const COMMANDS = [
         { name: "--full", description: "Request the larger snapshot mode" },
         {
           name: "--selector",
-          value: "<css>",
-          description: "Scope the snapshot to one element",
+          value: "<selector>",
+          description: "Scope the snapshot to one element, of any form",
+        },
+        {
+          name: "--root",
+          value: "<ref>",
+          description:
+            "Scope to a ref's subtree, or a frame ref's document; not with --selector",
+          since: 3,
+        },
+        {
+          name: "--viewport",
+          description: "Keep only what is on screen",
+          since: 3,
+        },
+        {
+          name: "--outline",
+          description: "Print the page's structure instead of its text",
+          since: 3,
+        },
+        {
+          name: "--locators",
+          description: "Give each control a selector that names it alone",
+          since: 3,
+        },
+        {
+          name: "--no-header",
+          description: "Leave out the page, space and tabs line",
+          since: 3,
+        },
+        {
+          name: "--cursor",
+          value: "<cursor>",
+          description: "Read the part after an earlier one's next cursor",
+          since: 3,
         },
         {
           name: "--max-chars",
@@ -385,12 +419,32 @@ export const COMMANDS = [
   command(
     "screenshot",
     "Page actions",
-    "screenshot <tab-id> <file.png>",
-    "Save a viewport PNG without overwriting",
+    "screenshot <tab-id> <file.png> [--full-page] [--clip x,y,width,height] [--scale css|device]",
+    "Save a PNG of the viewport, the whole page or a clip, without overwriting",
     {
       arguments: [
         TAB_ID,
         { name: "file.png", description: "A new file ending in .png." },
+      ],
+      flags: [
+        {
+          name: "--full-page",
+          description: "Capture the whole scrollable document",
+          since: 3,
+        },
+        {
+          name: "--clip",
+          value: "x,y,width,height",
+          description: "Capture this part, in CSS pixels of the image's space",
+          since: 3,
+        },
+        {
+          name: "--scale",
+          value: "css|device",
+          description:
+            "css gives one image pixel per CSS pixel; device keeps device pixels",
+          since: 3,
+        },
       ],
       route: "GET /tabs/:id/screenshot",
       script: "page.screenshot",

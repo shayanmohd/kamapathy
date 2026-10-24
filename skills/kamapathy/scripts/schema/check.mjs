@@ -380,6 +380,10 @@ function checkArguments(entry, shape, args, expected, app) {
         `${name} got ${shown} for ${arg.name}. Expected ${expected}.`,
       );
     }
+    // An argument the app predates, reported only once the value fits it, so
+    // another overload can still take that value.
+    if (app && (arg.since ?? 1) > app.apiLevel)
+      return outdated(name, arg.since, app);
   }
   return null;
 }

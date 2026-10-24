@@ -44,6 +44,23 @@ const target = (name = "target", optional = false) => ({
   kind: "target",
   ...(optional ? { optional } : {}),
 });
+// page.screenshot's options overload, listed before the path one so an object
+// never falls through to it. Its options are the route's own fields, plus the
+// file to write.
+const SHOT = { name: "options", kind: "options", optional: true, since: 3 };
+const shot = body("POST /tabs/:id/screenshot");
+const SHOT_OPTIONS = {
+  path: {
+    kind: "string",
+    max: 4096,
+    since: 3,
+    description: "Also write the PNG to this new file, which must end in .png.",
+  },
+  fullPage: shot.fullPage,
+  clip: shot.clip,
+  scale: shot.scale,
+  timeout: { ...shot.timeoutMs, field: "timeoutMs" },
+};
 
 const property = (name, signature, summary) => ({
   name,
@@ -287,17 +304,24 @@ export const PAGE_ENTRIES = [
   ),
   method(
     "Page.screenshot",
-    "page.screenshot(path)",
-    "Saves a viewport PNG. Never overwrites an existing file.",
-    [{ name: "path", kind: "string" }],
-    "Promise<string>",
-    "GET /tabs/:id/screenshot",
+    "page.screenshot(options?)",
+    "Captures the page as PNG: the viewport, the whole page or a clip, at CSS scale by default. With a path string it saves the file and returns its path.",
+    [SHOT],
+    "Promise<Buffer | string>",
+    "POST /tabs/:id/screenshot",
     [
-      "screenshot_unavailable",
       "screenshot_failed",
       "empty_screenshot",
+      "clip_outside_page",
+      "screenshot_too_large",
+      "invalid_field",
       "invalid_response",
     ],
+    {
+      expected: "page.screenshot(options?) or page.screenshot(path)",
+      overloads: [[SHOT], [{ name: "path", kind: "string" }]],
+      options: SHOT_OPTIONS,
+    },
   ),
   method(
     "Page.opener",

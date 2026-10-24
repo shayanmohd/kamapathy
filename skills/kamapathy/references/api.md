@@ -408,11 +408,19 @@ Selects local files on a file input. The site may upload them at once.
 
 Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/upload`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `upload_busy`, `unknown_ref`, `stale_ref`, `invalid_target`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.screenshot(path)`
+### `page.screenshot(options?)`
 
-Saves a viewport PNG. Never overwrites an existing file.
+Captures the page as PNG: the viewport, the whole page or a clip, at CSS scale by default. With a path string it saves the file and returns its path.
 
-Returns `Promise<string>`. Route `GET /tabs/:id/screenshot`. Errors: `screenshot_unavailable`, `screenshot_failed`, `empty_screenshot`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `path` | string of at most 4096 characters |  | Also write the PNG to this new file, which must end in .png. |
+| `fullPage` | true or false | `false` | Capture the whole scrollable document, not the viewport. |
+| `clip` | object |  | The part to capture, in CSS pixels of the image's own space. |
+| `scale` | one of css, device | `"css"` | css gives one image pixel per CSS pixel; device keeps device pixels. |
+| `timeout` | milliseconds from 1 to 60000 | `15000` | Most time for the load wait and the capture together. |
+
+Returns `Promise<Buffer | string>`. Route `POST /tabs/:id/screenshot`. Errors: `screenshot_failed`, `empty_screenshot`, `clip_outside_page`, `screenshot_too_large`, `invalid_field`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.opener()`
 
@@ -496,7 +504,7 @@ Navigate a tab
 
 Close a tab
 
-### `snapshot <tab-id> [options]`
+### `snapshot <tab-id> [--full] [--selector <selector>] [--root <ref>] [--viewport] [--outline] [--locators] [--no-header] [--cursor <cursor>] [--max-chars n] [--max-controls n] [--json]`
 
 Read bounded page text and control refs
 
@@ -532,9 +540,9 @@ Read wait options as JSON from stdin
 
 Read an actions array or {actions} JSON
 
-### `screenshot <tab-id> <file.png>`
+### `screenshot <tab-id> <file.png> [--full-page] [--clip x,y,width,height] [--scale css|device]`
 
-Save a viewport PNG without overwriting
+Save a PNG of the viewport, the whole page or a clip, without overwriting
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 

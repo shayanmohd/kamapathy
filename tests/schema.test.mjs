@@ -575,6 +575,42 @@ describe("API schema", () => {
       checkCall(goto, ["https://example.com/"], { apiLevel: 2 }),
     ).toBeNull();
 
+    // An argument the app predates, and the overload order that keeps a path
+    // string working while an options object is checked as options.
+    const screenshot = entry("Page.screenshot");
+    expect(screenshot.overloads[0][0]).toMatchObject({
+      kind: "options",
+      since: 3,
+    });
+    expect(checkCall(screenshot, [{}], { apiLevel: 3 })).toBeNull();
+    expect(
+      checkCall(screenshot, [{}], { apiLevel: 2, version: "0.2.0" }),
+    ).toEqual({
+      code: "app_outdated",
+      message:
+        "page.screenshot needs Kamapathy API level 3, and Kamapathy 0.2.0 has level 2. Ask the person to update Kamapathy, then read the skill again.",
+      fields: {
+        entry: "page.screenshot",
+        required: 3,
+        available: 2,
+        appVersion: "0.2.0",
+      },
+    });
+    expect(checkCall(screenshot, ["/tmp/a.png"], { apiLevel: 2 })).toBeNull();
+    expect(checkCall(screenshot, [{ timeoutMs: 5000 }])).toMatchObject({
+      code: "invalid_option",
+      fields: {
+        entry: "page.screenshot",
+        option: "timeoutMs",
+        suggestion: "timeout",
+        expected: "page.screenshot(options?) or page.screenshot(path)",
+      },
+    });
+    expect(
+      checkCall(screenshot, [{ fullPage: true }], { apiLevel: 2 }),
+    ).toMatchObject({ code: "app_outdated", fields: { option: "fullPage" } });
+    expect(checkCall(screenshot, [5])?.code).toBe("invalid_option");
+
     expect(suggest("timeout", ["selector", "timeoutMs"])).toBe("timeoutMs");
     expect(suggest("selecter", ["selector", "text"])).toBe("selector");
     expect(suggest("zzz", ["ref", "selector"])).toBeUndefined();
