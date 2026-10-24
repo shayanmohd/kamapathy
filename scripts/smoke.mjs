@@ -45,6 +45,12 @@ const fixture = createServer((request, response) => {
     return response.end(
       `<!doctype html><html lang="en"><head><title>Tall page</title></head><body style="margin:0"><h1 style="margin:0;height:40px">Tall page</h1><div style="height:2400px;background:linear-gradient(#eef,#99a)"></div><p id="bottom" style="margin:0;height:20px">Bottom of the page</p></body></html>`,
     );
+  // A page that asks to stay, for the Leave site prompt. Chromium only asks
+  // once the page has had a gesture, which a click on its button gives it.
+  if (request.url === "/guarded")
+    return response.end(
+      `<!doctype html><html lang="en"><head><title>Guarded page</title></head><body><h1>Guarded page</h1><button id="touch" type="button">Touch this page</button><p id="touched" role="status">Not touched</p><script>document.getElementById('touch').onclick=()=>{document.getElementById('touched').textContent='Touched';};addEventListener('beforeunload',(event)=>{event.preventDefault();event.returnValue='';});</script></body></html>`,
+    );
   const second = request.url === "/second";
   response.end(
     `<!doctype html><html lang="en"><head><title>${second ? "Second page" : "Kamapathy test garden"}</title></head><body><h1>${second ? "Second page" : "Kamapathy test garden"}</h1><a id="next" href="/second">Next page</a><label for="query">Research topic</label><input id="query"><button id="save">Save topic</button><p id="result">No topic saved</p><script>document.getElementById('save').onclick=()=>{document.getElementById('result').textContent=document.getElementById('query').value;};</script></body></html>`,
@@ -2043,6 +2049,168 @@ try {
   await overview.waitFor({ state: "detached" });
   assert.equal((await api(`/spaces/${watcher}`, "DELETE")).status, 200);
   checked("the spaces grid shows an agent's page for a space the person never opened");
+  // Section 6: a page that asks to stay. The box is native, so it is
+  // answered inside the application and nothing is ever shown on the
+  // person's screen; the real one is put back when the three checks are
+  // done. Playwright answers a page dialog it sees, which would race
+  // Kamapathy's own answer, so every page is left to answer its own.
+  const ownDialogs = (candidate) => candidate.on("dialog", () => {});
+  for (const candidate of app.context().pages()) ownDialogs(candidate);
+  app.context().on("page", ownDialogs);
+  const guardedUrl = `${origin}/guarded`;
+  // Replaces the Leave site box with a recorded answer and forgets the
+  // boxes before it: 0 is Leave, 1 is Stay. `holdMs` holds the main process
+  // the way a box the person is reading does.
+  const askWith = (button, holdMs = 0) =>
+    app.evaluate(
+      ({ dialog }, { answer, hold }) => {
+        globalThis.__kamapathyLeaveBoxes = [];
+        globalThis.__kamapathyLeaveBox ??= dialog.showMessageBoxSync;
+        dialog.showMessageBoxSync = (first, second) => {
+          globalThis.__kamapathyLeaveBoxes.push(second ?? first);
+          const until = Date.now() + hold;
+          while (Date.now() < until);
+          return answer;
+        };
+      },
+      { answer: button, hold: holdMs },
+    );
+  const leaveBoxes = () =>
+    app.evaluate(() => globalThis.__kamapathyLeaveBoxes ?? []);
+  const navigateTab = (id, url) =>
+    page.evaluate((action) => window.kamapathy.dispatch(action), {
+      type: "tab:navigate",
+      id,
+      url,
+    });
+  // The page behind a Playwright page object, which keeps its identity
+  // across a navigation, so its URL says where that page really is.
+  const pageAt = (url) =>
+    poll(
+      () =>
+        app
+          .context()
+          .pages()
+          .find((candidate) => candidate.url() === url),
+      { label: `the page at ${url}` },
+    );
+  const shows = async (url) =>
+    (await visibleViews()).some((view) => view.url === url);
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    personalTab,
+  );
+  await navigateTab(personalTab, guardedUrl);
+  const guardedPage = await pageAt(guardedUrl);
+  // The guard only asks once the page has had a gesture, which the click
+  // gives it.
+  await guardedPage.click("#touch");
+  await guardedPage.getByText("Touched", { exact: true }).waitFor();
+  await askWith(1, 600);
+  // The box holds the main process while the person reads it, so an agent
+  // request that lands then waits for the answer instead of failing.
+  const meanwhile = api(`/tabs/${agentTab}/snapshot`);
+  await navigateTab(personalTab, `${origin}/second`);
+  const answered = await meanwhile;
+  assert.equal(answered.status, 200, await answered.text());
+  const leaveBox = await poll(async () => (await leaveBoxes()).at(0), {
+    label: "the Leave site box",
+  });
+  assert.deepEqual(
+    [leaveBox.message, leaveBox.detail, ...leaveBox.buttons],
+    ["Leave site?", "Changes you made may not be saved.", "Leave", "Stay"],
+  );
+  assert.equal(guardedPage.url(), guardedUrl);
+  assert.ok(
+    await shows(guardedUrl),
+    "the page asked about is not the shown one",
+  );
+  await askWith(0);
+  await navigateTab(personalTab, `${origin}/second`);
+  await poll(() => guardedPage.url() === `${origin}/second`, {
+    label: "the page the person chose to leave",
+  });
+  assert.equal((await leaveBoxes()).length, 1);
+  checked("a personal tab honors Leave and Stay");
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentTab,
+  );
+  const toGuarded = await api(`/tabs/${agentTab}/navigate`, "POST", {
+    url: guardedUrl,
+    waitUntil: "load",
+  });
+  assert.equal(toGuarded.status, 200, await toGuarded.text());
+  const agentGuarded = await pageAt(guardedUrl);
+  const touch = await api(`/tabs/${agentTab}/click`, "POST", {
+    selector: "#touch",
+  });
+  assert.equal(touch.status, 200, await touch.text());
+  const touched = await api(`/tabs/${agentTab}/wait`, "POST", {
+    selector: "#touched",
+    text: "Touched",
+    timeoutMs: 8000,
+  });
+  assert.equal(touched.status, 200, await touched.text());
+  // The person takes this space over, so its own tab asks them as well.
+  await page.evaluate(
+    (id) =>
+      window.kamapathy.dispatch({ type: "space:ownership", id, owner: "human" }),
+    task,
+  );
+  await askWith(1);
+  await navigateTab(agentTab, `${origin}/second`);
+  const agentTabBox = await poll(async () => (await leaveBoxes()).at(0), {
+    label: "the Leave site box over the agent's tab",
+  });
+  assert.equal(agentTabBox.message, "Leave site?");
+  assert.equal(agentGuarded.url(), guardedUrl);
+  assert.ok(await shows(guardedUrl), "the agent's guarded page is not shown");
+  checked("an agent space under the person's control asks before leaving");
+  assert.equal((await api(`/spaces/${task}/resume`, "POST", {})).status, 200);
+  // Stay is still the answer, so a box here would keep the page as well as
+  // show in the record.
+  await askWith(1);
+  const left = await api(`/tabs/${agentTab}/navigate`, "POST", {
+    url: `${origin}/`,
+    waitUntil: "load",
+  });
+  const leftBody = await left.json();
+  assert.equal(left.status, 200, JSON.stringify(leftBody));
+  assert.deepEqual(leftBody.dialog, {
+    type: "beforeunload",
+    message: "",
+    answer: "accepted",
+  });
+  assert.equal(leftBody.tab.url, `${origin}/`);
+  assert.deepEqual(await leaveBoxes(), []);
+  await poll(() => agentGuarded.url() === `${origin}/`, {
+    label: "the page the agent left",
+  });
+  const overrides = (
+    await page.evaluate(() => window.kamapathy.getState())
+  ).activity.filter(
+    (item) =>
+      item.spaceId === task &&
+      item.message === "Agent left a page that asked it to stay",
+  );
+  assert.equal(overrides.length, 1);
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBoxSync = globalThis.__kamapathyLeaveBox;
+    delete globalThis.__kamapathyLeaveBoxes;
+  });
+  // The person's tab goes back to the page the checks after this one expect.
+  await navigateTab(personalTab, origin);
+  await waitForState(
+    page,
+    (state, id) =>
+      state.tabs.find((tab) => tab.id === id)?.title ===
+      "Kamapathy test garden",
+    personalTab,
+  );
+  checked(
+    "an agent-controlled tab leaves without asking and Recent activity says so",
+  );
   state = await page.evaluate(() =>
     window.kamapathy.dispatch({
       type: "space:create",

@@ -46,6 +46,11 @@ const pages = {
     `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
   ),
   "/tall": `<!doctype html><html><body style="margin:0"><h1 style="margin:0;height:40px">Tall page</h1><div style="height:2400px"></div><p id="sizes" style="margin:0;height:20px">sizes</p><script>document.getElementById('sizes').textContent='viewport '+Math.floor(visualViewport.width)+'x'+Math.floor(visualViewport.height)+' document '+document.documentElement.scrollWidth+'x'+document.documentElement.scrollHeight;</script></body></html>`,
+  // A page tall enough to scroll that reports the viewport and document it
+  // sees, then adds a control once the server answers its request. The page
+  // state is read before the control arrives and the selector wait after,
+  // whatever this machine's speed.
+  "/late": `<!doctype html><html><body style="margin:0"><h1 style="margin:0;height:40px">Late control</h1><div style="height:2400px"></div><p id="sizes" style="margin:0;height:20px">sizes</p><script>document.getElementById('sizes').textContent='viewport '+innerWidth+'x'+innerHeight+' document '+document.documentElement.scrollWidth+'x'+document.documentElement.scrollHeight;fetch('/late/control').then(()=>{const late=document.createElement('button');late.id='late';late.textContent='Late control';document.body.append(late);});</script></body></html>`,
   "/audio": page(
     `<button id="play">Play sound</button><p id="sound">Silent</p>`,
     `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
@@ -69,6 +74,12 @@ const IDENTITY_PATHS = [
 ];
 const seen = new Map();
 let identity;
+// The late page waits for this request before it adds its control, so the
+// control arrives while the selector wait is sleeping.
+let releaseControl;
+const controlReady = new Promise((done) => {
+  releaseControl = done;
+});
 const pixel = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
   "base64",
@@ -120,6 +131,11 @@ const site = createServer(async (request, response) => {
   if (path.startsWith("/identity/from-")) {
     response.writeHead(204);
     return response.end();
+  }
+  if (path === "/late/control") {
+    await controlReady;
+    response.writeHead(200, { "Content-Type": "text/plain" });
+    return response.end("go");
   }
   const html = pages[path];
   response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
@@ -389,6 +405,73 @@ try {
   );
   passed(
     "screenshots of an unwatched agent tab come out at CSS size, and a full-page capture covers its document",
+  );
+
+  // Section 6 in a normal launch: a navigation that reaches load, the page
+  // state it reads and a control that arrives while the wait sleeps. No
+  // window paints this tab, so each answer comes from its own session. The
+  // body is the one goto sends.
+  const lateTab = await open("/click");
+  await poll(async () => (await controls(lateTab)).includes("Click me"), {
+    timeoutMs: 10000,
+    label: "the page the navigation leaves",
+  });
+  const went = await api(`/tabs/${lateTab}/navigate`, "POST", {
+    url: `${origin}/late`,
+    waitUntil: "load",
+  });
+  const landing = await went.response.json();
+  assert.equal(went.status, 200, JSON.stringify(landing));
+  assert.deepEqual(
+    [landing.ok, landing.waitUntil, landing.httpStatus, landing.tab.url],
+    [true, "load", 200, `${origin}/late`],
+  );
+  // The page measured itself as it loaded, before anything captured it.
+  const lateSizes = /viewport (\d+)x(\d+) document (\d+)x(\d+)/.exec(
+    (await snapshot(lateTab)).text,
+  );
+  assert.ok(lateSizes, "the late page did not report its own size");
+  const [lateWidth, lateHeight, lateDocumentWidth, lateDocumentHeight] =
+    lateSizes.slice(1).map(Number);
+  const read = await json(`/tabs/${lateTab}/info`);
+  assert.deepEqual(
+    [read.viewport, read.document, read.scroll],
+    [
+      { width: lateWidth, height: lateHeight },
+      { width: lateDocumentWidth, height: lateDocumentHeight },
+      { x: 0, y: 0 },
+    ],
+    JSON.stringify(read),
+  );
+  assert.deepEqual([read.readyState, read.loading], ["complete", false]);
+  assert.ok(
+    read.document.height > read.viewport.height,
+    `A document of ${read.document.height} pixels is no taller than its viewport`,
+  );
+  // Nothing matches while the server holds the page's request.
+  const early = await api(`/tabs/${lateTab}/wait-for-selector`, "POST", {
+    selector: "#late",
+    timeoutMs: 0,
+  });
+  const ranOut = (await early.response.json()).error;
+  assert.equal(early.status, 504, JSON.stringify(ranOut));
+  assert.deepEqual(
+    [ranOut.code, ranOut.awaited, ranOut.matched],
+    ["wait_timeout", "selector", 0],
+  );
+  const pending = json(`/tabs/${lateTab}/wait-for-selector`, "POST", {
+    selector: "#late",
+    timeoutMs: 15000,
+  });
+  releaseControl();
+  const found = await pending;
+  assert.deepEqual(
+    [found.ok, found.state, found.matched],
+    [true, "visible", 1],
+    JSON.stringify(found),
+  );
+  passed(
+    "a normally launched Kamapathy navigates, reads the page state and waits for a late control in an unwatched agent tab",
   );
 
   const timers = await open("/timers");
