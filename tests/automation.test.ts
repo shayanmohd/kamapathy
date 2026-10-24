@@ -2324,6 +2324,67 @@ describe("local automation socket", () => {
     expect(controller.contents.loads).toEqual([]);
   });
 
+  it("navigate and open accept about:blank and refuse other schemes with a hint", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const { done } = await dispatched(tab.id, {
+      url: "about:blank",
+      waitUntil: "commit",
+    });
+    expect(page.loads.at(-1)).toEqual({ url: "about:blank" });
+    const blank = mainFrame(page, "loader-blank");
+    blank.start("about:blank");
+    blank.commit("about:blank");
+    const opened = await done;
+    expect(opened.status).toBe(200);
+    const answer = await opened.json();
+    expect(answer).toMatchObject({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, url: "about:blank" }),
+      waitUntil: "commit",
+    });
+    // A blank page has no document request, so it reports no status.
+    expect(answer.httpStatus).toBeUndefined();
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent opened a blank page",
+    });
+    const loads = page.loads.length;
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/navigate`, "POST", {
+        url: "file:///etc/hosts",
+      }),
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.error).toMatchObject({
+      code: "invalid_url",
+      url: "file:///etc/hosts",
+      hint: "Agents cannot open local files. Serve the folder over loopback HTTP, for example with python3 -m http.server, and open that address.",
+    });
+    expect(page.loads.length).toBe(loads);
+    // The same rule governs the route that opens a page.
+    const blankTab = await request(`/spaces/${space.id}/tabs`, "POST", {
+      url: "about:blank",
+    });
+    expect(blankTab.status).toBe(201);
+    expect((await blankTab.json()).tab).toMatchObject({ url: "about:blank" });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: space.id,
+      message: "Agent opened a blank page",
+    });
+    const deniedOpen = await failure(
+      await request(`/spaces/${space.id}/tabs`, "POST", {
+        url: "data:text/html,hello",
+      }),
+    );
+    expect(deniedOpen.status).toBe(400);
+    expect(deniedOpen.error).toMatchObject({
+      code: "invalid_url",
+      url: "data:text/html,hello",
+      hint: "Agents cannot open data: or blob: URLs. Open about:blank and write the content with evaluate.",
+    });
+  });
+
   it("navigate classifies an abort", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

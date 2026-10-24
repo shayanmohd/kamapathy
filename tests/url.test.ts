@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { HOME_URL } from "../shared/state";
 import {
+  AGENT_URL_LIMIT,
+  agentUrlHint,
+  agentUrlProblem,
   BLOCKED_EXTERNAL_SCHEMES,
   extensionId,
   fileKind,
   googleSignInFallback,
   hostname,
+  isAgentUrl,
   isExternalAppUrl,
   isFileUrl,
   isGoogleSignInRejectedUrl,
@@ -347,6 +351,71 @@ describe("remote page URL validation", () => {
     "http://",
   ])("does not treat %s as a permitted remote page", (url) => {
     expect(isWebUrl(url)).toBe(false);
+  });
+});
+
+describe("agent URL rule", () => {
+  // A URL of exactly this many characters, padded in its path.
+  const sized = (length: number) =>
+    `https://a.test/${"x".repeat(length - "https://a.test/".length)}`;
+
+  it("accepts only http, https and about:blank for agents", () => {
+    for (const url of [
+      "http://a.test/x",
+      "https://a.test/",
+      sized(AGENT_URL_LIMIT),
+      "about:blank",
+    ])
+      expect(isAgentUrl(url), url).toBe(true);
+    for (const url of [
+      "about:blank?x",
+      "about:blank/",
+      "about:config",
+      "file:///etc/hosts",
+      "data:text/html,hello",
+      "blob:https://a.test/550e8400-e29b-41d4-a716-446655440000",
+      "view-source:https://a.test/",
+      "javascript:alert(1)",
+      "kamapathy://newtab",
+      "https://user:pw@a.test/",
+      sized(AGENT_URL_LIMIT + 1),
+      "not a url",
+    ])
+      expect(isAgentUrl(url), url).toBe(false);
+  });
+
+  it("names the problem and the hint for each refusal", () => {
+    for (const [url, problem] of [
+      ["https://a.test/", undefined],
+      ["about:blank", undefined],
+      ["file:///etc/hosts", "local_file"],
+      ["data:text/html,hello", "inline_data"],
+      ["blob:https://a.test/550e8400", "inline_data"],
+      ["https://user:pw@a.test/", "credentials"],
+      ["http://:pw@a.test/", "credentials"],
+      ["about:config", "scheme"],
+      ["view-source:https://a.test/", "scheme"],
+      ["not a url", "incomplete"],
+      [sized(AGENT_URL_LIMIT + 1), "too_long"],
+    ] as const)
+      expect(agentUrlProblem(url), url).toBe(problem);
+    expect(agentUrlHint("file:///etc/hosts")).toBe(
+      "Agents cannot open local files. Serve the folder over loopback HTTP, for example with python3 -m http.server, and open that address.",
+    );
+    expect(agentUrlHint("data:text/html,hello")).toBe(
+      "Agents cannot open data: or blob: URLs. Open about:blank and write the content with evaluate.",
+    );
+    expect(agentUrlHint("https://user:pw@a.test/")).toBe(
+      "Open the address without credentials. A sign-in prompt goes to the person.",
+    );
+    for (const url of [
+      "https://a.test/",
+      "about:blank",
+      "about:config",
+      "not a url",
+      sized(AGENT_URL_LIMIT + 1),
+    ])
+      expect(agentUrlHint(url), url).toBeUndefined();
   });
 });
 

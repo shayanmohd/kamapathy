@@ -18,7 +18,7 @@ const target = { ref, selector };
 const url = {
   kind: "url",
   required: true,
-  description: "A complete http or https URL.",
+  description: "A complete http or https URL, or about:blank.",
 };
 // How far a navigation or a load-state wait waits.
 const waitUntil = {
@@ -553,7 +553,7 @@ export const ROUTES = [
       url: {
         kind: "url",
         description:
-          "The page to open. From API level 2 it may be left out for a blank page.",
+          "The page to open: a complete http or https URL, or about:blank. From API level 2 it may be left out for a blank page.",
       },
     },
     { follow: true },

@@ -730,7 +730,7 @@ Show the commands, or help on one
 | `invalid_cursor` | 400 | not retryable |  | The cursor is malformed or was made for another scope. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
-| `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
+| `invalid_url` | 400 | not retryable | `url`, `hint` | The URL is not a complete HTTP or HTTPS URL without credentials, or about:blank. |
 | `invalid_files` | 400 | not retryable |  | The upload has no files, too many, or a malformed one. |
 | `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |

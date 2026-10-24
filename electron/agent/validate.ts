@@ -3,7 +3,12 @@ import {
   cleanAgentText,
   type AgentTextField,
 } from "../../shared/agent-text";
-import { isWebUrl } from "../../shared/url";
+import {
+  AGENT_URL_LIMIT,
+  agentUrlHint,
+  isAgentUrl,
+  isWebUrl,
+} from "../../shared/url";
 import {
   ACTIONS,
   API_LEVEL,
@@ -547,13 +552,18 @@ export function agentTextField(
     return refuse("text that is not empty after cleaning");
   return cleaned;
 }
+// Every address an agent asks for, under the one agent URL rule. The refusal
+// carries the value it got, cut for a message, and what to do instead.
 export function urlField(body: Record<string, unknown>): string {
-  const value = stringField(body, "url", 8192);
-  if (!isWebUrl(value))
+  const value = stringField(body, "url", AGENT_URL_LIMIT);
+  if (!isAgentUrl(value)) {
+    const hint = agentUrlHint(value);
     return fail(
       "invalid_url",
-      "Use a complete HTTP or HTTPS URL without embedded credentials.",
+      "Use a complete HTTP or HTTPS URL without embedded credentials, or about:blank.",
+      { url: value.slice(0, 100), ...(hint === undefined ? {} : { hint }) },
     );
+  }
   return new URL(value).href;
 }
 export function expectationFields(body: Record<string, unknown>): {

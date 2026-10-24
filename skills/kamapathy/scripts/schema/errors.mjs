@@ -63,7 +63,8 @@ export const ERRORS = {
   invalid_url: code(
     400,
     false,
-    "The URL is not a complete HTTP or HTTPS URL without credentials.",
+    "The URL is not a complete HTTP or HTTPS URL without credentials, or about:blank.",
+    ["url", "hint"],
   ),
   invalid_files: code(
     400,
