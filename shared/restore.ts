@@ -1,13 +1,56 @@
+import { isPermissionKey, SAVED_SITE_PERMISSIONS } from "./permissions";
 import { HOME_URL, initialState, newTab } from "./state";
 import { isWebUrl } from "./url";
 import { compareVersions, isVersion } from "./version";
 import type {
   BrowserState,
   Settings,
+  SitePermission,
   Space,
   UpdateRelease,
   UpdateState,
 } from "./types";
+
+// A web origin on its own: no path, no query, no credentials.
+function isWebOrigin(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    isWebUrl(value) &&
+    new URL(value).origin === value
+  );
+}
+
+// The person's saved Allow and Block answers. One comes back only for a
+// restored personal space, a web origin and a permission Kamapathy grants.
+export function validSitePermissions(
+  value: unknown,
+  spaces: readonly Space[],
+): SitePermission[] {
+  if (!Array.isArray(value)) return [];
+  return (value as unknown[])
+    .filter((item): item is SitePermission => {
+      const row = item as Partial<SitePermission> | null;
+      return (
+        !!row &&
+        typeof row === "object" &&
+        spaces.some(
+          (space) => space.id === row.spaceId && space.kind === "personal",
+        ) &&
+        isWebOrigin(row.origin) &&
+        isPermissionKey(row.permission) &&
+        typeof row.allow === "boolean" &&
+        Number.isFinite(row.at)
+      );
+    })
+    .map(({ spaceId, origin, permission, allow, at }) => ({
+      spaceId,
+      origin,
+      permission,
+      allow,
+      at,
+    }))
+    .slice(-SAVED_SITE_PERMISSIONS);
+}
 
 export function validSettings(value: unknown, base: Settings): Settings {
   if (!value || typeof value !== "object") return base;
@@ -275,6 +318,10 @@ export function restoreState(
           Number.isInteger(visits) && visits! > 0 ? { ...item, visits } : item,
         )
         .slice(0, 1000);
+    state.sitePermissions = validSitePermissions(
+      saved.sitePermissions,
+      state.spaces,
+    );
   } catch {
     // Invalid saved data must never leave a partially restored session.
     state = initialState(platform);

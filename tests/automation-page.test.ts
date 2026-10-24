@@ -6,6 +6,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  DIALOG_DRAIN_SOURCE,
+  dialogHandlerSource,
+  dialogQueueSource,
+} from "../electron/agent/dom/dialog-handler";
 import { pdfDocument, readBlobPdf } from "../electron/agent/dom/pdf";
 import type { Level, Mode } from "../electron/agent/dom/select";
 import { parseSelector } from "../electron/agent/selectors";
@@ -301,5 +306,182 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     expect(
       await read({ url, offset: 0, chunkBytes: 4, maxBytes: 1024 }),
     ).toEqual({ ok: false, reason: "fetch_failed" });
+  }, 20000);
+
+  // Section 7's dialog handler, installed in the page the way an init script
+  // installs it, with a stand-in for the CDP binding it reports through.
+  const BINDING = "__kamapathyReports";
+  const EVENT = "kamapathy-dialog-test";
+  const installDialogs = async (
+    options: {
+      mode?: "agent" | "person";
+      policy?: { accept: boolean; promptText?: string } | null;
+      key?: string;
+      binding?: string;
+      event?: string;
+    } = {},
+  ) => {
+    await page.evaluate((binding) => {
+      const scope = globalThis as unknown as Record<string, unknown>;
+      scope.__reports = scope.__reports ?? [];
+      scope[binding] = (text: string) => {
+        (scope.__reports as string[]).push(text);
+      };
+    }, BINDING);
+    await page.evaluate(
+      dialogHandlerSource({
+        binding: options.binding ?? BINDING,
+        key: options.key ?? "__kamapathyUpdate",
+        mode: options.mode ?? "agent",
+        policy: options.policy ?? null,
+        ...(options.event === undefined ? {} : { event: options.event }),
+      }),
+    );
+  };
+  const dialogReports = () =>
+    page.evaluate(() =>
+      ((globalThis as unknown as { __reports: string[] }).__reports ?? []).map(
+        (text) => JSON.parse(text) as Record<string, unknown>,
+      ),
+    );
+
+  it("handler answers from the policy and reports", async () => {
+    await open("/frames/other");
+    await installDialogs();
+    // Dismissing is the default: confirm is false and prompt is null.
+    expect(
+      await page.evaluate(() => [
+        window.confirm("Delete this file?"),
+        window.prompt("Your name?", "preset"),
+      ]),
+    ).toEqual([false, null]);
+    // A second install finds the updater and changes the policy in place.
+    await installDialogs({ policy: { accept: true, promptText: "Ada" } });
+    expect(
+      await page.evaluate(() => [
+        window.confirm("Delete this file?"),
+        window.prompt("Your name?", "preset"),
+      ]),
+    ).toEqual([true, "Ada"]);
+    // An accepted prompt without text returns the default value.
+    await installDialogs({ policy: { accept: true } });
+    expect(
+      await page.evaluate(() => [
+        window.prompt("Your name?", "preset"),
+        window.prompt("Your name?"),
+      ]),
+    ).toEqual(["preset", ""]);
+    const seen = await dialogReports();
+    expect(seen).toEqual([
+      {
+        type: "confirm",
+        message: "Delete this file?",
+        answer: "dismissed",
+        url: page.url(),
+      },
+      {
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "dismissed",
+        url: page.url(),
+      },
+      {
+        type: "confirm",
+        message: "Delete this file?",
+        answer: "accepted",
+        url: page.url(),
+      },
+      {
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "accepted",
+        promptText: "Ada",
+        url: page.url(),
+      },
+      {
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "accepted",
+        promptText: "preset",
+        url: page.url(),
+      },
+      {
+        type: "prompt",
+        message: "Your name?",
+        answer: "accepted",
+        promptText: "",
+        url: page.url(),
+      },
+    ]);
+  }, 20000);
+
+  it("alerts keep the arm", async () => {
+    await open("/frames/other");
+    await installDialogs({ policy: { accept: true } });
+    expect(
+      await page.evaluate(() => [
+        window.alert("Saved"),
+        window.confirm("Delete this file?"),
+        window.confirm("And this one?"),
+      ]),
+    ).toEqual([undefined, true, true]);
+    expect(
+      (await dialogReports()).map((report) => [report.type, report.answer]),
+    ).toEqual([
+      ["alert", "accepted"],
+      ["confirm", "accepted"],
+      ["confirm", "accepted"],
+    ]);
+  }, 20000);
+
+  it("native mode shows real dialogs", async () => {
+    await open("/frames/other");
+    const native: string[] = [];
+    page.on("dialog", async (dialog) => {
+      native.push(`${dialog.type()} ${dialog.message()}`);
+      await dialog.dismiss();
+    });
+    await installDialogs();
+    expect(await page.evaluate(() => window.confirm("Agent answers"))).toBe(
+      false,
+    );
+    expect(native).toEqual([]);
+    // The person takes over, so the page gets its own functions back.
+    await installDialogs({ mode: "person" });
+    expect(await page.evaluate(() => window.confirm("You answer"))).toBe(false);
+    expect(native).toEqual(["confirm You answer"]);
+    expect(await dialogReports()).toHaveLength(1);
+    // Handing the page back puts the handler in charge again.
+    await installDialogs({ mode: "agent", policy: { accept: true } });
+    expect(await page.evaluate(() => window.confirm("Agent again"))).toBe(true);
+    expect(native).toHaveLength(1);
+    expect(await dialogReports()).toHaveLength(2);
+  }, 20000);
+
+  it("reports through its event in a context without the binding", async () => {
+    await open("/frames/other");
+    // The queue a frame's isolated world keeps, installed twice as a
+    // re-attach installs it.
+    await page.evaluate(dialogQueueSource(EVENT));
+    await page.evaluate(dialogQueueSource(EVENT));
+    await installDialogs({ binding: "__absent", event: EVENT });
+    expect(await page.evaluate(() => window.confirm("No binding here"))).toBe(
+      false,
+    );
+    const drained = (await page.evaluate(DIALOG_DRAIN_SOURCE)) as string[];
+    expect(drained.map((text) => JSON.parse(text))).toEqual([
+      {
+        type: "confirm",
+        message: "No binding here",
+        answer: "dismissed",
+        url: page.url(),
+      },
+    ]);
+    // Draining clears the queue, so nothing is reported twice.
+    expect(await page.evaluate(DIALOG_DRAIN_SOURCE)).toEqual([]);
+    expect(await dialogReports()).toEqual([]);
   }, 20000);
 });

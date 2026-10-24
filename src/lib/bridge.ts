@@ -341,7 +341,9 @@ export function createPreviewBridge(): KamapathyBridge {
       case "tab:reload":
       case "tab:stop":
         break;
-      // The web preview has no agent service.
+      // The web preview has no agent service and asks for nothing.
+      case "site-permission:remove":
+      case "site-permission:clear":
       case "space:grant":
       case "space:stop":
       case "space:keep":
@@ -440,6 +442,7 @@ export function createPreviewBridge(): KamapathyBridge {
     openImportPermissions: () => {},
     defaultBrowser: async () => ({ state: "unavailable", reason: "web" }),
     makeDefaultBrowser: async () => {},
+    answerPrompt: async () => {},
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

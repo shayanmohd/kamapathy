@@ -4,7 +4,7 @@ import { activeSpace } from "../authority";
 import { fail } from "../errors";
 import { send, type RouteDeps, type RouteImpl } from "../http";
 import type { AutomationController } from "../server";
-import { stringField, urlField } from "../validate";
+import { credentialFields, stringField, urlField } from "../validate";
 import {
   agentVisible,
   boundaryView,
@@ -366,6 +366,30 @@ export function spaceRoutes({
             limit: space!.pageBudget ?? PAGE_BUDGET,
           },
         });
+      },
+    },
+    // The name and password stay in the main process's memory, so nothing
+    // here echoes them, logs them or writes them down.
+    "POST /spaces/:id/http-credentials": {
+      handler: async ({ response, body, space }) => {
+        const { origin, username, password } = credentialFields(body!);
+        controller.prompts.setHTTPCredentials(space!.id, {
+          origin,
+          username,
+          password,
+        });
+        controller.addActivity(
+          space!.id,
+          `Agent stored a sign-in for ${origin}`,
+          "info",
+        );
+        return send(response, 200, { ok: true, origin });
+      },
+    },
+    "DELETE /spaces/:id/http-credentials": {
+      handler: async ({ response, space }) => {
+        controller.prompts.setHTTPCredentials(space!.id, null);
+        return send(response, 200, { ok: true });
       },
     },
     "POST /spaces/:id/tabs": {

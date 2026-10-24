@@ -28,6 +28,7 @@ import type {
   BrowserAction,
   BrowserState,
   FrozenFrame,
+  PromptAnswer,
   SignIns,
   SpaceColor,
 } from "../shared/types";
@@ -58,6 +59,7 @@ import { ToolsMenu } from "./components/ToolsMenu";
 import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
 import { AgentBar } from "./components/AgentBar";
+import { PromptBar } from "./components/PromptBar";
 import { acknowledgeHandoff, agentStatus } from "./lib/spaces";
 import { SpaceButton } from "./components/SpaceButton";
 import { SpacePopover } from "./components/SpacePopover";
@@ -172,6 +174,15 @@ export default function App() {
   // Local HTML and SVG files load without scripts.
   const scriptsOff = isDesktop && !!active && fileKind(active.url) === "markup";
   const ownedByAgent = agentRules(activeSpace) && activeSpace.owner === "agent";
+  // One bar at a time: this space's oldest request, with the rest counted.
+  const spacePrompts = state.prompts.filter(
+    (item) => item.spaceId === activeSpace.id,
+  );
+  const prompt = spacePrompts.length
+    ? spacePrompts.reduce((oldest, item) =>
+        item.at < oldest.at ? item : oldest,
+      )
+    : undefined;
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring = barStatus === "browsing" || barStatus === "idle";
   const mac = state.platform === "darwin";
@@ -190,6 +201,17 @@ export default function App() {
   const attempt = useCallback(async (action: BrowserAction) => {
     try {
       setState(await bridge.dispatch(action));
+      return "";
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : "Something went wrong. Please try again.";
+    }
+  }, []);
+  // An answer goes its own way, so a password never joins an action.
+  const answerPrompt = useCallback(async (answer: PromptAnswer) => {
+    try {
+      await bridge.answerPrompt(answer);
       return "";
     } catch (error) {
       return error instanceof Error
@@ -333,6 +355,7 @@ export default function App() {
     ownedByAgent,
     googleSignInRejected,
     scriptsOff,
+    prompt?.id,
     ring,
     barStatus,
     toast,
@@ -768,6 +791,15 @@ export default function App() {
               setFindOpen(false);
               void dispatch({ type: "page:stop-find" });
             }}
+          />
+        )}
+        {prompt && (
+          <PromptBar
+            key={prompt.id}
+            prompt={prompt}
+            space={activeSpace}
+            total={spacePrompts.length}
+            onAnswer={answerPrompt}
           />
         )}
         <div className={`page-frame ${ring ? "agent-ring" : ""}`}>

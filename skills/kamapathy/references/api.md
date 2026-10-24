@@ -637,14 +637,29 @@ Show the commands, or help on one
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}. Returns `image/png`. |
 | POST | `/tabs/:id/screenshot` | `fullPage?`, `clip?`, `scale?`, `timeoutMs?` | Captures the viewport, the whole page or a clip as PNG, at CSS or device scale. Returns `image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio`. |
-| POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound? }`. |
-| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound? }`. |
-| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound? }`. |
-| POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved }`. |
-| POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound? }`. |
+| POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
-| POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected }`. |
+| POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |
+| POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |
+| POST | `/expectations/:id/wait` | `{}` | Waits for the armed event outside the space's queue, so the action that causes it can run meanwhile. Returns `{ popup: TabView }, { download: Download }, { fileChooser: { id, tabId, multiple, accept } } or { dialog: DialogRecord }`. |
+| DELETE | `/expectations/:id` |  | Cancels an armed wait and ends the wait running on it. Returns `{ ok: true }`. |
+| POST | `/tabs/:id/dialog-policy` | `accept`, `promptText?`, `times?`, `lifetimeMs?` | Arms how the tab answers JavaScript dialogs, before the action that opens one. Without a policy, confirms are dismissed and prompts return nothing. Returns `{ policy: { accept, promptText, remaining, expiresAt } }`. |
+| DELETE | `/tabs/:id/dialog-policy` |  | Clears the tab's dialog policy, so its dialogs are dismissed again. Returns `{ policy: null }`. |
+| GET | `/tabs/:id/dialogs` |  | Reads the tab's dialog policy and the last 20 dialogs Kamapathy answered in it, oldest first. Returns `{ policy: { accept, promptText, remaining, expiresAt } \| null, dialogs: [{ type, message, defaultValue, answer, promptText, url, at }] }`. |
+| POST | `/spaces/:id/http-credentials` | `origin`, `username`, `password` | Stores a name and password for one http or https origin, in memory only, to answer the first server sign-in from that origin in the space's own pages. A repeat, a proxy sign-in and a certificate request always go to the person. Returns `{ ok: true, origin }`. |
+| DELETE | `/spaces/:id/http-credentials` |  | Forgets every origin the space stored credentials for. Returns `{ ok: true }`. |
+| GET | `/spaces/:id/downloads` |  | Lists the downloads this space holds, newest first. Only downloads an agent armed are kept. Returns `{ downloads: [{ id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure }] }`. |
+| GET | `/downloads/:id` |  | Reads one held download and how far it has come. Returns `{ download: { id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure } }`. |
+| POST | `/downloads/:id/cancel` | `{}` | Stops a download that is still running. A finished one is left as it is. Returns `{ download: { id, state, receivedBytes, totalBytes, failure } }`. |
+| DELETE | `/downloads/:id` |  | Deletes the download's bytes from the browser's profile. Returns `{ ok: true }`. |
+| POST | `/downloads/:id/wait` | `timeoutMs?` | Waits until the download stops running, outside the space's queue. Ask again to keep waiting. Returns `{ download: { id, tabId, url, suggestedFilename, mimeType, state, receivedBytes, totalBytes, failure } }`. |
+| GET | `/downloads/:id/content` |  | Reads a finished download's bytes over the socket. The connection drops if the space leaves the agent while it streams. Returns `application/octet-stream with Content-Length, Cache-Control: no-store and X-Content-Type-Options: nosniff`. |
+| GET | `/tabs/:id/popups` |  | Lists the open pages this page opened, with the ones nothing has reported yet marked unseen. Returns `{ popups: [{ id, label, url, openedAt, unseen? }] }`. |
 
 ## Errors
 
@@ -673,6 +688,8 @@ Show the commands, or help on one
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
 | `unknown_ref` | 404 | not retryable | `ref` | The ref was never issued for this page. |
+| `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
+| `download_not_found` | 404 | not retryable |  | No held download has this ID: it was deleted, its space closed, or an hour passed since it finished. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -681,6 +698,10 @@ Show the commands, or help on one
 | `space_protected` | 409 | not retryable | `tabs` | The space holds tabs the person opened, so the agent cannot close it. |
 | `sign_ins_mismatch` | 409 | not retryable | `spaceId`, `signIns` | The space a reuse found uses other sign-ins than the request asked for. |
 | `space_ended` | 409 | not retryable | `spaceId`, `endedBy`, `reason` | The agent finished this space or the person stopped it. Only the person can let an agent use it again. |
+| `expectation_pending` | 409 | not retryable | `event`, `expectationId` | The page already waits for that event. |
+| `download_limit` | 409 | not retryable | `limit` | The space already holds its most downloads. Delete one before arming another. |
+| `download_not_finished` | 409 | not retryable | `state`, `receivedBytes`, `totalBytes` | The download is still running, so it has no bytes to read yet. |
+| `download_failed` | 409 | not retryable | `failure` | The download was cancelled or broke off, so it has no bytes to read. |
 | `tab_limit` | 409 | not retryable |  | The space already has its most tabs. |
 | `space_limit` | 409 | not retryable |  | The API already manages its most spaces. |
 | `screenshot_unavailable` | 409 | not retryable |  | Retired from API level 3: screenshots work with the window hidden or minimized. |
@@ -735,6 +756,8 @@ Show the commands, or help on one
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
+| `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
+| `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
 | `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `title`, `popups` | The condition was not met before the timeout. |
 | `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
 | `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |

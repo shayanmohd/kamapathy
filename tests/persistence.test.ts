@@ -534,6 +534,135 @@ describe("desktop session persistence", () => {
     );
   });
 
+  it("restores valid site permissions only", () => {
+    const path = statePath();
+    const valid = [
+      {
+        spaceId: "personal",
+        origin: "https://maps.example",
+        permission: "geolocation",
+        allow: true,
+        at: 10,
+      },
+      {
+        spaceId: "work",
+        origin: "http://localhost:8080",
+        permission: "notifications",
+        allow: false,
+        at: 11,
+      },
+    ];
+    const invalid = [
+      // A space that is not restored, an origin with a path, a scheme the
+      // browser never asks for, an unknown key, and bad types.
+      {
+        spaceId: "gone",
+        origin: "https://a.example",
+        permission: "camera",
+        allow: true,
+        at: 12,
+      },
+      {
+        spaceId: "personal",
+        origin: "https://a.example/maps",
+        permission: "camera",
+        allow: true,
+        at: 13,
+      },
+      {
+        spaceId: "personal",
+        origin: "file:///etc",
+        permission: "camera",
+        allow: true,
+        at: 14,
+      },
+      {
+        spaceId: "personal",
+        origin: "https://b.example",
+        permission: "pet-door",
+        allow: true,
+        at: 15,
+      },
+      {
+        spaceId: "personal",
+        origin: "https://c.example",
+        permission: "camera",
+        allow: "yes",
+        at: 16,
+      },
+      {
+        spaceId: "personal",
+        origin: "https://d.example",
+        permission: "camera",
+        allow: true,
+        at: "soon",
+      },
+      null,
+    ];
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...initialState("darwin"),
+        sitePermissions: [...valid, ...invalid],
+      }),
+    );
+    expect(readState(path, "darwin", "0.2.0").sitePermissions).toEqual(valid);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...initialState("darwin"), sitePermissions: "all" }),
+    );
+    expect(readState(path, "darwin", "0.2.0").sitePermissions).toEqual([]);
+  });
+
+  it("saves site permissions, never prompts, and keeps the newest 1000", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    original.spaces.push({
+      id: "agent-task",
+      name: "Agent task",
+      color: "purple",
+      kind: "agent",
+      owner: "agent",
+      signIns: "shared",
+      createdAt: 1,
+    });
+    original.sitePermissions = [
+      ...Array.from({ length: 1001 }, (_, index) => ({
+        spaceId: "personal",
+        origin: `https://site-${index}.example`,
+        permission: "notifications" as const,
+        allow: true,
+        at: index,
+      })),
+      {
+        spaceId: "agent-task",
+        origin: "https://agent.example",
+        permission: "geolocation",
+        allow: true,
+        at: 2000,
+      },
+    ];
+    original.prompts.push({
+      id: "prompt",
+      spaceId: "personal",
+      tabId: original.tabs[0].id,
+      kind: "location",
+      origin: "https://asking.example",
+      at: 3,
+      agent: false,
+    });
+    writeState(path, original);
+    const raw = readFileSync(path, "utf8");
+    expect(raw).not.toContain("asking.example");
+    expect(raw).not.toContain("agent.example");
+    const saved = JSON.parse(raw);
+    expect(saved.sitePermissions).toHaveLength(1000);
+    expect(saved.sitePermissions[0].origin).toBe("https://site-1.example");
+    const restored = readState(path, "darwin", "0.2.0");
+    expect(restored.sitePermissions).toHaveLength(1000);
+    expect(restored.prompts).toEqual([]);
+  });
+
   it("keeps agent access off for a person who turned it off", () => {
     const path = statePath();
     const original = initialState();

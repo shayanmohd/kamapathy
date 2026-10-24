@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { LayoutMetrics } from "../electron/agent/screenshot";
 import type { AutomationController } from "../electron/agent/server";
+import type { HttpCredentials, PromptReceipts } from "../electron/prompts";
 import { TabRegistry } from "../electron/agent/tab-registry";
 import {
   agentRules,
@@ -144,6 +146,58 @@ export class FakeContents extends FakeHost {
     return this.zoom;
   }
 }
+// Profile folders the fakes made, removed by FakeController.cleanup.
+const profiles: string[] = [];
+
+// A download as Electron hands one to will-download: the methods the agent
+// server reads, and the progress and end a test drives by hand.
+export class FakeDownloadItem extends EventEmitter {
+  savePath = "";
+  dialogOptions?: unknown;
+  cancelled = false;
+  private received = 0;
+  constructor(
+    private readonly file: {
+      filename: string;
+      url?: string;
+      mimeType?: string;
+      totalBytes?: number;
+    },
+  ) {
+    super();
+  }
+  getFilename = () => this.file.filename;
+  getURL = () => this.file.url ?? `https://example.com/${this.file.filename}`;
+  getMimeType = () => this.file.mimeType ?? "application/octet-stream";
+  getTotalBytes = () => this.file.totalBytes ?? 0;
+  getReceivedBytes = () => this.received;
+  setSavePath = (path: string) => {
+    this.savePath = path;
+  };
+  getSavePath = () => this.savePath;
+  setSaveDialogOptions = (options: unknown) => {
+    this.dialogOptions = options;
+  };
+  cancel = () => {
+    this.cancelled = true;
+  };
+  /** Bytes arriving, as Chromium reports them. */
+  progress(
+    bytes: number,
+    state: "progressing" | "interrupted" = "progressing",
+  ) {
+    this.received = bytes;
+    this.emit("updated", {}, state);
+  }
+  /** The end of the download. */
+  finish(
+    state: "completed" | "cancelled" | "interrupted" = "completed",
+    bytes = this.received,
+  ) {
+    this.received = bytes;
+    this.emit("done", {}, state);
+  }
+}
 // BrowserController's state, registry and server-facing methods, without
 // windows. Tabs get their origin before they join the state, as there.
 export class FakeController implements AutomationController {
@@ -167,6 +221,50 @@ export class FakeController implements AutomationController {
   lent: string[] = [];
   scale = 1;
   emptyCapture = false;
+  captureAvailable = true;
+  // What the receipt wrapper tells the prompt center about each route, and
+  // what the server hands it or clears while it runs.
+  routeSignals: string[] = [];
+  deniedSink: PromptReceipts | null = null;
+  clearedPrompts: string[] = [];
+  // The origins each space stored credentials for, in the order they arrived.
+  // The names and passwords themselves are never kept here either.
+  credentialOrigins = new Map<string, string[]>();
+  readonly prompts = {
+    routeStarted: (tabId: string) => {
+      this.routeSignals.push(`start ${tabId}`);
+    },
+    routeEnded: (tabId: string) => {
+      this.routeSignals.push(`end ${tabId}`);
+    },
+    setReceipts: (receipts: PromptReceipts | null) => {
+      this.deniedSink = receipts;
+    },
+    setHTTPCredentials: (
+      spaceId: string,
+      credentials: HttpCredentials | null,
+    ) => {
+      if (!credentials) {
+        this.credentialOrigins.delete(spaceId);
+        return;
+      }
+      const origins = this.credentialOrigins.get(spaceId) ?? [];
+      this.credentialOrigins.set(spaceId, [
+        ...origins.filter((origin) => origin !== credentials.origin),
+        credentials.origin,
+      ]);
+    },
+    clearCredentials: () => {
+      this.credentialOrigins.clear();
+      this.clearedPrompts.push("credentials");
+    },
+    clearSpace: (spaceId: string) => {
+      this.clearedPrompts.push(spaceId);
+    },
+    clearAll: () => {
+      this.clearedPrompts.push("all");
+    },
+  };
   constructor() {
     this.state.spaces.push({
       id: "manual-agent",
@@ -355,9 +453,6 @@ export class FakeController implements AutomationController {
   blockRedirect(tabId: string, url: string) {
     for (const listener of this.blockedRedirects) listener(tabId, url);
   }
-  startDownload(tabId: string) {
-    for (const listener of this.downloadStarts) listener(tabId);
-  }
   leaveGuard(tabId: string) {
     for (const listener of this.leaveGuards) listener(tabId, Date.now());
   }
@@ -383,6 +478,60 @@ export class FakeController implements AutomationController {
     if (!tab.unseen) return;
     delete tab.unseen;
     this.emit();
+  }
+  // Where the agent server keeps held downloads, made on first use so most
+  // tests leave no folder behind. FakeController.cleanup removes them.
+  private profile?: string;
+  userDataPath() {
+    if (!this.profile) {
+      this.profile = mkdtempSync(join(tmpdir(), "kamapathy-profile-"));
+      profiles.push(this.profile);
+    }
+    return this.profile;
+  }
+  private decider?: (
+    contents: WebContents,
+    item: Electron.DownloadItem,
+  ) => { captured: true; id: string } | { captured: false };
+  onDownload(
+    decide: (
+      contents: WebContents,
+      item: Electron.DownloadItem,
+    ) => { captured: true; id: string } | { captured: false },
+  ) {
+    this.decider = decide;
+    return () => {
+      if (this.decider === decide) delete this.decider;
+    };
+  }
+  /** A download starting in a tab: the server's hook hears of it, then its
+   *  own decision answers, as the controller's handler does both. Without an
+   *  item there is nothing to decide, so only the hook fires. */
+  startDownload(tabId: string, item?: unknown) {
+    for (const listener of this.downloadStarts) listener(tabId);
+    if (item === undefined) return { captured: false as const };
+    const contents = this.pages.get(tabId) as unknown as WebContents;
+    return (
+      this.decider?.(contents, item as Electron.DownloadItem) ?? {
+        captured: false as const,
+      }
+    );
+  }
+  /** Removes every profile folder the fakes made. */
+  static cleanup() {
+    for (const path of profiles.splice(0))
+      rmSync(path, { recursive: true, force: true });
+  }
+  agentControlled(tabId: string) {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab?.managed) return false;
+    const space = this.state.spaces.find((item) => item.id === tab.spaceId);
+    return (
+      !!space &&
+      space.owner === "agent" &&
+      space.access !== "ended" &&
+      agentRules(space)
+    );
   }
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string) {
     const space = this.state.spaces.find((item) => item.id === spaceId);

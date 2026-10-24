@@ -112,6 +112,8 @@ export function initialState(
     activity: [],
     spaceRequests: [],
     passwordPrompts: [],
+    prompts: [],
+    sitePermissions: [],
     settings: {
       theme: "system",
       searchEngine: "duckduckgo",

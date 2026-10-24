@@ -12,9 +12,13 @@ import type {
   Tab,
 } from "../../shared/types";
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import type { PromptCenter } from "../prompts";
 import { createActions } from "./actions";
 import { activeSpace, createAuthority } from "./authority";
+import { createDialogs } from "./dialogs";
+import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
+import { createExpectations } from "./expectations";
 import {
   buildRoutes,
   findRoute,
@@ -25,7 +29,10 @@ import {
 import { createDispatchers } from "./input/dispatch";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
+import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
+import { downloadRoutes } from "./routes/downloads";
+import { eventRoutes } from "./routes/events";
 import { createNavigation } from "./routes/navigation";
 import { pdfRoutes } from "./routes/pdf";
 import { spaceRequestRoutes } from "./routes/space-requests";
@@ -36,6 +43,7 @@ import { Scheduler, type Lane } from "./scheduler";
 import { EventBufferPool } from "./session/event-buffer";
 import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
+import { createTabLog, watchPopups } from "./tab-log";
 import type { TabRegistry } from "./tab-registry";
 import { routeNotFound, validateBody } from "./validate";
 
@@ -97,6 +105,30 @@ export interface AutomationController {
   setPageBudget(spaceId: string, pageBudget: number): void;
   /** Clears a popup's unseen flag once the agent has addressed it. */
   markSeen(tabId: string): void;
+  /** Whether the agent has this tab now: managed, in a space it owns under
+   *  agent rules whose access has not ended. */
+  agentControlled(tabId: string): boolean;
+  /** The profile directory downloads are stored under. */
+  userDataPath(): string;
+  /** Lets the agent server decide a download before the space refuses it. */
+  onDownload(
+    decide: (
+      contents: WebContents,
+      item: Electron.DownloadItem,
+    ) => { captured: true; id: string } | { captured: false },
+  ): () => void;
+  /** The prompt center: each route's request window on a tab, the receipt
+   *  sink it reports refusals to, and what it drops when a space ends. */
+  readonly prompts: Pick<
+    PromptCenter,
+    | "routeStarted"
+    | "routeEnded"
+    | "setReceipts"
+    | "setHTTPCredentials"
+    | "clearCredentials"
+    | "clearSpace"
+    | "clearAll"
+  >;
   /** Gives the person control until they answer; returns the hold's id. */
   holdForPerson(spaceId: string, reason: HoldReason, prompt: string): string;
   /** Returns control to the agent unless the person took over since. */
@@ -218,6 +250,65 @@ export async function startAutomation(
     dispatchers,
     refs,
   });
+  const tabLog = createTabLog();
+  const receipts = createReceipts({
+    tabLog,
+    controller,
+    prompts: controller.prompts,
+  });
+  // Refusals are reported to the agent only while the server runs.
+  controller.prompts.setReceipts(receipts);
+  const stopPopupLog = watchPopups(
+    tabLog,
+    controller.registry,
+    () => controller.state,
+  );
+  const expectations = createExpectations({
+    tabLog,
+    controller,
+    authority,
+    sessions,
+  });
+  const dialogs = createDialogs({
+    tabLog,
+    controller,
+    sessions,
+    // An answered dialog resolves a live dialog wait with the record itself.
+    onAnswer: (tabId, record) => {
+      expectations.deliver(tabId, "dialog", { dialog: record });
+    },
+    onArm: expectations.onArm,
+  });
+  // Every agent tab answers its own dialogs, so the person never sees a
+  // dialog box from a page an agent drives.
+  const dialogStops = new Set<() => void>();
+  const stopDialogSessions = sessions.onSession((session, tab) => {
+    const stop = dialogs.attach(session, tab.id);
+    dialogStops.add(stop);
+    session.on("closed", () => {
+      dialogStops.delete(stop);
+    });
+  });
+  // Only downloads an agent armed are kept, in a private folder under the
+  // profile, and the controller asks before its space refuses one.
+  const downloads = createDownloads({
+    tabLog,
+    arms: () => expectations,
+    controller,
+    tabOf: (contents) =>
+      controller.state.tabs.find(
+        (tab) => controller.peekWebContents(tab.id) === contents,
+      ),
+  });
+  const stopDecider = controller.onDownload(downloads.decide);
+  // A long run keeps no ring, request window or arm for a tab that is gone.
+  const stopTabForget = controller.registry.on((event) => {
+    if (event.type !== "closed") return;
+    expectations.endTab(event.tabId, "tab_closed");
+    tabLog.forget(event.tabId);
+    receipts.forget(event.tabId);
+    dialogs.forget(event.tabId);
+  });
   // Refs a closed tab was issued are nobody's, so the book forgets them.
   const forgetClosedTabs = controller.subscribe(() =>
     refs.retain(new Set(controller.state.tabs.map((tab) => tab.id))),
@@ -227,6 +318,11 @@ export async function startAutomation(
     authority,
     actions,
     sessions,
+    tabLog,
+    receipts,
+    expectations,
+    dialogs,
+    downloads,
   });
   const deps: RouteDeps = {
     controller,
@@ -234,6 +330,11 @@ export async function startAutomation(
     actions,
     sessions,
     navigation,
+    tabLog,
+    receipts,
+    expectations,
+    dialogs,
+    downloads,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -250,6 +351,8 @@ export async function startAutomation(
     ...tabRoutes(deps),
     ...navigation.routes,
     ...pdfRoutes({ ...deps, pdf: { extractor, documents } }),
+    ...eventRoutes(deps),
+    ...downloadRoutes(deps),
     ...requests.routes,
     ...updateRoutes({ updates: options.updates }),
   });
@@ -317,22 +420,31 @@ export async function startAutomation(
       // while the person has control and whether it reaches unadopted tabs.
       const authorize = () => {
         const access = route?.access;
+        // A route whose path names neither a space nor a tab says which ids
+        // its own id belongs to, and answers 404 for an unknown one.
+        const named = route?.resolve?.(parts);
+        const spaceId =
+          named?.spaceId ??
+          (parts[0] === "spaces" && parts.length >= 2 ? parts[1] : undefined);
+        const tabId =
+          named?.tabId ??
+          (parts[0] === "tabs" && parts.length >= 2 ? parts[1] : undefined);
         return {
           space:
-            parts[0] === "spaces" && parts.length >= 2
-              ? authority.authorizeSpace(parts[1], {
+            spaceId === undefined
+              ? undefined
+              : authority.authorizeSpace(spaceId, {
                   human:
                     access?.human === "resume" && !resumeFromHuman
                       ? undefined
                       : access?.human,
-                })
-              : undefined,
+                }),
           tab:
-            parts[0] === "tabs" && parts.length >= 2
-              ? authority.authorizeTab(parts[1], {
+            tabId === undefined
+              ? undefined
+              : authority.authorizeTab(tabId, {
                   unmanaged: access?.unmanaged,
-                })
-              : undefined,
+                }),
         };
       };
       const route = findRoute(routes, method, parts);
@@ -445,6 +557,25 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        // A pending wait is answered before its tab session is released.
+        expectations.endAll("access_off");
+        // No tab keeps an armed policy or a handler once the server stops.
+        for (const tab of controller.state.tabs)
+          dialogs.clear(tab.id, "access_off");
+        for (const stop of dialogStops) stop();
+        dialogStops.clear();
+        stopDialogSessions();
+        // Nothing an agent downloaded outlives its access.
+        stopDecider();
+        downloads.clearAll();
+        stopPopupLog();
+        stopTabForget();
+        // Nothing keeps a request window open, or reports a refusal, once
+        // the server stops.
+        for (const tab of controller.state.tabs) receipts.forget(tab.id);
+        controller.prompts.setReceipts(null);
+        // No space keeps an agent's stored sign-ins once the server stops.
+        controller.prompts.clearCredentials();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

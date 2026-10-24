@@ -210,6 +210,8 @@ class FakeSession extends EventEmitter {
   clearCache = vi.fn(async () => {});
   setPermissionCheckHandler = vi.fn();
   setPermissionRequestHandler = vi.fn();
+  setDevicePermissionHandler = vi.fn();
+  setBluetoothPairingHandler = vi.fn();
   webRequest = {
     onBeforeRequest: vi.fn(),
     onBeforeSendHeaders: vi.fn(),

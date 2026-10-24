@@ -4,6 +4,7 @@ import type {
   BrowserState,
   ContentBounds,
   KamapathyBridge,
+  PromptAnswer,
 } from "../shared/types";
 import type { ExtensionCommand, ExtensionsView } from "../shared/extensions";
 
@@ -87,6 +88,10 @@ const bridge: KamapathyBridge = {
     ipcRenderer.send("kamapathy:open-import-permissions", { pane }),
   defaultBrowser: () => invoke("kamapathy:default-browser"),
   makeDefaultBrowser: () => invoke("kamapathy:make-default-browser"),
+  // Its own channel: an answer may carry a password, which never belongs in
+  // an action or in the state an action returns.
+  answerPrompt: (answer: PromptAnswer) =>
+    invoke("kamapathy:answer-prompt", answer),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

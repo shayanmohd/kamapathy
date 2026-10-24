@@ -1,0 +1,96 @@
+.prompt-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 12px;
+  margin: 0 8px 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.prompt-bar-text {
+  flex: 1;
+  min-width: 180px;
+}
+.prompt-bar-text strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.5;
+}
+.prompt-bar-text p {
+  margin-top: 3px;
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.prompt-bar-realm {
+  font-style: italic;
+}
+.prompt-bar-text .prompt-bar-retry {
+  color: var(--danger);
+}
+.prompt-bar-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.prompt-bar-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+.prompt-bar-choice span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prompt-bar-choice small {
+  display: block;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.prompt-bar-none {
+  color: var(--secondary);
+  font-size: 11px;
+}
+.prompt-bar-fields {
+  display: flex;
+  gap: 8px;
+}
+.prompt-bar-field {
+  display: flex;
+  flex-direction: column;
+}
+.prompt-bar-field .field-label {
+  margin: 0 0 4px;
+  font-size: 11px;
+}
+.prompt-bar-field .text-input {
+  width: 150px;
+  height: 30px;
+  font-size: 12px;
+}
+.prompt-bar-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.prompt-bar-actions .primary-button,
+.prompt-bar-actions .secondary-button {
+  min-height: 30px;
+  padding: 0 14px;
+  font-size: 11px;
+}
+.prompt-bar .form-error {
+  width: 100%;
+  margin-top: 0;
+}

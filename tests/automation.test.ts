@@ -1,7 +1,8 @@
-import { statSync } from "node:fs";
-import { request as httpRequest } from "node:http";
+import { statSync, writeFileSync } from "node:fs";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { takeWaitSlot } from "../electron/agent/expectations";
 import {
   createExtractor,
   type Extractor,
@@ -37,6 +38,7 @@ import type {
 import {
   FakeContents,
   FakeController,
+  FakeDownloadItem,
   socketFetch,
   testSocket,
 } from "./fake-automation";
@@ -91,6 +93,28 @@ describe("local automation socket", () => {
       );
       client.once("error", reject);
       client.flushHeaders();
+    });
+  // A byte stream the client does not read, so the handler stays open on
+  // its first chunk and keeps its stream slot.
+  const stall = (path: string) =>
+    new Promise<{
+      response: IncomingMessage;
+      client: ReturnType<typeof httpRequest>;
+    }>((resolve, reject) => {
+      const client = httpRequest(
+        {
+          socketPath: socket.path,
+          path,
+          agent: false,
+          headers: { Host: "kamapathy" },
+        },
+        (response) => {
+          response.pause();
+          resolve({ response, client });
+        },
+      );
+      client.once("error", reject);
+      client.end();
     });
   const createSpace = async () =>
     (await (await request("/spaces", "POST", { name: "Research" })).json())
@@ -170,6 +194,7 @@ describe("local automation socket", () => {
   afterEach(async () => {
     await api.close();
     socket.cleanup();
+    FakeController.cleanup();
   });
 
   it("creates agent spaces with the person's sign-ins unless isolation is requested", async () => {
@@ -4108,6 +4133,476 @@ describe("local automation socket", () => {
     expect(controller.contents.inputs).toEqual([]);
   });
 
+  it("answers an action that caused nothing without a receipt field, and keeps upload's body while adding them", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = (code: string) =>
+      code.includes(')("target",') ? { ok: true, x: 25, y: 45 } : { ok: true };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(click.status).toBe(200);
+    expect(await click.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+    });
+
+    // The page opens a window while the upload runs, so its answer names it.
+    const body = uploadBody();
+    page.result = (code: string) => {
+      if (code.includes(')("upload",'))
+        controller.openPopup(tab.id, "https://example.com/share");
+      return { ok: true, selected: 1 };
+    };
+    const upload = await request(`/tabs/${tab.id}/upload`, "POST", body);
+    expect(upload.status).toBe(200);
+    const popup = controller.state.tabs.find(
+      (item) => item.openerId === tab.id,
+    )!;
+    expect(await upload.json()).toEqual({
+      ok: true,
+      selected: 1,
+      popups: [
+        {
+          id: popup.id,
+          label: popup.label,
+          url: "https://example.com/share",
+        },
+      ],
+    });
+    expect(page.scripts.at(-1)!.code).toContain(
+      `)("upload",${JSON.stringify(body)},`,
+    );
+  });
+
+  it("opens the tab's request window at route entry and ends it when the route ends, failures included", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A read changes nothing, so it opens no window.
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    expect(controller.routeSignals).toEqual([]);
+
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    page.result = async () => {
+      await blocked;
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+    await expect
+      .poll(() => controller.routeSignals)
+      .toEqual([`start ${tab.id}`]);
+    release();
+    expect((await click).status).toBe(200);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+
+    controller.routeSignals = [];
+    page.result = () => {
+      throw new Error("the page went away");
+    };
+    const failed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(failed.status).toBe(500);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+
+    // Each batch step runs in its own window, like its own dispatch record.
+    controller.routeSignals = [];
+    page.result = { ok: true, x: 25, y: 45 };
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "click", ref: "@e1" },
+        { type: "click", ref: "@e2" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(controller.routeSignals).toEqual([
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+      `start ${tab.id}`,
+      `end ${tab.id}`,
+    ]);
+  });
+
+  it("the popup list reports every tab this tab opened with its label, url, openedAt and unseen flag", async () => {
+    const { tab } = await createPage();
+    const first = controller.openPopup(tab.id, "https://example.com/one");
+    const second = controller.openPopup(tab.id, "https://example.com/two");
+    const nested = controller.openPopup(second.id, "https://example.com/three");
+    const popupsOf = async (tabId: string) => {
+      const response = await request(`/tabs/${tabId}/popups`);
+      expect(response.status).toBe(200);
+      return (await response.json()).popups as { unseen?: true }[];
+    };
+    expect(await popupsOf(tab.id)).toEqual([
+      {
+        id: first.id,
+        label: first.label,
+        url: "https://example.com/one",
+        openedAt: first.createdAt,
+        unseen: true,
+      },
+      {
+        id: second.id,
+        label: second.label,
+        url: "https://example.com/two",
+        openedAt: second.createdAt,
+        unseen: true,
+      },
+    ]);
+    // Listing a page twice leaves every flag for the run's own notice.
+    expect((await popupsOf(tab.id)).map((item) => item.unseen)).toEqual([
+      true,
+      true,
+    ]);
+    // A route that addresses a popup reports it, so its flag clears.
+    expect((await request(`/tabs/${first.id}/snapshot`)).status).toBe(200);
+    expect(await popupsOf(tab.id)).toEqual([
+      expect.not.objectContaining({ unseen: true }),
+      expect.objectContaining({ id: second.id, unseen: true }),
+    ]);
+    // A popup of a popup belongs to its own opener.
+    expect(await popupsOf(second.id)).toEqual([
+      expect.objectContaining({ id: nested.id, label: nested.label }),
+    ]);
+  });
+
+  it("answers a popup wait with the page the action opened", async () => {
+    const { tab } = await createPage();
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+    });
+    expect(armed.status).toBe(201);
+    const { expectation } = await armed.json();
+    expect(expectation).toEqual({
+      id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      event: "popup",
+      tabId: tab.id,
+      expiresAt: expect.any(Number),
+    });
+    // The page waits for one popup at a time.
+    const again = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+    });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({
+      error: {
+        code: "expectation_pending",
+        message: expect.stringContaining("already waiting"),
+        event: "popup",
+        expectationId: expectation.id,
+      },
+    });
+
+    const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
+    let opened = false;
+    controller.contents.result = (code: string) => {
+      if (!code.includes(')("target",')) return { ok: true };
+      if (!opened) {
+        opened = true;
+        controller.openPopup(tab.id, "https://example.com/share");
+      }
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(click.status).toBe(200);
+    const popup = controller.state.tabs.find(
+      (item) => item.openerId === tab.id,
+    )!;
+    const answered = await waiting;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      popup: expect.objectContaining({
+        id: popup.id,
+        label: popup.label,
+        url: "https://example.com/share",
+        openerId: tab.id,
+      }),
+    });
+    // The result and the click's receipt both report it, so it is seen.
+    expect(popup.unseen).toBeUndefined();
+    // One event uses the arm up.
+    expect(
+      (await request(`/expectations/${expectation.id}/wait`, "POST", {})).status,
+    ).toBe(404);
+    expect(
+      (await request(`/expectations/${expectation.id}`, "DELETE")).status,
+    ).toBe(404);
+  });
+
+  it("a 17th wait answers 429 busy with scope server and retryable, and expectation routes never take the space lane", async () => {
+    const { space, tab } = await createPage();
+    const arm = async (tabId: string, event: string) => {
+      const response = await request(`/tabs/${tabId}/expectations`, "POST", {
+        event,
+        timeoutMs: 60000,
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()).expectation.id as string;
+    };
+    // A click holds the space's lane while the popup list, a wait and a
+    // cancel answer beside it.
+    const held = await arm(tab.id, "popup");
+    let releaseClick!: () => void;
+    controller.contents.result = (code: string) =>
+      code.includes(')("target",')
+        ? new Promise((resolve) => {
+            releaseClick = () => resolve({ ok: true, x: 25, y: 45 });
+          })
+        : { ok: true };
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+    await expect.poll(() => releaseClick).toBeDefined();
+    expect((await request(`/tabs/${tab.id}/popups`)).status).toBe(200);
+    const waiting = request(`/expectations/${held}/wait`, "POST", {});
+    expect((await request(`/expectations/${held}`, "DELETE")).status).toBe(200);
+    expect((await waiting).status).toBe(404);
+    // Arming is a page route, so it waits for the lane the click holds.
+    const queued = request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "dialog",
+    });
+    expect(
+      await Promise.race([
+        queued.then(() => "answered"),
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]),
+    ).toBe("waiting");
+    releaseClick();
+    expect((await click).status).toBe(200);
+    const answered = await queued;
+    expect(answered.status).toBe(201);
+    const { expectation } = await answered.json();
+    expect(
+      (await request(`/expectations/${expectation.id}`, "DELETE")).status,
+    ).toBe(200);
+
+    // Sixteen waits run at once, and each takes one of the slots they share.
+    const tabs = [tab.id];
+    for (let index = 0; index < 4; index += 1) {
+      const opened = await request(`/spaces/${space.id}/tabs`, "POST", {});
+      expect(opened.status).toBe(201);
+      tabs.push((await opened.json()).tab.id as string);
+    }
+    const ids: string[] = [];
+    for (const tabId of tabs)
+      for (const event of ["popup", "download", "filechooser", "dialog"])
+        if (ids.length < 17) ids.push(await arm(tabId, event));
+    const waits = ids
+      .slice(0, 16)
+      .map((id) => request(`/expectations/${id}/wait`, "POST", {}));
+    await expect
+      .poll(() => {
+        const release = takeWaitSlot();
+        release?.();
+        return release === undefined;
+      })
+      .toBe(true);
+    const refused = await request(`/expectations/${ids[16]}/wait`, "POST", {});
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("16"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    for (const id of ids.slice(0, 16))
+      expect((await request(`/expectations/${id}`, "DELETE")).status).toBe(200);
+    for (const answer of await Promise.all(waits))
+      expect(answer.status).toBe(404);
+  });
+
+  it("answers a bypassing dialog from the policy, resolves a dialog wait with it, and still fails a page route when one stays open after the backstop fails", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const opening = (type: string, message: string) => ({
+      url: "https://example.com/",
+      frameId: "main",
+      message,
+      type,
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    const answers = () =>
+      page.debugger.sent.filter(
+        (command) => command.method === "Page.handleJavaScriptDialog",
+      );
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "dialog",
+    });
+    expect(armed.status).toBe(201);
+    const { expectation } = await armed.json();
+    const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
+    // A dialog that never reached the page's handler is answered from the
+    // same policy, so no dialog ever stays open.
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      opening("confirm", "Bypass?"),
+    );
+    await expect.poll(() => answers().length).toBe(1);
+    expect(answers()[0].params).toEqual({ accept: false });
+    page.emitProtocol("Page.javascriptDialogClosed", {
+      result: false,
+      userInput: "",
+    });
+    const record = {
+      type: "confirm",
+      message: "Bypass?",
+      answer: "dismissed",
+      url: "https://example.com/",
+      at: expect.any(Number),
+    };
+    const answered = await waiting;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({ dialog: record });
+    const log = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await log.json()).toEqual({ policy: null, dialogs: [record] });
+
+    // A dialog the backstop cannot answer stays open, so phase 1's
+    // dialog_open holds this tab's page routes until the person closes it.
+    page.debugger.reply("Page.handleJavaScriptDialog", () => {
+      throw new Error("No dialog is showing");
+    });
+    page.emitProtocol(
+      "Page.javascriptDialogOpening",
+      opening("alert", "Stuck"),
+    );
+    await expect.poll(() => answers().length).toBe(2);
+    const refused = await request(`/tabs/${tab.id}/snapshot`);
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "dialog_open",
+      dialog: { type: "alert", message: "Stuck" },
+      started: false,
+    });
+    // Nothing answered it, so nothing records it either.
+    expect(
+      (await (await request(`/tabs/${tab.id}/dialogs`)).json()).dialogs,
+    ).toEqual([record]);
+  });
+
+  it("the dialog-policy route validates accept, promptText, times and lifetimeMs, DELETE resets, and the dialogs route answers the policy with its records", async () => {
+    const { tab } = await createPage();
+    const policy = `/tabs/${tab.id}/dialog-policy`;
+    for (const body of [
+      {},
+      { accept: "yes" },
+      { accept: true, promptText: "a".repeat(4097) },
+      { accept: true, times: 0 },
+      { accept: true, times: 21 },
+      { accept: true, lifetimeMs: 999 },
+      { accept: true, lifetimeMs: 600001 },
+      { accept: true, dismiss: true },
+    ]) {
+      const refused = await request(policy, "POST", body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+    }
+    const armed = await request(policy, "POST", {
+      accept: true,
+      promptText: "Ada",
+      times: 3,
+    });
+    expect(armed.status).toBe(200);
+    expect(await armed.json()).toEqual({
+      policy: {
+        accept: true,
+        promptText: "Ada",
+        remaining: 3,
+        expiresAt: expect.any(Number),
+      },
+    });
+    const empty = await request(`/tabs/${tab.id}/dialogs`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual({
+      policy: expect.objectContaining({ remaining: 3 }),
+      dialogs: [],
+    });
+
+    // The page's handler reports what it answered through its binding.
+    const binding = controller.contents.debugger.sent.find(
+      (command) => command.method === "Runtime.addBinding",
+    )!.params.name as string;
+    controller.contents.emitProtocol("Runtime.bindingCalled", {
+      name: binding,
+      executionContextId: 1,
+      payload: JSON.stringify({
+        type: "prompt",
+        message: "Your name?",
+        defaultValue: "preset",
+        answer: "accepted",
+        promptText: "Ada",
+        url: "https://example.com/",
+      }),
+    });
+    const listed = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await listed.json()).toEqual({
+      policy: expect.objectContaining({ remaining: 2 }),
+      dialogs: [
+        {
+          type: "prompt",
+          message: "Your name?",
+          defaultValue: "preset",
+          answer: "accepted",
+          promptText: "Ada",
+          url: "https://example.com/",
+          at: expect.any(Number),
+        },
+      ],
+    });
+    // A dialog the action itself causes is in its receipt.
+    controller.contents.result = (code: string) => {
+      if (!code.includes(')("target",')) return { ok: true };
+      controller.contents.emitProtocol("Runtime.bindingCalled", {
+        name: binding,
+        executionContextId: 1,
+        payload: JSON.stringify({
+          type: "confirm",
+          message: "Delete this file?",
+          answer: "accepted",
+          url: "https://example.com/",
+        }),
+      });
+      return { ok: true, x: 25, y: 45 };
+    };
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect((await click.json()).dialog).toMatchObject({ type: "confirm" });
+    expect(
+      (await (await request(`/tabs/${tab.id}/dialogs`)).json()).policy,
+    ).toMatchObject({ remaining: 1 });
+
+    const reset = await request(policy, "DELETE");
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toEqual({ policy: null });
+    const after = await request(`/tabs/${tab.id}/dialogs`);
+    expect(await after.json()).toEqual({
+      policy: null,
+      dialogs: [
+        expect.objectContaining({ type: "prompt" }),
+        expect.objectContaining({ type: "confirm" }),
+      ],
+    });
+    // A page with no debugger session cannot arm one.
+    const blank = await request(`/spaces/${tab.spaceId}/tabs`, "POST", {});
+    const other = (await blank.json()).tab as { id: string };
+    const refused = await request(`/tabs/${other.id}/dialog-policy`, "POST", {
+      accept: true,
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error.code).toBe("debugger_busy");
+  });
+
   it("requires a file input ref and rejects malformed file metadata before execution", async () => {
     const { tab } = await createPage();
     const validFile = uploadBody().files[0];
@@ -4634,14 +5129,49 @@ describe("local automation socket", () => {
       "POST /update/check": {},
       "POST /update/download": {},
       "POST /tabs/:id/pdf/text": { from: 1, maxChars: 0 },
+      "POST /tabs/:id/expectations": { event: "popup", timeoutMs: 1000 },
+      "POST /expectations/:id/wait": {},
+      "POST /tabs/:id/dialog-policy": { accept: false },
+      "POST /downloads/:id/cancel": {},
+      "POST /downloads/:id/wait": { timeoutMs: 1000 },
+      "POST /spaces/:id/http-credentials": {
+        origin: "https://shop.example",
+        username: "person",
+        password: "secret",
+      },
     };
+    // A wait names its arm, and a cancel its download, not a space or a tab.
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "popup",
+      timeoutMs: 60000,
+    });
+    const expectationId = (await armed.json()).expectation.id as string;
+    expect(
+      (
+        await request(`/tabs/${tab.id}/expectations`, "POST", {
+          event: "download",
+          timeoutMs: 60000,
+        })
+      ).status,
+    ).toBe(201);
+    const captured = controller.startDownload(
+      tab.id,
+      new FakeDownloadItem({ filename: "report.pdf" }),
+    );
+    const downloadId = (captured as { id: string }).id;
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
       const key = routeKey(route);
       expect(SAMPLES, key).toHaveProperty(key);
       const path = route.path.replace(
         ":id",
-        route.path.startsWith("/spaces/") ? space.id : tab.id,
+        route.path.startsWith("/spaces/")
+          ? space.id
+          : route.path.startsWith("/expectations/")
+            ? expectationId
+            : route.path.startsWith("/downloads/")
+              ? downloadId
+              : tab.id,
       );
       const response = await request(path, "POST", { ...SAMPLES[key], extra: true });
       expect(response.status, key).toBe(400);
@@ -5421,5 +5951,271 @@ describe("local automation socket", () => {
     for (const release of releases) release();
     expect(await first).toEqual({ status: 200 });
     expect(await second).toEqual({ status: 200 });
+  });
+
+  it("the download list, read, cancel and delete routes authorize their space and answer download_not_found for an unknown id", async () => {
+    const { space, tab } = await createPage();
+    const armed = await request(`/tabs/${tab.id}/expectations`, "POST", {
+      event: "download",
+    });
+    expect(armed.status).toBe(201);
+    const item = new FakeDownloadItem({
+      filename: "report.pdf",
+      url: "https://example.com/report.pdf",
+      mimeType: "application/pdf",
+      totalBytes: 9,
+    });
+    const captured = controller.startDownload(tab.id, item);
+    expect(captured).toEqual({ captured: true, id: expect.any(String) });
+    const id = (captured as { id: string }).id;
+    // The list and the read answer the same view, and no path of this
+    // machine is in it.
+    const view = {
+      id,
+      tabId: tab.id,
+      url: "https://example.com/report.pdf",
+      suggestedFilename: "report.pdf",
+      mimeType: "application/pdf",
+      state: "progressing",
+      receivedBytes: 0,
+      totalBytes: 9,
+      failure: null,
+    };
+    const listed = await request(`/spaces/${space.id}/downloads`);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ downloads: [view] });
+    expect((await (await request(`/downloads/${id}`)).json()).download).toEqual(
+      view,
+    );
+    // An unknown id is not found on any of the four routes.
+    for (const [path, method] of [
+      ["/downloads/0123456789abcdef", "GET"],
+      ["/downloads/0123456789abcdef/cancel", "POST"],
+      ["/downloads/0123456789abcdef", "DELETE"],
+      [`/spaces/${space.id}/downloads/0123456789abcdef`, "GET"],
+    ] as const) {
+      const missing = await request(
+        path,
+        method,
+        method === "POST" ? {} : undefined,
+      );
+      expect([404, 404]).toContain(missing.status);
+      expect((await missing.json()).error.code).toBe(
+        path.startsWith("/downloads") ? "download_not_found" : "route_not_found",
+      );
+    }
+    // The person taking over refuses every one of them, as a page route.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const held = await request(`/downloads/${id}`);
+    expect(held.status).toBe(409);
+    expect((await held.json()).error.code).toBe("human_control");
+    expect((await request(`/spaces/${space.id}/downloads`)).status).toBe(409);
+    await request(`/spaces/${space.id}/resume`, "POST", {});
+
+    // Cancel stops a running download and answers its record; a finished
+    // one is left as it is.
+    const cancelled = await request(`/downloads/${id}/cancel`, "POST", {});
+    expect(cancelled.status).toBe(200);
+    expect(item.cancelled).toBe(true);
+    item.finish("cancelled", 4);
+    const after = (await (await request(`/downloads/${id}`)).json()).download;
+    expect(after).toMatchObject({
+      state: "cancelled",
+      failure: "cancelled",
+      receivedBytes: 4,
+    });
+    expect((await request(`/downloads/${id}/cancel`, "POST", {})).status).toBe(
+      200,
+    );
+    // Delete takes the bytes with it, and the id is gone.
+    const removed = await request(`/downloads/${id}`, "DELETE");
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ ok: true });
+    expect((await request(`/downloads/${id}`)).status).toBe(404);
+    expect(
+      (await (await request(`/spaces/${space.id}/downloads`)).json()).downloads,
+    ).toEqual([]);
+  });
+
+  it("the content route answers 409 download_not_finished, 409 download_failed and 429 busy past four streams, and the wait route 429 busy past the shared wait cap", async () => {
+    const { tab } = await createPage();
+    // An armed download of this tab, as the controller's handler delivers it.
+    const capture = async (filename: string) => {
+      expect(
+        (
+          await request(`/tabs/${tab.id}/expectations`, "POST", {
+            event: "download",
+          })
+        ).status,
+      ).toBe(201);
+      const item = new FakeDownloadItem({ filename });
+      const decision = controller.startDownload(tab.id, item);
+      expect(decision.captured).toBe(true);
+      return { id: (decision as { id: string }).id, item };
+    };
+    const { id, item } = await capture("report.bin");
+    item.progress(5);
+    const running = await request(`/downloads/${id}/content`);
+    expect(running.status).toBe(409);
+    expect(await running.json()).toEqual({
+      error: {
+        code: "download_not_finished",
+        message: expect.stringContaining("still running"),
+        state: "progressing",
+        receivedBytes: 5,
+        totalBytes: 0,
+      },
+    });
+    item.finish("interrupted", 5);
+    const failed = await request(`/downloads/${id}/content`);
+    expect(failed.status).toBe(409);
+    expect((await failed.json()).error).toMatchObject({
+      code: "download_failed",
+      failure: "interrupted",
+    });
+
+    // Four byte streams are all the socket serves at once.
+    const payload = Buffer.alloc(2 * 1024 * 1024, 7);
+    const open: Awaited<ReturnType<typeof stall>>[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const stream = await capture(`file-${index}.bin`);
+      writeFileSync(stream.item.savePath, payload);
+      stream.item.finish("completed", payload.length);
+      open.push(await stall(`/downloads/${stream.id}/content`));
+    }
+    const refused = await request(`/downloads/${id}/content`);
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("4"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    // The first stream carries the whole file and names no file of this
+    // machine.
+    const first = open[0].response;
+    expect(first.statusCode).toBe(200);
+    expect(first.headers["content-type"]).toBe("application/octet-stream");
+    expect(first.headers["content-length"]).toBe(String(payload.length));
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.headers["x-content-type-options"]).toBe("nosniff");
+    expect(Object.keys(first.headers)).not.toContain("content-disposition");
+    const chunks: Buffer[] = [];
+    first.on("data", (chunk: Buffer) => chunks.push(chunk));
+    first.resume();
+    await new Promise((resolve) => first.once("end", resolve));
+    expect(Buffer.concat(chunks).equals(payload)).toBe(true);
+    // A client that goes away mid-stream gives its slot back.
+    for (const stream of open.slice(1)) stream.client.destroy();
+    await expect
+      .poll(async () => (await request(`/downloads/${id}/content`)).status)
+      .toBe(409);
+
+    // A download wait takes one of the sixteen slots every long poll shares.
+    const releases: (() => void)[] = [];
+    for (let release = takeWaitSlot(); release; release = takeWaitSlot())
+      releases.push(release);
+    const busy = await request(`/downloads/${id}/wait`, "POST", {});
+    expect(busy.status).toBe(429);
+    expect(await busy.json()).toEqual({
+      error: {
+        code: "busy",
+        message: expect.stringContaining("16"),
+        scope: "server",
+        retryable: true,
+      },
+    });
+    for (const release of releases) release();
+    // One that has already stopped answers its wait at once.
+    const answered = await request(`/downloads/${id}/wait`, "POST", {
+      timeoutMs: 1000,
+    });
+    expect(answered.status).toBe(200);
+    expect((await answered.json()).download).toMatchObject({
+      id,
+      state: "interrupted",
+      failure: "interrupted",
+    });
+    const invalid = await request(`/downloads/${id}/wait`, "POST", {
+      timeoutMs: 0,
+    });
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()).error).toMatchObject({
+      code: "invalid_field",
+    });
+  });
+
+
+  it("http-credentials validates its origin, username and password, answers ok with the origin only, and DELETE clears every origin of the space", async () => {
+    const space = await createSpace();
+    const path = `/spaces/${space.id}/http-credentials`;
+    const post = (body: Record<string, unknown>) =>
+      request(path, "POST", {
+        origin: "https://shop.example",
+        username: "person",
+        password: "secret",
+        ...body,
+      });
+    const refuses = async (body: Record<string, unknown>, field: string) => {
+      const response = await post(body);
+      expect(response.status, field).toBe(400);
+      expect((await response.json()).error.code, field).toBe("invalid_field");
+    };
+    await refuses({ origin: "https://shop.example/orders" }, "path");
+    await refuses({ origin: "https://shop.example/?q=1" }, "query");
+    await refuses({ origin: "https://shop.example/#top" }, "fragment");
+    await refuses({ origin: "ftp://shop.example" }, "scheme");
+    await refuses({ origin: "shop.example" }, "bare host");
+    await refuses({ origin: "https://person:secret@shop.example" }, "credentials");
+    await refuses({ username: "" }, "empty username");
+    await refuses({ username: "p".repeat(257) }, "long username");
+    await refuses({ password: "s".repeat(1025) }, "long password");
+    // The origin is stored as an origin, and an empty password is allowed.
+    const stored = await post({
+      origin: "https://shop.example:443/",
+      password: "",
+    });
+    expect(stored.status).toBe(200);
+    expect(await stored.json()).toEqual({
+      ok: true,
+      origin: "https://shop.example",
+    });
+    expect(controller.credentialOrigins.get(space.id)).toEqual([
+      "https://shop.example",
+    ]);
+    expect(controller.activity.at(-1)).toEqual({
+      spaceId: space.id,
+      message: "Agent stored a sign-in for https://shop.example",
+      kind: "info",
+    });
+    // DELETE clears every origin of the space.
+    const cleared = await request(path, "DELETE");
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ ok: true });
+    expect(controller.credentialOrigins.get(space.id)).toBeUndefined();
+  });
+
+  it("a ninth origin reaches the space and credentials are cleared when the server stops", async () => {
+    const space = await createSpace();
+    const path = `/spaces/${space.id}/http-credentials`;
+    for (let index = 0; index <= 8; index += 1) {
+      const response = await request(path, "POST", {
+        origin: `https://shop${index}.example`,
+        username: "person",
+        password: "secret",
+      });
+      expect(response.status, `origin ${index}`).toBe(200);
+    }
+    // The route stores each one; the prompt center keeps the newest eight.
+    expect(controller.credentialOrigins.get(space.id)).toHaveLength(9);
+    await api.close();
+    expect(controller.credentialOrigins.size).toBe(0);
+    expect(controller.clearedPrompts).toContain("credentials");
   });
 });

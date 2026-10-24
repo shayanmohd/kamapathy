@@ -12,6 +12,10 @@ import { tabView } from "../views";
 import { screenshotRoutes } from "./screenshot";
 import { checkPageBudget } from "./spaces";
 
+// The actions whose answer carries a receipt: the input routes and their
+// batch steps. A wait or a snapshot changes nothing, so neither gets one.
+const RECEIPT_ACTIONS = ["click", "fill", "press", "scroll", "drag"];
+
 export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
   const {
     controller,
@@ -19,9 +23,20 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     actions: { evaluatePage, executeToolAction },
     sessions,
     navigation,
+    receipts,
   } = deps;
   const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
+  // One scope per action, so its result names the popups, dialogs, download
+  // and refused requests that action caused.
+  const runAction = (
+    tabId: string,
+    action: ReturnType<typeof parseToolAction>,
+    run: RouteCall["run"],
+  ) =>
+    RECEIPT_ACTIONS.includes(action.type)
+      ? receipts.with(tabId, () => executeToolAction(tabId, action, run))
+      : executeToolAction(tabId, action, run);
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
     send(
       response,
@@ -33,12 +48,10 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       ),
     );
   const tool = (type: string): RouteImpl => ({
-    handler: async ({ response, body, tab, run }) =>
-      send(
-        response,
-        200,
-        await executeToolAction(tab!.id, parseToolAction(type, body!), run),
-      ),
+    handler: async ({ response, body, tab, run }) => {
+      const action = parseToolAction(type, body!);
+      return send(response, 200, await runAction(tab!.id, action, run));
+    },
   });
   return {
     "DELETE /tabs/:id": {
@@ -137,7 +150,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
               type: action.type,
               result: navigation.stepTypes.includes(action.type)
                 ? await navigation.step(tab!.id, action, step)
-                : await executeToolAction(tab!.id, action, step),
+                : await runAction(tab!.id, action, step),
             });
           } catch (error) {
             const { status, error: failure } = envelope(
@@ -234,14 +247,17 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
             "The page changed during the transfer. Take a fresh snapshot.",
           );
         const payload = uploadFields(body!);
-        const result = await evaluatePage(
-          tab!.id,
-          session,
-          "upload",
-          payload,
-          run.deadline,
-        );
-        authorizeTab(tab!.id);
+        const result = await receipts.with(tab!.id, async () => {
+          const selected = await evaluatePage(
+            tab!.id,
+            session,
+            "upload",
+            payload,
+            run.deadline,
+          );
+          authorizeTab(tab!.id);
+          return selected;
+        });
         controller.addActivity(
           tab!.spaceId,
           `Agent selected ${payload.files.length} file(s) for upload`,

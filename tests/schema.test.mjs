@@ -5,6 +5,8 @@ import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes } from "../electron/agent/http.ts";
 import { createNavigation } from "../electron/agent/routes/navigation.ts";
 import { pdfRoutes } from "../electron/agent/routes/pdf.ts";
+import { downloadRoutes } from "../electron/agent/routes/downloads.ts";
+import { eventRoutes } from "../electron/agent/routes/events.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
@@ -152,6 +154,8 @@ describe("API schema", () => {
       ...tabRoutes(deps),
       ...createNavigation(deps).routes,
       ...pdfRoutes(deps),
+      ...eventRoutes(deps),
+      ...downloadRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
       ...updateRoutes({}),
     };

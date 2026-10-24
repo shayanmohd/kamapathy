@@ -274,6 +274,30 @@ describe("interactive preview state invariants", () => {
         before.spaces,
       );
   });
+  it("ignores site permission actions and answers no prompts in the web preview", async () => {
+    const bridge = create();
+    const before = structuredClone(await bridge.getState());
+    for (const action of [
+      {
+        type: "site-permission:remove",
+        spaceId: "personal",
+        origin: "https://maps.example",
+        permission: "geolocation",
+      },
+      { type: "site-permission:clear" },
+    ] as const) {
+      const state = await bridge.dispatch(action);
+      expect(state.sitePermissions, action.type).toEqual(
+        before.sitePermissions,
+      );
+      expect(state.prompts, action.type).toEqual([]);
+    }
+    await expect(
+      bridge.answerPrompt({ id: "prompt", allow: true }),
+    ).resolves.toBeUndefined();
+    expect((await bridge.getState()).prompts).toEqual([]);
+  });
+
   it("has no thumbnails in the web preview", async () => {
     expect(await create().thumbnails()).toEqual({});
   });

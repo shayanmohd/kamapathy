@@ -7,10 +7,15 @@ import {
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { Actions } from "./actions";
 import type { Authority } from "./authority";
+import type { Dialogs } from "./dialogs";
+import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
 import type { Navigation } from "./routes/navigation";
+import type { Expectations } from "./expectations";
+import type { Receipts } from "./receipts";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
+import type { TabLog } from "./tab-log";
 
 export const BODY_LIMIT = 65536;
 
@@ -40,6 +45,10 @@ export interface RouteImpl {
   // resume take control back (server.ts decides when). unmanaged lets the
   // route reach tabs the agent has not adopted.
   access?: { human?: "allow" | "resume"; unmanaged?: true };
+  // For a route whose path names neither a space nor a tab: the ids its id
+  // segment belongs to, which the server authorizes instead of the path's.
+  // Throws its own 404 when the id is unknown.
+  resolve?(parts: string[]): { spaceId?: string; tabId?: string };
   // Runs after admission, before the body is read.
   beforeBody?(
     call: Pick<RouteCall, "request" | "response" | "space" | "tab">,
@@ -98,6 +107,11 @@ export interface RouteDeps {
   actions: Actions;
   sessions: TabSessions;
   navigation: Navigation;
+  tabLog: TabLog;
+  receipts: Receipts;
+  expectations: Expectations;
+  dialogs: Dialogs;
+  downloads: Downloads;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

@@ -4,8 +4,11 @@ import {
   API_LEVEL,
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
+import { WAIT_POLL_MS } from "./downloads";
 import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
+import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
@@ -479,6 +482,70 @@ export function urlField(body: Record<string, unknown>): string {
       "Use a complete HTTP or HTTPS URL without embedded credentials.",
     );
   return new URL(value).href;
+}
+export function expectationFields(body: Record<string, unknown>): {
+  event: ExpectationEvent;
+  timeoutMs: number;
+} {
+  const event = stringField(body, "event", 20);
+  if (!(EXPECTATION_EVENTS as readonly string[]).includes(event))
+    return fail(
+      "invalid_field",
+      `event must be ${EXPECTATION_EVENTS.slice(0, -1).join(", ")}, or ${EXPECTATION_EVENTS.at(-1)}.`,
+      { field: "event" },
+    );
+  return {
+    event: event as ExpectationEvent,
+    timeoutMs: integerField(body, "timeoutMs", 10000, 1, 60000),
+  };
+}
+export function dialogPolicyFields(
+  body: Record<string, unknown>,
+): DialogPolicyInput {
+  if (typeof body.accept !== "boolean")
+    return fail("invalid_field", "accept must be true or false.", {
+      field: "accept",
+    });
+  const promptText =
+    body.promptText === undefined
+      ? undefined
+      : stringField(body, "promptText", MAX_PROMPT_TEXT, true);
+  return {
+    accept: body.accept,
+    ...(promptText === undefined ? {} : { promptText }),
+    times: integerField(body, "times", 1, 1, 20),
+    lifetimeMs: integerField(body, "lifetimeMs", 60000, 1000, 600000),
+  };
+}
+export function downloadWaitFields(body: Record<string, unknown>): {
+  timeoutMs: number;
+} {
+  return { timeoutMs: integerField(body, "timeoutMs", WAIT_POLL_MS, 1, 60000) };
+}
+const ORIGIN_EXPECTED =
+  "origin must be an http or https origin, such as https://example.com, with no path, query, fragment or credentials.";
+export function credentialFields(body: Record<string, unknown>): {
+  origin: string;
+  username: string;
+  password: string;
+} {
+  const origin = stringField(body, "origin", 2048);
+  const username = stringField(body, "username", 256);
+  const password = stringField(body, "password", 1024, true);
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  }
+  if (
+    !isWebUrl(origin) ||
+    (parsed.pathname && parsed.pathname !== "/") ||
+    parsed.search ||
+    parsed.hash
+  )
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  return { origin: parsed.origin, username, password };
 }
 export function uploadFields(body: Record<string, unknown>) {
   const target = targetFields(body);
