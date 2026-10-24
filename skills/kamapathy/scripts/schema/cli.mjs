@@ -615,6 +615,39 @@ export const COMMANDS = [
     "Print the workspace folder, creating it with mode 0700 when missing",
     { since: 2 },
   ),
+  command(
+    "sites",
+    "Scripts",
+    "sites [<url-or-host>] [--json]",
+    "List the site packs, or the notes and tools for one site",
+    {
+      arguments: [
+        {
+          name: "url-or-host",
+          description: "A page's URL or a host such as github.com.",
+        },
+      ],
+      script: "siteContext",
+      examples: ["sites", "sites https://github.com/kamapathy"],
+      since: 4,
+    },
+  ),
+  command(
+    "sites check",
+    "Scripts",
+    "sites check [<pack-id-or-folder>]... [--json]",
+    "Check every site pack, or the ones named, and report each problem",
+    {
+      arguments: [
+        {
+          name: "pack-id-or-folder",
+          description: "A pack id, or a folder path holding a pack.json.",
+        },
+      ],
+      examples: ["sites check", "sites check github"],
+      since: 4,
+    },
+  ),
   command("help", "Help", "help [topic]", "Show the commands, or help on one", {
     arguments: [
       {

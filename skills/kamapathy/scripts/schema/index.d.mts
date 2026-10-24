@@ -13,6 +13,7 @@ export type FieldKind =
   | "ms"
   | "target"
   | "url"
+  | "page"
   | "object";
 export interface Field {
   kind: FieldKind;

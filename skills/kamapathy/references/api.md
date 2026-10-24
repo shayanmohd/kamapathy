@@ -56,6 +56,28 @@ Asks the person to let an agent use one of their spaces and waits for their answ
 
 Returns `Promise<Space>`. Route `POST /space-requests`. Errors: `request_declined`, `request_timeout`, `busy`, `invalid_field`, `automation_stopped`. Since API level 2.
 
+### `sitePacks(target?)`
+
+Lists the site packs in the workspace and the skill, or the ones matching a page.
+
+Returns `Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `siteContext(target)`
+
+Reads the notes and tools of every pack matching a page, with example calls.
+
+Returns `Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `runSiteTool(packId, tool, args, options)`
+
+Runs a site pack's Node tool in the agent's own Node.js.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `page` | page, required |  | The agent page the tool works in. |
+
+Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `site_tool_failed`. Since API level 4.
+
 ### `help(...names)`
 
 Prints the API, or one entry such as help("page.click"), or the topics errors and routes.
@@ -138,6 +160,28 @@ Downloads this computer's installer and waits for it; only the person installs i
 | `interval` | milliseconds from 250 to 10000 | `1000` | How often the status is read, 1000 by default. |
 
 Returns `Promise<UpdateStatus>`. Route `POST /update/download`. Errors: `update_unsupported`, `update_check_failed`, `update_download_failed`, `update_verify_failed`, `timeout`. Since API level 3.
+
+### `kamapathy.sitePacks(target?)`
+
+Lists the site packs in the workspace and the skill, or the ones matching a page.
+
+Returns `Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `kamapathy.siteContext(target)`
+
+Reads the notes and tools of every pack matching a page, with example calls.
+
+Returns `Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `kamapathy.runSiteTool(packId, tool, args, options)`
+
+Runs a site pack's Node tool in the agent's own Node.js.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `page` | page, required |  | The agent page the tool works in. |
+
+Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `site_tool_failed`. Since API level 4.
 
 ## Space
 
@@ -652,6 +696,14 @@ Start a scripting session in a terminal, with the same globals as run
 
 Print the workspace folder, creating it with mode 0700 when missing
 
+### `sites [<url-or-host>] [--json]`
+
+List the site packs, or the notes and tools for one site
+
+### `sites check [<pack-id-or-folder>]... [--json]`
+
+Check every site pack, or the ones named, and report each problem
+
 ### `help [topic]`
 
 Show the commands, or help on one
@@ -828,3 +880,9 @@ Show the commands, or help on one
 | `invalid_option` | client | not retryable | `entry`, `option`, `expected`, `suggestion` | Options are not a plain object, or have an undeclared key or a bad value. |
 | `invalid_argument` | client | not retryable | `entry`, `expected` | Arguments are missing, extra or of the wrong kind. |
 | `app_outdated` | client | not retryable | `entry`, `option`, `required`, `available`, `appVersion` | The running Kamapathy predates this call. |
+| `site_pack_not_found` | client | not retryable | `packId`, `roots` | No pack folder has this id. |
+| `site_tool_not_found` | client | not retryable | `packId`, `tool`, `kind`, `available` | No tool of this kind and name. |
+| `site_pack_invalid` | client | not retryable | `packId`, `dir`, `problems` | The pack or a tool file breaks a rule. |
+| `invalid_tool_args` | client | not retryable | `packId`, `tool`, `problems`, `expected` | The arguments do not match the tool's declaration. |
+| `site_tool_failed` | client | not retryable | `packId`, `tool`, `at`, `cause` | The Node tool threw an error of its own. |
+| `helpers_failed` | client | not retryable | `path`, `export`, `cause` | helpers.mjs could not be loaded or its exports installed. |

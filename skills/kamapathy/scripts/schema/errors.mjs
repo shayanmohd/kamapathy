@@ -611,6 +611,48 @@ export const ERRORS = {
     ["entry", "option", "required", "available", "appVersion"],
     2,
   ),
+  site_pack_not_found: code(
+    null,
+    false,
+    "No pack folder has this id.",
+    ["packId", "roots"],
+    4,
+  ),
+  site_tool_not_found: code(
+    null,
+    false,
+    "No tool of this kind and name.",
+    ["packId", "tool", "kind", "available"],
+    4,
+  ),
+  site_pack_invalid: code(
+    null,
+    false,
+    "The pack or a tool file breaks a rule.",
+    ["packId", "dir", "problems"],
+    4,
+  ),
+  invalid_tool_args: code(
+    null,
+    false,
+    "The arguments do not match the tool's declaration.",
+    ["packId", "tool", "problems", "expected"],
+    4,
+  ),
+  site_tool_failed: code(
+    null,
+    false,
+    "The Node tool threw an error of its own.",
+    ["packId", "tool", "at", "cause"],
+    4,
+  ),
+  helpers_failed: code(
+    null,
+    false,
+    "helpers.mjs could not be loaded or its exports installed.",
+    ["path", "export", "cause"],
+    4,
+  ),
 };
 
 // Whether an error can clear without the request changing: its code says

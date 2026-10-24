@@ -607,6 +607,12 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_option` | client | not retryable | `entry`, `option`, `expected`, `suggestion` | Options are not a plain object, or have an undeclared key or a bad value. |
 | `invalid_argument` | client | not retryable | `entry`, `expected` | Arguments are missing, extra or of the wrong kind. |
 | `app_outdated` | client | not retryable | `entry`, `option`, `required`, `available`, `appVersion` | The running Kamapathy predates this call. |
+| `site_pack_not_found` | client | not retryable | `packId`, `roots` | No pack folder has this id. |
+| `site_tool_not_found` | client | not retryable | `packId`, `tool`, `kind`, `available` | No tool of this kind and name. |
+| `site_pack_invalid` | client | not retryable | `packId`, `dir`, `problems` | The pack or a tool file breaks a rule. |
+| `invalid_tool_args` | client | not retryable | `packId`, `tool`, `problems`, `expected` | The arguments do not match the tool's declaration. |
+| `site_tool_failed` | client | not retryable | `packId`, `tool`, `at`, `cause` | The Node tool threw an error of its own. |
+| `helpers_failed` | client | not retryable | `path`, `export`, `cause` | helpers.mjs could not be loaded or its exports installed. |
 <!-- /generated:errors -->
 
 ## Versions and API levels

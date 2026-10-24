@@ -13,6 +13,7 @@ import { describeError, describeScriptError } from "../diagnostics.mjs";
 import { help } from "../help.mjs";
 import { guidance, hardStopCause, KamapathyError } from "./errors.mjs";
 import { line, printable } from "./format.mjs";
+import { loadHelperModule } from "./helper-module.mjs";
 import { readInput, required } from "./input.mjs";
 import { Session, takeNotices } from "./request.mjs";
 import { exists } from "./transport.mjs";
@@ -35,6 +36,9 @@ const GLOBALS = [
   "space",
   "spaces",
   "requestSpace",
+  "sitePacks",
+  "siteContext",
+  "runSiteTool",
 ];
 
 function deadline(value, name) {
@@ -417,6 +421,9 @@ export async function runScript(args, options = {}) {
   installGlobals(globalThis, client);
   const work = (async () => {
     try {
+      // The person's own helpers, after .env and the globals and before the
+      // script, so a helper can take either and neither can take its names.
+      await loadHelperModule(env.KAMAPATHY_WORKSPACE, globalThis);
       if (code !== undefined) {
         temporary = temporaryPath();
         await writeFile(temporary, code, { mode: 0o600, flag: "wx" });
@@ -426,10 +433,15 @@ export async function runScript(args, options = {}) {
     } catch (error) {
       // After the deadline or a signal, the stop's own line stays.
       if (!state.stopped) {
-        state.final = failureText(
-          await describeScriptError(error, { label, file, client }),
-          error,
-        );
+        // A workspace file the run never reached is the setup's failure, not
+        // the script's.
+        state.final =
+          error instanceof KamapathyError && error.code === "helpers_failed"
+            ? stopText(error)
+            : failureText(
+                await describeScriptError(error, { label, file, client }),
+                error,
+              );
         state.status = 1;
       }
     }

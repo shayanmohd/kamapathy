@@ -1,7 +1,8 @@
 // Kamapathy scripting client. Node built-ins only. It finds Kamapathy the way
 // the CLI does and every method sends exactly one documented HTTP route over
 // the local socket; nothing here runs inside a page. Each method checks its
-// arguments against the schema before anything is sent.
+// arguments against the schema before anything is sent. The site pack calls
+// send nothing at all: they read the workspace and the skill.
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -14,6 +15,7 @@ import {
   resolveLabels,
   Session,
 } from "./lib/request.mjs";
+import { listSitePacks, runToolIn, siteContextFor } from "./lib/sites.mjs";
 import { checkCall, findEntry } from "./schema/index.mjs";
 
 export { help } from "./help.mjs";
@@ -168,6 +170,54 @@ const labelOf = (options) =>
  * @property {boolean} truncated
  * @property {number} [nextPage] The first page not fully returned.
  * @property {true} [noText] The pages carry no text, such as scans.
+ */
+/**
+ * @typedef {object} SiteTool A tool a site pack declares.
+ * @property {string} name
+ * @property {"node" | "page"} kind A Node tool, or one that runs in the page.
+ * @property {string} description
+ */
+/**
+ * @typedef {object} SiteToolContext A tool with its arguments and an example.
+ * @property {string} name
+ * @property {"node" | "page"} kind
+ * @property {string} description
+ * @property {{ name: string, type: string, required: boolean, description: string }[]} args
+ * @property {{ type: string, description: string }} returns
+ * @property {string} example A call ready to run, with the required arguments.
+ */
+/**
+ * @typedef {object} SitePack One site pack, as sitePacks lists it.
+ * @property {string} id
+ * @property {string} name
+ * @property {"workspace" | "bundled"} source
+ * @property {string} dir The pack's folder.
+ * @property {string[]} domains The hosts the pack matches.
+ * @property {string[]} notes The note files it declares.
+ * @property {SiteTool[]} tools Node tools first, then page tools.
+ */
+/**
+ * @typedef {object} SiteContext One matching pack, with its notes read.
+ * @property {string} id
+ * @property {string} name
+ * @property {"workspace" | "bundled"} source
+ * @property {string} dir
+ * @property {string[]} domains
+ * @property {string} matchedBy The domain entry the page matched.
+ * @property {{ file: string, text: string }[]} notes
+ * @property {SiteToolContext[]} tools
+ */
+/**
+ * @typedef {object} SiteSkipped A pack, or a root, that broke a rule.
+ * @property {string} path
+ * @property {"workspace" | "bundled"} source
+ * @property {string} problem
+ */
+/**
+ * @typedef {object} NodeToolContext What a pack's Node tool is given.
+ * @property {Page} page The page the tool works in.
+ * @property {Client} kamapathy This client.
+ * @property {{ id: string, name: string, dir: string, source: "workspace" | "bundled" }} pack
  */
 
 // Refreshes a page from a response that carries its tab.
@@ -772,6 +822,11 @@ export class Space {
   }
 }
 
+// A site pack target as the library reads it: a Page by the last url it
+// recorded, anything else as it was given.
+const siteTarget = (target) =>
+  target instanceof Page ? { url: target.url } : target;
+
 /** A connected Kamapathy. */
 export class Client {
   #session;
@@ -789,6 +844,22 @@ export class Client {
   }
   #call(name, args, send) {
     return call(this.#session, `Client.${name}`, args, send);
+  }
+  // A call answered from the files on this computer: checked against the
+  // schema, without the app's level, since it needs no app and sends
+  // nothing.
+  async #local(name, args, work) {
+    const entry = findEntry(`Client.${name}`);
+    try {
+      const problem = checkCall(entry, args);
+      if (problem)
+        throw new KamapathyError(problem.code, problem.message, problem.fields);
+      return await work();
+    } catch (error) {
+      if (error instanceof KamapathyError && error.entry === undefined)
+        error.entry = entry.signature.split("(")[0];
+      throw error;
+    }
   }
   // An explicit page budget, or KAMAPATHY_PAGE_BUDGET when it is set.
   #budget(choices) {
@@ -949,6 +1020,53 @@ export class Client {
         await sleep(Math.min(interval, left), this.#session.signal);
         status = await this.updateStatus();
       }
+    });
+  }
+  /**
+   * Every site pack the workspace and the skill hold, or the ones matching a
+   * URL, a host or a Page.
+   * @param {string | Page} [target]
+   * @returns {Promise<{ host?: string | null, packs: SitePack[], skipped: SiteSkipped[] }>}
+   */
+  sitePacks(target) {
+    return this.#local("sitePacks", [target], () =>
+      listSitePacks(this.#session.env, siteTarget(target)),
+    );
+  }
+  /**
+   * The notes and tools of every pack matching a URL, a host or a Page, each
+   * tool with an example call.
+   * @param {string | Page} target
+   * @returns {Promise<{ url: string, host: string | null, packs: SiteContext[], skipped: SiteSkipped[] }>}
+   */
+  siteContext(target) {
+    return this.#local("siteContext", [target], () =>
+      siteContextFor(this.#session.env, siteTarget(target)),
+    );
+  }
+  /**
+   * Runs a site pack's Node tool in the agent's own Node.js, with the page,
+   * this client and the pack.
+   * @param {string} packId
+   * @param {string} tool
+   * @param {object | undefined} args The arguments the tool declares.
+   * @param {{ page: Page }} options
+   * @returns {Promise<unknown>} What the tool returned.
+   */
+  runSiteTool(packId, tool, args, options) {
+    return this.#local("runSiteTool", [packId, tool, args, options], () => {
+      if (!(options.page instanceof Page))
+        throw new KamapathyError(
+          "invalid_argument",
+          'kamapathy.runSiteTool needs options.page to be a Page from this client, such as the one space.page("p1") returns.',
+        );
+      return runToolIn(this.#session.env, {
+        packId,
+        tool,
+        args,
+        page: options.page,
+        client: this,
+      });
     });
   }
 }

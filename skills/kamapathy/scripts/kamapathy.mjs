@@ -33,6 +33,8 @@ import {
 } from "./help.mjs";
 import { startRepl } from "./lib/repl.mjs";
 import { runScript } from "./lib/run.mjs";
+import { checkAll } from "./lib/site-check.mjs";
+import { listSitePacks, problemText, siteContextFor } from "./lib/sites.mjs";
 import { megabytes, updateNotice, upgradeLines } from "./lib/updates.mjs";
 import {
   ensureWorkspace,
@@ -165,6 +167,94 @@ function budget(value, env) {
       ? pageBudgetFrom(env)
       : bounded(value, "--page-budget", 1, 20);
   return pageBudget === undefined ? {} : { pageBudget };
+}
+
+// A pack's name as the site pack commands quote it.
+const packName = (value) => JSON.stringify(printable(value));
+const writeLines = (stdout, lines) =>
+  stdout.write(lines.length ? `${lines.join("\n")}\n` : "");
+
+// One line per readable pack, then one per pack or root that broke a rule.
+function siteLines({ packs, skipped }) {
+  const lines = [];
+  for (const pack of packs) {
+    const named = (kind) =>
+      pack.tools.filter((tool) => tool.kind === kind).map((tool) => tool.name);
+    const clause = (label, names) =>
+      names.length ? `; ${label} ${names.join(", ")}` : "";
+    const head = `${printable(pack.id)} ${packName(pack.name)} ${pack.source}`;
+    lines.push(
+      `${head} ${pack.domains.map(printable).join(", ")}` +
+        clause("tools", named("node")) +
+        clause("page tools", named("page")),
+    );
+  }
+  for (const entry of skipped)
+    lines.push(`Skipped ${printable(entry.path)}: ${line(entry.problem)}`);
+  return lines;
+}
+
+// A tool as sites <url-or-host> prints it: its arguments beside its name,
+// then what it does, what it returns and the call a script would write.
+function toolLines(tool) {
+  const args = tool.args
+    .map((arg) => `${arg.name}${arg.required ? "" : "?"}: ${arg.type}`)
+    .join(", ");
+  return [
+    [
+      printable(tool.name),
+      args,
+      tool.kind === "page" ? "(page tool, needs page scripts)" : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    `  ${line(tool.description)}`,
+    `  returns ${printable(tool.returns.type)}: ${line(tool.returns.description)}`,
+    `  ${printable(tool.example)}`,
+  ];
+}
+
+// Each matching pack with its folder, notes and tools, or the one line that
+// says nothing matches this page.
+function siteContextLines({ url, host, packs, skipped }, target) {
+  const lines = [];
+  for (const pack of packs) {
+    lines.push(
+      `${printable(pack.id)} ${packName(pack.name)} (${pack.source}, matches ${printable(pack.matchedBy)})`,
+    );
+    lines.push(printable(pack.dir));
+    for (const note of pack.notes) {
+      lines.push(`--- ${printable(note.file)}`);
+      lines.push(printable(note.text).trimEnd());
+    }
+    for (const tool of pack.tools) lines.push(...toolLines(tool));
+  }
+  // A target with no host, about:blank among them, matches nothing, so the
+  // line names it as it was given.
+  if (!packs.length)
+    lines.push(`No site pack matches ${line(host || url || target)}.`);
+  for (const entry of skipped)
+    lines.push(`Skipped ${printable(entry.path)}: ${line(entry.problem)}`);
+  return lines;
+}
+
+// What sites check reports: a line per clean pack, a line per problem, a line
+// per argument that named no pack, and the count.
+function siteCheckLines({ packs, missing }) {
+  const lines = [];
+  for (const pack of packs)
+    if (pack.ok) lines.push(`ok ${printable(pack.id)} (${pack.source})`);
+    else
+      for (const problem of pack.problems)
+        lines.push(`${printable(pack.id)}: ${line(problemText(problem))}`);
+  for (const name of missing)
+    lines.push(`No site pack named ${JSON.stringify(line(name))}.`);
+  const passed = packs.filter((pack) => pack.ok).length;
+  const failed = packs.length - passed;
+  lines.push(
+    `${passed} pack${passed === 1 ? "" : "s"} passed${failed ? ` and ${failed} failed` : ""}.`,
+  );
+  return lines;
 }
 
 // One parser per command, keyed by the schema's command names. Each checks
@@ -598,6 +688,7 @@ export const PARSERS = {
       session,
       client: await connect({ session, lazy: true }),
       terminal: true,
+      env: options.env,
     });
   },
   workspace: async (_args, { env, json, stdout }) => {
@@ -606,6 +697,33 @@ export const PARSERS = {
       `${json ? JSON.stringify({ workspace }) : workspace}\n`,
     );
     return 0;
+  },
+  sites: async (args, { env, json, stdout }) => {
+    if (args.length > 1)
+      throw new Error("Use sites [<url-or-host>]. Run help for usage.");
+    const out = stdout || process.stdout;
+    const target = args[0];
+    // Both forms read the workspace and the skill: neither connects, starts
+    // Kamapathy nor loads .env.
+    const listing = target === undefined;
+    const result = listing
+      ? await listSitePacks(env)
+      : await siteContextFor(env, target);
+    if (json) out.write(`${JSON.stringify(result)}\n`);
+    else
+      writeLines(
+        out,
+        listing ? siteLines(result) : siteContextLines(result, target),
+      );
+    return 0;
+  },
+  "sites check": async (args, { env, json, stdout }) => {
+    const result = await checkAll(env, { targets: args });
+    const out = stdout || process.stdout;
+    if (json)
+      out.write(`${JSON.stringify({ ok: result.ok, packs: result.packs })}\n`);
+    else writeLines(out, siteCheckLines(result));
+    return result.ok ? 0 : 1;
   },
 };
 

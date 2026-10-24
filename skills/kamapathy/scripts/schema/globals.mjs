@@ -109,6 +109,60 @@ const request = (name, signature, kind) => ({
   since: 2,
 });
 
+const packs = (name, signature, kind) => ({
+  name,
+  kind,
+  signature,
+  summary:
+    "Lists the site packs in the workspace and the skill, or the ones matching a page.",
+  args: [{ name: "target", kind: "site", optional: true }],
+  returns:
+    "Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>",
+  errors: ["invalid_argument"],
+  since: 4,
+});
+const context = (name, signature, kind) => ({
+  name,
+  kind,
+  signature,
+  summary:
+    "Reads the notes and tools of every pack matching a page, with example calls.",
+  args: [{ name: "target", kind: "site" }],
+  returns:
+    "Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>",
+  errors: ["invalid_argument"],
+  since: 4,
+});
+const runTool = (name, signature, kind) => ({
+  name,
+  kind,
+  signature,
+  summary: "Runs a site pack's Node tool in the agent's own Node.js.",
+  args: [
+    { name: "packId", kind: "string" },
+    { name: "tool", kind: "string" },
+    { name: "args", kind: "json", optional: true },
+    { name: "options", kind: "options" },
+  ],
+  options: {
+    page: {
+      kind: "page",
+      required: true,
+      description: "The agent page the tool works in.",
+    },
+  },
+  returns: "Promise<unknown>",
+  errors: [
+    "invalid_argument",
+    "site_pack_not_found",
+    "site_tool_not_found",
+    "site_pack_invalid",
+    "invalid_tool_args",
+    "site_tool_failed",
+  ],
+  since: 4,
+});
+
 export const GLOBALS = [
   {
     name: "kamapathy",
@@ -126,6 +180,9 @@ export const GLOBALS = [
   list("spaces", "spaces()", "global"),
   open("openSpace", "openSpace(nameOrId, options?)", "global"),
   request("requestSpace", "requestSpace(options)", "global"),
+  packs("sitePacks", "sitePacks(target?)", "global"),
+  context("siteContext", "siteContext(target)", "global"),
+  runTool("runSiteTool", "runSiteTool(packId, tool, args, options)", "global"),
   {
     name: "help",
     kind: "global",
@@ -218,4 +275,11 @@ export const CLIENT = [
     ],
     since: 3,
   },
+  packs("Client.sitePacks", "kamapathy.sitePacks(target?)", "method"),
+  context("Client.siteContext", "kamapathy.siteContext(target)", "method"),
+  runTool(
+    "Client.runSiteTool",
+    "kamapathy.runSiteTool(packId, tool, args, options)",
+    "method",
+  ),
 ];

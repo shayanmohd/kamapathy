@@ -33,6 +33,7 @@ const {
   COMMANDS,
   ENTRIES,
   ERRORS,
+  GLOBAL_FLAGS,
   ROUTES,
   SELECTOR_FORMS,
   checkBody,
@@ -920,6 +921,206 @@ describe("API schema", () => {
       "`status <space-id> <text> | status <space-id> --clear`",
       "`fail <space-id> <message>`",
       "`page.click(target, options?)`",
+    ])
+      expect(reference, text).toContain(text);
+  });
+
+  it("the site pack members, globals and commands are declared at level 4", () => {
+    const summaries = {
+      sitePacks:
+        "Lists the site packs in the workspace and the skill, or the ones matching a page.",
+      siteContext:
+        "Reads the notes and tools of every pack matching a page, with example calls.",
+    };
+    const returns = {
+      sitePacks:
+        "Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>",
+      siteContext:
+        "Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>",
+    };
+    for (const [name, signature] of [
+      ["sitePacks", "sitePacks(target?)"],
+      ["siteContext", "siteContext(target)"],
+    ]) {
+      const global = entry(name);
+      const method = entry(`Client.${name}`);
+      expect(global, name).toMatchObject({
+        kind: "global",
+        signature,
+        summary: summaries[name],
+        returns: returns[name],
+        errors: ["invalid_argument"],
+        since: 4,
+      });
+      expect(method, name).toMatchObject({
+        kind: "method",
+        signature: `kamapathy.${signature}`,
+        summary: summaries[name],
+        returns: returns[name],
+        errors: ["invalid_argument"],
+        since: 4,
+      });
+      for (const item of [global, method]) {
+        // Neither declares a route: both are answered from the files on this
+        // computer, so the client checks them without the app's level and no
+        // argument carries one of its own.
+        expect(item.route, item.name).toBeUndefined();
+        expect(item.args, item.name).toEqual([
+          {
+            name: "target",
+            kind: "site",
+            ...(name === "sitePacks" ? { optional: true } : {}),
+          },
+        ]);
+        // A URL, a host and a Page fit; anything else is invalid_argument,
+        // and a second argument is refused.
+        for (const target of [
+          "github.com",
+          "https://github.com/kamapathy",
+          { url: "https://github.com/" },
+        ])
+          expect(checkCall(item, [target]), item.name).toBeNull();
+        for (const target of [5, true, null, {}, "", { id: "tab-1" }])
+          expect(
+            checkCall(item, [target])?.code,
+            `${item.name} ${JSON.stringify(target)}`,
+          ).toBe("invalid_argument");
+        expect(
+          checkCall(item, ["github.com", { json: true }])?.message,
+          item.name,
+        ).toContain("got 2 arguments");
+      }
+    }
+    expect(checkCall(entry("sitePacks"), [])).toBeNull();
+    expect(checkCall(entry("Client.sitePacks"), [])).toBeNull();
+    expect(checkCall(entry("siteContext"), [])?.message).toBe(
+      "siteContext got no target. Expected siteContext(target).",
+    );
+    // runSiteTool: the same declaration as a global and as a method, with
+    // the page option and the codes it raises.
+    const page = new Page(async () => {}, {
+      id: "t",
+      spaceId: "s",
+      url: "",
+      title: "",
+    });
+    for (const item of [entry("runSiteTool"), entry("Client.runSiteTool")]) {
+      expect(item, item.name).toMatchObject({
+        summary: "Runs a site pack's Node tool in the agent's own Node.js.",
+        returns: "Promise<unknown>",
+        errors: [
+          "invalid_argument",
+          "site_pack_not_found",
+          "site_tool_not_found",
+          "site_pack_invalid",
+          "invalid_tool_args",
+          "site_tool_failed",
+        ],
+        since: 4,
+      });
+      // It declares no route: the client reads the pack and runs its file.
+      expect(item.route, item.name).toBeUndefined();
+      expect(item.args, item.name).toEqual([
+        { name: "packId", kind: "string" },
+        { name: "tool", kind: "string" },
+        { name: "args", kind: "json", optional: true },
+        { name: "options", kind: "options" },
+      ]);
+      expect(item.options, item.name).toEqual({
+        page: {
+          kind: "page",
+          required: true,
+          description: "The agent page the tool works in.",
+        },
+      });
+      // A Page fits the page option, and arguments may be left out.
+      for (const args of [
+        ["github", "search_repositories", { query: "kamapathy" }, { page }],
+        ["github", "search_repositories", undefined, { page }],
+      ])
+        expect(checkCall(item, args), item.name).toBeNull();
+      expect(
+        checkCall(item, ["github", "search_repositories", {}])?.code,
+        item.name,
+      ).toBe("invalid_argument");
+      for (const options of [{}, { page: "p1" }, { page: null }, { page: 5 }])
+        expect(
+          checkCall(item, ["github", "search_repositories", {}, options])?.code,
+          `${item.name} ${JSON.stringify(options)}`,
+        ).toBe("invalid_option");
+    }
+    expect(entry("runSiteTool")).toMatchObject({
+      kind: "global",
+      signature: "runSiteTool(packId, tool, args, options)",
+    });
+    expect(entry("Client.runSiteTool")).toMatchObject({
+      kind: "method",
+      signature: "kamapathy.runSiteTool(packId, tool, args, options)",
+    });
+    // Every code it raises is client side and stays as it is on a retry.
+    for (const [code, fields] of [
+      ["site_pack_not_found", ["packId", "roots"]],
+      ["site_tool_not_found", ["packId", "tool", "kind", "available"]],
+      ["site_pack_invalid", ["packId", "dir", "problems"]],
+      ["invalid_tool_args", ["packId", "tool", "problems", "expected"]],
+      ["site_tool_failed", ["packId", "tool", "at", "cause"]],
+    ]) {
+      expect(ERRORS[code], code).toMatchObject({
+        status: null,
+        transient: false,
+        since: 4,
+      });
+      expect(ERRORS[code].fields, code).toEqual(fields);
+    }
+    // run and repl raise one code of their own for a workspace helpers.mjs
+    // they cannot load or install.
+    expect(ERRORS.helpers_failed).toMatchObject({
+      status: null,
+      transient: false,
+      since: 4,
+    });
+    expect(ERRORS.helpers_failed.fields).toEqual(["path", "export", "cause"]);
+    // The CLI's two commands, both answered from the files on this computer.
+    for (const [name, usage, summary, script] of [
+      [
+        "sites",
+        "sites [<url-or-host>] [--json]",
+        "List the site packs, or the notes and tools for one site",
+        "siteContext",
+      ],
+      [
+        "sites check",
+        "sites check [<pack-id-or-folder>]... [--json]",
+        "Check every site pack, or the ones named, and report each problem",
+        undefined,
+      ],
+    ]) {
+      const command = findCommand(name);
+      expect(command, name).toMatchObject({
+        group: "Scripts",
+        usage,
+        summary,
+        since: 4,
+      });
+      expect(command.route, name).toBeUndefined();
+      expect(command.script, name).toBe(script);
+      expect(command.arguments.length, name).toBe(1);
+      // --json is a global flag, so neither command declares one of its own.
+      expect(command.flags, name).toEqual([]);
+      expect(Object.hasOwn(PARSERS, name), name).toBe(true);
+    }
+    expect(GLOBAL_FLAGS.map((flag) => flag.name)).toContain("--json");
+    // The generated reference carries every form.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`sitePacks(target?)`",
+      "`siteContext(target)`",
+      "`runSiteTool(packId, tool, args, options)`",
+      "`kamapathy.sitePacks(target?)`",
+      "`kamapathy.siteContext(target)`",
+      "`kamapathy.runSiteTool(packId, tool, args, options)`",
+      "`sites [<url-or-host>] [--json]`",
+      "`sites check [<pack-id-or-folder>]... [--json]`",
     ])
       expect(reference, text).toContain(text);
   });
