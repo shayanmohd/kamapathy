@@ -87,6 +87,25 @@ export function createGo(deps: GoDeps) {
     if (retryableNavigation(error)) run.dispatch.dispatched = false;
     throw error;
   };
+  // A session still attaching reports nothing about the document it attaches
+  // to: Chromium enables a renderer's page agent after the attach, so a
+  // commit in that window is never reported and the wait has nothing to see.
+  // One read settles the session and names its main frame before anything is
+  // dispatched. A session that cannot settle is navigated all the same, as a
+  // page with no debugger always was.
+  const listening = async (tabId: string, run: Run, timeoutMs: number) => {
+    const session = sessions.get(tabId);
+    if (!session || session.state === "ready") return;
+    await session
+      .mainFrameId({
+        deadline: Math.min(run.deadline, Date.now() + timeoutMs),
+        signal: run.signal,
+        guard: () => {
+          authorizeTab(tabId);
+        },
+      })
+      .catch(() => {});
+  };
   const navigate = async (
     tabId: string,
     body: {
@@ -97,48 +116,54 @@ export function createGo(deps: GoDeps) {
     },
     run: Run,
   ): Promise<GoResult> => {
-    const tab = authorizeTab(tabId);
+    authorizeTab(tabId);
     const release = gate.enter(tabId);
-    const watch = watchLeaveGuard(controller, tabId);
     try {
-      // The tracker must be listening before the load starts, and its count
-      // read before it, so only this dispatch's navigation is followed.
-      const before = sessions.get(tabId);
-      const from = before ? trackers.for(before).navigation : 0;
-      run.dispatch.dispatched = true;
-      controller.navigateAgentTab(
-        tabId,
-        body.url,
-        body.referer === undefined ? {} : { referer: body.referer },
-      );
-      controller.addActivity(tab.spaceId, activityFor(body.url), "info");
-      // navigateAgentTab creates a missing view, so the session exists here.
-      const session = sessions.get(tabId);
-      if (!session)
-        return fail(
-          "debugger_busy",
-          "Kamapathy lost its connection to this tab. Try again shortly.",
-          { reason: "unavailable" },
+      await listening(tabId, run, body.timeoutMs);
+      // The person may have taken the space over while the session settled.
+      const tab = authorizeTab(tabId);
+      const watch = watchLeaveGuard(controller, tabId);
+      try {
+        // The tracker must be listening before the load starts, and its count
+        // read before it, so only this dispatch's navigation is followed.
+        const before = sessions.get(tabId);
+        const from = before ? trackers.for(before).navigation : 0;
+        run.dispatch.dispatched = true;
+        controller.navigateAgentTab(
+          tabId,
+          body.url,
+          body.referer === undefined ? {} : { referer: body.referer },
         );
-      const scope = scopeFor(tabId, session, body.timeoutMs, run);
-      const outcome = await awaitNavigation(scope, {
-        waitUntil: body.waitUntil,
-        from: session === before ? from : 0,
-        expect: "navigate",
-        url: body.url,
-      }).catch(sendable(run));
-      const current = authorizeTab(tabId);
-      return {
-        ok: true,
-        tab: tabView(current, controller.shownTab(current.spaceId)),
-        ...(outcome.httpStatus === undefined
-          ? {}
-          : { httpStatus: outcome.httpStatus }),
-        waitUntil: outcome.waitUntil,
-        ...watch.stop(),
-      };
+        controller.addActivity(tab.spaceId, activityFor(body.url), "info");
+        // navigateAgentTab creates a missing view, so the session exists here.
+        const session = sessions.get(tabId);
+        if (!session)
+          return fail(
+            "debugger_busy",
+            "Kamapathy lost its connection to this tab. Try again shortly.",
+            { reason: "unavailable" },
+          );
+        const scope = scopeFor(tabId, session, body.timeoutMs, run);
+        const outcome = await awaitNavigation(scope, {
+          waitUntil: body.waitUntil,
+          from: session === before ? from : 0,
+          expect: "navigate",
+          url: body.url,
+        }).catch(sendable(run));
+        const current = authorizeTab(tabId);
+        return {
+          ok: true,
+          tab: tabView(current, controller.shownTab(current.spaceId)),
+          ...(outcome.httpStatus === undefined
+            ? {}
+            : { httpStatus: outcome.httpStatus }),
+          waitUntil: outcome.waitUntil,
+          ...watch.stop(),
+        };
+      } finally {
+        watch.stop();
+      }
     } finally {
-      watch.stop();
       release();
     }
   };
@@ -148,58 +173,64 @@ export function createGo(deps: GoDeps) {
     body: { waitUntil: WaitUntil; timeoutMs: number; ignoreCache: boolean },
     run: Run,
   ): Promise<GoResult> => {
-    const tab = authorizeTab(tabId);
+    authorizeTab(tabId);
     const contents = controller.getWebContents(tabId);
     if (!contents || contents.isDestroyed())
       return fail(
         "no_web_page",
         "Navigate this tab to an HTTP or HTTPS page first.",
       );
-    // The document's own request says whether reloading would post again.
-    // A document the tracker never saw has no method, and reloading a GET
-    // beats refusing a reload Kamapathy cannot explain.
-    const before = sessions.get(tabId);
-    const tracker = before ? trackers.for(before) : undefined;
-    const document = tracker?.document;
-    if (document?.method === "POST") throw wouldResubmit(document.url);
     const release = gate.enter(tabId);
-    const watch = watchLeaveGuard(controller, tabId);
     try {
-      const from = tracker?.navigation ?? 0;
-      run.dispatch.dispatched = true;
-      controller.reloadAgentTab(tabId, { ignoreCache: body.ignoreCache });
-      controller.addActivity(
-        tab.spaceId,
-        `Agent reloaded ${hostOf(tab.url)}`,
-        "info",
-      );
-      const session = sessions.get(tabId);
-      if (!session)
-        return fail(
-          "debugger_busy",
-          "Kamapathy lost its connection to this tab. Try again shortly.",
-          { reason: "unavailable" },
+      await listening(tabId, run, body.timeoutMs);
+      // The person may have taken the space over while the session settled.
+      const tab = authorizeTab(tabId);
+      // The document's own request says whether reloading would post again.
+      // A document the tracker never saw has no method, and reloading a GET
+      // beats refusing a reload Kamapathy cannot explain.
+      const before = sessions.get(tabId);
+      const tracker = before ? trackers.for(before) : undefined;
+      const document = tracker?.document;
+      if (document?.method === "POST") throw wouldResubmit(document.url);
+      const watch = watchLeaveGuard(controller, tabId);
+      try {
+        const from = tracker?.navigation ?? 0;
+        run.dispatch.dispatched = true;
+        controller.reloadAgentTab(tabId, { ignoreCache: body.ignoreCache });
+        controller.addActivity(
+          tab.spaceId,
+          `Agent reloaded ${hostOf(tab.url)}`,
+          "info",
         );
-      const scope = scopeFor(tabId, session, body.timeoutMs, run);
-      // Any navigation the reload starts is its own, the retried URL of a
-      // failed load included.
-      const outcome = await awaitNavigation(scope, {
-        waitUntil: body.waitUntil,
-        from: session === before ? from : 0,
-        expect: "reload",
-      }).catch(sendable(run));
-      const current = authorizeTab(tabId);
-      return {
-        ok: true,
-        tab: tabView(current, controller.shownTab(current.spaceId)),
-        ...(outcome.httpStatus === undefined
-          ? {}
-          : { httpStatus: outcome.httpStatus }),
-        waitUntil: outcome.waitUntil,
-        ...watch.stop(),
-      };
+        const session = sessions.get(tabId);
+        if (!session)
+          return fail(
+            "debugger_busy",
+            "Kamapathy lost its connection to this tab. Try again shortly.",
+            { reason: "unavailable" },
+          );
+        const scope = scopeFor(tabId, session, body.timeoutMs, run);
+        // Any navigation the reload starts is its own, the retried URL of a
+        // failed load included.
+        const outcome = await awaitNavigation(scope, {
+          waitUntil: body.waitUntil,
+          from: session === before ? from : 0,
+          expect: "reload",
+        }).catch(sendable(run));
+        const current = authorizeTab(tabId);
+        return {
+          ok: true,
+          tab: tabView(current, controller.shownTab(current.spaceId)),
+          ...(outcome.httpStatus === undefined
+            ? {}
+            : { httpStatus: outcome.httpStatus }),
+          waitUntil: outcome.waitUntil,
+          ...watch.stop(),
+        };
+      } finally {
+        watch.stop();
+      }
     } finally {
-      watch.stop();
       release();
     }
   };

@@ -2498,6 +2498,61 @@ describe("local automation socket", () => {
     expect(never.error.readyState).toBeUndefined();
   });
 
+  it("navigate and reload wait for the tab's session before loading anything", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    // A page whose session is still attaching reports nothing about the
+    // document it attaches to, so a load sent into that window leaves the
+    // navigation nothing to wait for.
+    const attaching = async () => {
+      expect(
+        (await request(`/spaces/${space.id}/handoff`, "POST", {})).status,
+      ).toBe(200);
+      await expect.poll(() => page.debugger.attached).toBe(false);
+      page.debugger.holdReplies = true;
+      expect(
+        (await request(`/spaces/${space.id}/resume`, "POST", {})).status,
+      ).toBe(200);
+      await expect.poll(() => page.debugger.attached).toBe(true);
+    };
+    const quiet = () => new Promise((resolve) => setTimeout(resolve, 30));
+    const ready = () => {
+      page.debugger.holdReplies = false;
+      page.debugger.flush();
+    };
+    await attaching();
+    const going = request(`/tabs/${tab.id}/navigate`, "POST", {
+      url: "https://example.com/next",
+      waitUntil: "commit",
+    });
+    void going.catch(() => {});
+    await quiet();
+    expect(page.loads).toEqual([]);
+    ready();
+    await expect.poll(() => page.loads.length).toBe(1);
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/next");
+    first.request("https://example.com/next");
+    first.response(200);
+    first.commit("https://example.com/next");
+    expect((await going).status).toBe(200);
+    await attaching();
+    const reloading = request(`/tabs/${tab.id}/reload`, "POST", {
+      waitUntil: "commit",
+    });
+    void reloading.catch(() => {});
+    await quiet();
+    expect(page.reloads).toEqual([]);
+    ready();
+    await expect.poll(() => page.reloads.length).toBe(1);
+    const again = mainFrame(page, "loader-3");
+    again.start("https://example.com/next");
+    again.request("https://example.com/next");
+    again.response(200);
+    again.commit("https://example.com/next");
+    expect((await reloading).status).toBe(200);
+  });
+
   it("navigate still answers tab, and POST /tabs/:id/wait keeps its contract", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
