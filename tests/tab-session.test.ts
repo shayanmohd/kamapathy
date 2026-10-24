@@ -449,7 +449,7 @@ describe("TabSession", () => {
       type: "service_worker",
     });
     await settle();
-    expect(cdp.methods("worker-2")).toEqual([]);
+    expect(cdp.methods("worker-2")).toEqual(["Runtime.runIfWaitingForDebugger"]);
     expect(cdp.sent.at(-1)).toEqual({
       method: "Target.detachFromTarget",
       params: { sessionId: "worker-2" },
@@ -1800,7 +1800,9 @@ describe("frames", () => {
       waitingForDebugger: true,
     });
     await settle();
-    expect(cdp.methods("viewer-session")).toEqual([]);
+    expect(cdp.methods("viewer-session")).toEqual([
+      "Runtime.runIfWaitingForDebugger",
+    ]);
     expect(cdp.methods("panel-session")).toEqual([
       "Runtime.runIfWaitingForDebugger",
     ]);
@@ -1911,7 +1913,9 @@ describe("frames", () => {
       url: "https://example.com/",
     });
     await settle();
-    expect(cdp.methods("web-session")).toEqual([]);
+    expect(cdp.methods("web-session")).toEqual([
+      "Runtime.runIfWaitingForDebugger",
+    ]);
     expect(cdp.sent.at(-1)).toEqual({
       method: "Target.detachFromTarget",
       params: { sessionId: "web-session" },
