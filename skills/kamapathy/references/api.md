@@ -696,6 +696,14 @@ Start a scripting session in a terminal, with the same globals as run
 
 Print the workspace folder, creating it with mode 0700 when missing
 
+### `sites [<url-or-host>] [--json]`
+
+List the site packs, or the notes and tools for one site
+
+### `sites check [<pack-id-or-folder>]... [--json]`
+
+Check every site pack, or the ones named, and report each problem
+
 ### `help [topic]`
 
 Show the commands, or help on one

@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { chmod, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   agentPaths,
   checkSocket,
@@ -2329,6 +2329,246 @@ describe("scripted sessions", () => {
     const json = sink();
     expect(await runCli(["workspace", "--json"], { env: { KAMAPATHY_USER_DATA: userData }, fetch, stdout: json })).toBe(0);
     expect(JSON.parse(json.text())).toEqual({ workspace });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  // A workspace of this case's own, so no case depends on the packs the skill
+  // ships or on the person's own workspace.
+  async function siteWorkspace() {
+    const home = await mkdtemp(join(tmpdir(), "kamapathy-cli-sites-"));
+    directories.push(home);
+    await chmod(home, 0o700);
+    const sites = join(home, "sites");
+    await mkdir(sites, { mode: 0o700 });
+    return { home, sites, env: { KAMAPATHY_WORKSPACE: home } };
+  }
+  async function writeSitePack(root, id, manifest, files = {}) {
+    const dir = join(root, id);
+    await mkdir(dir, { mode: 0o700 });
+    await writeFile(join(dir, "pack.json"), JSON.stringify(manifest), { mode: 0o600 });
+    for (const [relative, text] of Object.entries(files)) {
+      const path = join(dir, relative);
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await writeFile(path, text, { mode: 0o600 });
+    }
+    return dir;
+  }
+  // The samples the skill ships, read from the folder, so a task that adds one
+  // extends these checks without touching them.
+  async function bundledPackIds() {
+    try {
+      const root = new URL("../skills/kamapathy/sites/", import.meta.url);
+      return (await readdir(root, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("_") && !entry.name.startsWith("."))
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+  // A pack a case can list, read and check: one note, one Node tool and one
+  // page tool, with every file the manifest declares.
+  const labPack = {
+    format: 1,
+    id: "local-lab",
+    name: "Local lab",
+    domains: ["127.0.0.1"],
+    notes: ["notes/overview.md"],
+    tools: {
+      list_products: {
+        description: "List the products the lab page shows.",
+        file: "tools/list-products.mjs",
+        export: "listProducts",
+        args: { limit: { type: "integer", description: "How many products to read, 1 to 20." } },
+        returns: { type: "array", description: "[{ name, price }]" },
+      },
+    },
+    pageTools: {
+      cart_total: {
+        description: "Read the total the cart page shows.",
+        file: "page-tools/cart-total.js",
+        returns: { type: "number", description: "The total in cents." },
+      },
+    },
+  };
+  const labFiles = {
+    "notes/overview.md": "The lab serves /packs/products and /packs/cart.\n",
+    "tools/list-products.mjs": "export const listProducts = async () => [];\n",
+    "page-tools/cart-total.js": "() => 0\n",
+  };
+  const noConnection = () => vi.fn(() => {
+    throw new Error("sites answers from this computer's files.");
+  });
+
+  it("sites lists both roots without connecting or starting Kamapathy", async () => {
+    const { sites, env: siteEnv } = await siteWorkspace();
+    await writeSitePack(sites, "local-lab", labPack, labFiles);
+    const broken = await writeSitePack(sites, "broken", { ...labPack, format: 2, id: "broken", name: "Broken" });
+    const fetch = noConnection();
+    // KAMAPATHY_NO_LAUNCH is unset, so a parser that built a session would go
+    // looking for Kamapathy; allowLaunch keeps such a regression from starting
+    // the real app.
+    const options = { env: siteEnv, fetch, connect: { allowLaunch: false } };
+    const stdout = sink();
+    expect(await runCli(["sites"], { ...options, stdout })).toBe(0);
+    const lines = stdout.text().trimEnd().split("\n");
+    expect(lines).toContain('local-lab "Local lab" workspace 127.0.0.1; tools list_products; page tools cart_total');
+    expect(lines.at(-1)).toBe(`Skipped ${broken}: format: format must be 1.`);
+    const bundled = await bundledPackIds();
+    for (const id of bundled) expect(lines.some((text) => text.startsWith(`${id} "`)), id).toBe(true);
+    expect(lines.length).toBe(bundled.length + 2);
+    const json = sink();
+    expect(await runCli(["sites", "--json"], { ...options, stdout: json })).toBe(0);
+    const data = JSON.parse(json.text());
+    expect(Object.keys(data).sort()).toEqual(["packs", "skipped"]);
+    expect(data.packs.find((pack) => pack.id === "local-lab")).toEqual({
+      id: "local-lab",
+      name: "Local lab",
+      source: "workspace",
+      dir: join(sites, "local-lab"),
+      domains: ["127.0.0.1"],
+      notes: ["notes/overview.md"],
+      tools: [
+        { name: "list_products", kind: "node", description: "List the products the lab page shows." },
+        { name: "cart_total", kind: "page", description: "Read the total the cart page shows." },
+      ],
+    });
+    expect(data.skipped).toEqual([{ path: broken, source: "workspace", problem: "format: format must be 1." }]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("sites <url> prints notes, tools and examples", async () => {
+    const { sites, env: siteEnv } = await siteWorkspace();
+    const dir = await writeSitePack(
+      sites,
+      "github",
+      {
+        format: 1,
+        id: "github",
+        name: "GitHub",
+        domains: ["*.github.com"],
+        notes: ["notes/overview.md"],
+        tools: {
+          search_repositories: {
+            description: "Search repositories and read the first results.",
+            file: "tools/search-repositories.mjs",
+            export: "searchRepositories",
+            args: {
+              query: { type: "string", required: true, description: "Words to search for." },
+              limit: { type: "integer", description: "How many results to read, 1 to 50." },
+            },
+            returns: { type: "array", description: "[{ fullName, url, description, stars, language }]" },
+          },
+        },
+        pageTools: {
+          repository_stats: {
+            description: "Read the stars, forks and topics the page shows.",
+            file: "page-tools/repository-stats.js",
+            returns: { type: "object", description: "{ fullName, stars, forks } or null" },
+          },
+        },
+      },
+      {
+        "notes/overview.md": "Gists live on gist.github.com.\nA search page lists repositories.\n",
+        "tools/search-repositories.mjs": "export const searchRepositories = async () => [];\n",
+        "page-tools/repository-stats.js": "() => null\n",
+      },
+    );
+    const fetch = noConnection();
+    const options = { env: siteEnv, fetch, connect: { allowLaunch: false } };
+    const stdout = sink();
+    expect(await runCli(["sites", "https://gist.github.com/x"], { ...options, stdout })).toBe(0);
+    expect(stdout.text()).toBe(
+      [
+        'github "GitHub" (workspace, matches *.github.com)',
+        dir,
+        "--- notes/overview.md",
+        "Gists live on gist.github.com.",
+        "A search page lists repositories.",
+        "search_repositories query: string, limit?: integer",
+        "  Search repositories and read the first results.",
+        "  returns array: [{ fullName, url, description, stars, language }]",
+        '  await runSiteTool("github", "search_repositories", { query: "<query>" }, { page })',
+        "repository_stats (page tool, needs page scripts)",
+        "  Read the stars, forks and topics the page shows.",
+        "  returns object: { fullName, stars, forks } or null",
+        '  await runPageTool("github", "repository_stats", {}, { page })',
+        "",
+      ].join("\n"),
+    );
+    const empty = sink();
+    expect(await runCli(["sites", "https://example.invalid/"], { ...options, stdout: empty })).toBe(0);
+    expect(empty.text()).toBe("No site pack matches example.invalid.\n");
+    const blank = sink();
+    expect(await runCli(["sites", "about:blank"], { ...options, stdout: blank })).toBe(0);
+    expect(blank.text()).toBe("No site pack matches about:blank.\n");
+    const json = sink();
+    expect(await runCli(["sites", "gist.github.com", "--json"], { ...options, stdout: json })).toBe(0);
+    const data = JSON.parse(json.text());
+    expect(data).toMatchObject({ url: "https://gist.github.com/", host: "gist.github.com", skipped: [] });
+    expect(data.packs[0]).toMatchObject({ id: "github", source: "workspace", dir, matchedBy: "*.github.com" });
+    expect(data.packs[0].notes).toEqual([
+      { file: "notes/overview.md", text: "Gists live on gist.github.com.\nA search page lists repositories.\n" },
+    ]);
+    await expect(runCli(["sites", "not a host"], options)).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(await main(["sites", "not a host"], { ...options, stdout: sink(), stderr: sink() })).toBe(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("sites check exits 1 with problems by file and line, 0 when clean", async () => {
+    const { sites, env: siteEnv } = await siteWorkspace();
+    await writeSitePack(sites, "local-lab", labPack, labFiles);
+    const brokenDir = await writeSitePack(
+      sites,
+      "broken",
+      { ...labPack, id: "broken", name: "Broken" },
+      { ...labFiles, "notes/overview.md": "The lab serves /packs/products.\nOpen @e3 to buy.\n" },
+    );
+    const refusal =
+      'holds the temporary ref @e3. Refs change with every snapshot; use a locator such as role=button[name="Save"].';
+    const fetch = noConnection();
+    const options = { env: siteEnv, fetch, connect: { allowLaunch: false } };
+    const bundled = await bundledPackIds();
+    const passed = 1 + bundled.length;
+    const stdout = sink();
+    expect(await runCli(["sites", "check"], { ...options, stdout })).toBe(1);
+    const lines = stdout.text().trimEnd().split("\n");
+    expect(lines).toContain("ok local-lab (workspace)");
+    expect(lines).toContain(`broken: notes/overview.md:2: ${refusal}`);
+    expect(lines.at(-1)).toBe(`${passed} pack${passed === 1 ? "" : "s"} passed and 1 failed.`);
+    const one = sink();
+    expect(await runCli(["sites", "check", "local-lab"], { ...options, stdout: one })).toBe(0);
+    expect(one.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
+    const folder = sink();
+    expect(await runCli(["sites", "check", join(sites, "local-lab")], { ...options, stdout: folder })).toBe(0);
+    expect(folder.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
+    // A pack outside both roots is checked where it sits, so it can be read
+    // before it is moved into the workspace.
+    const elsewhere = await mkdtemp(join(tmpdir(), "kamapathy-cli-pack-"));
+    directories.push(elsewhere);
+    const away = await writeSitePack(elsewhere, "local-lab", labPack, labFiles);
+    const apart = sink();
+    expect(await runCli(["sites", "check", away], { ...options, stdout: apart })).toBe(0);
+    expect(apart.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
+    const unknown = sink();
+    expect(await runCli(["sites", "check", "nope"], { ...options, stdout: unknown })).toBe(1);
+    expect(unknown.text()).toBe('No site pack named "nope".\n0 packs passed.\n');
+    const json = sink();
+    expect(await runCli(["sites", "check", "broken", "--json"], { ...options, stdout: json })).toBe(1);
+    const data = JSON.parse(json.text());
+    expect(Object.keys(data).sort()).toEqual(["ok", "packs"]);
+    expect(data).toEqual({
+      ok: false,
+      packs: [
+        {
+          id: "broken",
+          source: "workspace",
+          dir: brokenDir,
+          ok: false,
+          problems: [{ file: "notes/overview.md", line: 2, message: refusal }],
+        },
+      ],
+    });
     expect(fetch).not.toHaveBeenCalled();
   });
 

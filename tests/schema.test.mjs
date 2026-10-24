@@ -33,6 +33,7 @@ const {
   COMMANDS,
   ENTRIES,
   ERRORS,
+  GLOBAL_FLAGS,
   ROUTES,
   SELECTOR_FORMS,
   checkBody,
@@ -1079,6 +1080,36 @@ describe("API schema", () => {
       since: 4,
     });
     expect(ERRORS.helpers_failed.fields).toEqual(["path", "export", "cause"]);
+    // The CLI's two commands, both answered from the files on this computer.
+    for (const [name, usage, summary, script] of [
+      [
+        "sites",
+        "sites [<url-or-host>] [--json]",
+        "List the site packs, or the notes and tools for one site",
+        "siteContext",
+      ],
+      [
+        "sites check",
+        "sites check [<pack-id-or-folder>]... [--json]",
+        "Check every site pack, or the ones named, and report each problem",
+        undefined,
+      ],
+    ]) {
+      const command = findCommand(name);
+      expect(command, name).toMatchObject({
+        group: "Scripts",
+        usage,
+        summary,
+        since: 4,
+      });
+      expect(command.route, name).toBeUndefined();
+      expect(command.script, name).toBe(script);
+      expect(command.arguments.length, name).toBe(1);
+      // --json is a global flag, so neither command declares one of its own.
+      expect(command.flags, name).toEqual([]);
+      expect(Object.hasOwn(PARSERS, name), name).toBe(true);
+    }
+    expect(GLOBAL_FLAGS.map((flag) => flag.name)).toContain("--json");
     // The generated reference carries every form.
     const reference = read("skills/kamapathy/references/api.md");
     for (const text of [
@@ -1088,6 +1119,8 @@ describe("API schema", () => {
       "`kamapathy.sitePacks(target?)`",
       "`kamapathy.siteContext(target)`",
       "`kamapathy.runSiteTool(packId, tool, args, options)`",
+      "`sites [<url-or-host>] [--json]`",
+      "`sites check [<pack-id-or-folder>]... [--json]`",
     ])
       expect(reference, text).toContain(text);
   });
