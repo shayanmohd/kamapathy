@@ -70,6 +70,13 @@ export const ERRORS = {
     "The protocol command reaches beyond this tab's own page and frames.",
     ["method", "reason"],
   ),
+  agent_scripts_off: code(
+    403,
+    false,
+    "Page scripts are off in Kamapathy's Settings.",
+    [],
+    2,
+  ),
   request_declined: code(
     403,
     false,
@@ -241,6 +248,13 @@ export const ERRORS = {
     ["url", "armed"],
     2,
   ),
+  script_error: code(
+    422,
+    false,
+    "The page function threw or did not parse.",
+    ["name", "line", "column", "description"],
+    2,
+  ),
   drag_out_of_view: code(
     422,
     false,
@@ -318,6 +332,8 @@ export const ERRORS = {
       "readyState",
       "inflight",
       "pending",
+      "title",
+      "popups",
     ]),
     override: { status: 408, route: "POST /tabs/:id/wait", action: "wait" },
   },

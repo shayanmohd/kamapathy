@@ -195,6 +195,35 @@ const FIELDS = {
     idleMs,
     timeoutMs: waitTimeout,
   },
+  "wait-for-function": {
+    expression: {
+      kind: "string",
+      max: 16384,
+      since: 2,
+      description:
+        "An expression to evaluate in the page. Give this or function, not both.",
+    },
+    function: {
+      kind: "string",
+      max: 16384,
+      since: 2,
+      description: "The source of a function to call in the page.",
+    },
+    arg: {
+      kind: "json",
+      since: 2,
+      description: "The one JSON argument the function is called with.",
+    },
+    intervalMs: {
+      kind: "ms",
+      min: 10,
+      max: 10000,
+      default: 100,
+      since: 2,
+      description: "How long between checks.",
+    },
+    timeoutMs: waitTimeout,
+  },
 };
 
 const route = (method, path, summary, response, body, options = {}) => ({
@@ -447,6 +476,14 @@ export const ROUTES = [
     { budget: { field: "timeoutMs" }, since: 2 },
   ),
   route(
+    "POST",
+    "/tabs/:id/wait-for-function",
+    "Waits for a function the agent wrote to return a truthy value in the page.",
+    "{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }",
+    FIELDS["wait-for-function"],
+    { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
     "GET",
     "/tabs/:id/info",
     "Reads the viewport, scroll offsets, document size and ready state.",
@@ -631,6 +668,12 @@ export const ACTIONS = [
     type: "wait-for-load-state",
     summary: "Waits for the document this page shows to reach a state.",
     fields: FIELDS["wait-for-load-state"],
+    since: 2,
+  },
+  {
+    type: "wait-for-function",
+    summary: "Waits for a page function to return a truthy value.",
+    fields: FIELDS["wait-for-function"],
     since: 2,
   },
 ];

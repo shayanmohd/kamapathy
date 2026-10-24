@@ -1,6 +1,13 @@
 import { ApiError, fail } from "../errors";
+import {
+  evaluateScript,
+  isTruthy,
+  requireScripts,
+  type ScriptSource,
+} from "../evaluate";
 import type { Run } from "../http";
 import type { AutomationController } from "../server";
+import { CdpTimeoutError, ContextLostError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
 import { tabView, type TabView } from "../views";
 import { awaitLoadState, type NavigationScope, type WaitUntil } from "./await";
@@ -15,6 +22,11 @@ export interface UrlWaitBody {
   glob?: UrlGlob;
   waitUntil: WaitUntil;
   after?: number;
+  timeoutMs: number;
+}
+export interface FunctionWaitBody {
+  source: ScriptSource;
+  intervalMs: number;
   timeoutMs: number;
 }
 export interface PopupView {
@@ -76,6 +88,30 @@ const urlTimeout = (timeoutMs: number, lastUrl: string, expected?: string) =>
       lastUrl,
     },
   );
+
+// A function wait that ran out. The page may have moved on into a popup it
+// opened, so the first one is named.
+const functionTimeout = (
+  timeoutMs: number,
+  page: { url: string; title: string },
+  popups: PopupView[],
+) => {
+  const popup = popups[0];
+  const elsewhere = popup
+    ? ` Popup ${popup.label ?? popup.id} opened from it at ${cut(popup.url)}, so the condition may be there.`
+    : "";
+  return new ApiError(
+    "wait_timeout",
+    `The page function did not return a truthy value within ${timeoutMs} ms. It is at ${cut(page.url)}.${elsewhere}`,
+    {
+      awaited: "function",
+      timeoutMs,
+      url: page.url,
+      title: page.title,
+      popups,
+    },
+  );
+};
 
 // Sleeps up to milliseconds, or until wake is called.
 function nap(milliseconds: number, hold: { wake?: () => void }) {
@@ -291,5 +327,84 @@ export function createWaits(deps: WaitsDeps) {
       release();
     }
   };
-  return { url, loadState };
+  // A condition the agent wrote itself, run in the page every interval
+  // while the Page scripts setting allows it.
+  const fn = async (
+    tabId: string,
+    body: FunctionWaitBody,
+    run: Run,
+  ): Promise<Record<string, unknown>> => {
+    let tab = authorizeTab(tabId);
+    requireScripts(controller);
+    // This phase's stand-in for section 7's action window, as the URL wait
+    // has it: a popup counts when this page opened it while the wait ran.
+    const since = Date.now();
+    const session = pageFor(tabId);
+    const release = gate.enter(tabId);
+    const tracker = trackers.for(session);
+    const hold: { wake?: () => void } = {};
+    const deadline = Math.min(run.deadline, since + body.timeoutMs);
+    // A zero timeout still allows the page the time one check needs.
+    const pageDeadline = () =>
+      body.timeoutMs === 0
+        ? Math.min(run.deadline, Date.now() + ALLOWANCE_MS)
+        : deadline;
+    const timedOut = () =>
+      functionTimeout(
+        body.timeoutMs,
+        {
+          url: tracker.document?.url ?? session.contents.getURL(),
+          title: tab.title,
+        },
+        candidatePopups(controller, tabId, since),
+      );
+    try {
+      for (;;) {
+        tab = authorizeTab(tabId);
+        requireScripts(controller);
+        const limit = pageDeadline();
+        const result = await evaluateScript(session, body.source, {
+          deadline: limit,
+          signal: run.signal,
+          guard: () => {
+            authorizeTab(tabId);
+          },
+          dispatch: run.dispatch,
+          timeoutMs: Math.max(1, limit - Date.now()),
+        }).catch((error: unknown) => {
+          // A navigation ended the context, or the page was still busy at
+          // the deadline: the next check runs in the document it shows now.
+          if (error instanceof ContextLostError) return undefined;
+          if (error instanceof CdpTimeoutError) return undefined;
+          throw error;
+        });
+        if (result && isTruthy(result)) {
+          // Authorized once more before the answer, so a takeover at the
+          // last moment leaves no activity line behind.
+          const answered = viewFor(tabId);
+          controller.addActivity(
+            tab.spaceId,
+            "Agent observed a page condition",
+            "info",
+          );
+          return { ok: true, tab: answered, ...result };
+        }
+        if (Date.now() >= deadline) throw timedOut();
+        // Sleeping in ticks keeps a takeover within TICK_MS, however long
+        // the interval between checks is.
+        const nextAt = Date.now() + body.intervalMs;
+        while (Date.now() < nextAt) {
+          authorizeTab(tabId);
+          if (Date.now() >= deadline) throw timedOut();
+          await run.park(() =>
+            nap(Math.min(TICK_MS, nextAt - Date.now()), hold),
+          );
+        }
+      }
+    } finally {
+      hold.wake = undefined;
+      release();
+    }
+  };
+  return { url, loadState, fn };
 }

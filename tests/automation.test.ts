@@ -2394,6 +2394,345 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts).toEqual([]);
   });
 
+  // A function wait and its answer.
+  const waitForFunction = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/wait-for-function`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // The page answers main-world evaluations itself: each call is recorded
+  // with the moment it arrived, and the test scripts the reply.
+  const mainWorld = (
+    page: FakeContents,
+    reply: (expression: string, count: number) => unknown,
+  ) => {
+    const calls: { expression: string; at: number }[] = [];
+    page.debugger.reply("Runtime.evaluate", (params) => {
+      if (params.contextId !== undefined)
+        return { result: { type: "object", value: {} } };
+      calls.push({ expression: params.expression, at: Date.now() });
+      return reply(params.expression, calls.length);
+    });
+    return calls;
+  };
+  const truthy = (value: unknown) => ({ result: { type: "object", value } });
+  const falsy = { result: { type: "boolean", value: false } };
+
+  it("the function wait answers the first truthy value", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const source = "window.state && window.state.ready";
+    const calls = mainWorld(page, (_expression, count) =>
+      count < 3 ? falsy : truthy({ ready: true }),
+    );
+    const answered = await waitForFunction(tab.id, {
+      expression: source,
+      intervalMs: 60,
+      timeoutMs: 5000,
+    });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, managed: true }),
+      value: { ready: true },
+    });
+    expect(calls.map((call) => call.expression)).toEqual([
+      source,
+      source,
+      source,
+    ]);
+    // The checks are the interval apart.
+    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(50);
+    expect(calls[2].at - calls[1].at).toBeGreaterThanOrEqual(50);
+    // One main-world evaluation per check: no world of Kamapathy's own and
+    // no frame session, so it reads the page's own globals.
+    const sent = page.debugger.sent.filter(
+      (command) => command.method === "Runtime.evaluate",
+    );
+    expect(sent).toHaveLength(3);
+    for (const command of sent) {
+      expect(command.sessionId).toBeUndefined();
+      expect(command.params.contextId).toBeUndefined();
+      expect(command.params).toMatchObject({
+        expression: source,
+        returnByValue: true,
+        awaitPromise: true,
+        silent: true,
+      });
+    }
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent observed a page condition",
+    });
+  });
+
+  it("a function source is called with its argument", async () => {
+    const { tab } = await createPage();
+    const calls = mainWorld(controller.contents, (expression) =>
+      truthy(expression),
+    );
+    const source = "(item) => item.count > 1 && item.name";
+    // The fake answers with the expression it ran, so the answer shows it.
+    const withArg = await waitForFunction(tab.id, {
+      function: source,
+      arg: { count: 2, name: "two\u2028" },
+      timeoutMs: 1000,
+    });
+    expect(withArg.status).toBe(200);
+    expect((await withArg.json()).value).toBe(
+      `(${source})({"count":2,"name":"two\\u2028"})`,
+    );
+    const alone = await waitForFunction(tab.id, {
+      function: source,
+      timeoutMs: 1000,
+    });
+    expect(alone.status).toBe(200);
+    expect((await alone.json()).value).toBe(`(${source})()`);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("unserializable results answer with their text, and falsy ones keep looking", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const unserializable = (text: string) => ({
+      result: { type: "number", description: text, unserializableValue: text },
+    });
+    // A truthy value the protocol cannot send by value arrives as its text.
+    for (const [expression, text] of [
+      ["10n ** 20n", "100000000000000000000n"],
+      ["1 / 0", "Infinity"],
+    ] as const) {
+      mainWorld(page, () => unserializable(text));
+      const answered = await waitForFunction(tab.id, {
+        expression,
+        timeoutMs: 1000,
+      });
+      expect(answered.status, text).toBe(200);
+      expect(await answered.json()).toEqual({
+        ok: true,
+        tab: expect.objectContaining({ id: tab.id }),
+        unserializable: text,
+      });
+    }
+    // NaN, -0 and 0n are no condition, and neither is a result of undefined,
+    // so those waits keep looking and end at their deadline.
+    for (const text of ["NaN", "-0", "0n"]) {
+      mainWorld(page, () => unserializable(text));
+      const { status, error } = await failure(
+        await waitForFunction(tab.id, { expression: text, timeoutMs: 0 }),
+      );
+      expect(status, text).toBe(504);
+      expect(error, text).toMatchObject({
+        code: "wait_timeout",
+        awaited: "function",
+      });
+    }
+    mainWorld(page, () => ({ result: { type: "undefined" } }));
+    const nothing = await failure(
+      await waitForFunction(tab.id, { expression: "void 0", timeoutMs: 0 }),
+    );
+    expect(nothing.status).toBe(504);
+    expect(nothing.error).toMatchObject({ awaited: "function" });
+  });
+
+  it("a page exception ends the wait", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const long = `TypeError: no good\n${"x".repeat(5000)}`;
+    // A silent evaluation answers with the error object beside its details.
+    mainWorld(page, () => ({
+      result: { type: "object", className: "TypeError", subtype: "error" },
+      exceptionDetails: {
+        text: "Uncaught",
+        lineNumber: 1,
+        columnNumber: 2,
+        exception: { className: "TypeError", description: long },
+      },
+    }));
+    const thrown = await failure(
+      await waitForFunction(tab.id, {
+        function: "(value) => {\n  throw new TypeError('no good')\n}",
+        timeoutMs: 1000,
+      }),
+    );
+    expect(thrown.status).toBe(422);
+    expect(thrown.error).toMatchObject({
+      code: "script_error",
+      name: "TypeError",
+      line: 2,
+      column: 3,
+    });
+    expect(thrown.error.description).toBe(long.slice(0, 4000));
+    expect(String(thrown.error.message)).toContain("line 2, column 3");
+    // On line 1 a function source sits one character to the right, where the
+    // wrapper's parenthesis is; an expression runs as written.
+    const missing = {
+      exceptionDetails: {
+        text: "Uncaught",
+        lineNumber: 0,
+        columnNumber: 5,
+        exception: {
+          className: "ReferenceError",
+          description: "ReferenceError: missing is not defined",
+        },
+      },
+    };
+    mainWorld(page, () => missing);
+    const wrapped = await failure(
+      await waitForFunction(tab.id, {
+        function: "() => missing",
+        timeoutMs: 1000,
+      }),
+    );
+    expect(wrapped.error).toMatchObject({
+      code: "script_error",
+      name: "ReferenceError",
+      line: 1,
+      column: 5,
+      description: "ReferenceError: missing is not defined",
+    });
+    const bare = await failure(
+      await waitForFunction(tab.id, { expression: "missing", timeoutMs: 1000 }),
+    );
+    expect(bare.error).toMatchObject({ line: 1, column: 6 });
+  });
+
+  it("a context lost to navigation is retried at the next interval", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await tracking(tab.id);
+    const calls = mainWorld(page, (_expression, count) => {
+      if (count === 1) throw new Error("Inspected target navigated or closed");
+      return truthy("after");
+    });
+    const pending = waitForFunction(tab.id, {
+      expression: "window.ready",
+      intervalMs: 80,
+      timeoutMs: 5000,
+    });
+    await sleep(25);
+    const frame = mainFrame(page, "loader-2");
+    frame.start("https://example.com/next");
+    frame.commit("https://example.com/next");
+    const answered = await pending;
+    expect(answered.status).toBe(200);
+    expect((await answered.json()).value).toBe("after");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("the wait answers 403 while Page scripts are off", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy(true));
+    controller.state.settings.agentPageScripts = false;
+    const off = await failure(
+      await waitForFunction(tab.id, { expression: "true" }),
+    );
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message:
+        "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
+    });
+    // A plan that holds the step fails before its first action runs.
+    const batch = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "snapshot" },
+          { type: "wait-for-function", expression: "true" },
+        ],
+      }),
+    );
+    expect(batch.status).toBe(403);
+    expect(batch.error).toMatchObject({ code: "agent_scripts_off" });
+    expect(calls).toEqual([]);
+    expect(page.scripts).toEqual([]);
+    // With the setting on again, the same step runs.
+    controller.state.settings.agentPageScripts = true;
+    const ran = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "wait-for-function", expression: "true", timeoutMs: 1000 },
+      ],
+    });
+    expect(ran.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a function wait times out with its fields", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    mainWorld(page, () => falsy);
+    const timedOut = await failure(
+      await waitForFunction(tab.id, {
+        expression: "window.ready",
+        intervalMs: 50,
+        timeoutMs: 150,
+      }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toEqual({
+      code: "wait_timeout",
+      message:
+        "The page function did not return a truthy value within 150 ms. It is at https://example.com/.",
+      awaited: "function",
+      timeoutMs: 150,
+      url: "https://example.com/",
+      title: "https://example.com/",
+      popups: [],
+      // The agent's own code reached the page, so nothing here is retryable.
+      dispatched: true,
+    });
+    // A popup this page opened while it waited is named in the message.
+    const pending = waitForFunction(tab.id, {
+      expression: "window.ready",
+      intervalMs: 50,
+      timeoutMs: 300,
+    });
+    await sleep(40);
+    const popup = controller.openPopup(tab.id, "https://example.com/popup");
+    const withPopup = await failure(await pending);
+    expect(withPopup.status).toBe(504);
+    expect(withPopup.error.popups).toEqual([
+      { id: popup.id, label: popup.label, url: "https://example.com/popup" },
+    ]);
+    expect(withPopup.error.message).toBe(
+      `The page function did not return a truthy value within 300 ms. It is at https://example.com/. Popup ${popup.label} opened from it at https://example.com/popup, so the condition may be there.`,
+    );
+  });
+
+  it("the body is validated before the lane", async () => {
+    const { tab } = await createPage();
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/wait-for-function`, "POST", body));
+    for (const [body, field] of [
+      [{ expression: "true", function: "() => true" }, "function"],
+      [{}, "expression"],
+      [{ expression: "x".repeat(16385) }, "expression"],
+      [{ expression: "true", intervalMs: 9 }, "intervalMs"],
+      [{ expression: "true", timeoutMs: 60001 }, "timeoutMs"],
+      [{ expression: "true", arg: 1 }, "arg"],
+    ] as const) {
+      const { status, error } = await refuse(body);
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    // The step takes the same fields, and the plan is checked before it runs.
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "wait-for-function", intervalMs: 10001 }],
+      }),
+    );
+    expect(step.status).toBe(400);
+    expect(step.error).toMatchObject({
+      code: "invalid_field",
+      field: "intervalMs",
+    });
+    expect(controller.contents.scripts).toEqual([]);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -3040,6 +3379,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/reload": {},
       "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
+      "POST /tabs/:id/wait-for-function": { expression: "true" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

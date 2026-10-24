@@ -96,6 +96,7 @@ export interface Settings {
   showBookmarksBar: boolean;
   automationEnabled: boolean;
   isolateAgentSpaces: boolean;
+  agentPageScripts: boolean;
   welcomed: boolean;
 }
 export interface ImportProfile {

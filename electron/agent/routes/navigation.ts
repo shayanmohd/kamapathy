@@ -3,12 +3,17 @@ import { send, type Run, type RouteDeps, type RouteImpl } from "../http";
 import { createPendingGate, type WaitUntil } from "../navigation/await";
 import { createGo } from "../navigation/go";
 import { createTrackers } from "../navigation/trackers";
-import { createWaits, type UrlWaitBody } from "../navigation/waits";
+import {
+  createWaits,
+  type FunctionWaitBody,
+  type UrlWaitBody,
+} from "../navigation/waits";
 import type { AutomationController } from "../server";
 import {
   loadStateFields,
   navigationFields,
   reloadFields,
+  waitForFunctionFields,
   waitForUrlFields,
   type ToolAction,
 } from "../validate";
@@ -131,6 +136,14 @@ export function createNavigation(
             await waits.loadState(tab!.id, loadStateFields(body!), run),
           ),
       },
+      "POST /tabs/:id/wait-for-function": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await waits.fn(tab!.id, waitForFunctionFields(body!), run),
+          ),
+      },
       "GET /tabs/:id/info": {
         handler: async ({ response, tab, run }) => {
           const view = () => {
@@ -172,7 +185,13 @@ export function createNavigation(
         },
       },
     },
-    stepTypes: ["navigate", "reload", "wait-for-url", "wait-for-load-state"],
+    stepTypes: [
+      "navigate",
+      "reload",
+      "wait-for-url",
+      "wait-for-load-state",
+      "wait-for-function",
+    ],
     step: async (tabId, action, run) => {
       if (action.type === "navigate") {
         const body = action.payload as NavigateBody;
@@ -201,6 +220,14 @@ export function createNavigation(
       if (action.type === "wait-for-load-state") {
         const body = action.payload as LoadStateBody;
         return waits.loadState(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      if (action.type === "wait-for-function") {
+        const body = action.payload as unknown as FunctionWaitBody;
+        return waits.fn(
           tabId,
           { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
           run,

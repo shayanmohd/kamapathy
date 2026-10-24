@@ -6,10 +6,12 @@ import {
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { SnapshotOptions } from "../automation-dom";
 import { ApiError, fail } from "./errors";
+import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import type { Route } from "./http";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
 import type { UrlWaitBody } from "./navigation/waits";
+import type { AutomationController } from "./server";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
 export const PRESS_KEYS: Record<
@@ -43,7 +45,8 @@ export type ToolAction = {
     | "navigate"
     | "reload"
     | "wait-for-url"
-    | "wait-for-load-state";
+    | "wait-for-load-state"
+    | "wait-for-function";
   payload: Record<string, unknown>;
 };
 
@@ -179,6 +182,19 @@ export function loadStateFields(body: Record<string, unknown>): {
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
+// The function wait takes the page script fields, which the Page scripts
+// setting gates, plus how often it looks.
+export function waitForFunctionFields(body: Record<string, unknown>): {
+  source: ScriptSource;
+  intervalMs: number;
+  timeoutMs: number;
+} {
+  return {
+    source: scriptFields(body),
+    intervalMs: integerField(body, "intervalMs", 100, 10, 10000),
+    timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
+  };
+}
 export function targetFields(
   body: Record<string, unknown>,
   optional = false,
@@ -205,6 +221,10 @@ export function targetFields(
 export function parseToolAction(
   type: string,
   body: Record<string, unknown>,
+  // A batch validates its whole plan first, so a step the Page scripts
+  // setting gates is refused there, before the first action runs. The wait
+  // itself checks the setting again when it runs.
+  deps?: { controller: AutomationController },
 ): ToolAction {
   if (type === "snapshot") {
     const mode = body.mode ?? "compact";
@@ -296,6 +316,10 @@ export function parseToolAction(
   }
   if (type === "wait-for-load-state")
     return { type, payload: loadStateFields(body) };
+  if (type === "wait-for-function") {
+    if (deps) requireScripts(deps.controller);
+    return { type, payload: { ...waitForFunctionFields(body) } };
+  }
   if (type === "wait")
     return {
       type,

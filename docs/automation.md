@@ -291,6 +291,7 @@ Screenshots require a shown, unminimized Kamapathy window, including captures of
 | POST | `/tabs/:id/reload` | `waitUntil?`, `timeoutMs?`, `ignoreCache?` | Reloads the page and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
 | POST | `/tabs/:id/wait-for-url` | `url?`, `waitUntil?`, `after?`, `timeoutMs?` | Waits for this page's URL to match a glob, or reports its commits so a script can match them itself. Returns `{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }`. |
 | POST | `/tabs/:id/wait-for-load-state` | `state?`, `idleMs?`, `timeoutMs?` | Waits for the document this page shows to reach a state. Returns `{ ok: true, tab: TabView, state }`. |
+| POST | `/tabs/:id/wait-for-function` | `expression?`, `function?`, `arg?`, `intervalMs?`, `timeoutMs?` | Waits for a function the agent wrote to return a truthy value in the page. Returns `{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?` | Reads bounded page text and controls with refs. Returns `snapshot`. |
@@ -338,6 +339,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason` | The protocol command reaches beyond this tab's own page and frames. |
+| `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
@@ -376,6 +378,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `element_action_failed` | 422 | not retryable |  | The page refused the action. |
 | `navigation_failed` | 422 | retryable when netError is ERR_INTERNET_DISCONNECTED or ERR_NETWORK_CHANGED or ERR_NETWORK_IO_SUSPENDED or ERR_NAME_RESOLUTION_FAILED or ERR_CONNECTION_REFUSED or ERR_CONNECTION_TIMED_OUT | `url`, `netError`, `errorCode`, `httpStatus`, `blockedUrl` | The navigation ended without loading a document. |
 | `navigation_download` | 422 | not retryable | `url`, `armed` | The address is a download, not a page. |
+| `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
@@ -392,7 +395,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending` | The condition was not met before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `title`, `popups` | The condition was not met before the timeout. |
 | `not_connected` | client | retryable when reason is busy | `reason` | Kamapathy is unreachable, missing or must not be started, or the connection was lost. |
 | `timeout` | client | not retryable |  | The request timed out. An action may already have reached the page. |
 | `request_too_large` | client | not retryable |  | The encoded request is larger than its route accepts. |

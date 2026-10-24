@@ -115,7 +115,9 @@ export function tabRoutes({
               "Each action must be an object with a type.",
             );
           const action = value as Record<string, unknown>;
-          return parseToolAction(stringField(action, "type", 20), action);
+          return parseToolAction(stringField(action, "type", 20), action, {
+            controller,
+          });
         });
         const results: {
           index: number;
