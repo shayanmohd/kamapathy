@@ -3424,6 +3424,224 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts).toEqual([]);
   });
 
+  // A selector wait and its answer.
+  const waitForSelector = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/wait-for-selector`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+
+  it("wait-for-selector answers the state and the match count", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      matched: true,
+      counts: { matched: 2, visible: 1 },
+    };
+    const answered = await waitForSelector(tab.id, { selector: "#done" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, managed: true }),
+      state: "visible",
+      matched: 2,
+    });
+    // Raw CSS takes the first match, judged at the visible level.
+    expect(payloads("check").at(-1)).toEqual({
+      selector: "#done",
+      query: {
+        ast: { kind: "css", css: "#done", raw: true },
+        state: "visible",
+        mode: "first",
+        level: "visible",
+      },
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent observed a page condition",
+    });
+    // A ref waits for the element it names, with the state beside it.
+    const byRef = await waitForSelector(tab.id, {
+      ref: "@e2",
+      state: "attached",
+    });
+    expect(byRef.status).toBe(200);
+    expect(await byRef.json()).toMatchObject({ state: "attached", matched: 2 });
+    expect(payloads("check").at(-1)).toEqual({ ref: "@e2", state: "attached" });
+    // The batch step takes the same fields.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "wait-for-selector", selector: "#done", state: "attached" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(await batch.json()).toMatchObject({
+      ok: true,
+      results: [
+        {
+          index: 0,
+          type: "wait-for-selector",
+          result: { ok: true, state: "attached", matched: 2 },
+        },
+      ],
+    });
+  });
+
+  it("a second match fails attached and visible at once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const ambiguous = {
+      ok: false,
+      code: "ambiguous_match",
+      error:
+        "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+      fields: {
+        selector: "text=Save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates: [],
+      },
+    };
+    // Every match counts for hidden and detached, so only the strict states
+    // see a second match at all.
+    page.result = (code: string) =>
+      /"state":"(hidden|detached)"/.test(code)
+        ? { ok: true, matched: true, counts: { matched: 2, visible: 0 } }
+        : ambiguous;
+    const started = Date.now();
+    const refused = await failure(
+      await waitForSelector(tab.id, {
+        selector: "text=Save",
+        state: "attached",
+        timeoutMs: 20000,
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "ambiguous_match",
+      selector: "text=Save",
+      count: 2,
+    });
+    // It answered on the first check, not at the deadline.
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "attached",
+      mode: "strict",
+      level: "none",
+    });
+    const hidden = await waitForSelector(tab.id, {
+      selector: "text=Save",
+      state: "hidden",
+    });
+    expect(hidden.status).toBe(200);
+    expect(await hidden.json()).toMatchObject({
+      state: "hidden",
+      matched: 2,
+    });
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "hidden",
+      mode: "count",
+      level: "visible",
+    });
+    const detached = await waitForSelector(tab.id, {
+      selector: "text=Save",
+      state: "detached",
+    });
+    expect(detached.status).toBe(200);
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "detached",
+      mode: "count",
+      level: "none",
+    });
+  });
+
+  it("a selector wait times out with its fields", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      matched: false,
+      counts: { matched: 3, visible: 0 },
+    };
+    const timedOut = await failure(
+      await waitForSelector(tab.id, {
+        selector: ".row",
+        state: "visible",
+        timeoutMs: 300,
+      }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "selector",
+      timeoutMs: 300,
+      selector: ".row",
+      state: "visible",
+      matched: 3,
+      visible: 0,
+    });
+    // It looked again while it waited.
+    expect(payloads("check").length).toBeGreaterThan(1);
+  });
+
+  it("a dialog ends a selector wait at once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.emitProtocol("Page.javascriptDialogOpening", {
+      url: "https://example.com/",
+      frameId: "main",
+      message: "Save first?",
+      type: "confirm",
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    const started = Date.now();
+    const refused = await failure(
+      await waitForSelector(tab.id, { selector: "#done", timeoutMs: 20000 }),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.error).toMatchObject({
+      code: "dialog_open",
+      dialog: { type: "confirm", message: "Save first?" },
+    });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(page.scripts).toEqual([]);
+  });
+
+  it("selector states enforce their fields", async () => {
+    const { tab } = await createPage();
+    for (const body of [
+      { state: "showing" },
+      { timeoutMs: 60001 },
+      { selector: "a".repeat(2049) },
+      { selector: "a >> b" },
+    ]) {
+      const { status, error } = await failure(
+        await waitForSelector(tab.id, body),
+      );
+      expect(status, JSON.stringify(body).slice(0, 60)).toBe(400);
+      expect(error.code, JSON.stringify(body).slice(0, 60)).toBe(
+        "selector" in body && body.selector === "a >> b"
+          ? "invalid_selector"
+          : "invalid_field",
+      );
+    }
+    // The step takes the same fields, and the plan is checked before it runs.
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "wait-for-selector", selector: "#done", state: "showing" },
+        ],
+      }),
+    );
+    expect(step.status).toBe(400);
+    expect(step.error).toMatchObject({ code: "invalid_field", field: "state" });
+    expect(controller.contents.scripts).toEqual([]);
+  });
+
   // A function wait and its answer.
   const waitForFunction = (tabId: string, body: Record<string, unknown>) => {
     const done = request(`/tabs/${tabId}/wait-for-function`, "POST", body);
@@ -5178,6 +5396,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/reload": {},
       "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
+      "POST /tabs/:id/wait-for-selector": { ref: "@e1", state: "attached" },
       "POST /tabs/:id/wait-for-function": { expression: "true" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },

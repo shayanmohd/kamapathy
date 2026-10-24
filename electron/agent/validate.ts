@@ -15,6 +15,7 @@ import {
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
+import type { WaitState } from "./dom/select";
 import { WAIT_POLL_MS } from "./downloads";
 import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
@@ -65,6 +66,7 @@ export type ToolAction = {
     | "reload"
     | "wait-for-url"
     | "wait-for-load-state"
+    | "wait-for-selector"
     | "wait-for-function";
   payload: Record<string, unknown>;
   // The step's cleaned label; only the batch loop reads it.
@@ -200,6 +202,30 @@ export function loadStateFields(body: Record<string, unknown>): {
   return {
     state: enumField(body, "state", WAIT_UNTIL, "load"),
     idleMs: integerField(body, "idleMs", 500, 0, 10000),
+    timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
+  };
+}
+/** The four states a selector wait judges a page's matches against. */
+export const WAIT_STATES: readonly WaitState[] = [
+  "attached",
+  "visible",
+  "hidden",
+  "detached",
+];
+// The selector wait takes any target of section 4 beside the state it waits
+// for.
+export function waitForSelectorFields(body: Record<string, unknown>): {
+  target: TargetPayload;
+  state: WaitState;
+  selector: string;
+  timeoutMs: number;
+} {
+  const target = targetFields(body) as TargetPayload;
+  return {
+    target,
+    state: enumField(body, "state", WAIT_STATES, "visible"),
+    // The text the answer and the timeout echo: a ref names itself.
+    selector: "ref" in target ? target.ref : target.selector,
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
@@ -412,6 +438,8 @@ function parseAction(
   }
   if (type === "wait-for-load-state")
     return { type, payload: loadStateFields(body) };
+  if (type === "wait-for-selector")
+    return { type, payload: { ...waitForSelectorFields(body) } };
   if (type === "wait-for-function") {
     if (deps) requireScripts(deps.controller);
     return { type, payload: { ...waitForFunctionFields(body) } };

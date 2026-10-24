@@ -797,7 +797,7 @@ describe.skipIf(!chromiumAvailable)(
         await run("check", "role=cell", waiting("role=cell", "visible"), {
           text: "Cell one",
         }),
-      ).toEqual({ ok: true, matched: true });
+      ).toMatchObject({ ok: true, matched: true });
       expect(await run("focus", 'role=textbox[name="Notes"]')).toMatchObject({
         ok: true,
       });
@@ -811,10 +811,9 @@ describe.skipIf(!chromiumAvailable)(
       expect(await focused()).toBe("field");
       // The alias reaches both options of the list, and the name one.
       const option = 'role=ListBoxOption[name="Red"]';
-      expect(await run("check", option, waiting(option, "visible"))).toEqual({
-        ok: true,
-        matched: true,
-      });
+      expect(
+        await run("check", option, waiting(option, "visible")),
+      ).toMatchObject({ ok: true, matched: true });
       const options = "role=listboxoption";
       expect(
         await run("check", options, waiting(options, "visible")),
@@ -865,7 +864,7 @@ describe.skipIf(!chromiumAvailable)(
         await run("check", "button", waiting("button", "visible"), {
           text: "First copy",
         }),
-      ).toEqual({ ok: true, matched: true });
+      ).toMatchObject({ ok: true, matched: true });
     }, 60000);
   },
 );

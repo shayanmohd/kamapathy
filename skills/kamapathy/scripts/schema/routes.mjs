@@ -251,6 +251,23 @@ const FIELDS = {
     idleMs,
     timeoutMs: waitTimeout,
   },
+  "wait-for-selector": {
+    ...target,
+    selector: {
+      ...selector,
+      description:
+        "A ref or selector of any form. For attached and visible a locator or a ref must name one element; raw CSS and XPath take any match.",
+    },
+    state: {
+      kind: "enum",
+      values: ["attached", "visible", "hidden", "detached"],
+      default: "visible",
+      since: 4,
+      description:
+        "attached needs any match; visible a match the page draws; hidden no visible match; detached no match at all.",
+    },
+    timeoutMs: waitTimeout,
+  },
   "wait-for-function": {
     expression: {
       kind: "string",
@@ -653,6 +670,14 @@ export const ROUTES = [
     "{ ok: true, tab: TabView, state }",
     FIELDS["wait-for-load-state"],
     { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/wait-for-selector",
+    "Waits for an element to be attached, visible, hidden or detached.",
+    "{ ok: true, tab: TabView, state, matched }",
+    FIELDS["wait-for-selector"],
+    { budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "POST",
@@ -1091,6 +1116,12 @@ export const ACTIONS = [
     summary: "Waits for the document this page shows to reach a state.",
     fields: FIELDS["wait-for-load-state"],
     since: 2,
+  },
+  {
+    type: "wait-for-selector",
+    summary: "Waits for an element to reach a state.",
+    fields: FIELDS["wait-for-selector"],
+    since: 4,
   },
   {
     type: "wait-for-function",

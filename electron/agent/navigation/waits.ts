@@ -1,3 +1,4 @@
+import type { WaitState } from "../dom/select";
 import { ApiError, fail } from "../errors";
 import {
   evaluateScript,
@@ -6,9 +7,11 @@ import {
   type ScriptSource,
 } from "../evaluate";
 import type { Run } from "../http";
+import { waitMode } from "../resolve";
 import type { AutomationController } from "../server";
 import { CdpTimeoutError, ContextLostError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
+import type { TargetPayload } from "../validate";
 import { tabView, type TabView } from "../views";
 import { awaitLoadState, type NavigationScope, type WaitUntil } from "./await";
 import type { GoDeps } from "./go";
@@ -24,10 +27,22 @@ export interface UrlWaitBody {
   after?: number;
   timeoutMs: number;
 }
+export interface SelectorWaitBody {
+  target: TargetPayload;
+  state: WaitState;
+  // The text the answer and the timeout echo, which a ref names itself.
+  selector: string;
+  timeoutMs: number;
+}
 export interface FunctionWaitBody {
   source: ScriptSource;
   intervalMs: number;
   timeoutMs: number;
+}
+// What one check of a selector wait saw in the page.
+interface SelectorCounts {
+  matched: number;
+  visible: number;
 }
 export interface PopupView {
   id: string;
@@ -86,6 +101,26 @@ const urlTimeout = (timeoutMs: number, lastUrl: string, expected?: string) =>
       timeoutMs,
       ...(expected === undefined ? {} : { expected }),
       lastUrl,
+    },
+  );
+
+// A selector wait that ran out, with what its last check saw.
+const selectorTimeout = (
+  timeoutMs: number,
+  selector: string,
+  state: WaitState,
+  seen: SelectorCounts,
+) =>
+  new ApiError(
+    "wait_timeout",
+    `The selector ${cut(selector)} did not reach ${state} within ${timeoutMs} ms. The last check matched ${seen.matched} ${seen.matched === 1 ? "element" : "elements"}, ${seen.visible} of them visible.`,
+    {
+      awaited: "selector",
+      timeoutMs,
+      selector,
+      state,
+      matched: seen.matched,
+      visible: seen.visible,
     },
   );
 
@@ -327,6 +362,106 @@ export function createWaits(deps: WaitsDeps) {
       release();
     }
   };
+  // An element in the state the agent asked for, looked for the way an
+  // action resolves its target.
+  const selector = async (
+    tabId: string,
+    body: SelectorWaitBody,
+    run: Run,
+  ): Promise<{
+    ok: true;
+    tab: TabView;
+    state: WaitState;
+    matched: number;
+  }> => {
+    let tab = authorizeTab(tabId);
+    const release = gate.enter(tabId);
+    const hold: { wake?: () => void } = {};
+    const deadline = Math.min(run.deadline, Date.now() + body.timeoutMs);
+    // A zero timeout still allows the page the time one check needs.
+    const pageDeadline = () =>
+      body.timeoutMs === 0
+        ? Math.min(run.deadline, Date.now() + ALLOWANCE_MS)
+        : deadline;
+    // What the last check saw, which the answer and the timeout report.
+    let seen: SelectorCounts = { matched: 0, visible: 0 };
+    // The target as the page reads it. A ref carries the state beside it; a
+    // selector carries it in the query, with the mode and level that state
+    // asks for, so a hidden duplicate never blocks a visible wait.
+    const payload = (): Record<string, unknown> =>
+      "ref" in body.target
+        ? { ref: body.target.ref, state: body.state }
+        : {
+            selector: body.target.selector,
+            query: {
+              ast: body.target.query.ast,
+              state: body.state,
+              ...waitMode(body.target.query.ast, body.state),
+            },
+          };
+    try {
+      for (;;) {
+        tab = authorizeTab(tabId);
+        const session = pageFor(tabId);
+        const limit = pageDeadline();
+        const observation = await deps.actions
+          .evaluatePage(tabId, session, "check", payload(), limit, {
+            deadline: limit,
+            signal: run.signal,
+            guard: () => {
+              authorizeTab(tabId);
+            },
+            dispatch: run.dispatch,
+          })
+          .catch((error: unknown) => {
+            // The page was still busy at the deadline, which is this wait
+            // running out rather than a page failure.
+            const timedOut =
+              error instanceof CdpTimeoutError ||
+              (error instanceof ApiError &&
+                ["page_timeout", "action_timeout"].includes(error.code));
+            if (!timedOut || Date.now() < deadline) throw error;
+            throw selectorTimeout(
+              body.timeoutMs,
+              body.selector,
+              body.state,
+              seen,
+            );
+          });
+        const counts = observation.counts as SelectorCounts | undefined;
+        if (counts) seen = counts;
+        if (observation.matched) {
+          // Authorized once more before the answer, so a takeover at the
+          // last moment leaves no activity line behind.
+          const answered = viewFor(tabId);
+          controller.addActivity(
+            tab.spaceId,
+            "Agent observed a page condition",
+            "info",
+          );
+          return {
+            ok: true,
+            tab: answered,
+            state: body.state,
+            matched: seen.matched,
+          };
+        }
+        if (Date.now() >= deadline)
+          throw selectorTimeout(
+            body.timeoutMs,
+            body.selector,
+            body.state,
+            seen,
+          );
+        await run.park(() =>
+          nap(Math.min(TICK_MS, deadline - Date.now()), hold),
+        );
+      }
+    } finally {
+      hold.wake = undefined;
+      release();
+    }
+  };
   // A condition the agent wrote itself, run in the page every interval
   // while the Page scripts setting allows it.
   const fn = async (
@@ -406,5 +541,5 @@ export function createWaits(deps: WaitsDeps) {
       release();
     }
   };
-  return { url, loadState, fn };
+  return { url, loadState, selector, fn };
 }

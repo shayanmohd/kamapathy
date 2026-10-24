@@ -6,6 +6,7 @@ import { createTrackers } from "../navigation/trackers";
 import {
   createWaits,
   type FunctionWaitBody,
+  type SelectorWaitBody,
   type UrlWaitBody,
 } from "../navigation/waits";
 import type { AutomationController } from "../server";
@@ -14,6 +15,7 @@ import {
   navigationFields,
   reloadFields,
   waitForFunctionFields,
+  waitForSelectorFields,
   waitForUrlFields,
   type ToolAction,
 } from "../validate";
@@ -138,6 +140,14 @@ export function createNavigation(
             await waits.loadState(tab!.id, loadStateFields(body!), run),
           ),
       },
+      "POST /tabs/:id/wait-for-selector": {
+        handler: async ({ response, body, tab, run }) =>
+          send(
+            response,
+            200,
+            await waits.selector(tab!.id, waitForSelectorFields(body!), run),
+          ),
+      },
       "POST /tabs/:id/wait-for-function": {
         handler: async ({ response, body, tab, run }) =>
           send(
@@ -192,6 +202,7 @@ export function createNavigation(
       "reload",
       "wait-for-url",
       "wait-for-load-state",
+      "wait-for-selector",
       "wait-for-function",
     ],
     step: async (tabId, action, run) => {
@@ -222,6 +233,14 @@ export function createNavigation(
       if (action.type === "wait-for-load-state") {
         const body = action.payload as LoadStateBody;
         return waits.loadState(
+          tabId,
+          { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
+          run,
+        );
+      }
+      if (action.type === "wait-for-selector") {
+        const body = action.payload as unknown as SelectorWaitBody;
+        return waits.selector(
           tabId,
           { ...body, timeoutMs: cutTo(body.timeoutMs, run) },
           run,
