@@ -1,0 +1,1117 @@
+{
+  "browser": "Chrome/152.0.7977.76",
+  "electron": "44.2.0",
+  "protocolVersion": "1.3",
+  "domains": {
+    "Accessibility": {
+      "commands": [
+        "disable",
+        "enable",
+        "getPartialAXTree",
+        "getFullAXTree",
+        "getRootAXNode",
+        "getAXNodeAndAncestors",
+        "getChildAXNodes",
+        "queryAXTree"
+      ],
+      "events": ["loadComplete", "nodesUpdated"]
+    },
+    "Ads": {
+      "commands": ["getAdMetrics"],
+      "events": []
+    },
+    "Animation": {
+      "commands": [
+        "disable",
+        "enable",
+        "getCurrentTime",
+        "getPlaybackRate",
+        "releaseAnimations",
+        "resolveAnimation",
+        "seekAnimations",
+        "setPaused",
+        "setPlaybackRate",
+        "setTiming"
+      ],
+      "events": [
+        "animationCanceled",
+        "animationCreated",
+        "animationStarted",
+        "animationUpdated"
+      ]
+    },
+    "Audits": {
+      "commands": [
+        "getEncodedResponse",
+        "disable",
+        "enable",
+        "checkFormsIssues"
+      ],
+      "events": ["issueAdded"]
+    },
+    "Autofill": {
+      "commands": ["trigger", "setAddresses", "disable", "enable"],
+      "events": ["addressFormFilled"]
+    },
+    "BackgroundService": {
+      "commands": [
+        "startObserving",
+        "stopObserving",
+        "setRecording",
+        "clearEvents"
+      ],
+      "events": ["recordingStateChanged", "backgroundServiceEventReceived"]
+    },
+    "BluetoothEmulation": {
+      "commands": [
+        "enable",
+        "setSimulatedCentralState",
+        "disable",
+        "simulatePreconnectedPeripheral",
+        "simulateAdvertisement",
+        "simulateGATTOperationResponse",
+        "simulateCharacteristicOperationResponse",
+        "simulateDescriptorOperationResponse",
+        "addService",
+        "removeService",
+        "addCharacteristic",
+        "removeCharacteristic",
+        "addDescriptor",
+        "removeDescriptor",
+        "simulateGATTDisconnection"
+      ],
+      "events": [
+        "gattOperationReceived",
+        "characteristicOperationReceived",
+        "descriptorOperationReceived"
+      ]
+    },
+    "Browser": {
+      "commands": [
+        "setPermission",
+        "grantPermissions",
+        "resetPermissions",
+        "setDownloadBehavior",
+        "cancelDownload",
+        "close",
+        "crash",
+        "crashGpuProcess",
+        "getVersion",
+        "getBrowserCommandLine",
+        "getHistograms",
+        "getHistogram",
+        "getWindowBounds",
+        "getWindowForTarget",
+        "setWindowBounds",
+        "setContentsSize",
+        "setDockTile",
+        "executeBrowserCommand",
+        "addPrivacySandboxEnrollmentOverride"
+      ],
+      "events": ["downloadWillBegin", "downloadProgress"]
+    },
+    "CSS": {
+      "commands": [
+        "addRule",
+        "collectClassNames",
+        "createStyleSheet",
+        "disable",
+        "enable",
+        "forcePseudoState",
+        "forceStartingStyle",
+        "getBackgroundColors",
+        "getComputedStyleForNode",
+        "resolveValues",
+        "getLonghandProperties",
+        "getInlineStylesForNode",
+        "getAnimatedStylesForNode",
+        "getMatchedStylesForNode",
+        "getEnvironmentVariables",
+        "getMediaQueries",
+        "getPlatformFontsForNode",
+        "getStyleSheetText",
+        "getLayersForNode",
+        "getLocationForSelector",
+        "trackComputedStyleUpdatesForNode",
+        "trackComputedStyleUpdates",
+        "takeComputedStyleUpdates",
+        "setEffectivePropertyValueForNode",
+        "setPropertyRulePropertyName",
+        "setKeyframeKey",
+        "setMediaText",
+        "setContainerQueryText",
+        "setContainerQueryConditionText",
+        "setSupportsText",
+        "setNavigationText",
+        "setScopeText",
+        "setRuleSelector",
+        "setStyleSheetText",
+        "setStyleTexts",
+        "startRuleUsageTracking",
+        "stopRuleUsageTracking",
+        "takeCoverageDelta",
+        "setLocalFontsEnabled"
+      ],
+      "events": [
+        "fontsUpdated",
+        "mediaQueryResultChanged",
+        "styleSheetAdded",
+        "styleSheetChanged",
+        "styleSheetRemoved",
+        "computedStyleUpdated"
+      ]
+    },
+    "CacheStorage": {
+      "commands": [
+        "deleteCache",
+        "deleteEntry",
+        "requestCacheNames",
+        "requestCachedResponse",
+        "requestEntries"
+      ],
+      "events": []
+    },
+    "Cast": {
+      "commands": [
+        "enable",
+        "disable",
+        "setSinkToUse",
+        "startDesktopMirroring",
+        "startTabMirroring",
+        "stopCasting"
+      ],
+      "events": ["sinksUpdated", "issueUpdated"]
+    },
+    "Console": {
+      "commands": ["clearMessages", "disable", "enable"],
+      "events": ["messageAdded"]
+    },
+    "CrashReportContext": {
+      "commands": ["getEntries"],
+      "events": []
+    },
+    "DOM": {
+      "commands": [
+        "collectClassNamesFromSubtree",
+        "copyTo",
+        "describeNode",
+        "scrollIntoViewIfNeeded",
+        "disable",
+        "discardSearchResults",
+        "enable",
+        "focus",
+        "getAttributes",
+        "getBoxModel",
+        "getContentQuads",
+        "getDocument",
+        "getFlattenedDocument",
+        "getNodesForSubtreeByStyle",
+        "getNodeForLocation",
+        "getOuterHTML",
+        "getRelayoutBoundary",
+        "getSearchResults",
+        "hideHighlight",
+        "highlightNode",
+        "highlightRect",
+        "markUndoableState",
+        "moveTo",
+        "performSearch",
+        "pushNodeByPathToFrontend",
+        "pushNodesByBackendIdsToFrontend",
+        "querySelector",
+        "querySelectorAll",
+        "getTopLayerElements",
+        "getElementByRelation",
+        "redo",
+        "removeAttribute",
+        "removeNode",
+        "requestChildNodes",
+        "requestNode",
+        "resolveNode",
+        "setAttributeValue",
+        "setAttributesAsText",
+        "setFileInputFiles",
+        "setNodeStackTracesEnabled",
+        "getNodeStackTraces",
+        "getFileInfo",
+        "getDetachedDomNodes",
+        "setInspectedNode",
+        "setNodeName",
+        "setNodeValue",
+        "setOuterHTML",
+        "undo",
+        "getFrameOwner",
+        "getContainerForNode",
+        "getQueryingDescendantsForContainer",
+        "getAnchorElement",
+        "forceShowPopover"
+      ],
+      "events": [
+        "attributeModified",
+        "adoptedStyleSheetsModified",
+        "attributeRemoved",
+        "characterDataModified",
+        "childNodeCountUpdated",
+        "childNodeInserted",
+        "childNodeRemoved",
+        "distributedNodesUpdated",
+        "documentUpdated",
+        "inlineStyleInvalidated",
+        "pseudoElementAdded",
+        "topLayerElementsUpdated",
+        "scrollableFlagUpdated",
+        "adRelatedStateUpdated",
+        "affectedByStartingStylesFlagUpdated",
+        "pseudoElementRemoved",
+        "setChildNodes",
+        "shadowRootPopped",
+        "shadowRootPushed"
+      ]
+    },
+    "DOMDebugger": {
+      "commands": [
+        "getEventListeners",
+        "removeDOMBreakpoint",
+        "removeEventListenerBreakpoint",
+        "removeInstrumentationBreakpoint",
+        "removeXHRBreakpoint",
+        "setBreakOnCSPViolation",
+        "setDOMBreakpoint",
+        "setEventListenerBreakpoint",
+        "setInstrumentationBreakpoint",
+        "setXHRBreakpoint"
+      ],
+      "events": []
+    },
+    "DOMSnapshot": {
+      "commands": ["disable", "enable", "getSnapshot", "captureSnapshot"],
+      "events": []
+    },
+    "DOMStorage": {
+      "commands": [
+        "clear",
+        "disable",
+        "enable",
+        "getDOMStorageItems",
+        "removeDOMStorageItem",
+        "setDOMStorageItem"
+      ],
+      "events": [
+        "domStorageItemAdded",
+        "domStorageItemRemoved",
+        "domStorageItemUpdated",
+        "domStorageItemsCleared"
+      ]
+    },
+    "Debugger": {
+      "commands": [
+        "continueToLocation",
+        "disable",
+        "enable",
+        "evaluateOnCallFrame",
+        "getPossibleBreakpoints",
+        "getScriptSource",
+        "disassembleWasmModule",
+        "nextWasmDisassemblyChunk",
+        "getWasmBytecode",
+        "getStackTrace",
+        "pause",
+        "pauseOnAsyncCall",
+        "removeBreakpoint",
+        "restartFrame",
+        "resume",
+        "searchInContent",
+        "setAsyncCallStackDepth",
+        "setBlackboxExecutionContexts",
+        "setBlackboxPatterns",
+        "setBlackboxedRanges",
+        "setBreakpoint",
+        "setInstrumentationBreakpoint",
+        "setBreakpointByUrl",
+        "setBreakpointOnFunctionCall",
+        "setBreakpointsActive",
+        "setPauseOnExceptions",
+        "setReturnValue",
+        "setScriptSource",
+        "setSkipAllPauses",
+        "setVariableValue",
+        "stepInto",
+        "stepOut",
+        "stepOver"
+      ],
+      "events": [
+        "breakpointResolved",
+        "paused",
+        "resumed",
+        "scriptFailedToParse",
+        "scriptParsed"
+      ]
+    },
+    "DeviceAccess": {
+      "commands": ["enable", "disable", "selectPrompt", "cancelPrompt"],
+      "events": ["deviceRequestPrompted"]
+    },
+    "DeviceOrientation": {
+      "commands": [
+        "clearDeviceOrientationOverride",
+        "setDeviceOrientationOverride"
+      ],
+      "events": []
+    },
+    "DigitalCredentials": {
+      "commands": ["setVirtualWalletBehavior"],
+      "events": []
+    },
+    "Emulation": {
+      "commands": [
+        "canEmulate",
+        "clearDeviceMetricsOverride",
+        "clearGeolocationOverride",
+        "resetPageScaleFactor",
+        "setFocusEmulationEnabled",
+        "setAutoDarkModeOverride",
+        "setCPUThrottlingRate",
+        "setDefaultBackgroundColorOverride",
+        "setSafeAreaInsetsOverride",
+        "setDeviceMetricsOverride",
+        "setDevicePostureOverride",
+        "clearDevicePostureOverride",
+        "setDisplayFeaturesOverride",
+        "clearDisplayFeaturesOverride",
+        "setScrollbarsHidden",
+        "setDocumentCookieDisabled",
+        "setEmitTouchEventsForMouse",
+        "setEmulatedMedia",
+        "setEmulatedVisionDeficiency",
+        "setEmulatedOSTextScale",
+        "setGeolocationOverride",
+        "getOverriddenSensorInformation",
+        "setSensorOverrideEnabled",
+        "setSensorOverrideReadings",
+        "setPressureSourceOverrideEnabled",
+        "setPressureStateOverride",
+        "setIdleOverride",
+        "clearIdleOverride",
+        "setNavigatorOverrides",
+        "setPageScaleFactor",
+        "setScriptExecutionDisabled",
+        "setTouchEmulationEnabled",
+        "setVirtualTimePolicy",
+        "setLocaleOverride",
+        "setTimezoneOverride",
+        "setVisibleSize",
+        "setDisabledImageTypes",
+        "setDataSaverOverride",
+        "setHardwareConcurrencyOverride",
+        "setUserAgentOverride",
+        "setAutomationOverride",
+        "setSmallViewportHeightDifferenceOverride",
+        "getScreenInfos",
+        "addScreen",
+        "updateScreen",
+        "removeScreen",
+        "setPrimaryScreen"
+      ],
+      "events": ["virtualTimeBudgetExpired", "screenOrientationLockChanged"]
+    },
+    "EventBreakpoints": {
+      "commands": [
+        "setInstrumentationBreakpoint",
+        "removeInstrumentationBreakpoint",
+        "disable"
+      ],
+      "events": []
+    },
+    "Extensions": {
+      "commands": [
+        "triggerAction",
+        "loadUnpacked",
+        "getExtensions",
+        "uninstall",
+        "getStorageItems",
+        "removeStorageItems",
+        "clearStorageItems",
+        "setStorageItems"
+      ],
+      "events": []
+    },
+    "FedCm": {
+      "commands": [
+        "enable",
+        "disable",
+        "selectAccount",
+        "clickDialogButton",
+        "openUrl",
+        "dismissDialog",
+        "resetCooldown"
+      ],
+      "events": ["dialogShown", "dialogClosed"]
+    },
+    "Fetch": {
+      "commands": [
+        "disable",
+        "enable",
+        "failRequest",
+        "fulfillRequest",
+        "continueRequest",
+        "continueWithAuth",
+        "continueResponse",
+        "getResponseBody",
+        "takeResponseBodyAsStream"
+      ],
+      "events": ["requestPaused", "authRequired"]
+    },
+    "FileSystem": {
+      "commands": ["getDirectory"],
+      "events": []
+    },
+    "HeadlessExperimental": {
+      "commands": ["beginFrame", "disable", "enable"],
+      "events": []
+    },
+    "HeapProfiler": {
+      "commands": [
+        "addInspectedHeapObject",
+        "collectGarbage",
+        "disable",
+        "enable",
+        "getHeapObjectId",
+        "getObjectByHeapObjectId",
+        "getSamplingProfile",
+        "startSampling",
+        "startTrackingHeapObjects",
+        "stopSampling",
+        "stopTrackingHeapObjects",
+        "takeHeapSnapshot"
+      ],
+      "events": [
+        "addHeapSnapshotChunk",
+        "heapStatsUpdate",
+        "lastSeenObjectId",
+        "reportHeapSnapshotProgress",
+        "resetProfiles"
+      ]
+    },
+    "IO": {
+      "commands": ["close", "read", "resolveBlob"],
+      "events": []
+    },
+    "IndexedDB": {
+      "commands": [
+        "clearObjectStore",
+        "deleteDatabase",
+        "deleteObjectStoreEntries",
+        "disable",
+        "enable",
+        "requestData",
+        "getMetadata",
+        "requestDatabase",
+        "requestDatabaseNames"
+      ],
+      "events": []
+    },
+    "Input": {
+      "commands": [
+        "dispatchDragEvent",
+        "dispatchKeyEvent",
+        "insertText",
+        "imeSetComposition",
+        "dispatchMouseEvent",
+        "dispatchTouchEvent",
+        "cancelDragging",
+        "emulateTouchFromMouseEvent",
+        "setIgnoreInputEvents",
+        "setInterceptDrags",
+        "synthesizePinchGesture",
+        "synthesizeScrollGesture",
+        "synthesizeTapGesture"
+      ],
+      "events": ["dragIntercepted"]
+    },
+    "Inspector": {
+      "commands": ["disable", "enable"],
+      "events": [
+        "detached",
+        "targetCrashed",
+        "targetReloadedAfterCrash",
+        "workerScriptLoaded"
+      ]
+    },
+    "LayerTree": {
+      "commands": [
+        "compositingReasons",
+        "disable",
+        "enable",
+        "loadSnapshot",
+        "makeSnapshot",
+        "profileSnapshot",
+        "releaseSnapshot",
+        "replaySnapshot",
+        "snapshotCommandLog"
+      ],
+      "events": ["layerPainted", "layerTreeDidChange"]
+    },
+    "Log": {
+      "commands": [
+        "clear",
+        "disable",
+        "enable",
+        "startViolationsReport",
+        "stopViolationsReport"
+      ],
+      "events": ["entryAdded"]
+    },
+    "Media": {
+      "commands": ["enable", "disable"],
+      "events": [
+        "playerPropertiesChanged",
+        "playerEventsAdded",
+        "playerMessagesLogged",
+        "playerErrorsRaised",
+        "playerCreated"
+      ]
+    },
+    "Memory": {
+      "commands": [
+        "getDOMCounters",
+        "getDOMCountersForLeakDetection",
+        "prepareForLeakDetection",
+        "forciblyPurgeJavaScriptMemory",
+        "setPressureNotificationsSuppressed",
+        "simulatePressureNotification",
+        "startSampling",
+        "stopSampling",
+        "getAllTimeSamplingProfile",
+        "getBrowserSamplingProfile",
+        "getSamplingProfile"
+      ],
+      "events": []
+    },
+    "Network": {
+      "commands": [
+        "setAcceptedEncodings",
+        "clearAcceptedEncodingsOverride",
+        "canClearBrowserCache",
+        "canClearBrowserCookies",
+        "canEmulateNetworkConditions",
+        "clearBrowserCache",
+        "clearBrowserCookies",
+        "continueInterceptedRequest",
+        "deleteCookies",
+        "disable",
+        "emulateNetworkConditions",
+        "emulateNetworkConditionsByRule",
+        "overrideNetworkState",
+        "enable",
+        "configureDurableMessages",
+        "getAllCookies",
+        "getCertificate",
+        "getCookies",
+        "getResponseBody",
+        "getRequestPostData",
+        "getResponseBodyForInterception",
+        "takeResponseBodyForInterceptionAsStream",
+        "replayXHR",
+        "searchInResponseBody",
+        "setBlockedURLs",
+        "setBypassServiceWorker",
+        "setCacheDisabled",
+        "setCookie",
+        "setCookies",
+        "setExtraHTTPHeaders",
+        "setAttachDebugStack",
+        "setRequestInterception",
+        "setUserAgentOverride",
+        "streamResourceContent",
+        "getSecurityIsolationStatus",
+        "enableReportingApi",
+        "enableDeviceBoundSessions",
+        "deleteDeviceBoundSession",
+        "fetchSchemefulSite",
+        "loadNetworkResource",
+        "setCookieControls"
+      ],
+      "events": [
+        "dataReceived",
+        "eventSourceMessageReceived",
+        "loadingFailed",
+        "loadingFinished",
+        "requestIntercepted",
+        "requestServedFromCache",
+        "requestWillBeSent",
+        "resourceChangedPriority",
+        "signedExchangeReceived",
+        "responseReceived",
+        "webSocketClosed",
+        "webSocketCreated",
+        "webSocketFrameError",
+        "webSocketFrameReceived",
+        "webSocketFrameSent",
+        "webSocketHandshakeResponseReceived",
+        "webSocketWillSendHandshakeRequest",
+        "webTransportCreated",
+        "webTransportConnectionEstablished",
+        "webTransportClosed",
+        "directTCPSocketCreated",
+        "directTCPSocketOpened",
+        "directTCPSocketAborted",
+        "directTCPSocketClosed",
+        "directTCPSocketChunkSent",
+        "directTCPSocketChunkReceived",
+        "directUDPSocketJoinedMulticastGroup",
+        "directUDPSocketLeftMulticastGroup",
+        "directUDPSocketCreated",
+        "directUDPSocketOpened",
+        "directUDPSocketAborted",
+        "directUDPSocketClosed",
+        "directUDPSocketChunkSent",
+        "directUDPSocketChunkReceived",
+        "requestWillBeSentExtraInfo",
+        "responseReceivedExtraInfo",
+        "responseReceivedEarlyHints",
+        "trustTokenOperationDone",
+        "policyUpdated",
+        "reportingApiReportAdded",
+        "reportingApiReportUpdated",
+        "reportingApiEndpointsChangedForOrigin",
+        "deviceBoundSessionsAdded",
+        "deviceBoundSessionEventOccurred"
+      ]
+    },
+    "Overlay": {
+      "commands": [
+        "disable",
+        "enable",
+        "getHighlightObjectForTest",
+        "getGridHighlightObjectsForTest",
+        "getSourceOrderHighlightObjectForTest",
+        "hideHighlight",
+        "highlightFrame",
+        "highlightNode",
+        "highlightQuad",
+        "highlightRect",
+        "highlightSourceOrder",
+        "setInspectMode",
+        "setShowAdHighlights",
+        "setPausedInDebuggerMessage",
+        "setShowDebugBorders",
+        "setShowFPSCounter",
+        "setShowGridOverlays",
+        "setShowFlexOverlays",
+        "setShowScrollSnapOverlays",
+        "setShowContainerQueryOverlays",
+        "setShowInspectedElementAnchor",
+        "setShowPaintRects",
+        "setShowLayoutShiftRegions",
+        "setShowScrollBottleneckRects",
+        "setShowHitTestBorders",
+        "setShowWebVitals",
+        "setShowViewportSizeOnResize",
+        "setShowHinge",
+        "setShowDisplayCutout",
+        "setShowIsolatedElements",
+        "setShowWindowControlsOverlay"
+      ],
+      "events": [
+        "inspectNodeRequested",
+        "nodeHighlightRequested",
+        "screenshotRequested",
+        "inspectPanelShowRequested",
+        "inspectedElementWindowRestored",
+        "inspectModeCanceled"
+      ]
+    },
+    "PWA": {
+      "commands": [
+        "getOsAppState",
+        "install",
+        "uninstall",
+        "launch",
+        "launchFilesInApp",
+        "openCurrentPageInApp",
+        "changeAppUserSettings"
+      ],
+      "events": []
+    },
+    "Page": {
+      "commands": [
+        "addScriptToEvaluateOnLoad",
+        "addScriptToEvaluateOnNewDocument",
+        "bringToFront",
+        "captureScreenshot",
+        "captureSnapshot",
+        "clearDeviceMetricsOverride",
+        "clearDeviceOrientationOverride",
+        "clearGeolocationOverride",
+        "createIsolatedWorld",
+        "deleteCookie",
+        "disable",
+        "enable",
+        "getAppManifest",
+        "getInstallabilityErrors",
+        "getManifestIcons",
+        "getAppId",
+        "getAdScriptAncestry",
+        "getFrameTree",
+        "getLayoutMetrics",
+        "getNavigationHistory",
+        "resetNavigationHistory",
+        "getResourceContent",
+        "getResourceTree",
+        "handleJavaScriptDialog",
+        "navigate",
+        "navigateToHistoryEntry",
+        "printToPDF",
+        "reload",
+        "removeScriptToEvaluateOnLoad",
+        "removeScriptToEvaluateOnNewDocument",
+        "screencastFrameAck",
+        "searchInResource",
+        "setAdBlockingEnabled",
+        "setBypassCSP",
+        "getPermissionsPolicyState",
+        "getOriginTrials",
+        "setDeviceMetricsOverride",
+        "setDeviceOrientationOverride",
+        "setFontFamilies",
+        "setFontSizes",
+        "setDocumentContent",
+        "setDownloadBehavior",
+        "setGeolocationOverride",
+        "setLifecycleEventsEnabled",
+        "setTouchEmulationEnabled",
+        "startScreencast",
+        "stopLoading",
+        "crash",
+        "close",
+        "setWebLifecycleState",
+        "stopScreencast",
+        "produceCompilationCache",
+        "addCompilationCache",
+        "clearCompilationCache",
+        "setSPCTransactionMode",
+        "setRPHRegistrationMode",
+        "generateTestReport",
+        "waitForDebugger",
+        "setInterceptFileChooserDialog",
+        "setPrerenderingAllowed",
+        "getAnnotatedPageContent"
+      ],
+      "events": [
+        "domContentEventFired",
+        "fileChooserOpened",
+        "frameAttached",
+        "frameClearedScheduledNavigation",
+        "frameDetached",
+        "frameSubtreeWillBeDetached",
+        "frameNavigated",
+        "documentOpened",
+        "frameResized",
+        "frameStartedNavigating",
+        "frameRequestedNavigation",
+        "frameScheduledNavigation",
+        "frameStartedLoading",
+        "frameStoppedLoading",
+        "downloadWillBegin",
+        "downloadProgress",
+        "interstitialHidden",
+        "interstitialShown",
+        "javascriptDialogClosed",
+        "javascriptDialogOpening",
+        "lifecycleEvent",
+        "backForwardCacheNotUsed",
+        "loadEventFired",
+        "navigatedWithinDocument",
+        "screencastFrame",
+        "screencastVisibilityChanged",
+        "windowOpen",
+        "compilationCacheProduced"
+      ]
+    },
+    "Performance": {
+      "commands": ["disable", "enable", "setTimeDomain", "getMetrics"],
+      "events": ["metrics"]
+    },
+    "PerformanceTimeline": {
+      "commands": ["enable"],
+      "events": ["timelineEventAdded"]
+    },
+    "Preload": {
+      "commands": ["enable", "disable"],
+      "events": [
+        "ruleSetUpdated",
+        "ruleSetRemoved",
+        "preloadEnabledStateUpdated",
+        "prefetchStatusUpdated",
+        "prerenderStatusUpdated",
+        "preloadingAttemptSourcesUpdated"
+      ]
+    },
+    "Profiler": {
+      "commands": [
+        "disable",
+        "enable",
+        "getBestEffortCoverage",
+        "setSamplingInterval",
+        "start",
+        "startPreciseCoverage",
+        "stop",
+        "stopPreciseCoverage",
+        "takePreciseCoverage"
+      ],
+      "events": [
+        "consoleProfileFinished",
+        "consoleProfileStarted",
+        "preciseCoverageDeltaUpdate"
+      ]
+    },
+    "Runtime": {
+      "commands": [
+        "awaitPromise",
+        "callFunctionOn",
+        "compileScript",
+        "disable",
+        "discardConsoleEntries",
+        "enable",
+        "evaluate",
+        "getIsolateId",
+        "getHeapUsage",
+        "getProperties",
+        "globalLexicalScopeNames",
+        "queryObjects",
+        "releaseObject",
+        "releaseObjectGroup",
+        "runIfWaitingForDebugger",
+        "runScript",
+        "setAsyncCallStackDepth",
+        "setCustomObjectFormatterEnabled",
+        "setMaxCallStackSizeToCapture",
+        "terminateExecution",
+        "addBinding",
+        "removeBinding",
+        "getExceptionDetails"
+      ],
+      "events": [
+        "bindingCalled",
+        "consoleAPICalled",
+        "exceptionRevoked",
+        "exceptionThrown",
+        "executionContextCreated",
+        "executionContextDestroyed",
+        "executionContextsCleared",
+        "inspectRequested"
+      ]
+    },
+    "Schema": {
+      "commands": ["getDomains"],
+      "events": []
+    },
+    "Security": {
+      "commands": [
+        "disable",
+        "enable",
+        "setIgnoreCertificateErrors",
+        "handleCertificateError",
+        "setOverrideCertificateErrors"
+      ],
+      "events": [
+        "certificateError",
+        "visibleSecurityStateChanged",
+        "securityStateChanged"
+      ]
+    },
+    "ServiceWorker": {
+      "commands": [
+        "deliverPushMessage",
+        "disable",
+        "dispatchSyncEvent",
+        "dispatchPeriodicSyncEvent",
+        "enable",
+        "setForceUpdateOnPageLoad",
+        "skipWaiting",
+        "startWorker",
+        "stopAllWorkers",
+        "stopWorker",
+        "unregister",
+        "updateRegistration"
+      ],
+      "events": [
+        "workerErrorReported",
+        "workerRegistrationUpdated",
+        "workerVersionUpdated"
+      ]
+    },
+    "SmartCardEmulation": {
+      "commands": [
+        "enable",
+        "disable",
+        "reportEstablishContextResult",
+        "reportReleaseContextResult",
+        "reportListReadersResult",
+        "reportGetStatusChangeResult",
+        "reportBeginTransactionResult",
+        "reportPlainResult",
+        "reportConnectResult",
+        "reportDataResult",
+        "reportStatusResult",
+        "reportError"
+      ],
+      "events": [
+        "establishContextRequested",
+        "releaseContextRequested",
+        "listReadersRequested",
+        "getStatusChangeRequested",
+        "cancelRequested",
+        "connectRequested",
+        "disconnectRequested",
+        "transmitRequested",
+        "controlRequested",
+        "getAttribRequested",
+        "setAttribRequested",
+        "statusRequested",
+        "beginTransactionRequested",
+        "endTransactionRequested"
+      ]
+    },
+    "Storage": {
+      "commands": [
+        "getStorageKeyForFrame",
+        "getStorageKey",
+        "clearDataForOrigin",
+        "clearDataForStorageKey",
+        "getCookies",
+        "setCookies",
+        "clearCookies",
+        "getUsageAndQuota",
+        "overrideQuotaForOrigin",
+        "trackCacheStorageForOrigin",
+        "trackCacheStorageForStorageKey",
+        "trackIndexedDBForOrigin",
+        "trackIndexedDBForStorageKey",
+        "untrackCacheStorageForOrigin",
+        "untrackCacheStorageForStorageKey",
+        "untrackIndexedDBForOrigin",
+        "untrackIndexedDBForStorageKey",
+        "getTrustTokens",
+        "clearTrustTokens",
+        "getSharedStorageMetadata",
+        "getSharedStorageEntries",
+        "setSharedStorageEntry",
+        "deleteSharedStorageEntry",
+        "clearSharedStorageEntries",
+        "resetSharedStorageBudget",
+        "setSharedStorageTracking",
+        "setStorageBucketTracking",
+        "deleteStorageBucket",
+        "runBounceTrackingMitigations",
+        "getRelatedWebsiteSets"
+      ],
+      "events": [
+        "cacheStorageContentUpdated",
+        "cacheStorageListUpdated",
+        "indexedDBContentUpdated",
+        "indexedDBListUpdated",
+        "sharedStorageAccessed",
+        "sharedStorageWorkletOperationExecutionFinished",
+        "storageBucketCreatedOrUpdated",
+        "storageBucketDeleted"
+      ]
+    },
+    "SystemInfo": {
+      "commands": ["getInfo", "getFeatureState", "getProcessInfo"],
+      "events": []
+    },
+    "Target": {
+      "commands": [
+        "activateTarget",
+        "attachToTarget",
+        "attachToBrowserTarget",
+        "closeTarget",
+        "exposeDevToolsProtocol",
+        "createBrowserContext",
+        "getBrowserContexts",
+        "createTarget",
+        "detachFromTarget",
+        "disposeBrowserContext",
+        "getTargetInfo",
+        "getTargets",
+        "sendMessageToTarget",
+        "setAutoAttach",
+        "autoAttachRelated",
+        "setDiscoverTargets",
+        "setRemoteLocations",
+        "getDevToolsTarget",
+        "openDevTools"
+      ],
+      "events": [
+        "attachedToTarget",
+        "detachedFromTarget",
+        "receivedMessageFromTarget",
+        "targetCreated",
+        "targetDestroyed",
+        "targetCrashed",
+        "targetInfoChanged"
+      ]
+    },
+    "Tethering": {
+      "commands": ["bind", "unbind"],
+      "events": ["accepted"]
+    },
+    "Tracing": {
+      "commands": [
+        "end",
+        "getCategories",
+        "getTrackEventDescriptor",
+        "recordClockSyncMarker",
+        "requestMemoryDump",
+        "start"
+      ],
+      "events": ["bufferUsage", "dataCollected", "tracingComplete"]
+    },
+    "WebAudio": {
+      "commands": ["enable", "disable", "getRealtimeData"],
+      "events": [
+        "contextCreated",
+        "contextWillBeDestroyed",
+        "contextChanged",
+        "audioListenerCreated",
+        "audioListenerWillBeDestroyed",
+        "audioNodeCreated",
+        "audioNodeWillBeDestroyed",
+        "audioParamCreated",
+        "audioParamWillBeDestroyed",
+        "nodesConnected",
+        "nodesDisconnected",
+        "nodeParamConnected",
+        "nodeParamDisconnected"
+      ]
+    },
+    "WebAuthn": {
+      "commands": [
+        "enable",
+        "disable",
+        "addVirtualAuthenticator",
+        "setResponseOverrideBits",
+        "removeVirtualAuthenticator",
+        "addCredential",
+        "getCredential",
+        "getCredentials",
+        "removeCredential",
+        "clearCredentials",
+        "setUserVerified",
+        "setAutomaticPresenceSimulation",
+        "setCredentialProperties"
+      ],
+      "events": [
+        "credentialAdded",
+        "credentialDeleted",
+        "credentialUpdated",
+        "credentialAsserted"
+      ]
+    },
+    "WebMCP": {
+      "commands": ["enable", "disable", "invokeTool", "cancelInvocation"],
+      "events": ["toolsAdded", "toolsRemoved", "toolInvoked", "toolResponded"]
+    }
+  }
+}
