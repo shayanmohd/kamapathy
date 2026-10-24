@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { REPORT_PAGES, startFormSite } from "../tests/fixtures/form-site.mjs";
+import { ATTACHMENT, AUTH } from "../tests/fixtures/prompt-pages.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
@@ -2257,6 +2258,280 @@ try {
   assert.match(held.errors, /^error: run_timeout: The script did not finish within 3000 ms\./);
   await cli(["space", "close", runSpace.id]);
   passed("run --timeout 3000 ends a script waiting on /hold with run_timeout after its earlier output");
+  // Section 7 in the real app: what an action caused, dialogs answered
+  // without a box, armed downloads, file inputs and choosers, and the
+  // requests only the person can answer.
+  const { resolveSocket: findSocket, socketFetch: openSocket } = await import(
+    pathToFileURL(client).href,
+  );
+  const promptSocket = openSocket(await findSocket(environment));
+  const otherOrigin = fixture.origin.replace("127.0.0.1", "localhost");
+  // The request a site is waiting on, as the person's window shows it.
+  const promptFor = (spaceId) =>
+    poll(
+      async () =>
+        (await chrome.evaluate(() => window.kamapathy.getState())).prompts.find(
+          (item) => item.spaceId === spaceId,
+        ),
+      { timeoutMs: 15000, label: "the site's request for the person" },
+    );
+  const delayedSpace = (await json(["space", "create", "Delayed popups"])).space;
+  const delayedTab = (await json(["open", delayedSpace.id, `${fixture.origin}/prompts/delayed`])).tab;
+  // A page opened 400 ms later is outside the click's own window.
+  const unreportedClick = await cli(["click", delayedTab.id, "#open-later"]);
+  assert.equal(unreportedClick.output, "ok\n");
+  const latePopup = await poll(
+    async () =>
+      (await tabsOf(delayedSpace.id)).tabs.find((item) => item.openerId === delayedTab.id),
+    { timeoutMs: 10000, label: "the page opened after the click" },
+  );
+  // Armed before the click, the same page resolves the wait.
+  const popupArm = (await json(["expect", delayedTab.id, "popup"])).expectation;
+  assert.deepEqual([popupArm.event, popupArm.tabId], ["popup", delayedTab.id]);
+  await cli(["click", delayedTab.id, "#open-later"]);
+  const popupArrived = (await cli(["wait-expectation", popupArm.id])).output;
+  const reportedPopup = /^popup (p\d+) (\S+) (\S+)\n$/.exec(popupArrived);
+  assert.ok(reportedPopup, popupArrived);
+  assert.match(reportedPopup[3], /\/prompts\/landing$/);
+  const popupLines = (await cli(["tabs", delayedSpace.id])).output.trim().split("\n");
+  assert.match(
+    popupLines.find((line) => line.includes(reportedPopup[2])),
+    new RegExp(`^${reportedPopup[1]} ${reportedPopup[2]} page from ${delayedTab.label} http`),
+  );
+  // The page nothing reported is still new to the agent.
+  assert.match(
+    popupLines.find((line) => line.includes(latePopup.id)),
+    new RegExp(` page from ${delayedTab.label} new http`),
+  );
+  await cli(["space", "close", delayedSpace.id]);
+  passed("receipt and delayed popups");
+  const dialogSpace = (await json(["space", "create", "Dialog review"])).space;
+  const dialogTab = (await json(["open", dialogSpace.id, `${fixture.origin}/prompts/dialogs`])).tab;
+  const dismissedConfirm = await cli(["click", dialogTab.id, "#ask-confirm"]);
+  assert.equal(dismissedConfirm.output, 'ok\nconfirm "Delete the draft?" dismissed\n');
+  assert.match((await observe(dialogTab.id)).text, /confirm false/);
+  const dialogArm = await cli(
+    ["dialog-policy", dialogTab.id, "accept", "--times", "2", "--prompt-stdin"],
+    "Quarterly plan",
+  );
+  assert.equal(dialogArm.output, "policy accept 2 left\n");
+  const acceptedPrompt = await cli(["click", dialogTab.id, "#ask-prompt"]);
+  assert.equal(acceptedPrompt.output, 'ok\nprompt "What is the title?" accepted\n');
+  assert.match((await observe(dialogTab.id)).text, /prompt Quarterly plan/);
+  // An alert is answered at once and keeps the arm.
+  const alerted = await cli(["click", dialogTab.id, "#ask-alert"]);
+  assert.equal(alerted.output, 'ok\nalert "A note for you" accepted\n');
+  assert.deepEqual((await cli(["dialogs", dialogTab.id])).output.trim().split("\n"), [
+    "policy accept 1 left",
+    'confirm "Delete the draft?" dismissed',
+    'prompt "What is the title?" accepted',
+    'alert "A note for you" accepted',
+  ]);
+  // No box was ever raised: nothing holds the page, and every read above
+  // would have failed with dialog_open while one did.
+  const dialogInfo = await (await promptSocket(`/tabs/${dialogTab.id}/info`)).json();
+  assert.equal(dialogInfo.dialog, undefined, JSON.stringify(dialogInfo));
+  assert.equal(dialogInfo.readyState, "complete");
+  passed("dialogs dismissed by default, answered when armed, no native box");
+  const filesTab = (await json(["open", dialogSpace.id, `${fixture.origin}/prompts/files`])).tab;
+  const notesFile = join(temporary, "notes.txt");
+  await writeFile(notesFile, "Field notes\n");
+  await cli(["dialog-policy", filesTab.id, "accept"]);
+  // The label names the hidden input, and the page's change handler asks
+  // before it accepts what arrived.
+  const chosenFiles = await cli(["set-input-files", filesTab.id, "#notes-label", notesFile]);
+  assert.equal(chosenFiles.output, 'ok: selected 1\nconfirm "Upload these?" accepted\n');
+  assert.match((await observe(filesTab.id)).text, /Chose notes\.txt 12/);
+  await cli(["space", "close", dialogSpace.id]);
+  passed("a change-handler confirm during setInputFiles");
+  const downloadSpace = (await json(["space", "create", "Download review"])).space;
+  const downloadTab = (await json(["open", downloadSpace.id, `${fixture.origin}/prompts/download`])).tab;
+  // Nothing armed: the file never arrives, and the click says so.
+  const blockedClick = await cli(["click", downloadTab.id, "#attachment-link"]);
+  assert.equal(blockedClick.output, `ok\ndownload blocked ${ATTACHMENT.name}\n`);
+  assert.equal((await cli(["downloads", downloadSpace.id])).output, "No downloads.\n");
+  const downloadBytes = Buffer.byteLength(ATTACHMENT.body);
+  const savedPath = join(temporary, "downloads", ATTACHMENT.name);
+  const savedLine = await cli(["download", downloadTab.id, "#attachment-link", savedPath]);
+  assert.equal(savedLine.output, `saved ${savedPath} (${downloadBytes} bytes)\n`);
+  assert.equal(await readFile(savedPath, "utf8"), ATTACHMENT.body);
+  const heldDownloads = (await json(["downloads", downloadSpace.id])).downloads;
+  assert.equal(heldDownloads.length, 1, JSON.stringify(heldDownloads));
+  assert.deepEqual(
+    [
+      heldDownloads[0].state,
+      heldDownloads[0].suggestedFilename,
+      heldDownloads[0].receivedBytes,
+      heldDownloads[0].failure,
+    ],
+    ["completed", ATTACHMENT.name, downloadBytes, null],
+  );
+  assert.equal(
+    (await cli(["downloads", downloadSpace.id])).output,
+    `${heldDownloads[0].id} completed ${downloadBytes}/${downloadBytes} ${ATTACHMENT.name}\n`,
+  );
+  // The same path again writes nothing.
+  const secondSave = await cli(["save-download", heldDownloads[0].id, savedPath], undefined, {
+    failure: true,
+  });
+  assert.match(secondSave.errors, /already exists, so nothing was written/);
+  assert.equal(await readFile(savedPath, "utf8"), ATTACHMENT.body);
+  assert.equal((await cli(["delete-download", heldDownloads[0].id])).output, "ok\n");
+  assert.equal((await cli(["downloads", downloadSpace.id])).output, "No downloads.\n");
+  await cli(["space", "close", downloadSpace.id]);
+  passed("unarmed downloads blocked, armed ones saved without overwriting");
+  const chooserSpace = (await json(["space", "create", "Chooser review"])).space;
+  const chooserTab = (await json(["open", chooserSpace.id, `${fixture.origin}/prompts/chooser`])).tab;
+  const guardedClick = await cli(["click", chooserTab.id, "#pick"], undefined, { failure: true });
+  assert.match(
+    guardedClick.errors,
+    /422 file_chooser_opened: This action opened a file chooser, which Kamapathy closed\./,
+  );
+  // The input was cancelled, as a person's own cancel does, and nothing
+  // was selected.
+  const chooserEvents = await poll(
+    async () => {
+      const page = (await observe(chooserTab.id)).text;
+      return page.includes("pick:cancel") ? page : null;
+    },
+    { timeoutMs: 5000, label: "the input's own cancel event" },
+  );
+  assert.doesNotMatch(chooserEvents, /pick:input|pick:change/);
+  const chooserArm = (await json(["expect", chooserTab.id, "filechooser"])).expectation;
+  await cli(["click", chooserTab.id, "#create"]);
+  const chooserArrived = (await cli(["wait-expectation", chooserArm.id])).output;
+  const reportedChooser = /^file-chooser (\S+) single\n$/.exec(chooserArrived);
+  assert.ok(reportedChooser, chooserArrived);
+  // The page took its own input away again, and the bytes still land on it.
+  assert.equal((await cli(["set-files", reportedChooser[1], notesFile])).output, "ok: selected 1\n");
+  assert.match((await observe(chooserTab.id)).text, /Chose notes\.txt 12/);
+  await cli(["space", "close", chooserSpace.id]);
+  passed("file input clicks fail with file_chooser_opened, armed choosers take files");
+  const holdSpace = (await json(["space", "create", "Location review"])).space;
+  const holdTab = (await json(["open", holdSpace.id, `${fixture.origin}/prompts/location`])).tab;
+  // The site asks inside the window the click left open.
+  assert.equal((await cli(["click", holdTab.id, "#ask-location"])).output, "ok\n");
+  const locationPrompt = await promptFor(holdSpace.id);
+  assert.deepEqual(
+    [locationPrompt.kind, locationPrompt.agent, locationPrompt.tabId, locationPrompt.origin],
+    ["location", true, holdTab.id, fixture.origin],
+  );
+  const refusedCall = await cli(["snapshot", holdTab.id], undefined, { failure: true });
+  assert.match(
+    refusedCall.errors,
+    /409 human_control: The site asked for location, and only the person can answer\. Wait for control\./,
+  );
+  const heldError = await (await promptSocket(`/tabs/${holdTab.id}/snapshot`)).json();
+  assert.deepEqual(
+    (({ code, reason, prompt }) => ({ code, reason, prompt }))(heldError.error),
+    { code: "human_control", reason: "permission", prompt: "location" },
+  );
+  const returningControl = cli(["wait-for-control", holdSpace.id]);
+  await chrome.evaluate(
+    (id) => window.kamapathy.answerPrompt({ id, allow: true }),
+    locationPrompt.id,
+  );
+  assert.match((await returningControl).output, /^ok: agent has control/);
+  assert.doesNotMatch((await observe(holdTab.id)).text, /error 1/);
+  // The browser's other name is another origin, so the site is asked again,
+  // and a Block reaches the page as its own refusal.
+  await json(["navigate", holdTab.id, `${otherOrigin}/prompts/location`]);
+  await cli(["click", holdTab.id, "#ask-location"]);
+  const blockingPrompt = await promptFor(holdSpace.id);
+  assert.equal(blockingPrompt.kind, "location");
+  await chrome.evaluate(
+    (id) => window.kamapathy.answerPrompt({ id, allow: false }),
+    blockingPrompt.id,
+  );
+  await poll(async () => (await observe(holdTab.id)).text.includes("error 1"), {
+    timeoutMs: 10000,
+    label: "the page's own refusal",
+  });
+  await cli(["space", "close", holdSpace.id]);
+  passed("a location request hands over, agent resumes after Allow");
+  const attempts = () => fixture.events.filter((item) => item.type === "auth-attempt");
+  const authSpace = (await json(["space", "create", "Sign-in review"])).space;
+  const authTab = (await json(["open", authSpace.id, `${fixture.origin}/prompts/landing`])).tab;
+  assert.equal(
+    (
+      await cli(["http-credentials", authSpace.id, fixture.origin, "--stdin"], {
+        username: AUTH.username,
+        password: AUTH.password,
+      })
+    ).output,
+    `ok: ${fixture.origin}\n`,
+  );
+  await json(["navigate", authTab.id, `${fixture.origin}/prompts/auth`]);
+  assert.match((await observe(authTab.id)).text, /Signed in/);
+  assert.equal(
+    attempts().filter(
+      (item) => item.path === "/prompts/auth" && item.authorization === AUTH.header,
+    ).length,
+    1,
+    JSON.stringify(attempts()),
+  );
+  const attemptsBefore = attempts().length;
+  // Nothing is stored for the browser's other name, so the person signs in.
+  const navigatingAuth = cli(["navigate", authTab.id, `${otherOrigin}/prompts/auth`]).then(
+    (result) => result,
+    (error) => error,
+  );
+  const signInPrompt = await promptFor(authSpace.id);
+  assert.deepEqual(
+    [
+      signInPrompt.kind,
+      signInPrompt.agent,
+      signInPrompt.signIn.host,
+      signInPrompt.signIn.realm,
+      signInPrompt.signIn.proxy,
+      signInPrompt.signIn.retry,
+    ],
+    ["http_sign_in", true, "localhost", AUTH.realm, false, false],
+  );
+  const stoppedCall = await cli(["snapshot", authTab.id], undefined, { failure: true });
+  assert.match(
+    stoppedCall.errors,
+    /409 human_control: The site asked for http_sign_in, and only the person can answer\./,
+  );
+  await chrome.evaluate(
+    ({ id, credentials }) => window.kamapathy.answerPrompt({ id, allow: true, credentials }),
+    { id: signInPrompt.id, credentials: { username: AUTH.username, password: AUTH.password } },
+  );
+  await navigatingAuth;
+  await poll(async () => (await observe(authTab.id)).text.includes("Signed in"), {
+    timeoutMs: 15000,
+    label: "the page the person signed in to",
+  });
+  assert.ok(
+    attempts().length > attemptsBefore,
+    `${attempts().length} sign-in attempts, ${attemptsBefore} before the person answered`,
+  );
+  await cli(["space", "close", authSpace.id]);
+  passed("Basic auth with agent credentials, then the person");
+  const noticeSpace = (await json(["space", "create", "Notice review"])).space;
+  const noticeTab = (await json(["open", noticeSpace.id, `${fixture.origin}/prompts/delayed`])).tab;
+  const noticeScript = join(temporary, "unseen-popup.mjs");
+  await writeFile(
+    noticeScript,
+    [
+      `const found = await space(${JSON.stringify(noticeSpace.id)});`,
+      `const page = (await found.tabs()).find((item) => item.id === ${JSON.stringify(noticeTab.id)});`,
+      'await page.click("#open-later");',
+      'await page.wait({ selector: "#opened", text: "one page opened", timeoutMs: 5000 });',
+      "await new Promise((done) => setTimeout(done, 300));",
+      "",
+    ].join("\n"),
+  );
+  const noticeRun = await cli(["run", noticeScript]);
+  assert.equal(noticeLines(noticeRun.errors).length, 1, noticeRun.errors);
+  assert.match(
+    noticeLines(noticeRun.errors)[0],
+    new RegExp(
+      `^notice: unused page p\\d+ opened by ${noticeTab.label}: ${fixture.origin}/prompts/landing$`,
+    ),
+  );
+  await cli(["space", "close", noticeSpace.id]);
+  passed("run notes unseen popups");
   // Section 11 in the real app: versions, help, diagnostics and field checks.
   // The level comes from the one schema, so a new level needs no edit here.
   const { API_LEVEL } = await import(pathToFileURL(join(skill, "scripts/schema/index.mjs")).href);

@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { _electron as electron } from "playwright";
 import { textPdf } from "../tests/fixtures/pdf/index.mjs";
+import { promptPages, AUTH } from "../tests/fixtures/prompt-pages.mjs";
 import {
   resolveSocket,
   socketFetch,
@@ -35,6 +36,46 @@ const fixture = createServer((request, response) => {
       `<!doctype html><html lang="en"><head><title>Who am I</title></head><body><p id="cookies">${request.headers.cookie ?? "none"}</p></body></html>`,
     );
     return;
+  }
+  // Section 7's pages: the location request, the page behind Basic auth and
+  // the image behind it.
+  const prompts = (request.url ?? "").split("?")[0];
+  if (prompts.startsWith("/prompts/")) {
+    if (
+      prompts.startsWith("/prompts/auth") &&
+      request.headers.authorization !== AUTH.header
+    ) {
+      response.writeHead(401, {
+        "WWW-Authenticate": `Basic realm="${AUTH.realm}"`,
+        "Content-Type": "text/html",
+        "Cache-Control": "no-store",
+      });
+      return response.end(
+        '<!doctype html><html lang="en"><head><title>Sign in</title></head><body><h1>Sign in to continue</h1></body></html>',
+      );
+    }
+    if (prompts === "/prompts/auth-image.png") {
+      response.writeHead(200, {
+        "Content-Type": "image/png",
+        "Cache-Control": "no-store",
+      });
+      return response.end(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      );
+    }
+    const asked = promptPages[prompts];
+    if (asked) {
+      response.writeHead(200, {
+        "Content-Type": "text/html",
+        "Cache-Control": "no-store",
+      });
+      return response.end(
+        asked.replaceAll("{{other}}", origin.replace("127.0.0.1", "localhost")),
+      );
+    }
   }
   response.writeHead(200, {
     "Content-Type": "text/html",
@@ -2147,6 +2188,181 @@ try {
   checked(
     "the request dialog shows the reason as agent text and the access line under it, and grants the chosen space",
   );
+  // Section 7 in the window: the one prompt bar, saved site permissions, a
+  // sign-in the person answers, and a space that says it needs them.
+  const promptBar = page.locator("section.prompt-bar");
+  // The person's own page, which no debugger session touches.
+  const inPromptPage = (url, code) =>
+    app.evaluate(
+      ({ webContents }, [address, source]) => {
+        const contents = webContents
+          .getAllWebContents()
+          .find((item) => item.getURL() === address);
+        if (!contents) throw new Error(`No page at ${address}`);
+        return contents.executeJavaScript(source, true);
+      },
+      [url, code],
+    );
+  await page.evaluate(() =>
+    window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
+  );
+  const ownTab = (await page.evaluate(() => window.kamapathy.getState())).activeTabId;
+  // Each round is a document of its own, so every request reaches the
+  // browser instead of a decision the page already holds.
+  const visitLocation = async (round) => {
+    const url = `${origin}/prompts/location?round=${round}`;
+    await page.evaluate(
+      ({ id, address }) =>
+        window.kamapathy.dispatch({ type: "tab:navigate", id, url: address }),
+      { id: ownTab, address: url },
+    );
+    await waitForState(
+      page,
+      (state, address) =>
+        state.tabs.some((tab) => tab.url === address && !tab.loading),
+      url,
+    );
+    return url;
+  };
+  const locationPermission = (url) =>
+    inPromptPage(
+      url,
+      'navigator.permissions.query({ name: "geolocation" }).then((status) => status.state)',
+    );
+  const askLocation = (url) =>
+    inPromptPage(url, 'document.getElementById("ask-location").click()');
+  const firstRound = await visitLocation(1);
+  // Nothing is saved for this site, so nothing is granted either.
+  assert.equal(await locationPermission(firstRound), "denied");
+  await askLocation(firstRound);
+  await promptBar.waitFor();
+  assert.equal(await promptBar.getAttribute("aria-label"), "Personal");
+  await promptBar.getByText(`${origin} wants to know your location`).waitFor();
+  await promptBar.getByText("Kamapathy remembers this for Personal.").waitFor();
+  await promptBar.getByRole("button", { name: "Allow", exact: true }).click();
+  await promptBar.waitFor({ state: "detached" });
+  await waitForState(
+    page,
+    (state, address) =>
+      state.sitePermissions.some(
+        (row) =>
+          row.spaceId === "personal" &&
+          row.origin === address &&
+          row.permission === "geolocation" &&
+          row.allow,
+      ),
+    origin,
+  );
+  assert.equal(await locationPermission(firstRound), "granted");
+  // The saved Allow answers the next page's request, with no bar.
+  const secondRound = await visitLocation(2);
+  assert.equal(await locationPermission(secondRound), "granted");
+  await askLocation(secondRound);
+  await page.waitForTimeout(800);
+  assert.equal(await promptBar.count(), 0);
+  assert.deepEqual(
+    (await page.evaluate(() => window.kamapathy.getState())).prompts,
+    [],
+  );
+  // Settings removes the row, and the site is asked again.
+  await openBrowserMenu();
+  await browserMenu.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("heading", { name: "Site permissions" }).waitFor();
+  await page
+    .getByRole("button", { name: `Remove location for ${origin}` })
+    .click();
+  await waitForState(page, (state) => state.sitePermissions.length === 0);
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  const thirdRound = await visitLocation(3);
+  assert.equal(await locationPermission(thirdRound), "denied");
+  await askLocation(thirdRound);
+  await promptBar.waitFor();
+  await promptBar.getByRole("button", { name: "Block", exact: true }).click();
+  await promptBar.waitFor({ state: "detached" });
+  await waitForState(
+    page,
+    (state, address) =>
+      state.sitePermissions.some(
+        (row) =>
+          row.origin === address &&
+          row.permission === "geolocation" &&
+          !row.allow,
+      ),
+    origin,
+  );
+  checked("the permission bar remembers Allow and Settings removes it");
+  await page.evaluate(
+    ({ id, url }) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    { id: ownTab, url: `${origin}/prompts/auth` },
+  );
+  await promptBar.waitFor();
+  await promptBar.getByText("Sign in to 127.0.0.1").waitFor();
+  await promptBar.getByText(`The site says "${AUTH.realm}"`).waitFor();
+  const signIn = promptBar.getByRole("button", { name: "Allow", exact: true });
+  assert.equal(await signIn.isDisabled(), true);
+  await promptBar.locator("#prompt-username").fill(AUTH.username);
+  await promptBar.locator("#prompt-password").fill(AUTH.password);
+  await signIn.click();
+  await promptBar.waitFor({ state: "detached" });
+  await waitForState(
+    page,
+    (state, id) => state.tabs.find((tab) => tab.id === id)?.title === "Signed in",
+    ownTab,
+  );
+  checked("the sign-in bar loads a Basic auth page");
+  const waitingSpace = (
+    await (await api("/spaces", "POST", { name: "Waiting review" })).json()
+  ).space;
+  const askingTab = (
+    await (
+      await api(`/spaces/${waitingSpace.id}/tabs`, "POST", {
+        url: `${origin}/prompts/location`,
+      })
+    ).json()
+  ).tab;
+  const quietTab = (
+    await (
+      await api(`/spaces/${waitingSpace.id}/tabs`, "POST", {
+        url: `${origin}/prompts/landing`,
+      })
+    ).json()
+  ).tab;
+  assert.equal(
+    (await api(`/tabs/${askingTab.id}/click`, "POST", { selector: "#ask-location" }))
+      .status,
+    200,
+  );
+  const heldPrompt = await poll(
+    async () =>
+      (await page.evaluate(() => window.kamapathy.getState())).prompts.find(
+        (item) => item.spaceId === waitingSpace.id,
+      ),
+    { timeoutMs: 15000, label: "the request held for the person" },
+  );
+  assert.equal(heldPrompt.tabId, askingTab.id);
+  // The person is looking at their own space, so only the reminder shows.
+  await page.evaluate(() =>
+    window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
+  );
+  assert.equal(await promptBar.count(), 0);
+  assert.match(await spacesButton.getAttribute("aria-label"), /needs you/);
+  // Opening the space brings forward the page that asked, with the bar.
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    waitingSpace.id,
+  );
+  await promptBar.waitFor();
+  assert.equal(await promptBar.getAttribute("aria-label"), "Waiting review");
+  await promptBar.getByText("The agent is waiting for you.").waitFor();
+  assert.notEqual(askingTab.id, quietTab.id);
+  assert.equal(
+    (await page.evaluate(() => window.kamapathy.getState())).activeTabId,
+    askingTab.id,
+  );
+  await promptBar.getByRole("button", { name: "Block", exact: true }).click();
+  await promptBar.waitFor({ state: "detached" });
+  assert.equal((await api(`/spaces/${waitingSpace.id}`, "DELETE")).status, 200);
+  checked("opening a space that needs you shows the waiting prompt");
   await page.evaluate((id) => window.kamapathy.dispatch({ type: "space:activate", id }), manual);
   const manualBar = page.getByRole("region", { name: "Manual task" });
   await manualBar.getByRole("button", { name: "Stop", exact: true }).click();
