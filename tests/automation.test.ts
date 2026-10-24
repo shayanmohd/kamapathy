@@ -2877,6 +2877,102 @@ describe("local automation socket", () => {
     expect(controller.contents.reloads).toEqual([]);
   });
 
+  it("navigate and reload load a page again whose process stopped, which every other route refuses", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    page.crash();
+    // A page whose process stopped is refused everywhere but a load.
+    const refused = await request(`/tabs/${tab.id}/snapshot`);
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "page_crashed",
+    });
+    const { done: navigated } = await dispatched(tab.id, {
+      url: "https://example.com/again",
+      waitUntil: "load",
+    });
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/again");
+    first.request("https://example.com/again");
+    first.response(200);
+    first.commit("https://example.com/again");
+    first.lifecycle("DOMContentLoaded");
+    first.lifecycle("load");
+    // Chromium reports the commit to the debugger first. The page is back
+    // only once Electron reports the navigation, a moment later.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    page.navigate("https://example.com/again");
+    const answered = await navigated;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      tab: expect.objectContaining({ url: "https://example.com/again" }),
+      httpStatus: 200,
+      waitUntil: "load",
+    });
+    // A reload is the other way a page loads again.
+    page.crash();
+    const { done: reloaded } = await reloading(tab.id, { waitUntil: "load" });
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/again", "reload");
+    second.request("https://example.com/again");
+    second.response(200);
+    second.commit("https://example.com/again");
+    second.lifecycle("load");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    page.navigate("https://example.com/again");
+    expect((await reloaded).status).toBe(200);
+    // The page is a page again.
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+  });
+
+  it("a navigate on a page that does not come back says so instead of waiting on", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect((await request(`/tabs/${tab.id}/snapshot`)).status).toBe(200);
+    page.crash();
+    const { done: stopping } = await dispatched(tab.id, {
+      url: "https://example.com/again",
+      waitUntil: "load",
+    });
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/again");
+    first.request("https://example.com/again");
+    first.response(200);
+    first.commit("https://example.com/again");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // A page that stops again while its load is on the way is reported at
+    // once, well inside the navigation's own timeout.
+    page.crash();
+    const stopped = await failure(await stopping);
+    expect(stopped.status).toBe(409);
+    expect(stopped.error).toMatchObject({
+      code: "page_crashed",
+      dispatched: true,
+    });
+    // One that never comes back ends on the deadline.
+    const { done: timing } = await dispatched(
+      tab.id,
+      { url: "https://example.com/third", waitUntil: "load", timeoutMs: 150 },
+      2,
+    );
+    const second = mainFrame(page, "loader-3");
+    second.start("https://example.com/third");
+    second.request("https://example.com/third");
+    second.response(200);
+    second.commit("https://example.com/third");
+    const timeout = await failure(await timing);
+    expect(timeout.status).toBe(504);
+    expect(timeout.error).toMatchObject({
+      code: "navigation_timeout",
+      awaited: "load",
+      timeoutMs: 150,
+      committed: true,
+      url: "https://example.com/third",
+    });
+  });
+
   const sleep = (milliseconds: number) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds));
   // A URL wait and its answer.

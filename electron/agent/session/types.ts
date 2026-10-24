@@ -31,6 +31,10 @@ export interface Step {
   guard?: () => void;
   // Set once anything that can change the page has been sent.
   dispatch?: { dispatched: boolean };
+  // Set when this step dispatched the navigation that brings a crashed page
+  // back, so its own sends wait for that commit instead of reporting the
+  // crash it is undoing.
+  throughCrash?: true;
 }
 export type SendStep = Step & {
   sessionId?: string;
