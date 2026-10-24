@@ -14,12 +14,18 @@ import {
   PackProblem,
   cleanText,
   declaredFiles,
+  hostOf,
+  listSitePacks,
+  loadPacks,
+  matchPacks,
   problemText,
   readManifest,
   readTrustedFile,
   rootState,
   siteRoots,
+  summarize,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
+import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
 
 const posix = process.platform !== "win32";
 let workspace;
@@ -35,9 +41,30 @@ afterAll(async () => {
   await rm(workspace, { recursive: true, force: true });
 });
 
+const temporary = [];
+afterAll(async () => {
+  for (const path of temporary)
+    await rm(path, { recursive: true, force: true });
+});
+
+// A workspace root and a bundled root of one case's own, so no case depends
+// on the packs the skill ships.
+async function freshRoots() {
+  const base = await mkdtemp(join(tmpdir(), "kamapathy-site-roots-"));
+  temporary.push(base);
+  const home = join(base, "workspace");
+  await mkdir(home, { mode: 0o700 });
+  const roots = [
+    { path: join(home, "sites"), source: "workspace" },
+    { path: join(base, "bundled"), source: "bundled" },
+  ];
+  for (const root of roots) await mkdir(root.path, { mode: 0o700 });
+  return { roots, env: { KAMAPATHY_WORKSPACE: home } };
+}
+
 // A pack folder holding a pack.json and whatever files a case needs.
-async function writePack(id, manifest, files = {}) {
-  const dir = join(sites, id);
+async function writePackIn(sitesDir, id, manifest, files = {}) {
+  const dir = join(sitesDir, id);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { mode: 0o700 });
   await writeFile(
@@ -52,6 +79,13 @@ async function writePack(id, manifest, files = {}) {
   }
   return dir;
 }
+
+async function writePack(id, manifest, files = {}) {
+  return writePackIn(sites, id, manifest, files);
+}
+
+// The smallest manifest that passes every rule.
+const bare = (id, domains) => ({ format: 1, id, name: id, domains });
 
 const good = () => ({
   format: 1,
@@ -642,6 +676,363 @@ describe("site packs", () => {
       });
       await chmod(sites, 0o700);
     }
+  });
+
+  it("matches exact hosts and strict subdomains only", () => {
+    const packs = [
+      { id: "exact", domains: ["github.com"] },
+      { id: "wild", domains: ["*.github.com"] },
+      { id: "punycode", domains: ["xn--bcher-kva.example"] },
+      { id: "local", domains: ["127.0.0.1"] },
+    ];
+    const matches = (target) => {
+      const { host } = hostOf(target, { entry: "siteContext" });
+      return { host, ids: matchPacks(packs, host).map((pack) => pack.id) };
+    };
+    expect(matches("https://gist.github.com/x")).toEqual({
+      host: "gist.github.com",
+      ids: ["wild"],
+    });
+    expect(matches("https://a.b.github.com")).toEqual({
+      host: "a.b.github.com",
+      ids: ["wild"],
+    });
+    expect(matches("github.com")).toEqual({
+      host: "github.com",
+      ids: ["exact"],
+    });
+    expect(matches("https://GitHub.com.:8443/x")).toEqual({
+      host: "github.com",
+      ids: ["exact"],
+    });
+    expect(matches({ url: "https://bücher.example/" })).toEqual({
+      host: "xn--bcher-kva.example",
+      ids: ["punycode"],
+    });
+    expect(matches("127.0.0.1")).toEqual({
+      host: "127.0.0.1",
+      ids: ["local"],
+    });
+    // Another scheme, and a page that has not navigated, match nothing.
+    for (const target of [
+      "about:blank",
+      "file:///x",
+      { url: "" },
+      { id: "t1", label: "p1" },
+    ])
+      expect(matches(target)).toEqual({ host: null, ids: [] });
+
+    expect(hostOf("github.com", { entry: "siteContext" })).toEqual({
+      url: "https://github.com/",
+      host: "github.com",
+    });
+    expect(hostOf("about:blank", { entry: "siteContext" })).toEqual({
+      url: "about:blank",
+      host: null,
+    });
+    expect(hostOf({ url: "" }, { entry: "siteContext" })).toEqual({
+      url: null,
+      host: null,
+    });
+
+    for (const target of ["not a host", ""]) {
+      let failure = null;
+      try {
+        hostOf(target, { entry: "siteContext" });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(KamapathyError);
+      expect(failure.code).toBe("invalid_argument");
+      expect(failure.entry).toBe("siteContext");
+      expect(failure.message).toBe(
+        `siteContext got ${JSON.stringify(target)} for target. Expected a complete http or https URL, a host such as github.com, or a Page.`,
+      );
+    }
+  });
+
+  it("orders exact matches, then longer wildcards, then ids; a workspace folder hides the bundled pack even when invalid; pack.json is read on every call", async () => {
+    const { env, roots } = await freshRoots();
+    const [space, bundled] = roots;
+    for (const [id, domains] of [
+      ["alpha", ["a.b.c.example"]],
+      ["beta", ["a.b.c.example"]],
+      ["both", ["*.c.example", "a.b.c.example"]],
+      ["wild-b", ["*.b.c.example"]],
+      ["wild-c", ["*.c.example"]],
+    ])
+      await writePackIn(space.path, id, bare(id, domains));
+    await writePackIn(bundled.path, "github", good());
+
+    const loaded = await loadPacks(env, { roots });
+    expect(loaded.roots).toEqual([
+      { path: space.path, source: "workspace", state: "ok" },
+      { path: bundled.path, source: "bundled", state: "ok" },
+    ]);
+    expect(loaded.skipped).toEqual([]);
+    // The best entry of each pack decides its place, exact entries first.
+    expect(
+      matchPacks(loaded.packs, "a.b.c.example").map((pack) => [
+        pack.id,
+        pack.matchedBy,
+      ]),
+    ).toEqual([
+      ["alpha", "a.b.c.example"],
+      ["beta", "a.b.c.example"],
+      ["both", "a.b.c.example"],
+      ["wild-b", "*.b.c.example"],
+      ["wild-c", "*.c.example"],
+    ]);
+    // A wildcard takes no host of its own, and a pack matches by its best
+    // entry.
+    expect(
+      matchPacks(loaded.packs, "b.c.example").map((pack) => [
+        pack.id,
+        pack.matchedBy,
+      ]),
+    ).toEqual([
+      ["both", "*.c.example"],
+      ["wild-c", "*.c.example"],
+    ]);
+    expect(matchPacks(loaded.packs, "c.example")).toEqual([]);
+    expect(matchPacks(loaded.packs, null)).toEqual([]);
+
+    const matched = await listSitePacks(env, "https://a.b.c.example/x", {
+      roots,
+    });
+    expect(matched.host).toBe("a.b.c.example");
+    expect(matched.packs.map((pack) => pack.id)).toEqual([
+      "alpha",
+      "beta",
+      "both",
+      "wild-b",
+      "wild-c",
+    ]);
+    // A summary names the folder, the notes and both kinds of tool.
+    expect(matched.packs[0]).toEqual({
+      id: "alpha",
+      name: "alpha",
+      source: "workspace",
+      dir: join(space.path, "alpha"),
+      domains: ["a.b.c.example"],
+      notes: [],
+      tools: [],
+    });
+
+    const every = await listSitePacks(env, undefined, { roots });
+    expect(Object.hasOwn(every, "host")).toBe(false);
+    expect(every.packs.map((pack) => pack.id)).toEqual([
+      "alpha",
+      "beta",
+      "both",
+      "github",
+      "wild-b",
+      "wild-c",
+    ]);
+    expect(every.packs.find((pack) => pack.id === "github")).toEqual({
+      id: "github",
+      name: "GitHub",
+      source: "bundled",
+      dir: join(bundled.path, "github"),
+      domains: ["github.com"],
+      notes: ["notes/overview.md"],
+      tools: [
+        {
+          name: "search_repositories",
+          kind: "node",
+          description: "Search repositories and read the first results.",
+        },
+        {
+          name: "repository_stats",
+          kind: "page",
+          description:
+            "Read the stars, forks and topics of the open repository.",
+        },
+      ],
+    });
+    expect(
+      summarize(loaded.packs.find((pack) => pack.id === "github")),
+    ).toEqual(every.packs.find((pack) => pack.id === "github"));
+
+    // A workspace folder hides the bundled pack with its id, valid or not.
+    await writePackIn(
+      bundled.path,
+      "shared",
+      bare("shared", ["bundled.example"]),
+    );
+    const first = await listSitePacks(env, undefined, { roots });
+    expect(first.packs.find((pack) => pack.id === "shared")).toMatchObject({
+      source: "bundled",
+      domains: ["bundled.example"],
+    });
+    await writePackIn(
+      space.path,
+      "shared",
+      bare("shared", ["workspace.example"]),
+    );
+    const second = await listSitePacks(env, undefined, { roots });
+    expect(second.packs.find((pack) => pack.id === "shared")).toMatchObject({
+      source: "workspace",
+      domains: ["workspace.example"],
+    });
+    expect(second.skipped).toEqual([]);
+    await writePackIn(space.path, "shared", "{");
+    const broken = await listSitePacks(env, undefined, { roots });
+    expect(broken.packs.some((pack) => pack.id === "shared")).toBe(false);
+    expect(broken.skipped).toEqual([
+      {
+        path: join(space.path, "shared"),
+        source: "workspace",
+        problem: expect.stringContaining(
+          "pack.json: pack.json is not valid JSON (",
+        ),
+      },
+    ]);
+
+    // Every call reads pack.json again, so an edit lands at once.
+    await writePackIn(space.path, "alpha", {
+      ...bare("alpha", ["edited.example"]),
+      name: "Edited",
+    });
+    const edited = await listSitePacks(env, undefined, { roots });
+    expect(edited.packs.find((pack) => pack.id === "alpha")).toMatchObject({
+      name: "Edited",
+      domains: ["edited.example"],
+    });
+  });
+
+  it("reports unreadable packs under skipped", async () => {
+    const { env, roots } = await freshRoots();
+    const space = roots[0];
+    await writePackIn(space.path, "broken", "{");
+    await writePackIn(space.path, "mismatch", bare("other", ["other.example"]));
+    const fine = await writePackIn(
+      space.path,
+      "fine",
+      bare("fine", ["fine.example"]),
+    );
+    await symlink(fine, join(space.path, "linked"));
+    const shared = await writePackIn(
+      space.path,
+      "shared",
+      bare("shared", ["shared.example"]),
+    );
+    if (posix) await chmod(join(shared, "pack.json"), 0o660);
+    // Ignored without a word: a draft, a hidden folder and a loose file.
+    for (const name of ["_draft", ".hidden"]) {
+      await mkdir(join(space.path, name), { mode: 0o700 });
+      await writeFile(join(space.path, name, "pack.json"), "{", {
+        mode: 0o600,
+      });
+    }
+    await writeFile(join(space.path, "README.md"), "Packs live here.\n", {
+      mode: 0o600,
+    });
+
+    const { packs, skipped } = await loadPacks(env, { roots });
+    expect(packs.map((pack) => pack.id)).toEqual(
+      posix ? ["fine"] : ["fine", "shared"],
+    );
+    expect(skipped.map((row) => [row.path, row.source])).toEqual([
+      [join(space.path, "broken"), "workspace"],
+      [join(space.path, "linked"), "workspace"],
+      [join(space.path, "mismatch"), "workspace"],
+      ...(posix ? [[join(space.path, "shared"), "workspace"]] : []),
+    ]);
+    expect(skipped[0].problem).toMatch(
+      /^pack\.json: pack\.json is not valid JSON \(/,
+    );
+    expect(skipped[1].problem).toBe(
+      `pack.json: ${join(space.path, "linked")} is a link. Site packs hold only regular files and folders.`,
+    );
+    expect(skipped[2].problem).toBe(
+      'id: id must be "mismatch", the name of the pack\'s folder.',
+    );
+    if (posix)
+      expect(skipped[3].problem).toBe(
+        `pack.json: pack.json must be owned by your account and not changeable by others. Run chmod go-w ${join(shared, "pack.json")}.`,
+      );
+
+    if (posix) {
+      // A refused root is one line of its own and none of its packs is read.
+      await chmod(space.path, 0o707);
+      const refused = await loadPacks(env, { roots });
+      expect(refused.packs).toEqual([]);
+      expect(refused.skipped).toEqual([
+        {
+          path: space.path,
+          source: "workspace",
+          problem: `${space.path} must be owned by your account and not changeable by others. Run chmod go-w ${space.path}.`,
+        },
+      ]);
+      expect(refused.roots[0]).toMatchObject({ state: "refused" });
+      await chmod(space.path, 0o700);
+    }
+    if (posix && process.getuid() !== 0) {
+      await chmod(space.path, 0o300);
+      const unreadable = await loadPacks(env, { roots });
+      expect(unreadable.skipped).toEqual([
+        {
+          path: space.path,
+          source: "workspace",
+          problem: `${space.path} could not be read (EACCES).`,
+        },
+      ]);
+      await chmod(space.path, 0o700);
+    }
+
+    // More than 200 folders: the first 200 by name, and one line saying so.
+    const many = await freshRoots();
+    await Promise.all(
+      Array.from({ length: 205 }, (_value, index) => {
+        const id = `p${String(index).padStart(3, "0")}`;
+        return writePackIn(many.roots[0].path, id, bare(id, [`${id}.example`]));
+      }),
+    );
+    const cut = await loadPacks(many.env, { roots: many.roots });
+    expect(cut.packs.length).toBe(200);
+    expect(cut.packs.at(-1).id).toBe("p199");
+    expect(cut.skipped).toEqual([
+      {
+        path: many.roots[0].path,
+        source: "workspace",
+        problem: `${many.roots[0].path} holds more than 200 pack folders. Only the first 200 by name are read.`,
+      },
+    ]);
+
+    // At most 20 packs are reported.
+    const noisy = await freshRoots();
+    await Promise.all(
+      Array.from({ length: 25 }, (_value, index) =>
+        writePackIn(
+          noisy.roots[0].path,
+          `b${String(index).padStart(2, "0")}`,
+          "{",
+        ),
+      ),
+    );
+    const capped = await loadPacks(noisy.env, { roots: noisy.roots });
+    expect(capped.packs).toEqual([]);
+    expect(capped.skipped.map((row) => row.path)).toEqual(
+      Array.from({ length: 20 }, (_value, index) =>
+        join(noisy.roots[0].path, `b${String(index).padStart(2, "0")}`),
+      ),
+    );
+
+    // Named no roots, a call reads the workspace's sites folder and the one
+    // beside the client.
+    const home = await mkdtemp(join(tmpdir(), "kamapathy-site-default-"));
+    temporary.push(home);
+    await chmod(home, 0o700);
+    const both = await loadPacks({ KAMAPATHY_WORKSPACE: home });
+    expect(both.roots.map((root) => [root.path, root.source])).toEqual(
+      siteRoots({ KAMAPATHY_WORKSPACE: home }).map((root) => [
+        root.path,
+        root.source,
+      ]),
+    );
+    expect(both.roots[0].state).toBe("missing");
+    expect(both.packs.every((pack) => pack.source === "bundled")).toBe(true);
   });
 
   it("cleans control and bidirectional characters, keeping newlines when asked", () => {

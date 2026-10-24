@@ -1,9 +1,10 @@
 // Site packs: the two roots a pack can live in, the files a pack may hold and
 // the rules its pack.json must pass. Reading a pack never runs its code.
 import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { domainToASCII, fileURLToPath } from "node:url";
+import { KamapathyError } from "./errors.mjs";
 import { line } from "./format.mjs";
 import { checkWorkspace, workspacePath } from "./workspace.mjs";
 
@@ -539,4 +540,188 @@ export function declaredFiles(pack) {
   for (const tool of pack.tools) addFile(tool.file, "tool");
   for (const tool of pack.pageTools) addFile(tool.file, "pageTool");
   return files;
+}
+
+const TARGET_EXPECTED =
+  "Expected a complete http or https URL, a host such as github.com, or a Page.";
+
+// The target as a URL: as it is written, else with https:// in front. Null
+// when neither parses.
+function parsedTarget(value) {
+  for (const candidate of [value, `https://${value}`])
+    try {
+      return new URL(candidate);
+    } catch {
+      // The next form, or nothing.
+    }
+  return null;
+}
+
+/** A string URL, a bare host or anything with a string `url`. Throws KamapathyError invalid_argument. */
+export function hostOf(target, { entry }) {
+  const refuse = (value) =>
+    new KamapathyError(
+      "invalid_argument",
+      `${entry} got ${shown(value)} for target. ${TARGET_EXPECTED}`,
+      { entry },
+    );
+  let value;
+  if (typeof target === "string") value = target;
+  else if (target !== null && typeof target === "object") {
+    // A page that has not navigated holds no URL, so it matches nothing.
+    if (typeof target.url !== "string" || target.url === "")
+      return { url: null, host: null };
+    value = target.url;
+  } else throw refuse(target);
+  const url = parsedTarget(value);
+  if (!url) throw refuse(value);
+  // Only the web reaches a pack: about:blank and file: match nothing.
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    return { url: url.href, host: null };
+  return { url: url.href, host: url.hostname.replace(/\.$/, "") };
+}
+
+// How one domain entry fits a host: an exact entry, else the suffix of a
+// wildcard the host sits strictly under.
+function entryFit(entry, host) {
+  if (!entry.startsWith("*."))
+    return entry === host ? { wildcard: 0, length: host.length } : null;
+  const suffix = entry.slice(2);
+  return host.length > suffix.length && host.endsWith(`.${suffix}`)
+    ? { wildcard: 1, length: suffix.length }
+    : null;
+}
+
+// An exact entry beats a wildcard, and a longer wildcard suffix beats a
+// shorter one.
+const closer = (fit, than) =>
+  fit.wildcard === than.wildcard
+    ? fit.length > than.length
+    : fit.wildcard < than.wildcard;
+const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The packs whose domains match, best entry first, each with the entry that matched. */
+export function matchPacks(packs, host) {
+  if (!host) return [];
+  const matched = [];
+  for (const pack of packs) {
+    let best = null;
+    for (const entry of pack.domains) {
+      const fit = entryFit(entry, host);
+      if (fit && (!best || closer(fit, best.fit))) best = { entry, fit };
+    }
+    if (best)
+      matched.push({
+        pack: { ...pack, matchedBy: best.entry },
+        fit: best.fit,
+      });
+  }
+  return matched
+    .sort(
+      (a, b) =>
+        a.fit.wildcard - b.fit.wildcard ||
+        b.fit.length - a.fit.length ||
+        byText(a.pack.id, b.pack.id),
+    )
+    .map((row) => row.pack);
+}
+
+/** The pack as sitePacks and the CLI list it, Node tools before page tools. */
+export function summarize(pack) {
+  return {
+    id: pack.id,
+    name: pack.name,
+    source: pack.source,
+    dir: pack.dir,
+    domains: [...pack.domains],
+    notes: [...pack.notes],
+    tools: [...pack.tools, ...pack.pageTools].map(
+      ({ name, kind, description }) => ({ name, kind, description }),
+    ),
+  };
+}
+
+// The pack folders of one root by name, at most LIMITS.packs of them.
+// Names starting with _ or . are ignored, as is anything that is neither a
+// folder nor a link; a link is read so its refusal is reported.
+async function packFolders(root) {
+  const names = (await readdir(root.path, { withFileTypes: true }))
+    .filter(
+      (entry) =>
+        !entry.name.startsWith("_") &&
+        !entry.name.startsWith(".") &&
+        (entry.isDirectory() || entry.isSymbolicLink()),
+    )
+    .map((entry) => entry.name)
+    .sort();
+  return {
+    names: names.slice(0, LIMITS.packs),
+    cut: names.length > LIMITS.packs,
+  };
+}
+
+/** Every readable pack, workspace first, ids deduplicated with the workspace winning. */
+export async function loadPacks(env = process.env, { roots } = {}) {
+  const states = [];
+  const packs = [];
+  const skipped = [];
+  const taken = new Set();
+  const skip = (path, source, problem) => {
+    if (skipped.length < LIMITS.skipped)
+      skipped.push({ path, source, problem });
+  };
+  for (const root of roots ?? siteRoots(env)) {
+    const state = await rootState(root);
+    states.push(state);
+    if (state.state === "refused") {
+      skip(state.path, state.source, state.problem);
+      continue;
+    }
+    if (state.state !== "ok") continue;
+    let folders;
+    try {
+      folders = await packFolders(state);
+    } catch (error) {
+      skip(
+        state.path,
+        state.source,
+        `${state.path} could not be read (${error?.code ?? "unknown"}).`,
+      );
+      continue;
+    }
+    if (folders.cut)
+      skip(
+        state.path,
+        state.source,
+        `${state.path} holds more than ${LIMITS.packs} pack folders. Only the first ${LIMITS.packs} by name are read.`,
+      );
+    for (const id of folders.names) {
+      // A workspace folder hides the bundled pack with its id, so an edited
+      // copy wins whether or not it passes its rules.
+      if (taken.has(id)) continue;
+      taken.add(id);
+      const dir = join(state.path, id);
+      const { pack, problems } = await readManifest(dir, {
+        source: state.source,
+        id,
+      });
+      if (pack) packs.push(pack);
+      else skip(dir, state.source, problemText(problems[0]));
+    }
+  }
+  return { packs, skipped, roots: states };
+}
+
+/** What Client.sitePacks and kamapathy sites print. */
+export async function listSitePacks(env, target, options) {
+  const matching = target !== undefined;
+  // The target is read before the disk is, so a bad one lists nothing.
+  const host = matching ? hostOf(target, { entry: "sitePacks" }).host : null;
+  const { packs, skipped } = await loadPacks(env, options);
+  if (!matching)
+    return {
+      packs: [...packs].sort((a, b) => byText(a.id, b.id)).map(summarize),
+      skipped,
+    };
+  return { host, packs: matchPacks(packs, host).map(summarize), skipped };
 }
