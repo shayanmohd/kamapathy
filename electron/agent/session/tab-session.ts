@@ -383,7 +383,7 @@ export class TabSession {
       !(this.current === "attaching" && this.inSetupHook())
     ) {
       try {
-        await this.usable(step?.deadline ?? Date.now() + 15000);
+        await this.usable(step?.deadline ?? Date.now() + 15000, step);
       } catch (error) {
         step?.guard?.();
         throw error;
@@ -1146,11 +1146,16 @@ export class TabSession {
     }
   }
 
-  private async usable(deadline: number): Promise<void> {
+  private async usable(deadline: number, step?: SendStep): Promise<void> {
     if (this.current === "unavailable") {
       if (!this.connect()) throw this.lostError();
       return this.whenReady(Math.min(deadline, Date.now() + 2000));
     }
+    // The next commit brings a crashed page back, and a step that dispatched
+    // a navigation is waiting for its own commit anyway. A page that closes,
+    // stops again or never comes back fails here instead.
+    if (this.current === "crashed" && step?.throughCrash)
+      return this.whenReady(deadline);
     if (this.current !== "attaching") throw this.lostError();
     // A first attach may wait out a slow first load; a re-attach gets 2000 ms.
     return this.whenReady(

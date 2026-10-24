@@ -77,6 +77,7 @@ export function createGo(deps: GoDeps) {
         authorizeTab(tabId);
       },
       dispatch: run.dispatch,
+      throughCrash: true,
     },
     park: run.park,
     timeoutMs,
