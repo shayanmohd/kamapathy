@@ -1,4 +1,5 @@
 import { pageOperation, type PageOperation } from "../../automation-dom";
+import { FILES_SOURCE, fileOperation } from "../dom/files";
 import { outlineBuilder } from "../dom/outline";
 import { pageState, type PageStateOperation } from "../dom/page-state";
 import { selectorEngine } from "../dom/select";
@@ -6,10 +7,10 @@ import { selectorEngine } from "../dom/select";
 // Kamapathy's isolated world in each frame. Isolated init scripts use the
 // same name, so they share it.
 export const WORLD_NAME = "kamapathy";
-// The page script with the selector engine and the outline builder passed in
-// beside it, so selectors travel as JSON and the code that reads the page
-// travels as code.
-export const PAGE_SOURCE = `function(operation,payload,namespace){return (${pageOperation})(operation,payload,namespace,(${selectorEngine}),(${outlineBuilder}))}`;
+// The page script with the selector engine, the outline builder and the file
+// operations passed in beside it, so selectors travel as JSON and the code
+// that reads the page travels as code.
+export const PAGE_SOURCE = `function(operation,payload,namespace){return (${pageOperation})(operation,payload,namespace,(${selectorEngine}),(${outlineBuilder}),(${fileOperation}))}`;
 export const PAGE_STATE_SOURCE = pageState.toString();
 
 // Operations that change the page themselves. The others only read it, even
@@ -17,7 +18,7 @@ export const PAGE_STATE_SOURCE = pageState.toString();
 // serialized function an operation runs when it is not pageOperation.
 export const OPERATIONS: Record<
   PageOperation | PageStateOperation,
-  { mutates: boolean; source?: "pageState" }
+  { mutates: boolean; source?: "pageState" | "files" }
 > = {
   snapshot: { mutates: false },
   elements: { mutates: false },
@@ -36,6 +37,10 @@ export const OPERATIONS: Record<
   frameIndex: { mutates: false },
   info: { mutates: false, source: "pageState" },
   loadProbe: { mutates: false, source: "pageState" },
+  // The retarget needs the page script's resolver and refs; the apply runs on
+  // its own, so the file chooser can call it on a node with no ref.
+  retargetFile: { mutates: false },
+  applyFiles: { mutates: true, source: "files" },
 };
 
 export function operationExpression(
@@ -45,5 +50,7 @@ export function operationExpression(
 ): string {
   if (OPERATIONS[op].source === "pageState")
     return `(${PAGE_STATE_SOURCE})(${JSON.stringify(op)})`;
-  return `(${PAGE_SOURCE})(${JSON.stringify(op)},${JSON.stringify(payload)},${JSON.stringify(namespace)})`;
+  const source =
+    OPERATIONS[op].source === "files" ? FILES_SOURCE : PAGE_SOURCE;
+  return `(${source})(${JSON.stringify(op)},${JSON.stringify(payload)},${JSON.stringify(namespace)})`;
 }

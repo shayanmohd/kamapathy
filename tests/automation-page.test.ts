@@ -11,6 +11,7 @@ import {
   dialogHandlerSource,
   dialogQueueSource,
 } from "../electron/agent/dom/dialog-handler";
+import { FILES_SOURCE } from "../electron/agent/dom/files";
 import { pdfDocument, readBlobPdf } from "../electron/agent/dom/pdf";
 import type { Level, Mode } from "../electron/agent/dom/select";
 import { parseSelector } from "../electron/agent/selectors";
@@ -483,5 +484,178 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     // Draining clears the queue, so nothing is reported twice.
     expect(await page.evaluate(DIALOG_DRAIN_SOURCE)).toEqual([]);
     expect(await dialogReports()).toEqual([]);
+  }, 20000);
+  // Section 7's file inputs: a page with the shapes an upload form takes,
+  // from a label beside a hidden input to a panel whose input sits in a
+  // shadow root.
+  const FILE_PAGE = `<!doctype html>
+<main>
+  <label id="listing-label" for="listing-file">Choose a listing</label>
+  <input id="listing-file" type="file" accept=".png,image/jpeg" style="display:none">
+  <label id="note-label"><span id="note-text">Attach a note</span><input id="note-file" type="file" multiple></label>
+  <div id="panel"><p>Drop files here</p><upload-widget id="widget"></upload-widget></div>
+  <div id="two"><input type="file"><input type="file"></div>
+  <div id="empty"><button type="button">Upload</button></div>
+  <div id="off"><input type="file" disabled></div>
+  <div id="folder"><input type="file" webkitdirectory></div>
+  <div id="inert" inert><input type="file"></div>
+  <fieldset id="locked" disabled><input type="file"></fieldset>
+</main>
+<script>
+  document.getElementById("widget").attachShadow({ mode: "open" }).innerHTML =
+    '<input type="file">';
+  globalThis.seen = [];
+  const note = document.getElementById("note-file");
+  for (const type of ["input", "change"])
+    note.addEventListener(type, (event) => {
+      globalThis.seen.push(type + " " + note.files.length + " " + event.bubbles);
+    });
+</script>`;
+  const openHtml = async (html: string) => {
+    page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+    await page.setContent(html);
+  };
+  // A file as the client sends one.
+  const file = (name: string, type: string, text: string) => ({
+    name,
+    type,
+    data: Buffer.from(text).toString("base64"),
+  });
+  // The numbers the main process reserves for the input a retarget picks.
+  let nextFileRef = 500;
+  const retarget = (target: Record<string, unknown>): Promise<any> =>
+    operate("retargetFile", { ...target, firstRef: (nextFileRef += 1) });
+  // The apply runs on its own, the way the chooser path runs it.
+  const fileScript = `(${FILES_SOURCE})`;
+  const applyFiles = (
+    ref: string,
+    files: { name: string; type: string; data: string }[],
+    namespace = "test",
+  ): Promise<any> =>
+    page.evaluate(
+      ([script, payload, namespace]) =>
+        (0, eval)(script as string)("applyFiles", payload, namespace),
+      [fileScript, { ref, files }, namespace] as const,
+    );
+  const names = (selector: string) =>
+    page.evaluate(
+      (selector) =>
+        Array.from(
+          document.querySelector<HTMLInputElement>(selector)!.files ?? [],
+        ).map((item) => item.name),
+      selector,
+    );
+
+  it("setInputFiles retargets from labels and containers", async () => {
+    await openHtml(FILE_PAGE);
+    const png = file("listing.png", "image/png", "pixels");
+    // A label names the hidden input a person would click it for.
+    const labelled = await retarget(selectorTarget("#listing-label", "none"));
+    expect(labelled).toMatchObject({ ok: true });
+    expect(await applyFiles(labelled.ref, [png])).toEqual({
+      ok: true,
+      selected: 1,
+    });
+    expect(await names("#listing-file")).toEqual(["listing.png"]);
+    // Text inside a label that wraps its own input.
+    const inside = await retarget(selectorTarget("#note-text", "none"));
+    expect(
+      await applyFiles(inside.ref, [file("note.txt", "text/plain", "hello")]),
+    ).toEqual({ ok: true, selected: 1 });
+    expect(await names("#note-file")).toEqual(["note.txt"]);
+    // A panel whose one file input sits in an open shadow root.
+    const panel = await retarget(selectorTarget("#panel", "none"));
+    expect(await applyFiles(panel.ref, [png])).toEqual({
+      ok: true,
+      selected: 1,
+    });
+    expect(
+      await page.evaluate(() =>
+        Array.from(
+          document
+            .getElementById("widget")!
+            .shadowRoot!.querySelector<HTMLInputElement>("input")!.files ?? [],
+        ).map((item) => item.name),
+      ),
+    ).toEqual(["listing.png"]);
+    // The input itself keeps the ref it already holds.
+    expect(await retarget(selectorTarget("#note-file", "none"))).toEqual({
+      ok: true,
+      ref: inside.ref,
+    });
+    // A selector may name the hidden input itself.
+    expect(await retarget(selectorTarget("#listing-file", "none"))).toEqual({
+      ok: true,
+      ref: labelled.ref,
+    });
+  }, 20000);
+
+  it("refuses several, disabled, directory and inert inputs; [] clears", async () => {
+    await openHtml(FILE_PAGE);
+    expect(await retarget(selectorTarget("#two", "none"))).toMatchObject({
+      ok: false,
+      code: "multiple_file_inputs",
+      fields: { count: 2 },
+    });
+    expect(await retarget(selectorTarget("#empty", "none"))).toMatchObject({
+      ok: false,
+      code: "invalid_upload_target",
+    });
+    for (const selector of ["#off", "#folder", "#inert", "#locked"])
+      expect(
+        await retarget(selectorTarget(selector, "none")),
+        selector,
+      ).toMatchObject({ ok: false, code: "invalid_upload_target" });
+    const listing = await retarget(selectorTarget("#listing-label", "none"));
+    const png = file("listing.png", "image/png", "pixels");
+    // One file unless the input takes many, and only the types it accepts.
+    expect(await applyFiles(listing.ref, [png, png])).toMatchObject({
+      ok: false,
+      code: "invalid_files",
+    });
+    expect(
+      await applyFiles(listing.ref, [file("note.txt", "text/plain", "hello")]),
+    ).toMatchObject({ ok: false, code: "invalid_file_type" });
+    expect(await names("#listing-file")).toEqual([]);
+    expect(await applyFiles(listing.ref, [png])).toEqual({
+      ok: true,
+      selected: 1,
+    });
+    // An empty list clears the selection and skips both checks.
+    expect(await applyFiles(listing.ref, [])).toEqual({
+      ok: true,
+      selected: 0,
+    });
+    expect(await names("#listing-file")).toEqual([]);
+  }, 20000);
+
+  it("applying files fires input then change, and the bytes reach the input in order", async () => {
+    await openHtml(FILE_PAGE);
+    const note = await retarget(selectorTarget("#note-label", "none"));
+    expect(
+      await applyFiles(note.ref, [
+        file("one.txt", "text/plain", "first"),
+        file("two.txt", "text/plain", "second"),
+      ]),
+    ).toEqual({ ok: true, selected: 2 });
+    expect(await page.evaluate(() => (globalThis as any).seen)).toEqual([
+      "input 2 true",
+      "change 2 true",
+    ]);
+    expect(
+      await page.evaluate(async () => {
+        const input = document.getElementById("note-file") as HTMLInputElement;
+        return Promise.all(
+          Array.from(input.files ?? []).map(async (item) => [
+            item.name,
+            item.type,
+            await item.text(),
+          ]),
+        );
+      }),
+    ).toEqual([
+      ["one.txt", "text/plain", "first"],
+      ["two.txt", "text/plain", "second"],
+    ]);
   }, 20000);
 });

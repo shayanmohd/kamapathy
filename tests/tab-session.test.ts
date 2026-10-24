@@ -1311,6 +1311,7 @@ describe("evaluateInFrame", () => {
       if (dispatch.dispatched) marked.push(op);
     }
     expect(marked.sort()).toEqual([
+      "applyFiles",
       "click",
       "fill",
       "focus",

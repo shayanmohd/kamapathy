@@ -36,6 +36,7 @@ import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
 import { downloadRoutes } from "./routes/downloads";
 import { eventRoutes } from "./routes/events";
+import { fileRoutes } from "./routes/files";
 import { createNavigation } from "./routes/navigation";
 import { pdfRoutes } from "./routes/pdf";
 import { spaceRequestRoutes } from "./routes/space-requests";
@@ -353,6 +354,7 @@ export async function startAutomation(
     dialogs,
     downloads,
     presence,
+    refs,
   });
   const deps: RouteDeps = {
     controller,
@@ -366,6 +368,7 @@ export async function startAutomation(
     dialogs,
     downloads,
     presence,
+    refs,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -385,6 +388,7 @@ export async function startAutomation(
     ...pdfRoutes({ ...deps, pdf: { extractor, documents } }),
     ...eventRoutes(deps),
     ...downloadRoutes(deps),
+    ...fileRoutes(deps),
     ...requests.routes,
     ...updateRoutes({ updates: options.updates }),
   });

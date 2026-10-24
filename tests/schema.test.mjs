@@ -7,6 +7,7 @@ import { createNavigation } from "../electron/agent/routes/navigation.ts";
 import { pdfRoutes } from "../electron/agent/routes/pdf.ts";
 import { downloadRoutes } from "../electron/agent/routes/downloads.ts";
 import { eventRoutes } from "../electron/agent/routes/events.ts";
+import { fileRoutes } from "../electron/agent/routes/files.ts";
 import { spaceRequestRoutes } from "../electron/agent/routes/space-requests.ts";
 import { spaceRoutes } from "../electron/agent/routes/spaces.ts";
 import { statusRoutes } from "../electron/agent/routes/status.ts";
@@ -159,6 +160,7 @@ describe("API schema", () => {
       ...pdfRoutes(deps),
       ...eventRoutes(deps),
       ...downloadRoutes(deps),
+      ...fileRoutes(deps),
       ...spaceRequestRoutes({ ...deps, grantSpace() {} }).routes,
       ...updateRoutes({}),
     };

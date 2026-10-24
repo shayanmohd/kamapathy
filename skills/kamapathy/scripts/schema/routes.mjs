@@ -58,6 +58,33 @@ const idleMs = {
   since: 2,
   description: "How long nothing may be in flight before networkidle answers.",
 };
+// One file as it travels to a file input: its metadata and its bytes.
+const uploadFile = {
+  kind: "object",
+  fields: {
+    name: {
+      kind: "string",
+      max: 255,
+      required: true,
+      description: "The file's base name.",
+    },
+    type: {
+      kind: "string",
+      min: 0,
+      max: 128,
+      required: true,
+      description: "The MIME type, or an empty string.",
+    },
+    data: {
+      kind: "string",
+      min: 0,
+      max: Math.ceil((16 * 1024 * 1024) / 3) * 4,
+      required: true,
+      description: "The content as canonical base64.",
+    },
+  },
+  description: "One file.",
+};
 const label = {
   kind: "string",
   min: 1,
@@ -756,36 +783,41 @@ export const ROUTES = [
       files: {
         kind: "array",
         required: true,
-        of: {
-          kind: "object",
-          fields: {
-            name: {
-              kind: "string",
-              max: 255,
-              required: true,
-              description: "The file's base name.",
-            },
-            type: {
-              kind: "string",
-              min: 0,
-              max: 128,
-              required: true,
-              description: "The MIME type, or an empty string.",
-            },
-            data: {
-              kind: "string",
-              min: 0,
-              max: Math.ceil((16 * 1024 * 1024) / 3) * 4,
-              required: true,
-              description: "The content as canonical base64.",
-            },
-          },
-          description: "One file.",
-        },
+        of: uploadFile,
         description: "1 to 8 files, at most 16 MiB together.",
       },
     },
     { budget: 30000, limit: 24 * 1024 * 1024, follow: true },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/set-input-files",
+    "Puts files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the input.",
+    "{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    {
+      ...target,
+      files: {
+        kind: "array",
+        required: true,
+        of: uploadFile,
+        since: 2,
+        description:
+          "0 to 8 files, at most 16 MiB together. An empty list clears the selection.",
+      },
+      timeoutMs: {
+        kind: "ms",
+        max: 60000,
+        default: 3000,
+        since: 2,
+        description: "How long to wait for the target. 0 looks once.",
+      },
+    },
+    {
+      budget: { field: "timeoutMs", plusMs: 10000 },
+      limit: 24 * 1024 * 1024,
+      follow: true,
+      since: 2,
+    },
   ),
   route(
     "POST",

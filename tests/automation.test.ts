@@ -134,14 +134,14 @@ describe("local automation socket", () => {
     files: [{ name: "listing.png", type: "image/png", data: "AAEC/w==" }],
     ...overrides,
   });
-  const beginUpload = async (tabId: string) => {
+  const beginUpload = async (tabId: string, route = "upload") => {
     const encoded = JSON.stringify(uploadBody());
     const accessed = controller.accessedTabs.length;
     let client!: ReturnType<typeof httpRequest>;
     const result = new Promise<{ status: number; data: any }>((resolve, reject) => {
       client = httpRequest({
         socketPath: socket.path,
-        path: `/tabs/${tabId}/upload`,
+        path: `/tabs/${tabId}/${route}`,
         method: "POST",
         headers: {
           Host: "kamapathy",
@@ -4774,6 +4774,153 @@ describe("local automation socket", () => {
     expect((await response.json()).error.code).toBe("human_control");
   });
 
+  const setFilesBody = (overrides: Record<string, unknown> = {}) => ({
+    ref: "@e1",
+    files: [{ name: "listing.png", type: "image/png", data: "AAEC/w==" }],
+    ...overrides,
+  });
+  // A page that answers the file steps the way the page script does: the
+  // retarget refs the input with the number the route reserved for it, and
+  // the apply answers how many files the input now holds.
+  const fileSteps = (selected: number) => {
+    const chosen: string[] = [];
+    return {
+      chosen,
+      answer: (code: string) => {
+        if (!code.includes(')("retargetFile",')) return { ok: true, selected };
+        const reserved = [...code.matchAll(/"firstRef":(\d+)/g)].at(-1)!;
+        chosen.push(`@e${reserved[1]}`);
+        return { ok: true, ref: chosen.at(-1) };
+      },
+    };
+  };
+
+  it("set-input-files takes exactly one of ref or selector, 0 to 8 files up to 16 MiB, and answers 429 upload_busy while another transfer runs", async () => {
+    const { tab } = await createPage();
+    const path = `/tabs/${tab.id}/set-input-files`;
+    const file = setFilesBody().files[0];
+    const refused = [
+      { files: [file] },
+      { ref: "@e1", selector: "#upload", files: [file] },
+      setFilesBody({ ref: "@e0" }),
+      setFilesBody({ files: Array(9).fill(file) }),
+      setFilesBody({ files: [{ ...file, data: "not base64" }] }),
+      setFilesBody({ files: [{ ...file, name: "../secret.png" }] }),
+      setFilesBody({ files: [{ name: "listing.png", type: "image/png", path: "/private/listing.png" }] }),
+      setFilesBody({ timeoutMs: 60001 }),
+      setFilesBody({ timeoutMs: -1 }),
+    ];
+    for (const body of refused)
+      expect((await request(path, "POST", body)).status, JSON.stringify(body)).toBe(400);
+    expect(controller.contents.scripts).toEqual([]);
+    const half = Buffer.alloc(8 * 1024 * 1024 + 1).toString("base64");
+    const tooLarge = await request(path, "POST", setFilesBody({
+      files: ["first.aab", "second.aab"].map((name) => ({ name, type: "application/octet-stream", data: half })),
+    }));
+    expect(tooLarge.status).toBe(413);
+    expect((await tooLarge.json()).error.code).toBe("files_too_large");
+    expect(await declaredSize(path, 24 * 1024 * 1024 + 1)).toBe(413);
+    expect(controller.contents.scripts).toEqual([]);
+
+    // An empty list is a selection too: it clears the input.
+    const clearing = fileSteps(0);
+    controller.contents.result = clearing.answer;
+    const cleared = await request(path, "POST", setFilesBody({ files: [] }));
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ ok: true, selected: 0 });
+    expect(payloads("applyFiles")[0]).toEqual({
+      ref: clearing.chosen[0],
+      files: [],
+    });
+
+    // Both routes share the one transfer, so upload_busy means one thing.
+    const transfer = await beginUpload(tab.id, "set-input-files");
+    try {
+      const busy = await request(`/tabs/${tab.id}/upload`, "POST", uploadBody());
+      expect(busy.status).toBe(429);
+      expect((await busy.json()).error.code).toBe("upload_busy");
+      controller.contents.result = fileSteps(1).answer;
+      transfer.finish();
+      expect((await transfer.result).status).toBe(200);
+    } finally {
+      transfer.client.destroy();
+    }
+    expect((await request(`/tabs/${tab.id}/upload`, "POST", uploadBody())).status).toBe(200);
+  });
+
+  it("set-input-files waits for a late file input and looks once at timeoutMs 0", async () => {
+    const { tab } = await createPage();
+    const path = `/tabs/${tab.id}/set-input-files`;
+    const steps = fileSteps(1);
+    let looks = 0;
+    controller.contents.result = (code: string) => {
+      if (!code.includes(')("retargetFile",')) return steps.answer(code);
+      looks += 1;
+      // The panel draws its input while the route waits.
+      return looks > 2
+        ? steps.answer(code)
+        : {
+            ok: false,
+            code: "no_match",
+            error: "Nothing on the page matches this selector.",
+            fields: { selector: "#late" },
+          };
+    };
+    const late = { selector: "#late", files: setFilesBody().files };
+    const found = await request(path, "POST", late);
+    expect(found.status).toBe(200);
+    expect(await found.json()).toEqual({ ok: true, selected: 1 });
+    expect(looks).toBe(3);
+    // Zero makes one attempt and answers the page's own failure.
+    looks = 0;
+    const once = await request(path, "POST", { ...late, timeoutMs: 0 });
+    expect(once.status).toBe(422);
+    expect((await once.json()).error.code).toBe("no_match");
+    expect(looks).toBe(1);
+  });
+
+  it("set-input-files answers its receipt fields and never returns a path", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const body = {
+      selector: "label[for=listing]",
+      files: [
+        { name: "listing.png", type: "image/png", data: "AAEC/w==" },
+        { name: "plan.png", type: "image/png", data: "AAED/w==" },
+      ],
+    };
+    const steps = fileSteps(2);
+    page.result = (code: string) => {
+      // The page opens a window while the files go in, so the answer names it.
+      if (code.includes(')("applyFiles",'))
+        controller.openPopup(tab.id, "https://example.com/picked");
+      return steps.answer(code);
+    };
+    const response = await request(`/tabs/${tab.id}/set-input-files`, "POST", body);
+    expect(response.status).toBe(200);
+    const popup = controller.state.tabs.find((item) => item.openerId === tab.id)!;
+    expect(await response.json()).toEqual({
+      ok: true,
+      selected: 2,
+      popups: [{ id: popup.id, label: popup.label, url: "https://example.com/picked" }],
+    });
+    // The target is resolved without the bytes, which travel only with the
+    // apply, on the ref the retarget answered.
+    expect(page.scripts).toHaveLength(2);
+    expect(page.scripts[0].code).toContain(
+      ')("retargetFile",{"selector":"label[for=listing]"',
+    );
+    expect(page.scripts[0].code).not.toContain('"data":"AAEC/w=="');
+    expect(page.scripts[1].code).toContain(
+      `)("applyFiles",${JSON.stringify({ ref: steps.chosen[0], files: body.files })},`,
+    );
+    expect(page.scripts.map((script) => script.world)).toEqual([
+      "kamapathy",
+      "kamapathy",
+    ]);
+    expect(page.inputs).toEqual([]);
+  });
+
   // How a request ended: its status and error code, or "closed" if its
   // connection dropped first.
   const settled = (response: Promise<Response>) =>
@@ -5128,6 +5275,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/wait": { text: "Done" },
       "POST /tabs/:id/screenshot": {},
       "POST /tabs/:id/upload": uploadBody(),
+      "POST /tabs/:id/set-input-files": uploadBody(),
       "POST /update/check": {},
       "POST /update/download": {},
       "POST /tabs/:id/pdf/text": { from: 1, maxChars: 0 },

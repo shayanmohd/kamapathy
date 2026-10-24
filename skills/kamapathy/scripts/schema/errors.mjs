@@ -374,6 +374,13 @@ export const ERRORS = {
     false,
     "The ref is not a file input that can take these files.",
   ),
+  multiple_file_inputs: code(
+    422,
+    false,
+    "The target holds several file inputs, so none of them is the one to file.",
+    ["count"],
+    2,
+  ),
   invalid_value: code(422, false, "The control cannot take this value."),
   clip_outside_page: code(
     422,
