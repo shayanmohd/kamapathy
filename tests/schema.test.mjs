@@ -128,7 +128,10 @@ describe("API schema", () => {
     const keys = ROUTES.map(routeKey);
     expect(new Set(keys).size).toBe(keys.length);
     const deps = {
-      controller: {},
+      controller: {
+        onBlockedRedirect: () => () => {},
+        onDownloadStarted: () => () => {},
+      },
       authority: {
         managedSpaces: new Set(),
         authorizeSpace() {},

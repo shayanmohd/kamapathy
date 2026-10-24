@@ -16,21 +16,13 @@ const WATCHED = [
   "Network.loadingFailed",
 ];
 
-// Section 6's controller hooks. They land with the controller's agent
-// navigation, and a tracker set works without them until then.
-type NavigationHooks = {
-  onBlockedRedirect?(
-    listener: (tabId: string, url: string) => void,
-  ): () => void;
-  onDownloadStarted?(listener: (tabId: string) => void): () => void;
-};
 export interface Trackers {
   for(session: TabSession): NavigationTracker;
   probe(session: TabSession, step: Step & { namespace: string }): Promise<void>;
   dispose(): void;
 }
 export interface TrackersDeps {
-  controller: AutomationController & NavigationHooks;
+  controller: AutomationController;
   sessions: { get(tabId: string): TabSession | undefined };
 }
 
@@ -49,12 +41,10 @@ export function createTrackers({
     return session ? live.get(session)?.tracker : undefined;
   };
   const stops = [
-    controller.onBlockedRedirect?.((tabId, url) =>
+    controller.onBlockedRedirect((tabId, url) =>
       trackerFor(tabId)?.markBlocked(url),
     ),
-    controller.onDownloadStarted?.((tabId) =>
-      trackerFor(tabId)?.markDownload(),
-    ),
+    controller.onDownloadStarted((tabId) => trackerFor(tabId)?.markDownload()),
   ];
   const open = (session: TabSession) => {
     const held = live.get(session);
@@ -112,7 +102,7 @@ export function createTrackers({
       );
     },
     dispose() {
-      for (const stop of stops) stop?.();
+      for (const stop of stops) stop();
     },
   };
 }
