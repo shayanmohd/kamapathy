@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { REPORT_PAGES, startFormSite } from "../tests/fixtures/form-site.mjs";
+import { SIGN_IN_PASSWORD } from "../tests/fixtures/sign-in-pages.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
@@ -2629,6 +2630,173 @@ try {
   });
   await cli(["close", details.id]);
   passed("agents keep working with the window closed on the same instance");
+  // Section 18: the agent works in a tab whose site has a saved password.
+  // The form script reports nothing while the agent has control, so no menu
+  // opens, nothing is filled, and nothing the agent typed is ever saved.
+  await browser.evaluate(({ Menu, safeStorage }, platform) => {
+    // A key that never leaves this process: a sealed value is its bytes
+    // reversed, so no keychain of this computer is asked for one.
+    safeStorage.isAsyncEncryptionAvailable = async () => true;
+    safeStorage.encryptStringAsync = async (text) =>
+      Buffer.from(Buffer.from(text, "utf8").reverse());
+    safeStorage.decryptStringAsync = async (sealed) => ({
+      result: Buffer.from(sealed).reverse().toString("utf8"),
+      shouldReEncrypt: false,
+    });
+    if (platform === "linux")
+      safeStorage.getSelectedStorageBackend = () => "gnome_libsecret";
+    globalThis.__passwordMenus = 0;
+    Menu.prototype.popup = function () {
+      globalThis.__passwordMenus++;
+    };
+  }, process.platform);
+  const savedLogin = await chrome.evaluate(
+    (login) => window.kamapathy.passwords.add(login),
+    {
+      url: fixture.origin,
+      username: "site-person",
+      password: SIGN_IN_PASSWORD,
+    },
+  );
+  assert.ok(savedLogin?.id, JSON.stringify(savedLogin));
+  const savedLogins = () =>
+    chrome.evaluate(() => window.kamapathy.passwords.list());
+  const loginsBefore = await savedLogins();
+  const menusOpened = () => browser.evaluate(() => globalThis.__passwordMenus);
+  const signInUrl = `${fixture.origin}/passwords/sign-in`;
+  const signedInUrl = `${fixture.origin}/passwords/signed-in`;
+  const agentSignIn = (await json(["open", space.id, signInUrl])).tab;
+  // The person is looking at the page and the window says it has the
+  // keyboard, so only the agent's control can hold the menu back.
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    space.id,
+  );
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentSignIn.id,
+  );
+  await browser.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].focus();
+    globalThis.__passwordFocused = BrowserWindow.prototype.isFocused;
+    BrowserWindow.prototype.isFocused = () => true;
+  });
+  // Only the page the person is looking at can open the menu, so the
+  // first-run dialog that has covered the pages since launch is closed and
+  // the check waits until this page is the one on screen.
+  await chrome.keyboard.press("Escape");
+  await chrome.locator(".welcome-modal").waitFor({ state: "detached" });
+  const shownPages = () =>
+    browser.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]
+        .contentView.children.filter((view) => view.getVisible())
+        .map((view) => view.webContents?.getURL() ?? ""),
+    );
+  await poll(async () => (await shownPages()).includes(signInUrl), {
+    timeoutMs: 10000,
+    label: "the agent's sign-in page on screen",
+  });
+  // The fields, read in the application: the agent cannot read a tab the
+  // person has taken over.
+  const signInFields = (url) =>
+    browser.evaluate(
+      ({ webContents }, [url, expression]) =>
+        webContents
+          .getAllWebContents()
+          .filter((contents) => contents.getURL() === url)
+          .at(-1)
+          .executeJavaScript(expression),
+      [
+        url,
+        "[document.getElementById('username').value, document.getElementById('password').value]",
+      ],
+    );
+  await cli(["click", agentSignIn.id, "#username"]);
+  await cli(["press", agentSignIn.id, "ArrowDown", "#username"]);
+  assert.equal(await menusOpened(), 0, "no fill menu opened for the agent");
+  assert.deepEqual(await signInFields(signInUrl), ["", ""], "nothing filled");
+  // The agent signs in with what it was given. The page it reaches has no
+  // password field, which is what an offer to save would wait for.
+  await cli(["fill", agentSignIn.id, "#username", "--stdin"], "agent-typed");
+  await cli(["fill", agentSignIn.id, "#password", "--stdin"], SIGN_IN_PASSWORD);
+  await cli(["click", agentSignIn.id, "#submit"]);
+  await cli(["wait", agentSignIn.id, "--stdin"], {
+    selector: "h1",
+    text: "Signed in",
+    timeoutMs: 5000,
+  });
+  await sleep(3000);
+  assert.deepEqual(
+    (await chrome.evaluate(() => window.kamapathy.getState())).passwordPrompts,
+    [],
+    "no offer to save what the agent typed",
+  );
+  assert.deepEqual(await savedLogins(), loginsBefore);
+  assert.equal(await menusOpened(), 0);
+  // The same values, submitted by the person after they take the space over.
+  // They were typed while capture was off, so they stay the agent's.
+  await json(["navigate", agentSignIn.id, signInUrl]);
+  await cli(["fill", agentSignIn.id, "#username", "--stdin"], "agent-typed");
+  await cli(["fill", agentSignIn.id, "#password", "--stdin"], SIGN_IN_PASSWORD);
+  await chrome.evaluate(
+    (id) =>
+      window.kamapathy.dispatch({
+        type: "space:ownership",
+        id,
+        owner: "human",
+      }),
+    space.id,
+  );
+  await waitForState(
+    chrome,
+    (state, id) =>
+      state.spaces.find((item) => item.id === id).owner === "human",
+    space.id,
+  );
+  await browser.evaluate(({ webContents }, url) => {
+    const contents = webContents
+      .getAllWebContents()
+      .filter((item) => item.getURL() === url)
+      .at(-1);
+    return contents
+      .executeJavaScript(
+        `(() => {
+          const box = document.getElementById("submit").getBoundingClientRect();
+          return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+        })()`,
+      )
+      .then((at) => {
+        contents.focus();
+        for (const type of ["mouseDown", "mouseUp"])
+          contents.sendInputEvent({
+            ...at,
+            type,
+            button: "left",
+            clickCount: 1,
+          });
+      });
+  }, signInUrl);
+  await poll(async () => (await shownPages()).includes(signedInUrl), {
+    timeoutMs: 10000,
+    label: "the page the person signed in to",
+  });
+  await sleep(3000);
+  assert.deepEqual(
+    (await chrome.evaluate(() => window.kamapathy.getState())).passwordPrompts,
+    [],
+    "no offer to save what the person submitted for the agent",
+  );
+  assert.deepEqual(await savedLogins(), loginsBefore);
+  await browser.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.prototype.isFocused = globalThis.__passwordFocused;
+    delete globalThis.__passwordFocused;
+  });
+  await chrome.evaluate(() =>
+    window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
+  );
+  await cli(["resume", space.id]);
+  await cli(["close", agentSignIn.id]);
+  passed("an agent tab with a saved login gets no menu, fill or save prompt");
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");

@@ -1961,6 +1961,78 @@ try {
     .getByRole("button", { name: "Close dialog", exact: true })
     .click();
   await passwordsDialog.waitFor({ state: "detached" });
+  // Section 7's sign-in bar with section 18's sign-ins in it: the person
+  // types a Basic auth login once, and the bar offers it the next time.
+  const basicUrl = `${signInSite.origin}/passwords/basic`;
+  const basicRealm = "Kamapathy test realm";
+  const basicUsername = "basic-user";
+  const basicPassword = "basic pass 1";
+  // The password manager's own bar carries a class of its own, so this is
+  // section 7's.
+  const signInBar = page.locator("section.prompt-bar:not(.password-prompt)");
+  await page.evaluate(
+    ([id, url]) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    [passwordTab, basicUrl],
+  );
+  await signInBar.getByText(`The site says "${basicRealm}"`).waitFor();
+  assert.equal(
+    await signInBar.locator(".prompt-bar-logins button").count(),
+    0,
+    "nothing is saved for this realm yet",
+  );
+  await signInBar.getByLabel("Username", { exact: true }).fill(basicUsername);
+  await signInBar.getByLabel("Password", { exact: true }).fill(basicPassword);
+  assert.equal(
+    await signInBar
+      .getByRole("checkbox", { name: "Save password" })
+      .isChecked(),
+    true,
+    "Save password starts ticked",
+  );
+  await signInBar.getByRole("button", { name: "Allow", exact: true }).click();
+  await signInBar.waitFor({ state: "detached" });
+  const basicPage = await pageAt(basicUrl);
+  await basicPage.getByRole("heading", { name: "Basic auth done" }).waitFor();
+  const httpLogin = await poll(
+    async () => {
+      const list = await page.evaluate(() => window.kamapathy.passwords.list());
+      return (
+        (Array.isArray(list) && list.find((login) => login.kind === "http")) ||
+        null
+      );
+    },
+    { label: "the saved sign-in" },
+  );
+  assert.deepEqual(
+    [httpLogin.origin, httpLogin.realm, httpLogin.username],
+    [signInSite.origin, basicRealm, basicUsername],
+  );
+  // Chromium keeps a sign-in for the rest of the session, so the next tab is
+  // asked again with the auth cache emptied.
+  await app.evaluate(
+    ({ webContents }, id) => webContents.fromId(id).session.clearAuthCache(),
+    await pageContents(basicUrl),
+  );
+  state = await page.evaluate(
+    (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+    basicUrl,
+  );
+  const secondBasicTab = state.activeTabId;
+  await signInBar
+    .getByRole("button", { name: `Sign in as ${basicUsername}` })
+    .click();
+  await signInBar.waitFor({ state: "detached" });
+  // Nothing was typed this time: main answered the page with the saved
+  // values itself.
+  const secondBasicPage = await pageAt(basicUrl);
+  await secondBasicPage
+    .getByRole("heading", { name: "Basic auth done" })
+    .waitFor();
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    secondBasicTab,
+  );
+  checked("the sign-in bar uses a saved HTTP login");
   await page.evaluate(
     (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
     passwordTab,
@@ -2191,6 +2263,131 @@ try {
     task,
   );
   checked("the agent bar and ring show who controls the space, and control moves both ways");
+  // Section 18 in a space with agent rules: the person took it over, so a
+  // fill asks first and fills nothing unless they confirm.
+  const agentSignInUrl = `${signInSite.origin}/passwords/sign-in`;
+  const agentLogin = await page.evaluate(
+    (login) => window.kamapathy.passwords.add(login),
+    {
+      url: signInSite.origin,
+      username: personUsername,
+      password: personPassword,
+    },
+  );
+  assert.ok(agentLogin?.id, JSON.stringify(agentLogin));
+  const agentSignInTab = (
+    await (
+      await api(`/spaces/${task}/tabs`, "POST", { url: agentSignInUrl })
+    ).json()
+  ).tab.id;
+  await waitForState(
+    page,
+    (state, id) => state.tabs.some((tab) => tab.id === id && !tab.loading),
+    agentSignInTab,
+  );
+  await agentBar.getByRole("button", { name: "Take over" }).click();
+  await waitForState(
+    page,
+    (state, id) =>
+      state.spaces.find((space) => space.id === id).owner === "human",
+    task,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentSignInTab,
+  );
+  await poll(
+    async () =>
+      (await visibleViews()).some((view) => view.url === agentSignInUrl),
+    { label: "the sign-in page the person took over" },
+  );
+  const agentSignInContents = await pageContents(agentSignInUrl);
+  const signInFields = () =>
+    app.evaluate(
+      ({ webContents }, id) =>
+        webContents
+          .fromId(id)
+          .executeJavaScript(
+            "[document.getElementById('username').value, document.getElementById('password').value]",
+          ),
+      agentSignInContents,
+    );
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].focus();
+    globalThis.__passwordFocused = BrowserWindow.prototype.isFocused;
+    BrowserWindow.prototype.isFocused = () => true;
+  });
+  let agentMenu;
+  // Cancel is the answer waiting for the first choice. The click comes again
+  // where the frame's script had not yet been told it may offer a fill.
+  for (let attempt = 1; attempt <= 3 && !agentMenu; attempt++) {
+    await passwords.expect([1]);
+    await clickInPage(agentSignInContents, "#username");
+    agentMenu = await poll(
+      async () => {
+        const { popups } = await passwords.read();
+        return popups.length ? popups : null;
+      },
+      { timeoutMs: 3000, label: "the fill menu in the agent space" },
+    ).catch(() => undefined);
+  }
+  assert.equal(agentMenu?.length, 1, "the fill menu opened once");
+  assert.deepEqual(agentMenu[0].items, [
+    personUsername,
+    "",
+    "Manage passwords...",
+  ]);
+  await passwords.chooseFill(0);
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const { messages } = await passwords.read();
+        return messages.length ? messages : null;
+      },
+      { label: "the question an agent space asks before filling" },
+    ),
+    [
+      "Agents can read pages in this space, including this password. | Fill | Cancel",
+    ],
+  );
+  assert.deepEqual(await signInFields(), ["", ""], "Cancel filled nothing");
+  await passwords.expect([0]);
+  await passwords.chooseFill(0);
+  assert.deepEqual(
+    await poll(
+      async () => {
+        const values = await signInFields();
+        return values.every(Boolean) ? values : null;
+      },
+      { label: "the form filled after confirming" },
+    ),
+    [personUsername, personPassword],
+  );
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.prototype.isFocused = globalThis.__passwordFocused;
+    delete globalThis.__passwordFocused;
+  });
+  // The space goes back to the agent with the tab and the login gone.
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    agentSignInTab,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.passwords.remove(id),
+    agentLogin.id,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentTab,
+  );
+  await agentBar.getByRole("button", { name: "Let agent continue" }).click();
+  await waitForState(
+    page,
+    (state, id) =>
+      state.spaces.find((space) => space.id === id).owner === "agent",
+    task,
+  );
+  checked("an agent space confirms before filling");
   // Section 4: a full-page capture of the page the person is looking at
   // leaves its view and its scroll position where they were.
   const tallPage = `${origin}/tall`;
