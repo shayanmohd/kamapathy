@@ -320,6 +320,11 @@ async function syncAutomation(): Promise<void> {
         controller?.resetAgentAccess();
       }
     }
+    // The running server follows the Page scripts switch, so turning it off
+    // fails the script calls in flight.
+    automation?.setPageScripts(
+      controller?.state.settings.agentPageScripts !== false,
+    );
     // The client reads this to avoid starting Kamapathy after access was turned off.
     if (controller && !quitting)
       setAgentAccess(agent, controller.state.settings.automationEnabled);

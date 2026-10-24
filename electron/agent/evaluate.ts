@@ -1,5 +1,4 @@
 import { ApiError, fail } from "./errors";
-import type { AutomationController } from "./server";
 import { ContextLostError } from "./session/errors";
 import type { TabSession } from "./session/tab-session";
 import type { Step } from "./session/types";
@@ -66,15 +65,9 @@ export function scriptFields(body: Record<string, unknown>): ScriptSource {
   };
 }
 
-// Page scripts are the person's setting. Section 8 adds its switch and the
-// rest of the surface it gates.
-export function requireScripts(controller: AutomationController): void {
-  if (controller.state.settings.agentPageScripts) return;
-  fail(
-    "agent_scripts_off",
-    "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
-  );
-}
+// Page scripts are the person's setting. Section 8's gate owns the reading,
+// and this name is the one the waits and the routes already call.
+export { requirePageScripts as requireScripts } from "./page-scripts";
 
 // The one expression an evaluation sends. A function source is called with
 // its argument, with the line separators JSON leaves raw escaped so the

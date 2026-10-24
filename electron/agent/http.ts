@@ -12,6 +12,7 @@ import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
+import type { PageScripts } from "./page-scripts";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
 import type { AutomationController } from "./server";
@@ -114,6 +115,8 @@ export interface RouteDeps {
   dialogs: Dialogs;
   downloads: Downloads;
   presence: AgentPresence;
+  /** Section 8's Page scripts gate, shared by every call it gates. */
+  pageScripts: PageScripts;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

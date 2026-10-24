@@ -2,7 +2,12 @@ import { statSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ApiError } from "../electron/agent/errors";
 import { takeWaitSlot } from "../electron/agent/expectations";
+import {
+  createPageScripts,
+  SCRIPTS_OFF_MESSAGE,
+} from "../electron/agent/page-scripts";
 import {
   createExtractor,
   type Extractor,
@@ -3700,6 +3705,142 @@ describe("local automation socket", () => {
       field: "intervalMs",
     });
     expect(controller.contents.scripts).toEqual([]);
+  });
+
+  // Section 8's Page scripts gate: the switch, the signal in-flight script
+  // calls share, and the hooks a switch-off runs.
+  it("the gate reads the live setting", async () => {
+    expect(SCRIPTS_OFF_MESSAGE).toBe(
+      "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
+    );
+    const { tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("ready"));
+    const gate = createPageScripts(controller);
+    const body = { expression: "window.ready", timeoutMs: 1000 };
+    controller.state.settings.agentPageScripts = false;
+    expect(gate.on).toBe(false);
+    expect(() => gate.require()).toThrow(SCRIPTS_OFF_MESSAGE);
+    const off = await failure(await waitForFunction(tab.id, body));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    expect(calls).toEqual([]);
+    // The setting is the gate's only source of truth, so the same body runs
+    // as soon as it is back on.
+    controller.state.settings.agentPageScripts = true;
+    expect(gate.on).toBe(true);
+    expect(() => gate.require()).not.toThrow();
+    const ran = await waitForFunction(tab.id, body);
+    expect(ran.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    gate.dispose();
+  });
+
+  it("turning Page scripts off aborts in-flight script calls once", () => {
+    const gate = createPageScripts(controller);
+    const signal = gate.signal();
+    expect(signal.aborted).toBe(false);
+    const ran: string[] = [];
+    const stopFirst = gate.onOff(() => {
+      ran.push("first");
+      throw new Error("a hook that fails leaves the rest to run");
+    });
+    gate.onOff(() => ran.push("second"));
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBeInstanceOf(ApiError);
+    expect(signal.reason.code).toBe("agent_scripts_off");
+    expect(signal.reason.message).toBe(SCRIPTS_OFF_MESSAGE);
+    expect(ran).toEqual(["first", "second"]);
+    // Off again is no switch at all: nothing aborts twice and no hook runs.
+    gate.apply(false);
+    expect(ran).toEqual(["first", "second"]);
+    expect(gate.signal()).toBe(signal);
+    // A hook that let go is not called by the next switch-off.
+    stopFirst();
+    controller.state.settings.agentPageScripts = true;
+    gate.apply(true);
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(ran).toEqual(["first", "second", "second"]);
+    gate.dispose();
+  });
+
+  it("the signal is fresh after the switch comes back", () => {
+    const gate = createPageScripts(controller);
+    const first = gate.signal();
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(first.aborted).toBe(true);
+    expect(() => gate.require()).toThrow(SCRIPTS_OFF_MESSAGE);
+    controller.state.settings.agentPageScripts = true;
+    gate.apply(true);
+    const second = gate.signal();
+    expect(second).not.toBe(first);
+    expect(second.aborted).toBe(false);
+    // The call the switch-off failed keeps its own aborted signal.
+    expect(first.aborted).toBe(true);
+    expect(() => gate.require()).not.toThrow();
+    gate.dispose();
+  });
+
+  it("a batch holding a function wait fails validation while the switch is off", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy(true));
+    controller.state.settings.agentPageScripts = false;
+    const batch = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "snapshot" },
+          { type: "wait-for-function", expression: "true" },
+        ],
+      }),
+    );
+    expect(batch.status).toBe(403);
+    expect(batch.error).toMatchObject({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    // The plan answered before its first action ran.
+    expect(calls).toEqual([]);
+    expect(page.scripts).toEqual([]);
+  });
+
+  it("the server exposes setPageScripts", async () => {
+    const { tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("ready"));
+    const gate = createPageScripts(controller);
+    const ran: string[] = [];
+    gate.onOff(() => ran.push("off"));
+    const body = { expression: "window.ready", timeoutMs: 1000 };
+    // What the app does when the person turns the switch off: the server
+    // applies the setting, and the state change itself runs the effects once.
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    controller.emit();
+    expect(ran).toEqual(["off"]);
+    expect(gate.signal().aborted).toBe(true);
+    const off = await failure(await waitForFunction(tab.id, body));
+    expect(off.status).toBe(403);
+    expect(off.error.code).toBe("agent_scripts_off");
+    expect(calls).toEqual([]);
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    controller.emit();
+    expect(gate.signal().aborted).toBe(false);
+    expect(ran).toEqual(["off"]);
+    const allowed = await waitForFunction(tab.id, body);
+    expect(allowed.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    // A gate that was disposed hears no more of the person's choices.
+    gate.dispose();
+    controller.state.settings.agentPageScripts = false;
+    controller.emit();
+    expect(ran).toEqual(["off"]);
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {

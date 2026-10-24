@@ -46,6 +46,9 @@ export const settingsCopy = {
   isolate: "Isolate agent spaces",
   isolateNote:
     "Give every new agent space a temporary session of its own instead of your sign-ins.",
+  scripts: "Page scripts",
+  scriptsNote:
+    "Agents can run their own scripts and developer commands in agent tabs. Scripts see what the page sees, including values that snapshots hide.",
   spaces:
     "Agent spaces use your sign-ins unless you isolate them, and disappear when you quit. Take over at any time.",
   activity: "Recent activity",

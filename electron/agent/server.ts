@@ -29,6 +29,7 @@ import {
   type RouteDeps,
 } from "./http";
 import { createDispatchers } from "./input/dispatch";
+import { createPageScripts } from "./page-scripts";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
 import { createPresence } from "./presence";
@@ -185,6 +186,8 @@ export interface AutomationServer {
   endSpace(id: string): void;
   /** The person's answer to a request for a space. */
   answerRequest(id: string, answer: { allow: boolean; spaceId?: string }): void;
+  /** The Page scripts setting: off fails the script calls in flight. */
+  setPageScripts(on: boolean): void;
   close(): Promise<void>;
 }
 // End-to-end checks read tab sessions through this probe on globalThis in the
@@ -262,6 +265,8 @@ export async function startAutomation(
     },
   });
   const referenceSession = randomBytes(12).toString("hex");
+  // The person's switch over every call that runs the agent's own code.
+  const pageScripts = createPageScripts(controller);
   const presence = createPresence({ controller, authority });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
@@ -353,6 +358,7 @@ export async function startAutomation(
     dialogs,
     downloads,
     presence,
+    pageScripts,
   });
   const deps: RouteDeps = {
     controller,
@@ -366,6 +372,7 @@ export async function startAutomation(
     dialogs,
     downloads,
     presence,
+    pageScripts,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -589,6 +596,9 @@ export async function startAutomation(
     instance,
     grantSpace,
     answerRequest: requests.answer,
+    setPageScripts(on: boolean) {
+      pageScripts.apply(on);
+    },
     endSpace(id: string) {
       const space = controller.state.spaces.find((item) => item.id === id);
       if (!space) throw new Error("Space was not found.");
@@ -610,6 +620,7 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        pageScripts.dispose();
         // A pending wait is answered before its tab session is released.
         expectations.endAll("access_off");
         // No tab keeps an armed policy or a handler once the server stops.
