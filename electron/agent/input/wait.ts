@@ -4,7 +4,7 @@
 import type { WebContents } from "electron";
 import type { ActionBlocker, ActionKind, Blocked } from "../dom/actions";
 import type { Level } from "../dom/select";
-import { ApiError, fail } from "../errors";
+import { fail } from "../errors";
 import type { Park } from "../http";
 import { CdpTimeoutError } from "../session/errors";
 
@@ -164,8 +164,9 @@ export async function runAttempts<T>(
       if (WEAK.includes(result.blocked.blocker)) weak = result.blocked;
       else real = result.blocked;
     }
-    // Nothing is sent again once a press has gone out.
-    if (context.gesture.committed) break;
+    // Nothing is sent again once a press has gone out, and a client that
+    // left is not waited for.
+    if (context.gesture.committed || options.signal?.aborted) break;
     context.attempt += 1;
     const left = until - Date.now();
     if (left <= 0) break;
@@ -177,17 +178,17 @@ export async function runAttempts<T>(
   }
   const waitedMs = Date.now() - started;
   const stop = real ?? weak;
-  if (stop?.blocker === "no_match")
+  if (stop?.blocker === "no_match") {
+    const selector = options.selector ?? stop.selector;
     return fail(
       "no_match",
       "Nothing on the page matched this selector before the timeout. Take a snapshot to check the page.",
       {
-        ...((options.selector ?? stop.selector)
-          ? { selector: options.selector ?? stop.selector }
-          : {}),
+        ...(selector === undefined ? {} : { selector }),
         waitedMs,
       },
     );
+  }
   const reason = stop ? REASONS[stop.blocker] : "The target was not ready.";
   return fail(
     "action_timeout",
@@ -268,7 +269,7 @@ export async function confirmDelivery<T>(deps: {
     )
       return delivered;
     if (attempt >= MAX_DELIVERIES - 1 || deps.budget - Date.now() < SPARE_MS)
-      throw new ApiError(
+      return fail(
         "input_not_delivered",
         "The page did not accept native input. Inspect the page before retrying.",
       );

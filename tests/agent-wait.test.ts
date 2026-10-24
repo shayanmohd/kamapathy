@@ -40,6 +40,7 @@ const loop = <T>(
     park: Park;
     selector?: string;
     action?: string;
+    signal?: AbortSignal;
   },
   attempt: Parameters<typeof runAttempts<T>>[1],
 ) =>
@@ -50,6 +51,7 @@ const loop = <T>(
       park: options.park,
       action: options.action ?? "click",
       ...(options.selector === undefined ? {} : { selector: options.selector }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     },
     attempt,
   );
@@ -125,6 +127,33 @@ describe("the attempt loop", () => {
     // between every pair of attempts.
     expect(state.parks).toBe(at.length - 1);
     expect(state.others).toBe(at.length - 1);
+  });
+
+  it("stops waiting when the request's own deadline or its client is gone", async () => {
+    const { state, park } = parker();
+    let attempts = 0;
+    // The request's budget bounds the loop, whatever timeout it was given.
+    const bounded = await ended(
+      loop({ park, timeoutMs: 60000, deadline: Date.now() + 120 }, async () => {
+        attempts += 1;
+        return { done: false, blocked: { blocker: "covered" } };
+      }),
+    );
+    expect(bounded.code).toBe("action_timeout");
+    expect(attempts).toBe(3);
+    // A client that left is not waited for.
+    const aborted = new AbortController();
+    let after = 0;
+    const gone = await ended(
+      loop({ park, timeoutMs: 60000, signal: aborted.signal }, async () => {
+        after += 1;
+        aborted.abort();
+        return { done: false, blocked: { blocker: "hidden" } };
+      }),
+    );
+    expect(after).toBe(1);
+    expect(gone.code).toBe("action_timeout");
+    expect(state.parks).toBe(2);
   });
 
   it("makes exactly one attempt when the timeout is zero", async () => {
