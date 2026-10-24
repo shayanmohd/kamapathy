@@ -28,6 +28,7 @@ import {
   send,
   type RouteDeps,
 } from "./http";
+import { registerCounters } from "./input/counters";
 import { createDispatchers } from "./input/dispatch";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
@@ -259,6 +260,8 @@ export async function startAutomation(
     buffers: new EventBufferPool(),
     onOpen: (session) => {
       documents.watch(session);
+      // Every frame counts the input it receives from its first document on.
+      void registerCounters(session).catch(() => {});
     },
   });
   const referenceSession = randomBytes(12).toString("hex");

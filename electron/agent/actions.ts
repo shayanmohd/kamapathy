@@ -6,6 +6,7 @@ import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
 import { nativeDrag } from "./input/actions";
+import { confirmDelivery } from "./input/wait";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
 import { createResolver } from "./resolve";
@@ -275,49 +276,43 @@ export function createActions(deps: {
       await session.send(command.method, command.parameters, gesture);
     }
   };
-  // Chromium reports a successful dispatch for native input that it drops while a
-  // page has not rendered a frame since its last navigation. Confirm the page
-  // received the input and repeat only input that provably never arrived.
-  const deliverNativeInput = async <T>(
+  // Section 5's delivery check, reading this tab's page counters and waiting
+  // out its frames. The gesture goes out again only on positive evidence
+  // that no frame received it.
+  const deliverNativeInput = <T>(
     id: string,
     session: TabSession,
     kind: "mouse" | "key",
     deliver: (armed: Record<string, unknown>) => Promise<T>,
     step: Step,
-    epoch: number,
   ): Promise<T> => {
-    for (let attempt = 0; ; attempt += 1) {
-      const armed = await evaluatePage(id, session, "input", {}, step.deadline, step);
-      const delivered = await deliver(armed);
-      // Input that already changed the page was delivered.
-      if (session.epoch !== epoch) return delivered;
-      const received = await evaluatePage(
-        id,
-        session,
-        "input",
-        {},
-        step.deadline,
-        step,
-      );
-      const before = armed[kind];
-      const after = received[kind];
-      // Repeat input only on positive evidence that the page never received it.
-      if (typeof before !== "number" || typeof after !== "number" || after > before)
-        return delivered;
-      if (attempt >= 2)
-        return fail(
-          "input_not_delivered",
-          "The page did not accept native input. Inspect the page before retrying.",
+    // The counters the gesture was armed with, which a drag compares against.
+    let armed: Record<string, unknown> = {};
+    return confirmDelivery({
+      kind,
+      counters: async () =>
+        (armed = await evaluatePage(
+          id,
+          session,
+          "input",
+          {},
+          step.deadline,
+          step,
+        )),
+      frames: async () => {
+        await evaluatePage(
+          id,
+          session,
+          "frame",
+          {},
+          Math.min(step.deadline, Date.now() + 2000),
+          step,
         );
-      await evaluatePage(
-        id,
-        session,
-        "frame",
-        {},
-        Math.min(step.deadline, Date.now() + 2000),
-        step,
-      ).catch(() => {});
-    }
+      },
+      epoch: () => session.epoch,
+      budget: step.deadline,
+      deliver: () => deliver(armed),
+    });
   };
   const executeToolAction = async (
     id: string,
@@ -426,7 +421,6 @@ export function createActions(deps: {
               epoch,
             ),
           step,
-          epoch,
         );
       }
       // Let synchronous submit/navigation handlers start, then wait for their load.
@@ -474,7 +468,6 @@ export function createActions(deps: {
               evaluatePage(id, session, operation, {}, evaluateBy, gesture),
           }),
         step,
-        epoch,
       );
       await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
       await readyContents(id, remaining(deadline), false, run.park);
@@ -534,7 +527,6 @@ export function createActions(deps: {
             epoch,
           ),
         step,
-        epoch,
       );
       await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
       await readyContents(id, remaining(deadline), false, run.park);

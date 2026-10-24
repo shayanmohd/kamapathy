@@ -6,6 +6,10 @@ import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageOperation } from "../electron/automation-dom";
 import { ApiError, errorBody, toApiError } from "../electron/agent/errors";
+import {
+  COUNTER_SOURCE,
+  registerCounters,
+} from "../electron/agent/input/counters";
 import { createDispatchers } from "../electron/agent/input/dispatch";
 import type { AutomationController } from "../electron/agent/server";
 import {
@@ -3632,6 +3636,80 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       MAIN,
       FRAME_TREE,
     ]);
+  });
+
+  it("installs the input counter init script once per session and again after a re-attach", async () => {
+    const { session, cdp } = await framed();
+    session.onSessionSetup(focusHook(session));
+    const sent = cdp.sent.length;
+    const stop = await registerCounters(session);
+    const COUNTERS = {
+      method: "Page.addScriptToEvaluateOnNewDocument",
+      params: {
+        source: expect.stringContaining("kamapathyInput"),
+        runImmediately: true,
+        worldName: WORLD_NAME,
+      },
+    };
+    expect(cdp.sent.slice(sent)).toEqual([
+      COUNTERS,
+      { ...COUNTERS, sessionId: "child-1" },
+    ]);
+    const before = cdp.sent.length;
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(cdp.sent.slice(before)).toEqual([
+      ...SETUP,
+      FOCUS,
+      COUNTERS,
+      FRAME_TREE,
+    ]);
+    const removed = cdp.sent.length;
+    stop();
+    await settle();
+    expect(cdp.sent.slice(removed).map((command) => command.method)).toEqual([
+      "Page.removeScriptToEvaluateOnNewDocument",
+    ]);
+  });
+
+  it("counts a frame's native input where the input operation reads it", async () => {
+    const listeners = new Map<string, ((event: unknown) => void)[]>();
+    const world: Record<string, unknown> = {
+      document: { title: "A page" },
+      addEventListener: (name: string, listener: (event: unknown) => void) => {
+        listeners.set(name, [...(listeners.get(name) ?? []), listener]);
+      },
+      WeakSet,
+      setTimeout,
+    };
+    // The wrapper runs the source in each new document, and again in the
+    // current one after a re-attach, so it installs its listeners once.
+    const run = () => runInNewContext(`(() => {${COUNTER_SOURCE}})()`, world);
+    run();
+    run();
+    expect([...listeners.keys()]).toEqual(["mousedown", "keydown", "dragstart"]);
+    expect([...listeners.values()].map((list) => list.length)).toEqual([
+      1, 1, 1,
+    ]);
+    expect(world.kamapathyInput).toEqual({ mouse: 0, key: 0, drag: 0 });
+    listeners.get("mousedown")![0]({});
+    listeners.get("mousedown")![0]({});
+    listeners.get("keydown")![0]({});
+    listeners.get("dragstart")![0]({ defaultPrevented: false });
+    // A drag the page cancels in its own handler never counts.
+    listeners.get("dragstart")![0]({ defaultPrevented: true });
+    await settle();
+    expect(world.kamapathyInput).toEqual({ mouse: 2, key: 1, drag: 1 });
+    // The input operation reads the counters and the documents this script
+    // already listens to, so neither counts an event twice.
+    expect(PAGE_SOURCE).toContain("kamapathyInput");
+    expect(PAGE_SOURCE).toContain("kamapathyListening");
+    expect(
+      (world.kamapathyListening as WeakSet<object>).has(
+        world.document as object,
+      ),
+    ).toBe(true);
   });
 
   it("wraps init scripts to return at once outside web frames", async () => {
