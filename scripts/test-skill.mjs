@@ -3,6 +3,7 @@ import { prepareDesktopRuntime } from "./desktop-runtime.mjs";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { existsSync, statSync } from "node:fs";
 import {
   mkdtemp,
@@ -18,6 +19,10 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 import { REPORT_PAGES, startFormSite } from "../tests/fixtures/form-site.mjs";
+import {
+  NAVIGATION_PATHS,
+  navigationLog,
+} from "../tests/fixtures/navigation-pages.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
@@ -2301,6 +2306,525 @@ try {
     { code: "unknown_field", field: "zz" },
   );
   passed("a raw socket POST with an extra field gets 400 unknown_field");
+  // Section 6 in the real app: every load state, the navigation errors and
+  // refusals, the reload rules, a guard an agent overrides, and the four
+  // waits with every matcher kind.
+  // Playwright answers a page dialog it sees, which would race Kamapathy's
+  // own answer to the leave guard, so every page of this app gets a listener
+  // that leaves its dialogs to Kamapathy.
+  const ownDialogs = (page) => page.on("dialog", () => {});
+  for (const page of browser.windows()) ownDialogs(page);
+  browser.on("window", ownDialogs);
+  const navUrl = (path) => `${fixture.origin}${path}`;
+  const navTab = (
+    await json(["open", space.id, navUrl(NAVIGATION_PATHS.landing)])
+  ).tab;
+  // When the fixture last answered a path, and when it was last asked for it.
+  const servedAt = (path) =>
+    Math.max(
+      0,
+      ...navigationLog.served
+        .filter((entry) => entry.path === path)
+        .map((entry) => entry.at),
+    );
+  const askedAt = (path) =>
+    Math.max(
+      0,
+      ...fixture.requests
+        .filter((entry) => entry.path === path)
+        .map((entry) => entry.at),
+    );
+  // A script in the agent's own Node, so one process drives a whole story
+  // and a wait can run beside an action.
+  const runPage = (body) =>
+    cli([
+      "run",
+      "-e",
+      `const page = (await (await space(${JSON.stringify(space.id)})).tabs()).find((item) => item.id === ${JSON.stringify(navTab.id)});\n${body}`,
+    ]);
+  const runJson = async (body) =>
+    JSON.parse((await runPage(body)).output.trim().split("\n").at(-1));
+  const slow = navUrl(NAVIGATION_PATHS.slow);
+  const committed = await cli(["navigate", navTab.id, slow]);
+  const commitAt = Date.now();
+  assert.equal(committed.output.trim(), `tab ${navTab.id} ${slow} 200`);
+  const reachedAt = {};
+  for (const state of ["domcontentloaded", "load", "networkidle"]) {
+    const answer = await cli([
+      "wait-for-load-state",
+      navTab.id,
+      state,
+      "--timeout",
+      "30000",
+    ]);
+    reachedAt[state] = Date.now();
+    assert.equal(answer.output.trim(), `ok: ${state} ${slow}`);
+  }
+  assert.ok(
+    commitAt < reachedAt.domcontentloaded &&
+      reachedAt.domcontentloaded < reachedAt.load &&
+      reachedAt.load < reachedAt.networkidle,
+    JSON.stringify({ commitAt, ...reachedAt }),
+  );
+  // Each state waited for what holds it: the blocking script, then the image
+  // the DOMContentLoaded handler asks for, then the quiet window after the
+  // fetches the load event starts.
+  assert.ok(
+    servedAt("/nav/slow.js") <= reachedAt.domcontentloaded &&
+      servedAt("/nav/slow.js") <= askedAt("/nav/slow.png") &&
+      servedAt("/nav/slow.png") <= reachedAt.load,
+    JSON.stringify({
+      script: servedAt("/nav/slow.js"),
+      image: [askedAt("/nav/slow.png"), servedAt("/nav/slow.png")],
+      reachedAt,
+    }),
+  );
+  const stagger = servedAt("/nav/stagger");
+  assert.ok(
+    reachedAt.networkidle - stagger >= 400 &&
+      stagger > reachedAt.domcontentloaded,
+    JSON.stringify({ stagger, reachedAt }),
+  );
+  // domcontentloaded waits for the handlers themselves, not for readyState
+  // interactive: the page's own mark is already set when the wait answers.
+  await cli(["navigate", navTab.id, navUrl(NAVIGATION_PATHS.handler)]);
+  await cli(["wait-for-load-state", navTab.id, "domcontentloaded"]);
+  const handler = await cli(
+    ["wait-for-function", navTab.id, "--stdin", "--timeout", "0"],
+    "window.handlerDone === true",
+  );
+  assert.equal(handler.output.trim(), "ok: value true");
+  passed("every load state is reached in order");
+  const atCommit = await runJson(`
+await page.navigate(${JSON.stringify(slow)});
+const during = await page.info();
+const loaded = await page.waitForLoadState("load", { timeout: 30000 });
+const after = await page.info();
+console.log(JSON.stringify({
+  during: { readyState: during.readyState, loading: during.loading },
+  state: loaded.state,
+  after: after.readyState,
+  url: page.url,
+}));
+`);
+  // Still loading: the image the handler asked for has not arrived.
+  assert.equal(atCommit.during.loading, true);
+  assert.notEqual(atCommit.during.readyState, "complete");
+  assert.equal(atCommit.state, "load");
+  assert.equal(atCommit.after, "complete");
+  assert.equal(atCommit.url, slow);
+  // The answer's status reaches the terminal, 404 included.
+  const missingUrl = navUrl(NAVIGATION_PATHS.missing);
+  assert.equal(
+    (await cli(["navigate", navTab.id, missingUrl])).output.trim(),
+    `tab ${navTab.id} ${missingUrl} 404`,
+  );
+  passed(
+    "navigate(url) returns at commit while the slow page is still loading",
+  );
+  const referer = `${fixture.origin}/nav/reading-list?from=the-agent`;
+  const referers = navigationLog.referers.length;
+  await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.referer),
+    "--referer",
+    referer,
+  ]);
+  assert.deepEqual(navigationLog.referers.slice(referers), [referer]);
+  passed("Referer is sent exactly as given");
+  // A port nothing listens on, so Chromium refuses the connection itself.
+  const closedPort = await new Promise((settle, reject) => {
+    const listener = createServer();
+    listener.on("error", reject);
+    listener.listen(0, "127.0.0.1", () => {
+      const { port } = listener.address();
+      listener.close(() => settle(port));
+    });
+  });
+  const failures = await runJson(`
+const seen = {};
+const caught = async (name, go) => {
+  try {
+    await go();
+    seen[name] = null;
+  } catch (error) {
+    seen[name] = {
+      code: error.code, status: error.status, url: error.url,
+      netError: error.netError, errorCode: error.errorCode,
+      httpStatus: error.httpStatus, armed: error.armed, by: error.by,
+      retryable: error.retryable, message: error.message,
+    };
+  }
+};
+await caught("noContent", () => page.goto(${JSON.stringify(navUrl(NAVIGATION_PATHS.noContent))}));
+await caught("attachment", () => page.goto(${JSON.stringify(navUrl(NAVIGATION_PATHS.attachment))}));
+// The page sends itself elsewhere while a navigation of the agent's is still
+// in flight, which replaces it.
+await page.goto(${JSON.stringify(navUrl(`${NAVIGATION_PATHS.jsRedirect}?after=1500`))});
+await caught("interrupted", () => page.goto(${JSON.stringify(`${fixture.origin}/hold`)}, { timeout: 20000 }));
+await caught("refused", () => page.goto("http://127.0.0.1:" + ${closedPort} + "/nav/landing", { timeout: 20000 }));
+console.log(JSON.stringify(seen));
+`);
+  assert.deepEqual(
+    [
+      failures.noContent.code,
+      failures.noContent.status,
+      failures.noContent.url,
+      failures.noContent.netError,
+      failures.noContent.httpStatus,
+    ],
+    [
+      "navigation_failed",
+      422,
+      navUrl(NAVIGATION_PATHS.noContent),
+      "ERR_ABORTED",
+      204,
+    ],
+  );
+  assert.equal(typeof failures.noContent.errorCode, "number");
+  assert.deepEqual(
+    [
+      failures.attachment.code,
+      failures.attachment.status,
+      failures.attachment.url,
+      failures.attachment.armed,
+    ],
+    ["navigation_download", 422, navUrl(NAVIGATION_PATHS.attachment), false],
+  );
+  assert.deepEqual(
+    [
+      failures.interrupted.code,
+      failures.interrupted.status,
+      failures.interrupted.url,
+      failures.interrupted.by,
+    ],
+    [
+      "navigation_interrupted",
+      409,
+      `${fixture.origin}/hold`,
+      navUrl(NAVIGATION_PATHS.landing),
+    ],
+  );
+  assert.deepEqual(
+    [
+      failures.refused.code,
+      failures.refused.netError,
+      failures.refused.retryable,
+      failures.refused.url,
+    ],
+    [
+      "navigation_failed",
+      "ERR_CONNECTION_REFUSED",
+      true,
+      `http://127.0.0.1:${closedPort}/nav/landing`,
+    ],
+  );
+  // Chromium's numeric code is only there when the page's own failure event
+  // arrived before the protocol's; the name is what the retry rule reads.
+  assert.equal(typeof failures.refused.errorCode, "number");
+  passed("each navigation error carries its fields");
+  const refusals = [
+    ["file:///etc/passwd", "Agents cannot open local files."],
+    ["data:text/html,<p>Inline</p>", "Agents cannot open data: or blob: URLs."],
+    [
+      `http://agent:secret@127.0.0.1:${new URL(fixture.origin).port}${NAVIGATION_PATHS.landing}`,
+      "Open the address without credentials.",
+    ],
+  ];
+  for (const [address, hint] of refusals) {
+    const stopped = await cli(["navigate", navTab.id, address], undefined, {
+      failure: true,
+    });
+    assert.match(
+      stopped.errors,
+      /400 invalid_url: Use a complete HTTP or HTTPS URL without embedded credentials, or about:blank\./,
+    );
+    assert.ok(stopped.errors.includes(`hint: ${hint}`), stopped.errors);
+  }
+  assert.equal(
+    (await cli(["navigate", navTab.id, "about:blank"])).output.trim(),
+    `tab ${navTab.id} about:blank`,
+  );
+  passed("scheme refusals carry their hints");
+  const cached = navUrl(NAVIGATION_PATHS.cached);
+  const fetches = navigationLog.scriptFetches;
+  await cli(["navigate", navTab.id, cached, "--wait-until", "load"]);
+  assert.equal(navigationLog.scriptFetches, fetches + 1);
+  // A plain reload keeps what the browser may cache; past the cache the
+  // fixture is asked for the script again.
+  assert.equal(
+    (await cli(["reload", navTab.id])).output.trim(),
+    `tab ${navTab.id} ${cached} 200`,
+  );
+  assert.equal(navigationLog.scriptFetches, fetches + 1);
+  const refetched = await runJson(`
+const fresh = await page.reload({ ignoreCache: true });
+console.log(JSON.stringify({ url: fresh.tab.url, status: fresh.httpStatus, waitUntil: fresh.waitUntil }));
+`);
+  assert.deepEqual(refetched, { url: cached, status: 200, waitUntil: "load" });
+  assert.equal(navigationLog.scriptFetches, fetches + 2);
+  const posts = navigationLog.posts;
+  await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.postForm),
+    "--wait-until",
+    "load",
+  ]);
+  const postForm = await observe(navTab.id);
+  await cli(["click", navTab.id, ref(postForm, "Post the form")]);
+  await cli(["wait", navTab.id, "--stdin"], {
+    selector: "#posted",
+    timeoutMs: 8000,
+  });
+  assert.equal(navigationLog.posts, posts + 1);
+  const resubmit = await cli(["reload", navTab.id], undefined, {
+    failure: true,
+  });
+  assert.match(
+    resubmit.errors,
+    /409 reload_would_resubmit: Reloading this page would send its form again\./,
+  );
+  assert.equal(navigationLog.posts, posts + 1);
+  passed("reload follows the page's rules");
+  await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.guarded),
+    "--wait-until",
+    "load",
+  ]);
+  const guarded = await observe(navTab.id);
+  // The guard only asks once the page has had a gesture, which the click
+  // gives it.
+  await cli(["click", navTab.id, ref(guarded, "Touch this page")]);
+  await cli(["wait", navTab.id, "--stdin"], {
+    selector: "#touched",
+    text: "Touched",
+    timeoutMs: 8000,
+  });
+  const left = await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.landing),
+    "--wait-until",
+    "load",
+  ]);
+  assert.deepEqual(left.output.trim().split("\n"), [
+    `tab ${navTab.id} ${navUrl(NAVIGATION_PATHS.landing)} 200`,
+    "dialog beforeunload accepted",
+  ]);
+  const overrides = (
+    await chrome.evaluate(() => window.kamapathy.getState())
+  ).activity.filter(
+    (item) =>
+      item.spaceId === space.id &&
+      item.message === "Agent left a page that asked it to stay",
+  );
+  assert.equal(overrides.length, 1);
+  passed("a guarded page leaves under agent control and reports it");
+  const scrolled = await runJson(`
+await page.goto(${JSON.stringify(navUrl(NAVIGATION_PATHS.info))});
+await page.scroll("down", 600);
+const read = await page.info();
+const inPage = await page.waitForFunction(() => ({
+  viewport: { width: Math.round(innerWidth), height: Math.round(innerHeight) },
+  scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
+  document: {
+    width: Math.round(document.documentElement.scrollWidth),
+    height: Math.round(document.documentElement.scrollHeight),
+  },
+  readyState: document.readyState,
+}));
+console.log(JSON.stringify({
+  read: {
+    viewport: read.viewport, scroll: read.scroll, document: read.document,
+    readyState: read.readyState, loading: read.loading,
+  },
+  inPage: inPage.value,
+}));
+`);
+  assert.deepEqual(scrolled.read, { ...scrolled.inPage, loading: false });
+  assert.equal(scrolled.read.readyState, "complete");
+  assert.ok(scrolled.read.scroll.y > 0, JSON.stringify(scrolled.read));
+  const printedInfo = (await cli(["info", navTab.id])).output
+    .trim()
+    .split("\n");
+  assert.equal(
+    printedInfo[1],
+    `viewport ${scrolled.read.viewport.width}x${scrolled.read.viewport.height} scroll ${scrolled.read.scroll.x},${scrolled.read.scroll.y} document ${scrolled.read.document.width}x${scrolled.read.document.height} complete`,
+  );
+  passed("info reports the page after scrolling");
+  const pushed = `${navUrl(NAVIGATION_PATHS.pushed)}?step=1`;
+  const matched = await runJson(`
+const seen = [];
+// A glob, a RegExp and a predicate, each against a commit the page makes in
+// place and one a 302 produced.
+for (const matcher of ["**/nav/pushed?step=1", /\\/nav\\/pushed\\?step=1$/, (url) => url.pathname === "/nav/pushed"]) {
+  await page.goto(${JSON.stringify(navUrl(NAVIGATION_PATHS.pushState))});
+  seen.push((await page.waitForURL(matcher, { timeout: 20000 })).url);
+}
+for (const matcher of ["**/nav/landing", /\\/nav\\/landing$/, (url) => url.pathname === "/nav/landing"]) {
+  await page.goto(${JSON.stringify(navUrl(`${NAVIGATION_PATHS.jsRedirect}?to=${NAVIGATION_PATHS.redirect}&after=700`))});
+  seen.push((await page.waitForURL(matcher, { timeout: 20000 })).url);
+}
+console.log(JSON.stringify(seen));
+`);
+  assert.deepEqual(matched, [
+    pushed,
+    pushed,
+    pushed,
+    navUrl(NAVIGATION_PATHS.landing),
+    navUrl(NAVIGATION_PATHS.landing),
+    navUrl(NAVIGATION_PATHS.landing),
+  ]);
+  // A link the agent clicks opens the page in a popup, so the wait ends by
+  // naming it instead of running out.
+  const inPopup = await runJson(`
+await page.goto(${JSON.stringify(navUrl(NAVIGATION_PATHS.popupOpener))});
+// The answer is read at once, so the rejection is never left unhandled
+// while the click runs.
+const waiting = page.waitForURL("**/nav/landing", { timeout: 20000 }).then(
+  () => null,
+  (error) => ({
+    code: error.code, status: error.status, lastUrl: error.lastUrl,
+    popup: error.popup, message: error.message,
+  }),
+);
+await page.waitForTimeout(500);
+await page.click("#open-landing");
+console.log(JSON.stringify(await waiting));
+`);
+  assert.deepEqual(
+    [inPopup.code, inPopup.status, inPopup.lastUrl, inPopup.popup.url],
+    [
+      "url_opened_in_popup",
+      409,
+      navUrl(NAVIGATION_PATHS.popupOpener),
+      navUrl(NAVIGATION_PATHS.landing),
+    ],
+  );
+  assert.ok(
+    inPopup.message.includes(
+      `popup ${inPopup.popup.label ?? inPopup.popup.id} opened from it at ${navUrl(NAVIGATION_PATHS.landing)}`,
+    ),
+    inPopup.message,
+  );
+  await cli(["close", inPopup.popup.id]);
+  passed("every URL matcher kind works, and a popup match is reported");
+  await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.poll),
+    "--wait-until",
+    "load",
+  ]);
+  const quiet = await callApi(
+    `/tabs/${navTab.id}/wait-for-load-state`,
+    "POST",
+    { state: "networkidle", timeoutMs: 1500 },
+  );
+  assert.equal(quiet.status, 504);
+  const pending = (await quiet.json()).error;
+  assert.deepEqual(
+    [pending.code, pending.awaited, pending.state, pending.readyState],
+    ["wait_timeout", "load_state", "networkidle", "complete"],
+  );
+  assert.ok(pending.inflight >= 1, JSON.stringify(pending));
+  assert.ok(
+    pending.pending.some((address) => address.endsWith("/nav/poll-wait")),
+    JSON.stringify(pending.pending),
+  );
+  passed("networkidle names what is pending");
+  await cli([
+    "navigate",
+    navTab.id,
+    navUrl(NAVIGATION_PATHS.changing),
+    "--wait-until",
+    "load",
+  ]);
+  // The page changes on a ladder, so each state is still to come when its
+  // wait starts: the element arrives invisible, becomes visible, then one
+  // paragraph turns invisible and another leaves.
+  for (const [target, state, line] of [
+    ["#later", "attached", "ok: attached 1 match"],
+    ["#later", "visible", "ok: visible 1 match"],
+    ["#fading", "hidden", "ok: hidden 1 match"],
+    ["#leaving", "detached", "ok: detached 0 matches"],
+  ]) {
+    const answer = await cli([
+      "wait-for-selector",
+      navTab.id,
+      target,
+      "--state",
+      state,
+    ]);
+    assert.equal(answer.output.trim(), line);
+  }
+  const duplicate = await cli(
+    ["wait-for-selector", navTab.id, "text=Save"],
+    undefined,
+    { failure: true },
+  );
+  assert.match(duplicate.errors, /422 ambiguous_match: /);
+  // A same-origin frame is searched again on every check, so what it adds
+  // late is found. The frame from the other origin is left alone; section 9
+  // in phase 7 is where it joins the search.
+  assert.equal(
+    (
+      await cli(["wait-for-selector", navTab.id, "#late-in-frame"])
+    ).output.trim(),
+    "ok: visible 1 match",
+  );
+  const across = await cli(
+    ["wait-for-selector", navTab.id, "#only-across", "--timeout", "1500"],
+    undefined,
+    { failure: true },
+  );
+  assert.match(
+    across.errors,
+    /504 wait_timeout: The selector #only-across did not reach visible within 1500 ms\. The last check matched 0 elements, 0 of them visible\./,
+  );
+  passed("selector states and ambiguity behave");
+  const value = await cli(
+    ["wait-for-function", navTab.id, "--stdin"],
+    'document.querySelector("#later") ? document.title : false',
+  );
+  assert.equal(value.output.trim(), 'ok: value "Changing page"');
+  const thrown = await cli(
+    ["wait-for-function", navTab.id, "--stdin"],
+    '(() => { throw new TypeError("The page said no"); })()',
+    { failure: true },
+  );
+  assert.match(
+    thrown.errors,
+    /422 script_error: The page function failed at line 1, column \d+: TypeError: The page said no/,
+  );
+  // A takeover ends a wait that is still running.
+  const neverTrue = cli(
+    ["wait-for-function", navTab.id, "--stdin", "--timeout", "30000"],
+    "window.neverTrue === true",
+    { failure: true },
+  );
+  await sleep(2000);
+  await chrome.evaluate(
+    (id) =>
+      window.kamapathy.dispatch({
+        type: "space:ownership",
+        id,
+        owner: "human",
+      }),
+    space.id,
+  );
+  const ended = await neverTrue;
+  assert.match(ended.errors, /409 human_control: /);
+  assert.match(
+    (await cli(["resume", space.id])).output,
+    /^ok: agent control resumed/,
+  );
+  await cli(["close", navTab.id]);
+  passed("function waits answer values and errors, and a takeover ends one");
   // Section 12: setup gives agents the skill and a working command.
   const setUp = await chrome.evaluate(() =>
     window.kamapathy.applyAgentSetup({
