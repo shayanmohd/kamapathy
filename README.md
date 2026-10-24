@@ -260,7 +260,8 @@ Controls:
 
 - Agents reach only the spaces they create and the ones you let them use: choose **Let an agent use this space** in a space's options, or allow an agent's request for one. Tabs in your other spaces stay out of reach, and in a space you let an agent use, each tab you had there stays yours until the agent adopts it.
 - Agent spaces use your sign-ins unless you isolate them. **Isolate agent spaces** in Settings > Agents gives every new agent space a temporary session of its own, and an agent can ask for one isolated space with `space create "Name" --isolated`. Either way, agent spaces deny downloads and never see a permission prompt, and they disappear when you quit unless you keep one as a personal space after its agent is done.
-- Snapshots are compact: visible text plus controls with short refs such as `@e12`, their state and current values. Password, one-time code and card fields read as `(value hidden)`. Snapshots read open shadow roots and same-origin frames, nested ones included, and list cross-origin frames without reading them.
+- Snapshots are compact: visible text plus controls with short refs such as `@e12`, their state and current values. Password, one-time code and card fields read as `(value hidden)`. Snapshots read open shadow roots and same-origin frames, nested ones included, and list cross-origin frames without reading them. A snapshot can print the page's structure as an outline instead of its text, keep only what is on screen, read one control's subtree, continue in parts, and give each control a locator that still names it in a later run.
+- Agents name a control by its ref or by a selector: CSS, `text=`, `role=`, `href=`, `xpath=`, an ending `:has-text("...")` or `:text-is("...")`, and an ending `>> nth=N`. A selector that matches nothing, or several controls an action could take, is answered with counts and candidates instead of a guess.
 - Agents can click, fill, select files, press keys, drag, scroll, wait for changes and run several steps in one batch or one script.
 - Cross-origin frames, canvas editors and JavaScript dialogs still need a handoff: the agent asks you to continue there.
 - The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. **Stop** in the agent bar ends the agent's access to that one space, and turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
@@ -291,6 +292,20 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - A failed run prints where in the script it failed, a caret under a syntax error, whether the call can be retried and up to two hints.
 - `run` and `repl` load the workspace's `.env` and each `--env-file`, never changing a variable that is already set.
 - `<command> --help` and `-h` print that command's help and run nothing, and `--` ends option parsing.
+- `invalid_selector` answers 400 instead of 422 and carries the `selector`, a `reason`, the `forms` and often a `hint`; CSS a page rejects is 400 too.
+- A selector matching nothing answers `422 no_match` with `selector` and `waitedMs`, in place of the old message about 0 elements.
+- A selector matching several elements an action can take answers `422 ambiguous_match` with counts and up to three candidates with refs; hidden and disabled duplicates no longer make an action's selector ambiguous, while a snapshot `selector` still counts hidden matches.
+- CSS selectors search open shadow roots, one tree at a time, so they no longer stop at a shadow boundary or have to match uniquely across a whole document.
+- A well-formed ref no snapshot of that page issued answers `404 unknown_ref` before any page work, where the page used to answer `stale_ref`; `stale_ref` now names the `ref`.
+- `selector: "@e12"` acts as that ref, and `@21`, `ref=21` and `21` answer `invalid_selector` with a hint naming the one form.
+- Snapshots carry a `header` by default, so the first line of `snapshot` and `page.text()` names the page, its space and the space's tabs instead of the title; `header: false` or `--no-header` restores the title line.
+- Screenshots no longer need a shown, unminimized window, and `screenshot_unavailable` is retired.
+- Screenshots are CSS pixels by default, so on a 2x display `GET /tabs/:id/screenshot`, `screenshot <tab-id> <file.png>` and `page.screenshot(path)` give half the pixel width and height they gave before; `scale: "device"` or `--scale device` keeps device pixels.
+- A full-page capture, or a clip outside the viewport, fires one `resize`, one visual viewport resize and matchMedia changes in the page, may give it a 1 by 1 pixel viewport for an instant, leaves unloaded lazy content unloaded and paints fixed elements at the current scroll; the first capture of an agent tab in a hidden window turns its `visibilityState` to visible for good.
+- `GET /tabs/:id/screenshot` allows 15000 ms, not 30000, for the load wait and the capture together.
+- `screenshot` prints `saved <path> (<width>x<height>)`, and `--json` adds `width`, `height`, `clip` and `pixelRatio`.
+- `/health` answers `apiLevel: 3`, and `--version` prints API level 3.
+- With a JavaScript dialog open, `role=` selectors, snapshot locators and screenshots fail at once with `409 dialog_open` instead of waiting out their timeout.
 
 </details>
 
