@@ -141,6 +141,8 @@ export interface ImportSource {
   default: boolean;
   // Sign-ins come from the Chromium family only.
   signInsAvailable: boolean;
+  // Saved passwords come from the Chromium family too.
+  passwordsAvailable: boolean;
   // macOS keeps the data folder from Kamapathy until the person allows it.
   status: "ready" | "needs_permission";
 }
@@ -165,6 +167,8 @@ export interface ImportRequest {
   bookmarks: boolean;
   history: boolean;
   signIns: SignInsTarget;
+  // Saved passwords, which go to the password manager.
+  passwords?: boolean;
 }
 export interface ImportOutcome {
   bookmarks: number;
@@ -172,6 +176,8 @@ export interface ImportOutcome {
   signIns: number;
   spaces: { id: string; name: string }[];
   warnings: string[];
+  // Logins added, only when passwords were asked for.
+  passwords?: number;
 }
 export type ImportErrorCode =
   | "import_invalid_request"

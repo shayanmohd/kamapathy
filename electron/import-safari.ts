@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { crc32, inflateRawSync } from "node:zlib";
 import type { ImportOutcome } from "../shared/types";
 import {
@@ -178,19 +179,22 @@ function json(data: Buffer): unknown {
   }
 }
 
-/** By extension: .html and .htm are bookmarks, .json with history entries is history. */
+/** By extension: .html and .htm are bookmarks, .json with history entries is history, and Passwords.csv is section 18's. */
 export function readSafariArchive(
   bytes: Uint8Array,
-  options: { bookmarks: boolean; history: boolean },
+  options: { bookmarks: boolean; history: boolean; passwords?: boolean },
 ): {
   bookmarks: ImportedBookmark[];
   history: ImportedVisit[];
+  passwords?: Buffer;
   warnings: string[];
 } {
   const bookmarks: ImportedBookmark[] = [];
   const history: ImportedVisit[] = [];
   let hasBookmarks = false;
   let hasHistory = false;
+  let hasPasswords = false;
+  let passwords: Buffer | undefined;
   for (const file of readZip(bytes)) {
     const name = file.name.toLowerCase();
     if (name.endsWith(".html") || name.endsWith(".htm")) {
@@ -199,46 +203,73 @@ export function readSafariArchive(
         bookmarks.push(...parseBookmarksHtml(file.data.toString("utf8")));
       continue;
     }
-    // Saved passwords belong to the password manager and are never read here.
+    // Saved passwords are read by the password manager, never parsed here.
+    if (basename(name) === "passwords.csv") {
+      hasPasswords = true;
+      if (options.passwords) passwords ??= file.data;
+      continue;
+    }
     if (!name.endsWith(".json")) continue;
     const parsed = json(file.data);
     if (!holdsHistory(parsed)) continue;
     hasHistory = true;
     if (options.history) history.push(...parseHistoryJson(parsed));
   }
-  if (!hasBookmarks && !hasHistory) throw notExport();
+  // Passwords alone are an export only when the person asked for them.
+  if (!hasBookmarks && !hasHistory && !(options.passwords && hasPasswords))
+    throw notExport();
   const warnings: string[] = [];
   if (options.bookmarks && !hasBookmarks)
     warnings.push("That file had no bookmarks in it.");
   if (options.history && !hasHistory)
     warnings.push("That file had no history in it.");
   history.sort((a, b) => b.visitedAt - a.visitedAt);
-  return { bookmarks: unique(bookmarks), history: unique(history), warnings };
+  return {
+    bookmarks: unique(bookmarks),
+    history: unique(history),
+    ...(passwords ? { passwords } : {}),
+    warnings,
+  };
 }
 
 export async function runSafariImport(
   target: ImportTarget,
   bytes: unknown,
   options: unknown,
+  // Section 18's import of the archive's Passwords.csv, handed over by main.
+  mergePasswords?: (
+    csv: Buffer,
+  ) => Promise<{ added: number; warnings: string[] }>,
 ): Promise<ImportOutcome> {
-  const { bookmarks, history } = record(options);
+  const { bookmarks, history, passwords } = record(options);
   if (
     !(bytes instanceof Uint8Array) ||
     bytes.byteLength < EOCD_LENGTH ||
     bytes.byteLength > SAFARI_ARCHIVE_LIMIT ||
     typeof bookmarks !== "boolean" ||
     typeof history !== "boolean" ||
-    (!bookmarks && !history)
+    (passwords !== undefined && typeof passwords !== "boolean") ||
+    (!bookmarks && !history && passwords !== true)
   )
     throw new ImportError("import_invalid_request", INVALID_REQUEST);
-  const data = readSafariArchive(bytes, { bookmarks, history });
+  const wanted = passwords === true && mergePasswords !== undefined;
+  const data = readSafariArchive(bytes, {
+    bookmarks,
+    history,
+    passwords: wanted,
+  });
   const counts = await applyImported(target, data);
+  const saved =
+    wanted && data.passwords && mergePasswords
+      ? await mergePasswords(data.passwords)
+      : undefined;
   // Safari's export carries no cookies, so no sign-in ever comes from it.
   return {
     bookmarks: counts.bookmarks,
     history: counts.history,
     signIns: 0,
     spaces: [],
-    warnings: data.warnings,
+    warnings: [...data.warnings, ...(saved?.warnings ?? [])],
+    ...(wanted ? { passwords: saved?.added ?? 0 } : {}),
   };
 }

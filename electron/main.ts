@@ -56,12 +56,13 @@ import {
 import { runSafariImport } from "./import-safari";
 import { clearDownloadFolder } from "./agent/downloads";
 import { startAutomation } from "./agent/server";
-import { writeCsvFile } from "./passwords/csv";
+import { readLoginCsv, writeCsvFile } from "./passwords/csv";
+import { passwordErrorBody } from "./passwords/errors";
 import { connectForms, type FormBroker } from "./passwords/forms";
 import { registerPasswordIpc } from "./passwords/ipc";
 import { createReauth } from "./passwords/reauth";
 import { safeStorageSealer } from "./passwords/seal";
-import { Vault } from "./passwords/vault";
+import { Vault, type ImportedLogin } from "./passwords/vault";
 import {
   createAgentSetup,
   parseAgentSetupRequest,
@@ -499,6 +500,42 @@ async function importReply(
   }
 }
 
+// Saved passwords from an import, merged once. A vault that cannot take them
+// becomes one warning, so bookmarks, history and sign-ins still arrive.
+async function mergeImportedPasswords(
+  logins: readonly ImportedLogin[],
+  neverSaved: readonly string[],
+): Promise<{ added: number; warnings: string[] }> {
+  if (!logins.length && !neverSaved.length) return { added: 0, warnings: [] };
+  try {
+    const current = vault!;
+    await current.open();
+    const summary = await current.merge([...logins], [...neverSaved], {
+      replace: false,
+    });
+    return { added: summary.added, warnings: summary.warnings };
+  } catch (error) {
+    const body = passwordErrorBody(error);
+    if (!body) throw error;
+    return { added: 0, warnings: [body.message] };
+  }
+}
+
+// The Passwords.csv inside a Safari export, read by the file rules.
+async function mergeImportedCsv(
+  csv: Buffer,
+): Promise<{ added: number; warnings: string[] }> {
+  let rows: ImportedLogin[];
+  try {
+    rows = readLoginCsv(csv).rows;
+  } catch (error) {
+    const body = passwordErrorBody(error);
+    if (!body) throw error;
+    return { added: 0, warnings: [body.message] };
+  }
+  return mergeImportedPasswords(rows, []);
+}
+
 function registerIpc(): void {
   ipcMain.handle("kamapathy:state", (event) => validateSender(event).state);
   ipcMain.handle("kamapathy:dispatch", async (event, action: BrowserAction) => {
@@ -563,14 +600,23 @@ function registerIpc(): void {
   });
   ipcMain.handle("kamapathy:import", (event, request: unknown) => {
     const owner = validateSender(event);
-    return importReply(() => runImport(owner, parseImportRequest(request)));
+    return importReply(() =>
+      runImport(
+        owner,
+        parseImportRequest(request),
+        undefined,
+        mergeImportedPasswords,
+      ),
+    );
   });
   // The export file the person chose, up to SAFARI_ARCHIVE_LIMIT.
   ipcMain.handle(
     "kamapathy:import-safari",
     (event, bytes: unknown, options: unknown) => {
       const owner = validateSender(event);
-      return importReply(() => runSafariImport(owner, bytes, options));
+      return importReply(() =>
+        runSafariImport(owner, bytes, options, mergeImportedCsv),
+      );
     },
   );
   // Opens the macOS privacy pane where the person lets Kamapathy read

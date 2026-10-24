@@ -17,6 +17,7 @@ import {
   errorText,
   importRequest,
   initialSelection,
+  passwordsAvailable,
   SAFARI_FILE_LIMIT,
   selectableSource,
   signInsAvailable,
@@ -28,6 +29,7 @@ import {
   stepNumber,
   type OnboardingStep,
 } from "../lib/onboarding";
+import { isPasswordError } from "../lib/passwords";
 import { defaultBrowserCopy, importCopy, welcomeCopy } from "../copy";
 import { Modal, SiteIcon } from "./ui";
 import "./Welcome.css";
@@ -51,6 +53,9 @@ export function ImportPanel({
   const [bookmarks, setBookmarks] = useState(true);
   const [history, setHistory] = useState(true);
   const [signIns, setSignIns] = useState(startSignIns);
+  const [passwords, setPasswords] = useState(true);
+  // A locked or missing vault has nowhere to put a password.
+  const [vaultBlocked, setVaultBlocked] = useState(false);
   const [destination, setDestination] = useState<"shared" | "separate">(
     "shared",
   );
@@ -71,6 +76,26 @@ export function ImportPanel({
       },
       () => {
         if (alive) setSources([]);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // The vault is asked once, as the panel opens.
+  useEffect(() => {
+    let alive = true;
+    bridge.passwords.status().then(
+      (status) => {
+        if (!alive) return;
+        setVaultBlocked(
+          isPasswordError(status) ||
+            status.state === "locked" ||
+            status.state === "unavailable",
+        );
+      },
+      () => {
+        if (alive) setVaultBlocked(true);
       },
     );
     return () => {
@@ -118,11 +143,14 @@ export function ImportPanel({
   // Safari is listed on macOS only, where the keychain asks for a password.
   const mac = (sources ?? []).some((source) => source.id === "safari");
   const canSignIns = sources ? signInsAvailable(sources, selection) : false;
+  const hasPasswords = sources ? passwordsAvailable(sources, selection) : false;
+  const withPasswords = passwords && !vaultBlocked;
   const request = importRequest({
     selection,
     bookmarks,
     history,
     signIns: signIns && canSignIns,
+    passwords: hasPasswords && withPasswords,
     destination,
   });
   function choose(source: string, profiles: Set<string>) {
@@ -178,7 +206,12 @@ export function ImportPanel({
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     await send(
-      () => bridge.importSafariArchive(bytes, { bookmarks, history }),
+      () =>
+        bridge.importSafariArchive(bytes, {
+          bookmarks,
+          history,
+          ...(withPasswords ? { passwords: true } : {}),
+        }),
       false,
     );
   }
@@ -257,6 +290,13 @@ export function ImportPanel({
                 )}
               </>
             );
+            // Firefox keeps its passwords where Kamapathy cannot read them.
+            const note =
+              source.id === "firefox" ? (
+                <span className="import-note import-source-note">
+                  {importCopy.firefoxPasswords}
+                </span>
+              ) : null;
             const only =
               source.profiles.length === 1 ? source.profiles[0] : undefined;
             if (only)
@@ -274,6 +314,7 @@ export function ImportPanel({
                     <span className="import-source-name">{source.name}</span>
                     {tags}
                   </span>
+                  {note}
                 </label>
               );
             return (
@@ -292,6 +333,7 @@ export function ImportPanel({
                     </button>
                   )}
                 </div>
+                {note}
                 {source.profiles.length > 1 && (
                   <div className="import-profiles">
                     {source.profiles.map((profile) => (
@@ -341,8 +383,22 @@ export function ImportPanel({
           />
           {importCopy.signIns}
         </label>
+        {hasPasswords && (
+          <label>
+            <input
+              type="checkbox"
+              checked={withPasswords}
+              disabled={vaultBlocked}
+              onChange={(event) => setPasswords(event.target.checked)}
+            />
+            {importCopy.passwords}
+          </label>
+        )}
       </div>
       {!canSignIns && <p className="import-note">{importCopy.signInsHint}</p>}
+      {hasPasswords && (
+        <p className="import-note">{importCopy.passwordsNote}</p>
+      )}
       {signIns && canSignIns && (
         <div
           className="import-destination"
@@ -399,6 +455,18 @@ export function ImportPanel({
         >
           <strong>{importCopy.safariTitle}</strong>
           <p className="import-note">{importCopy.safariSteps}</p>
+          <label className="import-safari-choice">
+            <input
+              type="checkbox"
+              checked={withPasswords}
+              disabled={vaultBlocked}
+              onChange={(event) => setPasswords(event.target.checked)}
+            />
+            {importCopy.passwords}
+          </label>
+          {!hasPasswords && (
+            <p className="import-note">{importCopy.passwordsNote}</p>
+          )}
           <input
             ref={chooser}
             type="file"

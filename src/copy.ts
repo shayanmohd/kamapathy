@@ -116,6 +116,9 @@ export const signInNoticeCopy = {
   copied: "Link copied.",
 } as const;
 
+const passwordsItem = (count: number) =>
+  `${count} ${count === 1 ? "password" : "passwords"}`;
+
 export const importCopy = {
   title: "Import bookmarks and history",
   description:
@@ -144,6 +147,10 @@ export const importCopy = {
     "Each profile gets a personal space of its own, with sign-ins kept apart from your other spaces.",
   keychainNote:
     "macOS asks for your password once for each browser, so Kamapathy can read its sign-ins.",
+  passwords: "Passwords",
+  passwordsNote: "Kept in Kamapathy's password manager. Agents can't use them.",
+  firefoxPasswords:
+    "Export passwords from Firefox as a CSV file, then import it in Passwords.",
   needsPermission: "Needs permission",
   permission: "Kamapathy needs permission to read this browser's data.",
   openSettings: "Open system settings",
@@ -153,11 +160,22 @@ export const importCopy = {
   chooseZip: "Choose .zip file",
   dropZip: "Drop the Safari .zip file here",
   tooLarge: "That file is larger than 16 MB. Choose the file Safari exported.",
-  done: (bookmarks: number, history: number, signIns?: number) => {
-    const counted = `Imported ${bookmarks} ${bookmarks === 1 ? "bookmark" : "bookmarks"}`;
-    const sites = `${history} ${history === 1 ? "site" : "sites"}`;
-    if (signIns === undefined) return `${counted} and ${sites}.`;
-    return `${counted}, ${sites} and ${signIns} ${signIns === 1 ? "sign-in" : "sign-ins"}.`;
+  donePasswords: passwordsItem,
+  done: (
+    bookmarks: number,
+    history: number,
+    signIns?: number,
+    passwords?: number,
+  ) => {
+    const items = [
+      `${bookmarks} ${bookmarks === 1 ? "bookmark" : "bookmarks"}`,
+      `${history} ${history === 1 ? "site" : "sites"}`,
+    ];
+    if (signIns !== undefined)
+      items.push(`${signIns} ${signIns === 1 ? "sign-in" : "sign-ins"}`);
+    if (passwords !== undefined) items.push(passwordsItem(passwords));
+    const last = items.pop();
+    return `Imported ${items.join(", ")} and ${last}.`;
   },
   spaces: (names: string[]) => `New spaces: ${names.join(", ")}.`,
   errors: {

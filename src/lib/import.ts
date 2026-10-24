@@ -13,6 +13,7 @@ export interface ImportChoices {
   bookmarks: boolean;
   history: boolean;
   signIns: boolean;
+  passwords: boolean;
   destination: "shared" | "separate";
 }
 /** The Safari export file the panel accepts, matching the IPC channel's limit. */
@@ -42,12 +43,19 @@ export function importRequest(choices: ImportChoices): ImportRequest | null {
     [...ids].map((profile) => ({ source, profile })),
   );
   if (!profiles.length) return null;
-  if (!choices.bookmarks && !choices.history && !choices.signIns) return null;
+  if (
+    !choices.bookmarks &&
+    !choices.history &&
+    !choices.signIns &&
+    !choices.passwords
+  )
+    return null;
   return {
     profiles,
     bookmarks: choices.bookmarks,
     history: choices.history,
     signIns: choices.signIns ? choices.destination : "none",
+    ...(choices.passwords ? { passwords: true } : {}),
   };
 }
 
@@ -61,6 +69,16 @@ export function signInsAvailable(
   );
 }
 
+export function passwordsAvailable(
+  sources: readonly ImportSource[],
+  selection: Selection,
+): boolean {
+  return sources.some(
+    (source) =>
+      source.passwordsAvailable && (selection.get(source.id)?.size ?? 0) > 0,
+  );
+}
+
 export function blockedSources(
   sources: readonly ImportSource[],
 ): ImportSource[] {
@@ -68,9 +86,14 @@ export function blockedSources(
 }
 
 export function doneLine(outcome: ImportOutcome, withSignIns: boolean): string {
-  return withSignIns
-    ? importCopy.done(outcome.bookmarks, outcome.history, outcome.signIns)
-    : importCopy.done(outcome.bookmarks, outcome.history);
+  // Imports without a password read as they did before.
+  const passwords = outcome.passwords ? outcome.passwords : undefined;
+  return importCopy.done(
+    outcome.bookmarks,
+    outcome.history,
+    withSignIns ? outcome.signIns : undefined,
+    passwords,
+  );
 }
 
 export function errorText(error: ImportFailure["error"]): string {
