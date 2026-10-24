@@ -296,6 +296,17 @@ export const newTabCopy = {
 } as const;
 
 export const passwordsCopy = {
+  prompt: {
+    save: (host: string) => `Save password for ${host}?`,
+    update: (username: string, host: string) =>
+      `Update password for ${username} on ${host}?`,
+    username: "Username",
+    hidden: "••••••••",
+    saveButton: "Save",
+    never: "Never for this site",
+    notNow: "Not now",
+    updateButton: "Update",
+  },
   title: "Passwords",
   search: "Search passwords...",
   opening: "Unlocking passwords...",

@@ -1,6 +1,8 @@
 import type {
+  BrowserState,
   PasswordErrorBody,
   PasswordImportSummary,
+  PasswordPrompt,
   PasswordResult,
   SavedLoginSummary,
 } from "../../shared/types";
@@ -14,6 +16,16 @@ export function isPasswordError<T>(
   const body = (result as { error?: PasswordErrorBody } | null | undefined)
     ?.error;
   return !!body && typeof body.code === "string";
+}
+
+// The prompt bar holds one request: section 7's prompt for the active tab
+// comes first, then that tab's offer to save or update a password.
+export function shownPasswordPrompt(
+  state: BrowserState,
+): PasswordPrompt | undefined {
+  if ((state.prompts ?? []).some((item) => item.tabId === state.activeTabId))
+    return undefined;
+  return state.passwordPrompts.find((item) => item.tabId === state.activeTabId);
 }
 
 export function loginHost(origin: string): string {
