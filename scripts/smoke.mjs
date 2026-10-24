@@ -1,13 +1,17 @@
 import { poll, waitForState } from "./wait.mjs";
 import { prepareDesktopRuntime } from "./desktop-runtime.mjs";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createCipheriv, createHash, pbkdf2Sync } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, statSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { _electron as electron } from "playwright";
+import { textPdf } from "../tests/fixtures/pdf/index.mjs";
 import {
   resolveSocket,
   socketFetch,
@@ -18,6 +22,17 @@ let failRecoverablePage = true;
 const fixture = createServer((request, response) => {
   if (request.url === "/recoverable" && failRecoverablePage) {
     request.socket.destroy();
+    return;
+  }
+  // Shows the sign-ins the browser sent with the request.
+  if (request.url === "/whoami") {
+    response.writeHead(200, {
+      "Content-Type": "text/html",
+      "Cache-Control": "no-store",
+    });
+    response.end(
+      `<!doctype html><html lang="en"><head><title>Who am I</title></head><body><p id="cookies">${request.headers.cookie ?? "none"}</p></body></html>`,
+    );
     return;
   }
   response.writeHead(200, {
@@ -86,12 +101,86 @@ await writeFile(
   insert.run("https://shop.example/", "Shop", 1, chromeTime(Date.now() - 180000));
   history.close();
 }
+const chromeMicroseconds = (millis) => (millis + 11644473600000) * 1000;
+// One sign-in in that profile, encrypted under the Safe Storage key this
+// platform derives. Windows wraps its key with DPAPI, which nothing can stand
+// in for, so there the panel's note is all that is checked.
+const importedCookie = { name: "kamapathy_smoke", value: "imported" };
+const keychainPassword = "smoke-keychain";
+const stubDirectory = join(profile, "bin");
+if (process.platform !== "win32") {
+  const key =
+    process.platform === "darwin"
+      ? pbkdf2Sync(keychainPassword, "saltysalt", 1003, 16, "sha1")
+      : pbkdf2Sync("peanuts", "saltysalt", 1, 16, "sha1");
+  const cipher = createCipheriv("aes-128-cbc", key, Buffer.alloc(16, 0x20));
+  const encrypted = Buffer.concat([
+    Buffer.from("v10"),
+    cipher.update(
+      Buffer.concat([
+        createHash("sha256").update("127.0.0.1").digest(),
+        Buffer.from(importedCookie.value),
+      ]),
+    ),
+    cipher.final(),
+  ]);
+  await mkdir(join(chromeData, "Default", "Network"), { recursive: true });
+  const cookies = new DatabaseSync(
+    join(chromeData, "Default", "Network", "Cookies"),
+  );
+  cookies.exec(
+    "CREATE TABLE cookies(creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL, top_frame_site_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, encrypted_value BLOB NOT NULL, path TEXT NOT NULL, expires_utc INTEGER NOT NULL, is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL, last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL, is_persistent INTEGER NOT NULL, priority INTEGER NOT NULL, samesite INTEGER NOT NULL, source_scheme INTEGER NOT NULL)",
+  );
+  cookies
+    .prepare(
+      "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, priority, samesite, source_scheme) VALUES (?, ?, '', ?, '', ?, '/', ?, 0, 0, ?, 1, 1, 1, 1, 1)",
+    )
+    .run(
+      chromeMicroseconds(Date.now()),
+      "127.0.0.1",
+      importedCookie.name,
+      encrypted,
+      chromeMicroseconds(Date.now() + 86400000),
+      chromeMicroseconds(Date.now()),
+    );
+  cookies.close();
+}
+// Kamapathy reads the key by calling `security`, as it calls `plutil`, so a
+// stub first on PATH keeps the real keychain out of this run.
+if (process.platform === "darwin") {
+  await mkdir(stubDirectory, { recursive: true });
+  const stub = join(stubDirectory, "security");
+  await writeFile(
+    stub,
+    `#!/bin/sh\nif [ "$1" = "find-generic-password" ]; then\n  echo ${keychainPassword}\n  exit 0\nfi\nexit 44\n`,
+  );
+  await chmod(stub, 0o755);
+  // The import panel offers Safari where Safari keeps its data.
+  await mkdir(join(home, "Library", "Safari"), { recursive: true });
+}
+const notAZip = resolve("tests/fixtures/import/safari/not-a-zip.zip");
+// A local page whose script would rename it, and a PDF another app hands over.
+const localFile = join(profile, "local.html");
+await writeFile(
+  localFile,
+  '<!doctype html><html lang="en"><head><title>Static</title></head><body><h1>Local file</h1><script>document.title = "Scripted"</script></body></html>',
+);
+const localFileUrl = pathToFileURL(localFile).href;
+const pdfFile = join(profile, "report.pdf");
+await writeFile(
+  pdfFile,
+  textPdf([["Quarterly report"], ["Page two"]], { title: "Quarterly report" }),
+);
+const pdfFileUrl = pathToFileURL(pdfFile).href;
 const env = {
   ...process.env,
   KAMAPATHY_USER_DATA: profile,
   ...(process.platform === "win32"
     ? { USERPROFILE: home, LOCALAPPDATA: home, APPDATA: join(home, "roaming") }
     : { HOME: home }),
+  ...(process.platform === "darwin"
+    ? { PATH: `${stubDirectory}${delimiter}${process.env.PATH ?? ""}` }
+    : {}),
 };
 delete env.ELECTRON_RUN_AS_NODE;
 const visibleViews = () =>
@@ -156,15 +245,52 @@ try {
   const welcome = page.locator(".welcome-modal");
   await welcome.getByRole("heading", { name: "Welcome to Kamapathy" }).waitFor();
   assert.equal(state.settings.welcomed, false);
-  await welcome.getByRole("radio", { name: /^Google Chrome/ }).check();
+  const welcomeStep = welcome.locator(".welcome-step");
+  const atStep = (number) =>
+    poll(async () => (await welcomeStep.textContent()) === `Step ${number} of 6`, {
+      label: `step ${number} of the welcome dialog`,
+    });
+  await atStep(1);
+  assert.equal(await welcome.locator(".welcome-cards p").count(), 2);
+  await welcome.getByRole("button", { name: "Get started" }).click();
+  await welcome.getByRole("heading", { name: "Your data stays here" }).waitFor();
+  await atStep(2);
+  // Back goes to the first step, and the walk carries on from there.
+  await welcome.getByRole("button", { name: "Back" }).click();
+  await atStep(1);
+  await welcome.getByRole("button", { name: "Get started" }).click();
+  await welcome.getByRole("button", { name: "Next" }).click();
+  await welcome
+    .getByRole("heading", { name: "Bring your browser with you" })
+    .waitFor();
+  await atStep(3);
+  await welcome.getByRole("button", { name: "Skip", exact: true }).waitFor();
+  const chromeProfile = welcome.getByRole("checkbox", { name: "Google Chrome" });
+  await chromeProfile.waitFor();
+  assert.equal(await chromeProfile.isChecked(), true);
   await welcome.getByRole("button", { name: "Import", exact: true }).click();
   await welcome.getByText("Imported 2 bookmarks and 3 sites.").waitFor();
   await welcome.getByRole("button", { name: "Continue" }).click();
+  await welcome.getByRole("heading", { name: "Connect your agent" }).waitFor();
+  await atStep(4);
+  await welcome.getByRole("button", { name: "Set up later" }).click();
   await welcome.getByRole("heading", { name: "Sign in once" }).waitFor();
+  await atStep(5);
   const topSites = welcome.getByRole("button", { name: /^Open / });
   assert.equal(await topSites.first().getAttribute("aria-label"), "Open docs.example");
   assert.equal(await topSites.count(), 6);
-  await welcome.getByRole("button", { name: "Done" }).click();
+  await welcome.getByRole("button", { name: "Next" }).click();
+  await welcome.getByRole("heading", { name: "You're all set" }).waitFor();
+  await atStep(6);
+  assert.equal(await welcome.locator(".welcome-default").count(), 0);
+  assert.equal(
+    await welcome
+      .getByRole("checkbox", { name: "Make Kamapathy your default browser" })
+      .count(),
+    0,
+  );
+  checked("a development build offers no default browser choice on the last step");
+  await welcome.getByRole("button", { name: "Start browsing" }).click();
   await welcome.waitFor({ state: "detached" });
   await waitForState(page, (state) => state.settings.welcomed);
   state = await page.evaluate(() => window.kamapathy.getState());
@@ -183,7 +309,37 @@ try {
       ["https://shop.example/", 1],
     ],
   );
-  checked("the welcome dialog imports bookmarks and history from another browser, then offers top sites, once");
+  checked("the welcome dialog walks six steps, imports bookmarks and history from another browser, then offers top sites, once");
+  // A first run closed partway through is still over.
+  const secondProfile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-second-"));
+  const secondApp = await electron.launch({
+    executablePath: await prepareDesktopRuntime(),
+    args: [resolve("out/main/index.js")],
+    env: { ...env, KAMAPATHY_USER_DATA: secondProfile },
+    timeout: 30000,
+  });
+  try {
+    const secondPage = await secondApp.firstWindow();
+    await secondPage.waitForSelector(".home-page, .web-page");
+    await secondPage.waitForFunction(() => !!window.kamapathy);
+    const secondWelcome = secondPage.locator(".welcome-modal");
+    await secondWelcome.getByRole("button", { name: "Get started" }).click();
+    await secondWelcome
+      .getByRole("heading", { name: "Your data stays here" })
+      .waitFor();
+    await secondPage.keyboard.press("Escape");
+    await secondWelcome.waitFor({ state: "detached" });
+    await waitForState(secondPage, (state) => state.settings.welcomed);
+  } finally {
+    await secondApp.close().catch(() => {});
+    await rm(secondProfile, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 150,
+    });
+  }
+  checked("closing the welcome dialog at the second step still ends the first run");
   assert.equal(await page.getByRole("complementary").count(), 0);
   if (process.platform === "darwin") {
     assert.deepEqual(
@@ -1767,10 +1923,73 @@ try {
   );
   await page.getByRole("button", { name: "Browser menu", exact: true }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
+  const defaultBrowserRow = page
+    .locator(".setting-row")
+    .filter({ has: page.getByText("Default browser", { exact: true }) });
+  await defaultBrowserRow.getByText("Available in the installed app.").waitFor();
+  assert.equal(
+    await defaultBrowserRow.getByRole("button", { name: "Make default" }).count(),
+    0,
+  );
+  checked("a development build says the default browser needs the installed app");
   await page.getByRole("button", { name: "Import...", exact: true }).click();
   await page.getByRole("heading", { name: "Import bookmarks and history" }).waitFor();
   await page.getByRole("button", { name: /^(Skip|Continue|Import)$/ }).first().waitFor();
-  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  if (process.platform === "darwin") {
+    await page.locator("input.import-file").setInputFiles(notAZip);
+    await page
+      .getByText("That is not a .zip file. Choose the file Safari exported.")
+      .waitFor();
+    checked("the Safari block refuses a file that is not the export");
+  }
+  await page.getByRole("checkbox", { name: "Sign-ins (cookies)" }).check();
+  await page
+    .getByText(
+      "These sign-ins will work in every space that shares your sign-ins, and for agents there.",
+    )
+    .waitFor();
+  checked("the import panel says who will be able to use imported sign-ins");
+  // Windows wraps its Safe Storage key with DPAPI, so only the note is checked.
+  if (process.platform === "win32") {
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await page
+      .getByText(/^Imported \d+ bookmarks, \d+ sites and 1 sign-in\.$/)
+      .waitFor();
+    await page.getByRole("button", { name: "Continue" }).click();
+    state = await page.evaluate(() =>
+      window.kamapathy.dispatch({
+        type: "space:create",
+        name: "Signed in",
+        color: "blue",
+        kind: "personal",
+      }),
+    );
+    assert.equal(
+      state.spaces.find((space) => space.id === state.activeSpaceId).signIns,
+      "shared",
+    );
+    await page.evaluate(
+      (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+      `${origin}/whoami`,
+    );
+    await waitForState(page, (state) =>
+      state.tabs.some((tab) => tab.url === `${origin}/whoami` && !tab.loading),
+    );
+    const whoami = app
+      .context()
+      .pages()
+      .filter((candidate) => candidate.url() === `${origin}/whoami`)
+      .at(-1);
+    assert.match(
+      await whoami.locator("#cookies").textContent(),
+      new RegExp(`${importedCookie.name}=${importedCookie.value}`),
+    );
+    checked(
+      "an imported sign-in reaches the site in a space that shares your sign-ins",
+    );
+  }
   await page.getByRole("button", { name: "Browser menu", exact: true }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
   const isolateSwitch = page.getByRole("switch", { name: "Isolate agent spaces" });
@@ -1822,6 +2041,77 @@ try {
   for (const id of [isolatedSpace.id, sharedAgentSpace.id, requestedIsolation.id, defaultAgentSpace.id])
     assert.equal((await restartedApi(`/spaces/${id}`, "DELETE")).status, 200);
   checked("Settings can isolate every new agent space, and an agent can ask for one isolated space");
+  // Files on this computer open in a personal space without scripts, and
+  // nowhere an agent could reach them.
+  const fileAddress = page.getByRole("textbox", {
+    name: "Address bar",
+    exact: true,
+  });
+  await fileAddress.fill(localFileUrl);
+  await fileAddress.press("Enter");
+  state = await waitForState(page, (state) =>
+    state.tabs.some((tab) => tab.url === localFileUrl && !tab.loading),
+  );
+  assert.equal(state.tabs.find((tab) => tab.url === localFileUrl).title, "Static");
+  await page.getByText("Scripts are off for files on this computer.").waitFor();
+  checked("a local HTML file opens in a personal space with its scripts off");
+  state = await page.evaluate(() =>
+    window.kamapathy.dispatch({
+      type: "space:create",
+      name: "Agent work",
+      color: "purple",
+      kind: "agent",
+    }),
+  );
+  const agentWork = state.activeSpaceId;
+  await fileAddress.fill(localFileUrl);
+  await fileAddress.press("Enter");
+  await page
+    .locator(".toast")
+    .filter({
+      hasText: "Files on this computer open only in your personal spaces.",
+    })
+    .waitFor();
+  state = await page.evaluate(() => window.kamapathy.getState());
+  assert.equal(
+    state.tabs.filter(
+      (tab) => tab.spaceId === agentWork && tab.url === localFileUrl,
+    ).length,
+    0,
+  );
+  checked("an agent space refuses a file on this computer from the address bar");
+  // Another app hands over a PDF while an agent space is the one in front: it
+  // lands in a personal space, in front, with the window focused.
+  const beforeHandOver = new Set(state.tabs.map((tab) => tab.id));
+  const handOver = spawn(
+    await prepareDesktopRuntime(),
+    [resolve("out/main/index.js"), pdfFile],
+    { cwd: profile, env, stdio: "ignore" },
+  );
+  try {
+    state = await waitForState(page, (state) =>
+      state.tabs.some((tab) => tab.url === pdfFileUrl),
+    );
+  } finally {
+    handOver.kill();
+  }
+  const pdfTab = state.tabs.find((tab) => tab.url === pdfFileUrl);
+  assert.ok(!beforeHandOver.has(pdfTab.id), "the PDF opened a new tab");
+  const pdfSpace = state.spaces.find((space) => space.id === pdfTab.spaceId);
+  assert.equal(pdfSpace.kind, "personal");
+  assert.notEqual(pdfSpace.access, "granted");
+  assert.notEqual(pdfSpace.id, agentWork);
+  assert.equal(state.activeTabId, pdfTab.id);
+  await poll(
+    () =>
+      app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].isFocused(),
+      ),
+    { label: "the window focused for the file another app handed over" },
+  );
+  checked(
+    "a PDF given to a second instance opens as a foreground tab in a personal space",
+  );
   if (process.platform === "darwin") {
     await page.evaluate(
       (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
