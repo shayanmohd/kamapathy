@@ -27,6 +27,8 @@ export const PERMISSION_KEYS: readonly PermissionKey[] = [
   "display-capture",
   "speaker-selection",
 ];
+/** The saved decisions a state keeps, in state and on disk; oldest dropped. */
+export const SAVED_SITE_PERMISSIONS = 1000;
 /** The permissions a request in an agent tab may hold for the person. */
 export const HOLDABLE: readonly PermissionKey[] = [
   "geolocation",

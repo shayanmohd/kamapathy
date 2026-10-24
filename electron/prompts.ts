@@ -8,6 +8,7 @@ import {
   permissionKeysFor,
   permissionWords,
   promptKindFor,
+  SAVED_SITE_PERMISSIONS,
   type DeviceKind,
   type PermissionKey,
   type PromptKind,
@@ -26,7 +27,6 @@ import { REQUEST_WINDOW_MS } from "./agent/receipts";
 export type { DeviceKind };
 export const PROMPT_LIMIT = 8; // held prompts per space
 export const CREDENTIAL_ORIGINS = 8; // origins an agent space may store
-export const SITE_PERMISSIONS = 1000; // saved decisions kept
 // The most of a site's own words any prompt shows.
 const ORIGIN_TEXT = 120;
 // The chooser kinds Kamapathy opens. Electron 44.2.0 emits no
@@ -260,7 +260,7 @@ export function createPromptCenter(
         allow,
         at: now(),
       });
-    host.state.sitePermissions = rows.slice(-SITE_PERMISSIONS);
+    host.state.sitePermissions = rows.slice(-SAVED_SITE_PERMISSIONS);
   };
 
   const inWindow = (tabId: string) => {
