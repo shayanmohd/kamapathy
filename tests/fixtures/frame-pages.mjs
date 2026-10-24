@@ -6,6 +6,9 @@
 // click that ignores the frame offsets lands outside it. The later pages host
 // a frame inside a shadow root, scroll and scale frames, give a frame control
 // the same selector as one outside it, and hide frames with CSS visibility.
+// Section 9's pages put a payment form from the other name beside a 1 by 1
+// tracking frame, on a page that takes focus, under an overlay, far below the
+// fold, added after a wait and loading another document on demand.
 export const framePages = {
   "/frames/shadow": `<!doctype html><meta charset="utf-8"><title>Shadow controls</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
@@ -53,6 +56,79 @@ document.getElementById("file").onchange = (event) => { result.textContent = "Fi
 <button type="button" id="deep" onclick="this.textContent='Deep clicked'">Deep button</button>
 <p style="margin:28px 0 0">Text two frames deep</p>`,
   "/frames/other": `<!doctype html><meta charset="utf-8"><title>Card details</title><p>Card number</p><input aria-label="Card number">`,
+  "/frames/checkout": `<!doctype html><meta charset="utf-8"><title>Payment</title>
+<style>body{font:14px sans-serif;margin:8px}</style>
+<p>Pay with a card</p>
+<label for="card">Card number</label><input id="card" name="cardnumber" autocomplete="cc-number">
+<button type="button" id="pay" style="margin-top:120px" onclick="this.textContent='Paid'">Pay now</button>
+<p id="checkout-result" role="status">Checkout untouched</p>
+<script>
+const result = document.getElementById("checkout-result");
+document.getElementById("card").onkeydown = (event) => { if (event.key === "Enter") result.textContent = "Entered " + event.target.value.length + " digits"; };
+</script>`,
+  "/frames/tracker": `<!doctype html><meta charset="utf-8"><title>Tracking frames</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;border:0;padding:0}#shown{width:300px;height:100px}#pixel{width:1px;height:1px}</style>
+<p>Text beside the frames</p>
+<iframe id="shown" title="Card details"></iframe>
+<iframe id="pixel" title="Tracker"></iframe>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+const otherOrigin = location.origin.replace(location.hostname, otherHost);
+document.getElementById("shown").src = otherOrigin + "/frames/other";
+document.getElementById("pixel").src = otherOrigin + "/frames/other?pixel=1";
+</script>`,
+  "/frames/focus": `<!doctype html><meta charset="utf-8"><title>Focus frames</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:360px;height:160px;border:2px solid #666;padding:4px;margin:0 0 8px}</style>
+<h1>Focus page</h1>
+<input id="top-field" aria-label="Top field">
+<iframe id="same" title="Same origin form" src="/frames/embedded"></iframe>
+<iframe id="cross" title="Payment form"></iframe>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+document.getElementById("cross").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
+</script>`,
+  "/frames/covered": `<!doctype html><meta charset="utf-8"><title>Covered frame</title>
+<style>body{font:14px sans-serif;margin:0}#pay{display:block;position:absolute;left:0;top:60px;width:400px;height:300px;border:0}#veil{position:absolute;left:0;top:0;width:900px;height:120px;background:rgba(0,0,0,0.2)}button{position:absolute;left:0;top:10px;margin:0}</style>
+<button type="button" id="duplicate" onclick="this.textContent='Top paid'">Pay now</button>
+<iframe id="pay" title="Payment form"></iframe>
+<div id="veil"></div>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+document.getElementById("pay").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
+</script>`,
+  "/frames/far": `<!doctype html><meta charset="utf-8"><title>Far frame</title>
+<style>body{font:14px sans-serif;margin:0}#spacer{height:1600px}iframe{display:block;width:400px;height:200px;border:0}</style>
+<p>Top of the far page</p>
+<div id="spacer"></div>
+<iframe id="far" title="Payment form"></iframe>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+document.getElementById("far").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
+</script>`,
+  "/frames/late": `<!doctype html><meta charset="utf-8"><title>Late frame</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:400px;height:200px;border:0}</style>
+<p>Waiting for the form</p>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+setTimeout(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "late";
+  frame.title = "Payment form";
+  frame.src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
+  document.body.append(frame);
+}, 1500);
+</script>`,
+  "/frames/navigating": `<!doctype html><meta charset="utf-8"><title>Navigating frame</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:400px;height:200px;border:0}</style>
+<button type="button" id="again" onclick="document.getElementById('moving').src = next()">Load the next page</button>
+<iframe id="moving" title="Payment form"></iframe>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+const otherOrigin = location.origin.replace(location.hostname, otherHost);
+let loaded = 0;
+const next = () => (loaded++ % 2 ? otherOrigin + "/frames/checkout" : otherOrigin + "/frames/other");
+document.getElementById("moving").src = next();
+</script>`,
   "/frames/shadow-frame": `<!doctype html><meta charset="utf-8"><title>Shadow frame</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
 <h1>Widget host</h1>

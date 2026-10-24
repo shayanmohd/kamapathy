@@ -1743,24 +1743,22 @@ describe("local automation socket", () => {
     expect(payloads("check")).toHaveLength(1);
   });
 
-  it("refuses a control inside a frame from another origin as a conflict, before any input", async () => {
+  it("reaches a control inside a frame from another origin", async () => {
     const { tab } = await createPage();
-    controller.contents.result = {
-      ok: false,
-      code: "cross_origin_frame",
-      error:
-        "This control is inside a frame from another origin, which Kamapathy cannot read. Ask the person to continue there.",
-    };
+    // Section 9 reads and acts in frames from any web origin, so the page
+    // script no longer answers cross_origin_frame and the action reaches the
+    // frame's own world.
+    controller.contents.result = (code: string) =>
+      code.includes(')("fill",') ? { ok: true } : { ok: true, x: 25, y: 45 };
     for (const [route, body] of [
       ["click", { ref: "@e2" }],
       ["fill", { ref: "@e2", value: "card" }],
-      ["drag", { source: { ref: "@e1" }, target: { ref: "@e2" } }],
     ] as const) {
       const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
-      expect(response.status).toBe(409);
-      expect((await response.json()).error.code).toBe("cross_origin_frame");
+      expect(response.status).toBe(200);
+      expect((await response.json()).ok).toBe(true);
     }
-    expect(controller.contents.inputs).toEqual([]);
+    expect(controller.contents.inputs.length).toBeGreaterThan(0);
     controller.contents.result = {
       url: "https://example.com/",
       title: "Example",

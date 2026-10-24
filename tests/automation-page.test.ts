@@ -14,7 +14,10 @@ import {
 import { pdfDocument, readBlobPdf } from "../electron/agent/dom/pdf";
 import type { Level, Mode } from "../electron/agent/dom/select";
 import { parseSelector } from "../electron/agent/selectors";
-import { PAGE_SOURCE } from "../electron/agent/session/operations";
+import {
+  FRAME_OWNER_SOURCE,
+  PAGE_SOURCE,
+} from "../electron/agent/session/operations";
 import type { PageOperation } from "../electron/automation-dom";
 import { framePages } from "./fixtures/frame-pages.mjs";
 
@@ -40,11 +43,13 @@ const selectorTarget = (
 
 describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   let site: Server;
+  let sibling: Server;
   let origin: string;
+  let siblingOrigin: string;
   let browser: Browser;
   let page: Page;
   beforeAll(async () => {
-    site = createServer((request, response) => {
+    const serve = (request: any, response: any) => {
       const path = new URL(request.url || "/", "http://x").pathname;
       if (path === "/plain") {
         response.writeHead(200, { "Content-Type": "text/plain" });
@@ -53,9 +58,15 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
       const html = framePages[path];
       response.writeHead(html ? 200 : 404, { "Content-Type": "text/html" });
       response.end(html || "");
-    });
+    };
+    site = createServer(serve);
+    // The same pages on a second port: a frame from there is cross-origin but
+    // same-site, which Chromium keeps in the page's own process.
+    sibling = createServer(serve);
     await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+    await new Promise<void>((done) => sibling.listen(0, "127.0.0.1", done));
     origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+    siblingOrigin = `http://127.0.0.1:${(sibling.address() as AddressInfo).port}`;
     browser = await chromium.launch();
   }, 60000);
   afterEach(async () => {
@@ -64,6 +75,7 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
+    sibling?.close();
   });
   const open = async (path: string) => {
     page = await browser.newPage({ viewport: { width: 900, height: 700 } });
@@ -93,13 +105,25 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
   // The frame /frames/shadow-frame hosts in a shadow root.
   const shadowFrame = () =>
     document.getElementById("widget")!.shadowRoot!.getElementById("embedded");
-  const snapshot = () =>
+  const snapshot = (extra: Record<string, unknown> = {}) =>
     operate("snapshot", {
       mode: "full",
       maxChars: 24000,
       maxControls: 100,
       firstRef: 1,
+      ...extra,
     });
+  // bindFrameOwner runs with the owner element as `this`, as the main process
+  // calls it through Runtime.callFunctionOn.
+  const bindOwner = async (
+    key: string,
+    find: () => Element | null | undefined,
+  ): Promise<any> =>
+    page.evaluate(
+      ([source, element, key]) =>
+        (0, eval)(source).call(element as Element, key),
+      [FRAME_OWNER_SOURCE, await page.evaluateHandle(find), key] as const,
+    );
   const byLabel = (listing: any, label: string) =>
     listing.interactables.find((control: any) => control.label === label);
   const frameAt = (path: string) =>
@@ -264,6 +288,276 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     });
     expect(await operate("target", { ref: count.ref })).toMatchObject({
       ok: true,
+    });
+  }, 20000);
+
+  // Section 9 (verify first item 2): the boundary the groups rest on. A world
+  // made without universal access reads no frame from another origin, whether
+  // Chromium runs it in this process or its own.
+  it("reads no frame from another origin in a world without universal access", async () => {
+    await open("/frames/outer");
+    await page.evaluate(
+      (src) =>
+        new Promise<void>((done) => {
+          const frame = document.createElement("iframe");
+          frame.id = "same-site";
+          frame.title = "Same site";
+          frame.style.cssText = "display:block;width:300px;height:100px";
+          frame.onload = () => done();
+          frame.src = src;
+          document.body.append(frame);
+        }),
+      `${siblingOrigin}/frames/other`,
+    );
+    const session = await page.context().newCDPSession(page);
+    const { frameTree } = await session.send("Page.getFrameTree");
+    const world = await session.send("Page.createIsolatedWorld", {
+      frameId: frameTree.frame.id,
+      worldName: "kamapathy",
+      grantUniveralAccess: false,
+    });
+    const opaque = async (id: string) => {
+      const got = await session.send("Runtime.evaluate", {
+        expression: `document.getElementById(${JSON.stringify(id)}).contentDocument === null`,
+        contextId: world.executionContextId,
+        returnByValue: true,
+      });
+      return got.result.value;
+    };
+    // Another site, and the same site on another port.
+    expect(await opaque("other")).toBe(true);
+    expect(await opaque("same-site")).toBe(true);
+    // This origin's own frame stays readable in that world.
+    expect(await opaque("inner")).toBe(false);
+  }, 20000);
+
+  it("leaves a bound placeholder at a cross-origin owner and reads nothing inside", async () => {
+    await open("/frames/outer");
+    expect(
+      await bindOwner("f-other", () => document.getElementById("other")),
+    ).toEqual({ local: "1", readable: false });
+    const listing = await snapshot({ frameContext: { group: "", tier: 0 } });
+    expect(listing.group).toBe("");
+    const entry = byLabel(listing, "Card details");
+    expect(entry).toMatchObject({
+      role: "iframe",
+      crossOrigin: true,
+      key: "f-other",
+    });
+    // The entry sits in the top document, so it carries no frame path.
+    expect(entry.frame).toBeUndefined();
+    // Nothing of the frame's own document is read in this world.
+    expect(listing.text).not.toContain("Card number");
+    expect(
+      listing.interactables.some(
+        (control: any) => control.label === "Card number",
+      ),
+    ).toBe(false);
+    // One placeholder, where the walk met the owner, with the frame's own path.
+    expect(listing.placeholders).toHaveLength(1);
+    expect(listing.placeholders[0]).toMatchObject({
+      key: "f-other",
+      local: "1",
+      readable: false,
+    });
+    // The walk met the heading, the text and the first frame before it.
+    expect(listing.placeholders[0].order).toBeGreaterThan(0);
+    // The border box of a frame 420 wide and 80 tall with 6 of padding and a
+    // 4 border, at the body's margin.
+    expect(listing.placeholders[0].box).toEqual({
+      left: 16,
+      top: expect.any(Number),
+      right: 456,
+      bottom: expect.any(Number),
+    });
+    expect(
+      listing.placeholders[0].box.bottom - listing.placeholders[0].box.top,
+    ).toBe(100);
+    expect(typeof listing.placeholders[0].tier).toBe("number");
+  }, 20000);
+
+  it("frameBox gives the origin, scale and area of a padded, scaled owner", async () => {
+    await open("/frames/scaled");
+    await bindOwner("f-scaled", () => document.getElementById("scaled"));
+    const got = await operate("frameBox", { key: "f-scaled" });
+    expect(got.ok).toBe(true);
+    // A 400 by 200 frame with 6 of padding and a 4 border, drawn at half size:
+    // the content box starts 10 in, halved, and shows 400 by 200 of document.
+    expect(got.box).toEqual({
+      x: 5,
+      y: 5,
+      scaleX: 0.5,
+      scaleY: 0.5,
+      width: 400,
+      height: 200,
+    });
+    expect(got.area).toEqual({ left: 5, top: 5, right: 205, bottom: 105 });
+    // The middle of the Target button in the frame's own pixels, in the page's.
+    const point = await operate("frameBox", {
+      key: "f-scaled",
+      point: { x: 150, y: 60 },
+    });
+    expect(point.point).toEqual({ x: 80, y: 35 });
+    expect(point.covered).toBeUndefined();
+    await page.mouse.click(point.point.x, point.point.y);
+    expect((await snapshot()).text).toContain("Scaled grid hit Target");
+    expect(await operate("frameBox", { key: "gone" })).toMatchObject({
+      ok: false,
+      code: "page_changed",
+    });
+  }, 20000);
+
+  it("frameBox translates a point and names an overlay over the owner", async () => {
+    await open("/frames/covered");
+    await bindOwner("f-pay", () => document.getElementById("pay"));
+    const under = await operate("frameBox", {
+      key: "f-pay",
+      point: { x: 100, y: 10 },
+    });
+    // The frame sits 60 down, so its own point 10 is 70 in the page, under the
+    // overlay the page draws over its top.
+    expect(under).toMatchObject({
+      ok: true,
+      point: { x: 100, y: 70 },
+      covered: true,
+    });
+    expect(under.interceptor).toMatchObject({ tag: "div", role: "div" });
+    const below = await operate("frameBox", {
+      key: "f-pay",
+      point: { x: 100, y: 200 },
+    });
+    expect(below).toMatchObject({ ok: true, point: { x: 100, y: 260 } });
+    expect(below.covered).toBeUndefined();
+    expect(below.interceptor).toBeUndefined();
+  }, 20000);
+
+  it("leaves out a 1 by 1 cross-origin frame", async () => {
+    await open("/frames/tracker");
+    const context = { frameContext: { group: "", tier: 0 } };
+    const listing = await snapshot(context);
+    expect(byLabel(listing, "Tracker")).toBeUndefined();
+    expect(listing.text).not.toContain("Tracker");
+    // The placeholders are what carries a frame's content into the page's
+    // text, and a tracking pixel leaves none.
+    expect(listing.placeholders.map((item: any) => item.local)).toEqual(["0"]);
+    expect(
+      (await snapshot({ ...context, format: "outline" })).outline,
+    ).not.toContain("Tracker");
+    // The same frame at 8 by 8 is listed.
+    await page.evaluate(() => {
+      const pixel = document.getElementById("pixel") as HTMLElement;
+      pixel.style.width = "8px";
+      pixel.style.height = "8px";
+    });
+    const grown = await snapshot(context);
+    expect(byLabel(grown, "Tracker")).toMatchObject({
+      role: "iframe",
+      crossOrigin: true,
+    });
+    expect(grown.placeholders.map((item: any) => item.local)).toEqual([
+      "0",
+      "1",
+    ]);
+    expect(
+      (await snapshot({ ...context, format: "outline" })).outline,
+    ).toContain("Tracker");
+  }, 20000);
+
+  it("bindFrameOwner records the owner and says whether this world can read it", async () => {
+    await open("/frames/outer");
+    expect(
+      await bindOwner("f-inner", () => document.getElementById("inner")),
+    ).toEqual({ local: "0", readable: true });
+    expect(
+      await bindOwner("f-other", () => document.getElementById("other")),
+    ).toEqual({ local: "1", readable: false });
+    // A frame inside a frame of this origin is part of the same group.
+    expect(
+      await bindOwner("f-nested", () =>
+        document
+          .querySelector<HTMLIFrameElement>("#inner")!
+          .contentDocument!.getElementById("nested"),
+      ),
+    ).toEqual({ local: "0/0", readable: true });
+    // Binding again keeps one entry per owner.
+    expect(
+      await bindOwner("f-inner", () => document.getElementById("inner")),
+    ).toEqual({ local: "0", readable: true });
+    expect(
+      await page.evaluate(() => {
+        const table = (globalThis as any).__kamapathyFrames;
+        return [
+          table.byKey.size,
+          table.keyOf.get(document.getElementById("inner")),
+          table.byKey.get("f-other") === document.getElementById("other"),
+        ];
+      }),
+    ).toEqual([3, "f-inner", true]);
+    // The numbering counts frames a shadow root hosts, as the walk does.
+    await open("/frames/shadow-frame");
+    expect(await bindOwner("f-shadow", shadowFrame)).toEqual({
+      local: "0",
+      readable: true,
+    });
+  }, 20000);
+
+  it("activeFrame follows focus through two owners", async () => {
+    await open("/frames/focus");
+    expect(await operate("activeFrame")).toEqual({
+      ok: true,
+      path: "",
+      editable: false,
+    });
+    await page.focus("#top-field");
+    expect(await operate("activeFrame")).toEqual({
+      ok: true,
+      path: "",
+      editable: true,
+    });
+    // A field inside a frame of this origin answers that document's path.
+    await frameAt("/frames/embedded").locator("#word").focus();
+    expect(await operate("activeFrame")).toEqual({
+      ok: true,
+      path: "0",
+      editable: true,
+    });
+    // A field inside an opaque owner answers the owner by key and path.
+    await bindOwner("f-cross", () => document.getElementById("cross"));
+    await frameAt("/frames/checkout").locator("#card").click();
+    expect(await operate("activeFrame")).toEqual({
+      ok: true,
+      path: "1",
+      key: "f-cross",
+      editable: false,
+    });
+    // A frame agents never enter answers blocked, whatever it ended up showing.
+    await page.evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "local";
+      frame.title = "Local file";
+      frame.src = "file:///etc/hosts";
+      document.body.append(frame);
+    });
+    await page.evaluate(() => document.getElementById("local")!.focus());
+    expect(await operate("activeFrame")).toEqual({
+      ok: true,
+      path: "2",
+      editable: false,
+      blocked: true,
+    });
+  }, 20000);
+
+  it("target accepts a bound owner key", async () => {
+    await open("/frames/outer");
+    await bindOwner("f-other", () => document.getElementById("other"));
+    const point = await operate("target", { owner: "f-other" });
+    expect(point.ok).toBe(true);
+    // The middle of the owner, which lands inside the frame it shows.
+    expect(point.x).toBeGreaterThan(16);
+    expect(point.x).toBeLessThan(456);
+    expect(await operate("target", { owner: "f-gone" })).toMatchObject({
+      ok: false,
+      code: "page_changed",
     });
   }, 20000);
 
