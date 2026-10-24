@@ -303,7 +303,12 @@ export const ERRORS = {
     "The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired.",
     ["ref"],
   ),
-  element_obscured: code(409, true, "Another element covers the target."),
+  element_obscured: code(
+    409,
+    true,
+    "Another element covers the target, after input the action already sent.",
+    ["presses"],
+  ),
   body_too_large: code(
     413,
     false,
@@ -470,13 +475,12 @@ export const ERRORS = {
     "awaited",
     "timeoutMs",
   ]),
-  action_timeout: code(504, true, "The action did not start in time.", [
-    "awaited",
-    "timeoutMs",
-    "blocker",
-    "detail",
-    "interceptor",
-  ]),
+  action_timeout: code(
+    504,
+    true,
+    "The request did not start in time, or its target never became ready for input.",
+    ["awaited", "timeoutMs", "blocker", "detail", "interceptor"],
+  ),
   pdf_timeout: code(
     504,
     false,

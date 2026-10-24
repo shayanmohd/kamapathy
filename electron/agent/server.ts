@@ -514,6 +514,9 @@ export async function startAutomation(
         // A malformed body, or a label the person could not be shown,
         // never waits behind page work.
         validateBody(route, body);
+        // A route whose budget depends on its body answers inside that one;
+        // admission counted the largest it declares.
+        if (route.budgetOf) ticket.narrow(route.budgetOf(body));
         checkAgentText(route, body);
         const lane: Lane =
           route.lane === "space"

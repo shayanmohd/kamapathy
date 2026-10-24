@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
-import { buildRoutes } from "../electron/agent/http.ts";
+import { buildRoutes, routeBudget } from "../electron/agent/http.ts";
 import { createNavigation } from "../electron/agent/routes/navigation.ts";
 import { pdfRoutes } from "../electron/agent/routes/pdf.ts";
 import { downloadRoutes } from "../electron/agent/routes/downloads.ts";
@@ -31,6 +31,7 @@ const {
   API_LEVEL,
   CLIENT_VERSION,
   COMMANDS,
+  COMPUTE,
   ENTRIES,
   ERRORS,
   ROUTES,
@@ -173,13 +174,25 @@ describe("API schema", () => {
     for (const item of built) {
       expect(item.schema, item.key).toBe(route(item.key));
       expect(item.lane, item.key).toBe(item.schema.lane);
-      // A field budget admits the field's longest value.
+      // A field budget admits the field's longest value, and a computed one
+      // the maximum it declares.
       const { budget } = item.schema;
+      const computed = typeof budget === "object" && "compute" in budget;
       expect(item.budgetMs, item.key).toBe(
         typeof budget === "number"
           ? budget
-          : item.schema.body[budget.field].max + (budget.plusMs ?? 0),
+          : computed
+            ? budget.maxMs
+            : item.schema.body[budget.field].max + (budget.plusMs ?? 0),
       );
+      // Only a computed budget narrows the request from its own body.
+      if (computed) {
+        expect(item.budgetOf({}), item.key).toBe(COMPUTE[budget.compute]({}));
+        expect(item.budgetOf(undefined), item.key).toBe(item.budgetOf({}));
+        expect(item.budgetMs, item.key).toBeGreaterThanOrEqual(
+          item.budgetOf({}),
+        );
+      } else expect(item.budgetOf, item.key).toBeUndefined();
       expect(item.bodyLimit, item.key).toBe(item.schema.limit);
       expect(`${item.method} /${item.path.join("/")}`, item.key).toBe(item.key);
     }
@@ -192,6 +205,13 @@ describe("API schema", () => {
     for (const item of ROUTES) {
       expect(item.limit, routeKey(item)).toBeGreaterThan(0);
       expect(item.budget, routeKey(item)).toBeDefined();
+      // Every compute name a route declares has a function and a maximum.
+      if (typeof item.budget === "object" && "compute" in item.budget) {
+        expect(COMPUTE[item.budget.compute], routeKey(item)).toBeTypeOf(
+          "function",
+        );
+        expect(item.budget.maxMs, routeKey(item)).toBeGreaterThan(0);
+      }
       expect(["space", "server", "none", "body", "preadmission"]).toContain(
         item.lane,
       );
@@ -753,6 +773,53 @@ describe("API schema", () => {
     );
     expect(route("POST /tabs/:id/upload").limit).toBe(24 * 1024 * 1024);
     expect(route("GET /health").lane).toBe("preadmission");
+  });
+
+  it("computes the budget a pressing route's own body asks for", () => {
+    // The timeout, one delay per gap, and the settle and load wait of 15100.
+    expect(COMPUTE.clickBudget({ ref: "@e1" })).toBe(18100);
+    expect(COMPUTE.clickBudget({ ref: "@e1", timeoutMs: 10000 })).toBe(25100);
+    expect(
+      COMPUTE.clickBudget({ timeoutMs: 0, clickCount: 3, delayMs: 100 }),
+    ).toBe(15600);
+    expect(
+      COMPUTE.clickBudget({ timeoutMs: 60000, clickCount: 3, delayMs: 5000 }),
+    ).toBe(100100);
+    expect(COMPUTE.dblclickBudget({ delayMs: 50 })).toBe(18250);
+    expect(COMPUTE.dblclickBudget({ timeoutMs: 60000, delayMs: 5000 })).toBe(
+      90100,
+    );
+    expect(COMPUTE.dragBudget({})).toBe(18100);
+    expect(COMPUTE.dragBudget({ timeoutMs: 60000 })).toBe(75100);
+    // A press without a target waits for no element.
+    expect(COMPUTE.pressBudget({ key: "Enter" })).toBe(15100);
+    expect(COMPUTE.pressBudget({ key: "Enter", ref: "@e1" })).toBe(18100);
+    expect(
+      COMPUTE.pressBudget({ key: "a", selector: "#name", delayMs: 5000 }),
+    ).toBe(23100);
+    expect(COMPUTE.mouseClickBudget({})).toBe(15100);
+    expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 5000 })).toBe(
+      30100,
+    );
+    expect(COMPUTE.typeBudget({ text: "hello" })).toBe(10000);
+    expect(COMPUTE.typeBudget({ text: "hello", delayMs: 1000 })).toBe(15000);
+    expect(COMPUTE.rawBudget({})).toBe(10000);
+    // The router takes the declared maximum and narrows each request itself.
+    const click = {
+      ...route("POST /tabs/:id/click"),
+      budget: { compute: "clickBudget", maxMs: 100100 },
+    };
+    const budget = routeBudget(click);
+    expect(budget.budgetMs).toBe(100100);
+    expect(budget.budgetOf({ ref: "@e1", timeoutMs: 10000 })).toBe(25100);
+    expect(() =>
+      routeBudget({ ...click, budget: { compute: "noBudget", maxMs: 10 } }),
+    ).toThrow(
+      "POST /tabs/:id/click budgets on noBudget, which the schema does not compute.",
+    );
+    expect(() =>
+      routeBudget({ ...click, budget: { field: "timeoutMs" } }),
+    ).toThrow("POST /tabs/:id/click budgets on a field without a maximum.");
   });
 
   it("the status and fail routes are declared at level 3", () => {

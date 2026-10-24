@@ -27,7 +27,10 @@ export interface Field {
   since?: number;
   description: string;
 }
-export type Budget = number | { field: string; plusMs?: number } | { compute: string };
+export type Budget =
+  | number
+  | { field: string; plusMs?: number }
+  | { compute: string; maxMs: number };
 export type SchemaLane = "space" | "server" | "none" | "body" | "preadmission";
 export interface SchemaRoute {
   method: "GET" | "POST" | "DELETE";

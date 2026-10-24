@@ -554,7 +554,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
 | `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
-| `element_obscured` | 409 | retryable |  | Another element covers the target. |
+| `element_obscured` | 409 | retryable | `presses` | Another element covers the target, after input the action already sent. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
@@ -587,7 +587,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
-| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The request did not start in time, or its target never became ready for input. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |

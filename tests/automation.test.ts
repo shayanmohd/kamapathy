@@ -11,6 +11,7 @@ import {
 import type { PdfPages } from "../electron/agent/pdf/worker";
 import { RefBook } from "../electron/agent/refs";
 import { watchLeaveGuard } from "../electron/agent/routes/navigation";
+import { LIMITS, Scheduler } from "../electron/agent/scheduler";
 import { FORMS, REF_HINT } from "../electron/agent/selectors";
 import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
@@ -22,6 +23,7 @@ import {
   ACTIONS,
   API_LEVEL,
   COMMANDS,
+  COMPUTE,
   ENTRIES,
   ERRORS,
   ROUTES,
@@ -3667,6 +3669,46 @@ describe("local automation socket", () => {
     expect(withPopup.error.message).toBe(
       `The page function did not return a truthy value within 300 ms. It is at https://example.com/. Popup ${popup.label} opened from it at https://example.com/popup, so the condition may be there.`,
     );
+  });
+
+  it("narrows a request's budget from its own body", async () => {
+    // A click with its own options answers inside that budget, while
+    // admission counted the maximum the route declares.
+    const body = { ref: "@e1", timeoutMs: 10000 };
+    const budgetMs = COMPUTE.clickBudget(body);
+    expect(budgetMs).toBe(25100);
+    const scheduler = new Scheduler();
+    const ticket = scheduler.admit({ spaceId: "space-1", budgetMs: 100100 });
+    expect(ticket.runDeadline).toBe(
+      ticket.arrival + 100100 + LIMITS.graceMs,
+    );
+    ticket.narrow(budgetMs);
+    expect(ticket.runDeadline).toBe(ticket.arrival + 25100 + LIMITS.graceMs);
+    // Nothing widens a request that already asked for less.
+    ticket.narrow(100100);
+    ticket.narrow(Number.NaN);
+    expect(ticket.runDeadline).toBe(ticket.arrival + 25100 + LIMITS.graceMs);
+    const deadline = await ticket.start({
+      kind: "space",
+      spaceId: "space-1",
+    });
+    expect(deadline).toBeLessThanOrEqual(ticket.arrival + 25100);
+    expect(deadline).toBeGreaterThan(ticket.arrival + 25000);
+    ticket.finish();
+
+    // Queue time beyond the grace comes out of the request's own budget.
+    const queued = new Scheduler({ ...LIMITS, graceMs: 50 });
+    const first = queued.admit({ spaceId: "space-1", budgetMs: 100100 });
+    await first.start({ kind: "space", spaceId: "space-1" });
+    const second = queued.admit({ spaceId: "space-1", budgetMs: 100100 });
+    second.narrow(budgetMs);
+    const starting = second.start({ kind: "space", spaceId: "space-1" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    first.finish();
+    const late = await starting;
+    expect(late).toBe(second.runDeadline);
+    expect(late - Date.now()).toBeLessThan(25100);
+    second.finish();
   });
 
   it("the body is validated before the lane", async () => {

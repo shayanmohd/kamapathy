@@ -1100,8 +1100,39 @@ export const ACTIONS = [
   },
 ];
 
-// Budgets that combine several body fields, by name. Section 5 adds them.
-export const COMPUTE = {};
+// Budgets that combine several body fields, by name. A route declares one as
+// {compute, maxMs}: maxMs is what admission counts, and the request narrows
+// its own deadline to the function's answer.
+// How long the action waits for a target it can take, from the body or the
+// route's own default.
+const timeout = (body, fallback) =>
+  typeof body.timeoutMs === "number" ? body.timeoutMs : fallback;
+// The delay a gesture spends in its gaps: one delayMs per gap.
+const gaps = (count, body) =>
+  Math.max(0, count) * (typeof body.delayMs === "number" ? body.delayMs : 0);
+const clicks = (body) =>
+  typeof body.clickCount === "number" ? body.clickCount : 1;
+// The settle and the load wait every pressing route adds.
+const AFTER_INPUT_MS = 15100;
+
+export const COMPUTE = {
+  clickBudget: (body) =>
+    timeout(body, 3000) + gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
+  dblclickBudget: (body) =>
+    timeout(body, 3000) + gaps(3, body) + AFTER_INPUT_MS,
+  dragBudget: (body) => timeout(body, 3000) + AFTER_INPUT_MS,
+  pressBudget: (body) =>
+    (body.ref || body.selector ? timeout(body, 3000) : 0) +
+    gaps(1, body) +
+    AFTER_INPUT_MS,
+  mouseClickBudget: (body) =>
+    gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
+  typeBudget: (body) =>
+    10000 +
+    (typeof body.delayMs === "number" ? body.delayMs : 0) *
+      (typeof body.text === "string" ? body.text.length : 0),
+  rawBudget: () => 10000,
+};
 
 export const routeKey = ({ method, path }) => `${method} ${path}`;
 

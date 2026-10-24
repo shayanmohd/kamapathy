@@ -27,6 +27,8 @@ export interface Ticket {
   readonly runDeadline: number;
   start(lane: Lane): Promise<number>;
   park<T>(wait: () => Promise<T>): Promise<T>;
+  /** Lowers the request's budget to the one its own body asks for. */
+  narrow(budgetMs: number): void;
   drop(): void;
   finish(): void;
 }
@@ -34,8 +36,9 @@ export interface Ticket {
 // A request from admission to finish. It has a waiter while it waits for its
 // lane or while its parked wait runs.
 interface Entry {
-  readonly budgetMs: number;
-  readonly runDeadline: number;
+  readonly arrival: number;
+  budgetMs: number;
+  runDeadline: number;
   readonly spaceId?: string;
   lane?: string;
   order: number;
@@ -81,6 +84,7 @@ export class Scheduler {
       );
     const arrival = Date.now();
     const entry: Entry = {
+      arrival,
       budgetMs,
       runDeadline: arrival + budgetMs + this.limits.graceMs,
       spaceId,
@@ -93,9 +97,12 @@ export class Scheduler {
       this.perSpace.set(spaceId, (this.perSpace.get(spaceId) ?? 0) + 1);
     return {
       arrival,
-      runDeadline: entry.runDeadline,
+      get runDeadline() {
+        return entry.runDeadline;
+      },
       start: (lane) => this.start(entry, lane),
       park: (wait) => this.park(entry, wait),
+      narrow: (narrowed) => this.narrow(entry, narrowed),
       drop: () => this.drop(entry),
       finish: () => this.finish(entry),
     };
@@ -190,6 +197,16 @@ export class Scheduler {
           else this.grant(entry);
         });
     });
+  }
+
+  // A request whose body asks for less answers inside that, so the queue
+  // time beyond the grace still comes out of its own budget. It never asks
+  // for more than admission counted.
+  private narrow(entry: Entry, budgetMs: number) {
+    if (!Number.isFinite(budgetMs) || budgetMs < 0) return;
+    if (budgetMs >= entry.budgetMs) return;
+    entry.budgetMs = budgetMs;
+    entry.runDeadline = entry.arrival + budgetMs + this.limits.graceMs;
   }
 
   private drop(entry: Entry) {
