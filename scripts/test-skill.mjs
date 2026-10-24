@@ -717,9 +717,12 @@ try {
     assert.equal(response.status, 200, png.toString("utf8").slice(0, 300));
     const frame = await middleOf(png);
     const band = bandAt(y, frame.height);
+    // Chromium captures in the display's own colour profile, so a wide gamut
+    // screen reads pure green as 117,251,76. Each band is one of red, green,
+    // blue and yellow, so ask which channels are lit rather than their values.
     assert.ok(
-      frame.color.every(
-        (channel, index) => Math.abs(channel - BANDS[band][index]) < 60,
+      frame.color.every((channel, index) =>
+        BANDS[band][index] === 255 ? channel >= 128 : channel <= 127,
       ),
       `A capture at ${y} shows ${frame.color} where band ${band} is ${BANDS[band]}`,
     );
