@@ -7,6 +7,8 @@
 // its parts repeat ancestors; a page of every kind of node an outline
 // prints; and a page of controls whose locators differ in kind, with
 // lookalike controls and duplicate addresses that no locator can name.
+// a page of four 900 pixel bands in distinct colors, with the scroll
+// position printed in a corner, so a capture says which band it holds.
 // {{other}} becomes a second origin for the same server, which makes that
 // frame cross origin.
 const paragraph = (number) =>
@@ -154,6 +156,42 @@ dialog{position:static;margin:0;border:0;padding:0}
 <a href="/two" id="link2a2b3c4">Open</a>
 <a href="/shared" id="rowa1b2c3d4">Shared</a>
 <a href="/shared" id="rowe5f6g7h8">Shared</a>`,
+  "/snapshot/capture": `<!doctype html><meta charset="utf-8"><title>Capture bands</title>
+<style>
+body{font:14px sans-serif;margin:0}
+section{height:900px}
+h2{margin:0;font-size:13px}
+#band1{background:#ff0000}
+#band2{background:#00ff00}
+#band3{background:#0000ff}
+#band4{background:#ffff00}
+#corner{position:fixed;top:0;left:0;background:#fff;font:12px monospace}
+#corner p{margin:0}
+</style>
+<section id="band1"><h2>Band one</h2></section>
+<section id="band2"><h2>Band two</h2></section>
+<section id="band3"><h2>Band three</h2></section>
+<section id="band4"><h2>Band four</h2></section>
+<div id="corner"><p id="marker">scrollY 0</p><p id="sizes">sizes</p></div>
+<script>
+const marker = document.getElementById("marker");
+const show = () => {
+  marker.textContent = "scrollY " + Math.round(window.scrollY);
+};
+addEventListener("scroll", show);
+show();
+// Measured once: a full-page capture resizes the page for an instant, and
+// a check reads these numbers to know what it should have captured.
+document.getElementById("sizes").textContent =
+  "viewport " +
+  Math.floor(visualViewport.width) +
+  "x" +
+  Math.floor(visualViewport.height) +
+  " document " +
+  document.documentElement.scrollWidth +
+  "x" +
+  document.documentElement.scrollHeight;
+</script>`,
   "/snapshot/links": `<!doctype html><meta charset="utf-8"><title>Every link</title>
 <style>body{font:14px sans-serif;margin:16px}a{display:block}</style>
 <a id="plain" href="http://example.com/catalog">Catalog</a>

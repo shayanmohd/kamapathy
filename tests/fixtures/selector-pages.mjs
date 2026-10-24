@@ -4,7 +4,9 @@
 // hides from text matching, lookalike controls at every level, four rows of
 // the same button, a control under a sticky header, a control behind a modal
 // backdrop, nodes a role resolution may pick, the role words Chromium
-// reports its own way, and three buttons of one accessible name.
+// reports its own way, three buttons of one accessible name, and a page
+// with a target for every form, whose clicks are reported by the id they
+// reached.
 export const selectorPages = {
   "/selectors/shadow": `<!doctype html><meta charset="utf-8"><title>Shadow items</title>
 <style>body{font:14px sans-serif;margin:16px}iframe{display:block;border:1px solid #666;width:280px;height:70px}</style>
@@ -175,6 +177,59 @@ customElements.define("x-closed", XClosed);
   "/selectors/frame-role": `<!doctype html><meta charset="utf-8"><title>Framed role</title>
 <style>body{font:14px sans-serif;margin:8px}</style>
 <button id="frameSave" type="button">Frame save</button>`,
+  "/selectors/forms": `<!doctype html><meta charset="utf-8"><title>Every selector form</title>
+<style>body{font:14px sans-serif;margin:16px}button,a{display:block;margin:4px 0}li{list-style:none;padding:4px}iframe{display:block;border:1px solid #666;width:280px;height:70px}</style>
+<p id="status" role="status">nothing</p>
+<button id="plain" type="button">Press for CSS</button>
+<button class="boxed" id="prefixed" type="button">Press for a prefix</button>
+<button id="worded" type="button">Keep the draft</button>
+<button id="exact" type="button">Publish</button>
+<button id="roleExact" type="button" aria-label="Retry now">Retry</button>
+<button id="rolePart" type="button" aria-label="Archive the invoice">Archive</button>
+<a id="addressed" href="/plans?tier=pro#faq">Plans</a>
+<table id="grid">
+<tr><td><button class="cell" id="rowOne" type="button">Row one</button></td></tr>
+<tr><td><button class="cell" id="rowTwo" type="button">Row two</button></td></tr>
+</table>
+<ul id="invoices">
+<li id="invoice11">Invoice 11 paid</li>
+<li id="invoice12">Invoice 12 due</li>
+</ul>
+<button id="save" type="button">Save</button>
+<button id="saveAll" type="button">Save all</button>
+<button class="pick" id="pickHidden" type="button" style="display:none">Pick hidden</button>
+<button class="pick" id="pickOne" type="button">Pick one</button>
+<button class="pick" id="pickTwo" type="button">Pick two</button>
+<button class="pick" id="pickLast" type="button">Pick three</button>
+<x-form id="formsHost"></x-form>
+<iframe id="formsFrame" title="Framed forms" src="/selectors/forms-frame"></iframe>
+<script>
+class XForm extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: "open" }).innerHTML = '<button id="shadowItem" type="button">Shadow item</button>';
+  }
+}
+customElements.define("x-form", XForm);
+// Every click is reported by the id of the element it really reached, so a
+// form that matched the wrong control says so. Nothing navigates.
+document.addEventListener("click", (event) => {
+  event.preventDefault();
+  const target = event.composedPath()[0];
+  const id = target instanceof Element ? target.id : "";
+  if (id && id !== "status") document.getElementById("status").textContent = "clicked " + id;
+}, true);
+</script>`,
+  "/selectors/forms-frame": `<!doctype html><meta charset="utf-8"><title>Framed forms</title>
+<style>body{font:14px sans-serif;margin:8px}</style>
+<p id="frameStatus" role="status">nothing</p>
+<button id="frameItem" type="button">Frame item</button>
+<script>
+document.addEventListener("click", (event) => {
+  event.preventDefault();
+  const id = event.composedPath()[0] instanceof Element ? event.composedPath()[0].id : "";
+  if (id && id !== "frameStatus") document.getElementById("frameStatus").textContent = "clicked " + id;
+}, true);
+</script>`,
   "/selectors/role-twins": `<!doctype html><meta charset="utf-8"><title>Three saves</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
 <button id="hiddenSave" type="button" aria-label="Save" style="opacity:0">Hidden copy</button>

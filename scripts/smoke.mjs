@@ -24,6 +24,11 @@ const fixture = createServer((request, response) => {
     "Content-Type": "text/html",
     "Cache-Control": "no-store",
   });
+  // A page several viewports tall, for a full-page capture.
+  if (request.url === "/tall")
+    return response.end(
+      `<!doctype html><html lang="en"><head><title>Tall page</title></head><body style="margin:0"><h1 style="margin:0;height:40px">Tall page</h1><div style="height:2400px;background:linear-gradient(#eef,#99a)"></div><p id="bottom" style="margin:0;height:20px">Bottom of the page</p></body></html>`,
+    );
   const second = request.url === "/second";
   response.end(
     `<!doctype html><html lang="en"><head><title>${second ? "Second page" : "Kamapathy test garden"}</title></head><body><h1>${second ? "Second page" : "Kamapathy test garden"}</h1><a id="next" href="/second">Next page</a><label for="query">Research topic</label><input id="query"><button id="save">Save topic</button><p id="result">No topic saved</p><script>document.getElementById('save').onclick=()=>{document.getElementById('result').textContent=document.getElementById('query').value;};</script></body></html>`,
@@ -1467,6 +1472,54 @@ try {
     task,
   );
   checked("the agent bar and ring show who controls the space, and control moves both ways");
+  // Section 4: a full-page capture of the page the person is looking at
+  // leaves its view and its scroll position where they were.
+  const tallPage = `${origin}/tall`;
+  assert.equal(
+    (await api(`/tabs/${agentTab}/navigate`, "POST", { url: tallPage })).status,
+    200,
+  );
+  assert.equal(
+    (await api(`/tabs/${agentTab}/scroll`, "POST", { direction: "down", pixels: 600 })).status,
+    200,
+  );
+  const pageMetrics = () =>
+    app.evaluate(
+      ({ webContents }, url) =>
+        webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+          .executeJavaScript(
+            "[scrollX, scrollY, document.documentElement.scrollWidth, document.documentElement.scrollHeight]",
+          ),
+      tallPage,
+    );
+  const viewsBeforeCapture = await visibleViews();
+  const metricsBefore = await pageMetrics();
+  assert.deepEqual(metricsBefore.slice(0, 2), [0, 600]);
+  const wholePage = await api(`/tabs/${agentTab}/screenshot`, "POST", {
+    fullPage: true,
+  });
+  const tallPng = Buffer.from(await wholePage.arrayBuffer());
+  assert.equal(wholePage.status, 200, tallPng.toString("utf8").slice(0, 300));
+  assert.deepEqual([...tallPng.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.deepEqual(
+    [tallPng.readUInt32BE(16), tallPng.readUInt32BE(20)],
+    metricsBefore.slice(2),
+  );
+  assert.equal(
+    wholePage.headers.get("X-Kamapathy-Clip"),
+    `0,0,${metricsBefore[2]},${metricsBefore[3]}`,
+  );
+  assert.deepEqual(await pageMetrics(), metricsBefore);
+  assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  assert.equal(
+    (await api(`/tabs/${agentTab}/navigate`, "POST", { url: origin })).status,
+    200,
+  );
+  checked(
+    "a full-page capture of the shown agent tab leaves its view bounds and scroll unchanged",
+  );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   await agentBar.getByText("Research helper · You're in control").waitFor();
   assert.doesNotMatch(await spacesButton.getAttribute("aria-label"), /needs you/);

@@ -6,6 +6,8 @@ import { actionPages } from './action-pages.mjs';
 import { framePages } from './frame-pages.mjs';
 import { driverPages, SLOW_IMAGE_MS } from './driver-pages.mjs';
 import { popupPages } from './popup-pages.mjs';
+import { selectorPages } from './selector-pages.mjs';
+import { snapshotPages } from './snapshot-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
@@ -38,10 +40,13 @@ export async function startFormSite() {
         response.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
         return response.end(pixel, () => events.push({ type: 'slow-image-served', at: Date.now() }));
       }
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname]);
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-        return response.end(page);
+        // A page asking for {{other}} gets this server through its other
+        // loopback name, which makes a frame of it cross origin.
+        const other = `http://${request.headers.host?.startsWith('localhost') ? '127.0.0.1' : 'localhost'}:${server.address().port}`;
+        return response.end(page.replaceAll('{{other}}', other));
       }
       if (request.method === 'GET' && url.pathname === '/uploads') return send('File upload lab', `<h1>Upload test files</h1><form action="/upload-receipt" method="post" enctype="multipart/form-data"><label for="bundle">App bundle</label><input id="bundle" type="file" name="bundle" accept=".aab" required><section><label for="artwork">Artwork files</label><input id="artwork" style="display:none" type="file" name="artwork" accept="image/png" multiple></section><section hidden><input type="file" id="closed-upload" aria-label="Closed upload"></section><label for="disabled-upload">Disabled upload</label><input type="file" id="disabled-upload" disabled><button type="button" id="replace-upload">Replace bundle input</button><button type="submit">Submit files</button><p id="selected-status" role="status"></p></form>`, `document.querySelector('#replace-upload').onclick=()=>{const input=document.querySelector('#bundle');input.replaceWith(input.cloneNode());};document.querySelector('form').addEventListener('change',()=>{document.querySelector('#selected-status').textContent='Selected '+Array.from(document.querySelectorAll('input[type=file]')).reduce((n,input)=>n+input.files.length,0)+' files';});`);
       if (request.method === 'POST' && url.pathname === '/upload-receipt') {
