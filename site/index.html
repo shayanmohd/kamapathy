@@ -185,7 +185,7 @@
       <article class="feature">
         <svg><use href="#i-sign-in" /></svg>
         <h3>Bring your browser with you</h3>
-        <p>Import bookmarks, history and, if you like, your sign-ins from Chrome, Edge, Brave, Arc, Vivaldi, Opera or Firefox, and Safari from the file it exports. Then sign in once to your top sites.</p>
+        <p>Import bookmarks, history and, if you like, your sign-ins from Chrome, Edge, Brave, Arc, Vivaldi, Opera or Firefox, and Safari from the file it exports. Saved passwords come over from the Chrome-based browsers, or from a CSV file. Then sign in once to your top sites.</p>
       </article>
       <article class="feature">
         <svg><use href="#i-eye" /></svg>
@@ -355,7 +355,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
     <ul class="compare-notes">
       <li><b>Automation libraries</b> are tools you drive from code, such as Playwright based tools. They launch a browser of their own, so your daily browsing and sign-ins stay elsewhere unless you wire them in.</li>
       <li><b>AI browsers with a built in assistant</b> ship one agent as part of the product. Bringing your own agents, or several at once, depends on what each one allows.</li>
-      <li>Every row describes Kamapathy as it is today. Not there yet: browser extensions, a password manager, sync, an ad blocker, DRM playback, signed installers, self-installing updates and an independent security audit.</li>
+      <li>Every row describes Kamapathy as it is today. Not there yet: browser extensions, sync, an ad blocker, DRM playback, signed installers, self-installing updates and an independent security audit.</li>
     </ul>
   </section>
 
@@ -468,11 +468,11 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>Can an agent see my own tabs or accounts?</summary>
-        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
+        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. They never get your saved passwords. Kamapathy offers and fills those only while you are in control, and no API reaches them. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
       </details>
       <details>
         <summary>Can I import from Chrome?</summary>
-        <p>Yes. The first launch offers to bring your bookmarks and history over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera or Firefox, with your default browser preselected and a checkbox for each profile, and from Safari through the file it exports. Your sign-ins from the Chrome-based browsers can come too, into your shared sign-ins or a new space for each profile; passwords and extensions do not come over yet. You can do it later from Settings, under Browsing. Kamapathy reads the other browser's files and never changes them.</p>
+        <p>Yes. The first launch offers to bring your bookmarks and history over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera or Firefox, with your default browser preselected and a checkbox for each profile, and from Safari through the file it exports. Your sign-ins from the Chrome-based browsers can come too, into your shared sign-ins or a new space for each profile, and so can their saved passwords, into Kamapathy's own password manager; from any other browser or password manager, export a CSV file and import that under Passwords. Extensions do not come over yet. You can do it later from Settings, under Browsing. Kamapathy reads the other browser's files and never changes them.</p>
       </details>
       <details>
         <summary>What can an agent not do?</summary>
@@ -480,7 +480,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>Will my sites work?</summary>
-        <p>Kamapathy uses Chromium, the engine behind Chrome and Edge, so pages render and behave the same way. Browser extensions, sync, a password manager, an ad blocker and DRM playback aren't part of this preview yet.</p>
+        <p>Kamapathy uses Chromium, the engine behind Chrome and Edge, so pages render and behave the same way. Browser extensions, sync, an ad blocker and DRM playback aren't part of this preview yet.</p>
       </details>
       <details>
         <summary>Why does my computer warn me when I open it?</summary>
