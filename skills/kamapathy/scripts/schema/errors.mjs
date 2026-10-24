@@ -345,6 +345,13 @@ export const ERRORS = {
     ["name", "line", "column", "description"],
     2,
   ),
+  result_too_large: code(
+    422,
+    false,
+    "The result is larger than the route returns.",
+    ["bytes", "limit"],
+    4,
+  ),
   no_match: code(
     422,
     true,
@@ -442,6 +449,19 @@ export const ERRORS = {
     "detail",
     "interceptor",
   ]),
+  evaluation_timeout: code(
+    504,
+    false,
+    "The page script did not finish within the timeout.",
+    [
+      "awaited",
+      "timeoutMs",
+      "executionStopped",
+      "mayHaveLateEffects",
+      "pageResponsive",
+    ],
+    4,
+  ),
   pdf_timeout: code(
     504,
     false,

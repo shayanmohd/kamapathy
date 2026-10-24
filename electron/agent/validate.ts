@@ -198,6 +198,16 @@ export function loadStateFields(body: Record<string, unknown>): {
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
   };
 }
+// Section 8's evaluate takes the page script fields, which the Page scripts
+// setting gates, with a timeout the page keeps a margin of.
+export function evaluateFields(
+  body: Record<string, unknown>,
+): ScriptSource & { timeoutMs: number } {
+  return {
+    ...scriptFields(body),
+    timeoutMs: integerField(body, "timeoutMs", 15000, 2000, 60000),
+  };
+}
 // The function wait takes the page script fields, which the Page scripts
 // setting gates, plus how often it looks.
 export function waitForFunctionFields(body: Record<string, unknown>): {

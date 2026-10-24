@@ -802,7 +802,7 @@ describe("local automation socket", () => {
     expect(controller.calls).toEqual([]);
   });
 
-  it("serializes selectors as data and exposes no evaluate endpoint", async () => {
+  it("serializes selectors as data and reads no code from a field it never declared", async () => {
     const { tab } = await createPage();
     const selector = '#field"); process.exit(); //';
     controller.contents.result = { ok: true };
@@ -830,13 +830,16 @@ describe("local automation socket", () => {
       ),
     ).toBe(true);
     expect(executed.world).toBe("kamapathy");
-    expect(
-      (
-        await request(`/tabs/${tab.id}/evaluate`, "POST", {
-          code: "process.exit()",
-        })
-      ).status,
-    ).toBe(404);
+    // Section 8's evaluate runs the agent's own expression or function, and
+    // nothing it never declared.
+    const undeclared = await request(`/tabs/${tab.id}/evaluate`, "POST", {
+      code: "process.exit()",
+    });
+    expect(undeclared.status).toBe(400);
+    expect((await undeclared.json()).error).toMatchObject({
+      code: "unknown_field",
+      field: "code",
+    });
     expect(
       (await request(`/tabs/${tab.id}/snapshot?token=secret`)).status,
     ).toBe(400);
@@ -3391,6 +3394,10 @@ describe("local automation socket", () => {
   };
   const truthy = (value: unknown) => ({ result: { type: "object", value } });
   const falsy = { result: { type: "boolean", value: false } };
+  // Every page script Kamapathy sends names itself, so the page reports it
+  // under that name instead of inline.
+  const named = (source: string) =>
+    `${source}\n//# sourceURL=kamapathy-evaluate.js`;
 
   it("the function wait answers the first truthy value", async () => {
     const { tab } = await createPage();
@@ -3411,9 +3418,9 @@ describe("local automation socket", () => {
       value: { ready: true },
     });
     expect(calls.map((call) => call.expression)).toEqual([
-      source,
-      source,
-      source,
+      named(source),
+      named(source),
+      named(source),
     ]);
     // The checks are the interval apart.
     expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(50);
@@ -3428,11 +3435,13 @@ describe("local automation socket", () => {
       expect(command.sessionId).toBeUndefined();
       expect(command.params.contextId).toBeUndefined();
       expect(command.params).toMatchObject({
-        expression: source,
+        expression: named(source),
         returnByValue: true,
         awaitPromise: true,
         silent: true,
       });
+      // A check reads the page and never stops its scripts.
+      expect(command.params.timeout).toBeUndefined();
     }
     expect(controller.activity.at(-1)).toMatchObject({
       spaceId: tab.spaceId,
@@ -3454,14 +3463,14 @@ describe("local automation socket", () => {
     });
     expect(withArg.status).toBe(200);
     expect((await withArg.json()).value).toBe(
-      `(${source})({"count":2,"name":"two\\u2028"})`,
+      named(`(${source})({"count":2,"name":"two\\u2028"})`),
     );
     const alone = await waitForFunction(tab.id, {
       function: source,
       timeoutMs: 1000,
     });
     expect(alone.status).toBe(200);
-    expect((await alone.json()).value).toBe(`(${source})()`);
+    expect((await alone.json()).value).toBe(named(`(${source})()`));
     expect(calls).toHaveLength(2);
   });
 
@@ -3841,6 +3850,208 @@ describe("local automation socket", () => {
     controller.state.settings.agentPageScripts = false;
     controller.emit();
     expect(ran).toEqual(["off"]);
+  });
+
+  // Section 8's evaluate route: the agent's own expression or function in
+  // the page's main frame.
+  const evaluate = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/evaluate`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // A page that answers only once the test lets it, so a takeover, a
+  // navigation or the switch can land while the call is in flight.
+  const heldEvaluate = async (
+    tabId: string,
+    value: unknown,
+    body: Record<string, unknown> = {},
+  ) => {
+    let release: (() => void) | undefined;
+    controller.contents.debugger.reply(
+      "Runtime.evaluate",
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ result: { type: "string", value } });
+        }),
+    );
+    const done = evaluate(tabId, {
+      expression: "document.cookie",
+      timeoutMs: 10000,
+      ...body,
+    });
+    await expect.poll(() => typeof release).toBe("function");
+    return { done, release: () => release!() };
+  };
+
+  it("evaluate answers through the route", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, (expression) => {
+      if (expression.startsWith("void 0"))
+        return { result: { type: "undefined" } };
+      if (expression.startsWith("10n"))
+        return {
+          result: {
+            type: "bigint",
+            description: "100n",
+            unserializableValue: "100n",
+          },
+        };
+      return { result: { type: "object", value: { items: [1, "two"] } } };
+    });
+    const answered = await evaluate(tab.id, { expression: "window.cart" });
+    expect(answered.status).toBe(200);
+    // The tab comes from the controller, so a client refreshes its page from
+    // the same answer.
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({
+        id: tab.id,
+        url: "https://example.com/",
+        title: "https://example.com/",
+        managed: true,
+      }),
+      value: { items: [1, "two"] },
+    });
+    const unserializable = await evaluate(tab.id, { expression: "10n ** 2n" });
+    expect(await unserializable.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      unserializable: "100n",
+    });
+    // Undefined is neither a value nor text, so the answer carries neither.
+    const nothing = await evaluate(tab.id, { expression: "void 0" });
+    expect(await nothing.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+    });
+    expect(calls.map((call) => call.expression)).toEqual([
+      "window.cart\n//# sourceURL=kamapathy-evaluate.js",
+      "10n ** 2n\n//# sourceURL=kamapathy-evaluate.js",
+      "void 0\n//# sourceURL=kamapathy-evaluate.js",
+    ]);
+    // A page script reads what the page reads, so the refs a snapshot gave
+    // still point at the same elements.
+    expect(refs.generation(tab.id)).toBe(0);
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent ran a page script",
+    });
+  });
+
+  it("evaluate validates before the lane", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy(true));
+    for (const [body, field] of [
+      [{ expression: "true", function: "() => true" }, "function"],
+      [{}, "expression"],
+      [{ expression: "x".repeat(16385) }, "expression"],
+      [{ expression: "true", arg: 1 }, "arg"],
+      [{ expression: "true", timeoutMs: 1999 }, "timeoutMs"],
+      [{ expression: "true", timeoutMs: 60001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await failure(await evaluate(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    expect(calls).toEqual([]);
+    // An argument is JSON data, so a 1 MiB body of it is sent as it is.
+    const source = "(value) => value.length";
+    const padding =
+      1048576 -
+      Buffer.byteLength(JSON.stringify({ function: source, arg: "" }));
+    const large = { function: source, arg: "x".repeat(padding) };
+    expect(Buffer.byteLength(JSON.stringify(large))).toBe(1048576);
+    const accepted = await evaluate(tab.id, large);
+    expect(accepted.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(await declaredSize(`/tabs/${tab.id}/evaluate`, 1048577)).toBe(413);
+  });
+
+  it("evaluate runs on about:blank but not without a page", async () => {
+    const { space, tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("blank"));
+    // A committed about:blank document is a page for evaluate, which the
+    // hint for data URLs relies on.
+    controller.navigateAgentTab(tab.id, "about:blank");
+    const answered = await evaluate(tab.id, { expression: "location.href" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      tab: expect.objectContaining({ url: "about:blank" }),
+      value: "blank",
+    });
+    expect(calls).toHaveLength(1);
+    // Every agent space opens with a tab on the new tab page, which has no
+    // web document of its own.
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    const refused = await failure(
+      await evaluate(blank.id, { expression: "1" }),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.error).toMatchObject({ code: "no_web_page" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a navigation or a takeover during evaluate withholds the value", async () => {
+    const { space, tab } = await createPage();
+    const navigated = await heldEvaluate(tab.id, "from the old document");
+    controller.contents.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    navigated.release();
+    const changed = await failure(await navigated.done);
+    expect(changed.status).toBe(409);
+    expect(changed.error).toMatchObject({ code: "page_changed" });
+    expect(JSON.stringify(changed.error)).not.toContain("old document");
+    // A takeover answers after the call, so the value stays with the page.
+    const taken = await heldEvaluate(tab.id, "the person's page");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    taken.release();
+    const held = await failure(await taken.done);
+    expect(held.status).toBe(409);
+    expect(held.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+    });
+    expect(JSON.stringify(held.error)).not.toContain("person's page");
+  });
+
+  it("evaluate answers 403 while Page scripts are off, in flight included", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy("ready"));
+    controller.state.settings.agentPageScripts = false;
+    const off = await failure(await evaluate(tab.id, { expression: "1" }));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    expect(calls).toEqual([]);
+    // Switching it off fails the calls already running and withholds what
+    // they would have answered.
+    controller.state.settings.agentPageScripts = true;
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const stopped = await failure(await running.done);
+    expect(stopped.status).toBe(403);
+    expect(stopped.error).toMatchObject({ code: "agent_scripts_off" });
+    expect(JSON.stringify(stopped.error)).not.toContain("value from the page");
+    running.release();
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
@@ -5259,6 +5470,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
       "POST /tabs/:id/wait-for-function": { expression: "true" },
+      "POST /tabs/:id/evaluate": { expression: "true" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

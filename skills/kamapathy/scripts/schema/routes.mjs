@@ -280,6 +280,35 @@ const FIELDS = {
     },
     timeoutMs: waitTimeout,
   },
+  evaluate: {
+    expression: {
+      kind: "string",
+      max: 16384,
+      since: 4,
+      description:
+        "An expression to run in the page, with top-level await. Give this or function, not both.",
+    },
+    function: {
+      kind: "string",
+      max: 16384,
+      since: 4,
+      description: "The source of a function to call in the page.",
+    },
+    arg: {
+      kind: "json",
+      since: 4,
+      description: "The one JSON argument the function is called with.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 2000,
+      max: 60000,
+      default: 15000,
+      since: 4,
+      description:
+        "How long the script may run. The page itself gets this less 1000 ms.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -661,6 +690,19 @@ export const ROUTES = [
     "{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }",
     FIELDS["wait-for-function"],
     { budget: { field: "timeoutMs" }, since: 2 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/evaluate",
+    "Runs the agent's own expression or function in the page's main frame.",
+    "{ ok: true, tab: TabView, value?: json } or { ok: true, tab: TabView, unserializable } or { ok: true, tab: TabView }",
+    FIELDS.evaluate,
+    {
+      limit: 1048576,
+      budget: { field: "timeoutMs" },
+      follow: true,
+      since: 4,
+    },
   ),
   route(
     "GET",
