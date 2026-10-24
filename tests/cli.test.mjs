@@ -3238,7 +3238,7 @@ describe("scripted sessions", () => {
         health: { status: "ok", version: "0.1.9", apiLevel: 1 },
         stdout: sink(),
       }),
-    ).rejects.toMatchObject({ code: "app_outdated", entry: "navigate", option: "waitUntil", required: 2 });
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "navigate", option: "waitUntil", required: 4 });
     expect(older.requests).toEqual([]);
   });
 
