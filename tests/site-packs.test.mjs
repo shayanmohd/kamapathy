@@ -10,9 +10,11 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   LIMITS,
   PackProblem,
@@ -36,10 +38,15 @@ import {
   checkPack,
 } from "../skills/kamapathy/scripts/lib/site-check.mjs";
 import {
+  HELPER_LIMIT,
+  loadHelperModule,
+} from "../skills/kamapathy/scripts/lib/helper-module.mjs";
+import {
   KamapathyError,
   hardStopCause,
 } from "../skills/kamapathy/scripts/lib/errors.mjs";
 import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
+import { runCli } from "../skills/kamapathy/scripts/kamapathy.mjs";
 
 const posix = process.platform !== "win32";
 let workspace;
@@ -646,6 +653,49 @@ export function timedOut() {
 const EXTRAS_TOOL = `export const number = 5;
 export const other = () => "other";
 `;
+
+const CLI = fileURLToPath(
+  new URL("../skills/kamapathy/scripts/kamapathy.mjs", import.meta.url),
+);
+
+// A workspace of one case's own, holding the files it names.
+async function helperWorkspace(files = {}) {
+  const base = await realpath(
+    await mkdtemp(join(tmpdir(), "kamapathy-helpers-")),
+  );
+  temporary.push(base);
+  const home = join(base, "workspace");
+  await mkdir(home, { mode: 0o700 });
+  for (const [name, text] of Object.entries(files))
+    await writeFile(join(home, name), text, { mode: 0o600 });
+  return home;
+}
+
+// A run in a process of its own, so the workspace .env reaches process.env
+// and the globals a helper meets are the ones a real run installs.
+function runWith(home, code) {
+  const env = {
+    ...process.env,
+    KAMAPATHY_NO_LAUNCH: "1",
+    KAMAPATHY_USER_DATA: join(home, "profile"),
+    KAMAPATHY_WORKSPACE: home,
+  };
+  // The key comes from the workspace .env, which never changes a name the
+  // environment already holds.
+  delete env.FIXTURE_KEY;
+  const child = spawn(process.execPath, [CLI, "run", "-e", code], { env });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  return new Promise((done) =>
+    child.once("close", (status) => done({ status, stdout, stderr })),
+  );
+}
+
+// What a run says about a helpers.mjs its account cannot trust.
+const refusalText = (home) =>
+  `error: helpers_failed: Kamapathy will not load ${join(home, "helpers.mjs")}: it must be a regular file of at most 256 KiB that your account owns and others cannot change.\n`;
 
 describe("site packs", () => {
   it("reads a pack.json and reports every manifest rule", async () => {
@@ -2226,4 +2276,196 @@ export const withRef = () => "\u200fok";
     expect(one.ok).toBe(true);
     expect(one.missing).toEqual([]);
   });
+
+  it("helpers.mjs exports become globals after .env loads", async () => {
+    const home = await helperWorkspace({
+      ".env": "FIXTURE_KEY=from-dot-env\n",
+    });
+    const helpers = join(home, "helpers.mjs");
+    const log = join(home, "loads.txt");
+    await writeFile(
+      helpers,
+      [
+        `import { appendFileSync } from "node:fs";`,
+        `appendFileSync(${JSON.stringify(log)}, "loaded\\n");`,
+        // The top level runs after .env, so the key is already in place.
+        `const key = process.env.FIXTURE_KEY;`,
+        `export const fixtureKey = () => key;`,
+        `export function fixtureGreet(name) {`,
+        `  return "hello " + name;`,
+        `}`,
+        `export const _fixturePrivate = () => "private";`,
+        `export default function fixtureDefault() {`,
+        `  return "default";`,
+        `}`,
+        ``,
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const script = [
+      `import { readFileSync } from "node:fs";`,
+      `const fail = (message) => {`,
+      `  throw new Error(message);`,
+      `};`,
+      `if (fixtureKey() !== "from-dot-env") fail("key " + fixtureKey());`,
+      `if (fixtureGreet("world") !== "hello world") fail("second export");`,
+      `if (typeof _fixturePrivate !== "undefined") fail("private export");`,
+      `if (typeof fixtureDefault !== "undefined") fail("default export");`,
+      `if (globalThis.default !== undefined) fail("default name");`,
+      `const shape = Object.getOwnPropertyDescriptor(globalThis, "fixtureGreet");`,
+      `if (!shape.writable || !shape.configurable || shape.enumerable)`,
+      `  fail("shape " + JSON.stringify(shape, (_key, value) => typeof value));`,
+      `if (Object.keys(globalThis).includes("fixtureGreet")) fail("enumerable");`,
+      `const again = await import(${JSON.stringify(pathToFileURL(helpers).href)});`,
+      `if (again.fixtureGreet !== fixtureGreet) fail("another module");`,
+      `const loads = readFileSync(${JSON.stringify(log)}, "utf8");`,
+      `if (loads !== "loaded\\n") fail("loads " + JSON.stringify(loads));`,
+      `globalThis.fixtureGreet = () => "mine";`,
+      `if (fixtureGreet() !== "mine") fail("not writable");`,
+      `process.stdout.write("ok\\n");`,
+    ].join("\n");
+    expect(await runWith(home, script)).toEqual({
+      status: 0,
+      stdout: "ok\n",
+      stderr: "",
+    });
+
+    // A workspace without the file changes nothing a run already had.
+    const bare = await helperWorkspace({ ".env": "FIXTURE_KEY=only-env\n" });
+    expect(
+      await runWith(
+        bare,
+        [
+          `if (typeof fixtureKey !== "undefined") throw new Error("helpers");`,
+          `if (typeof spaces !== "function") throw new Error("globals");`,
+          `if (process.env.FIXTURE_KEY !== "only-env") throw new Error("env");`,
+          `process.stdout.write("bare\\n");`,
+        ].join("\n"),
+      ),
+    ).toEqual({ status: 0, stdout: "bare\n", stderr: "" });
+    expect(await loadHelperModule(bare, {})).toBeNull();
+  }, 30000);
+
+  it("a taken name, a failed import, a link or a group writable helpers.mjs ends the run with helpers_failed", async () => {
+    const long = `no FIXTURE_KEY: ${repeat(400)}`;
+    const cases = [
+      {
+        what: "a name Node already uses",
+        helpers: `export const fetch = () => "mine";\n`,
+        message:
+          "Kamapathy could not load helpers.mjs: it exports fetch, which is already a global. Rename it, or start the name with _ to keep it private.",
+      },
+      {
+        what: "a name the client installs",
+        helpers: `export const sitePacks = () => [];\n`,
+        message:
+          "Kamapathy could not load helpers.mjs: it exports sitePacks, which is already a global. Rename it, or start the name with _ to keep it private.",
+      },
+      {
+        what: "a name no script can use",
+        helpers: `const value = 1;\nexport { value as "two words" };\n`,
+        message:
+          'Kamapathy could not load helpers.mjs: it exports "two words", which is not a name a script can use. Rename it, or start the name with _ to keep it private.',
+      },
+      {
+        what: "a throw at the top level, cut to 300 characters",
+        helpers: `throw new Error(${JSON.stringify(long)});\n`,
+        message: `Kamapathy could not load helpers.mjs: ${long.slice(0, 300)}`,
+      },
+    ];
+    for (const entry of cases) {
+      const home = await helperWorkspace({ "helpers.mjs": entry.helpers });
+      const marker = join(home, "ran.txt");
+      const run = await runWith(
+        home,
+        [
+          `import { writeFileSync } from "node:fs";`,
+          `writeFileSync(${JSON.stringify(marker)}, "ran");`,
+        ].join("\n"),
+      );
+      expect(run, entry.what).toEqual({
+        status: 1,
+        stdout: "",
+        stderr: `error: helpers_failed: ${entry.message}\n`,
+      });
+      expect(existsSync(marker), entry.what).toBe(false);
+    }
+
+    // A file Node cannot parse fails the same way, in Node's own words.
+    const unparsed = await helperWorkspace({
+      "helpers.mjs": "export const = 1;\n",
+    });
+    const broken = await runWith(unparsed, `process.stdout.write("ran\\n");`);
+    expect(broken.status).toBe(1);
+    expect(broken.stdout).toBe("");
+    expect(broken.stderr).toMatch(
+      /^error: helpers_failed: Kamapathy could not load helpers\.mjs: \S[^\n]*\n$/,
+    );
+
+    // The workspace file rules: no link, and off Windows nothing group or
+    // others can change.
+    const marker = "ran.txt";
+    const writes = (home) =>
+      [
+        `import { writeFileSync } from "node:fs";`,
+        `writeFileSync(${JSON.stringify(join(home, marker))}, "ran");`,
+      ].join("\n");
+    const linked = await helperWorkspace({
+      "real.mjs": `export const fixtureLinked = () => 1;\n`,
+    });
+    await symlink(join(linked, "real.mjs"), join(linked, "helpers.mjs"));
+    expect(await runWith(linked, writes(linked))).toEqual({
+      status: 1,
+      stdout: "",
+      stderr: refusalText(linked),
+    });
+    expect(existsSync(join(linked, marker))).toBe(false);
+    if (posix) {
+      const shared = await helperWorkspace({
+        "helpers.mjs": `export const fixtureShared = () => 1;\n`,
+      });
+      await chmod(join(shared, "helpers.mjs"), 0o664);
+      expect(await runWith(shared, writes(shared))).toEqual({
+        status: 1,
+        stdout: "",
+        stderr: refusalText(shared),
+      });
+      expect(existsSync(join(shared, marker))).toBe(false);
+    }
+
+    // The 256 KiB cap, with nothing defined on the target it was given.
+    expect(HELPER_LIMIT).toBe(262144);
+    const big = await helperWorkspace({
+      "helpers.mjs": `export const fixtureBig = () => 1;\n// ${repeat(HELPER_LIMIT)}\n`,
+    });
+    const target = {};
+    const refused = await loadHelperModule(big, target).catch((error) => error);
+    expect(refused).toBeInstanceOf(KamapathyError);
+    expect(refused.code).toBe("helpers_failed");
+    expect(refused.path).toBe(join(big, "helpers.mjs"));
+    expect(`error: helpers_failed: ${refused.message}\n`).toBe(
+      refusalText(big),
+    );
+    expect(Object.keys(target)).toEqual([]);
+
+    // The repl loads the same file before its prompt, and leaves without
+    // one. The waiting .exit is never read, so a session that starts anyway
+    // says so at once.
+    const session = await helperWorkspace({ "helpers.mjs": cases[0].helpers });
+    const input = new PassThrough();
+    input.write(".exit\n");
+    const output = new PassThrough();
+    let text = "";
+    output.on("data", (chunk) => (text += chunk));
+    expect(
+      await runCli(["repl"], {
+        env: { KAMAPATHY_NO_LAUNCH: "1", KAMAPATHY_WORKSPACE: session },
+        fetch: vi.fn(),
+        stdin: input,
+        stdout: output,
+        terminal: true,
+      }),
+    ).toBe(1);
+    expect(text).toBe(`error: helpers_failed: ${cases[0].message}\n`);
+  }, 30000);
 });

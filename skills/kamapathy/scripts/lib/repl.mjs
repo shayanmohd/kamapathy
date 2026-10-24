@@ -4,7 +4,8 @@ import repl from "node:repl";
 import { inspect } from "node:util";
 import { describeError } from "../diagnostics.mjs";
 import { KamapathyError } from "./errors.mjs";
-import { line } from "./format.mjs";
+import { line, printable } from "./format.mjs";
+import { loadHelperModule } from "./helper-module.mjs";
 import { takeNotices } from "./request.mjs";
 import { installGlobals } from "./run.mjs";
 
@@ -19,9 +20,26 @@ function writer(value) {
   return describeError(value).join("\n");
 }
 
-// Resolves 0 when the person types .exit or presses Ctrl+D.
-export function startRepl({ input, output, session, client, terminal }) {
+// Resolves 0 when the person types .exit or presses Ctrl+D, and 1 when the
+// workspace helpers.mjs cannot be loaded.
+export async function startRepl({
+  input,
+  output,
+  session,
+  client,
+  terminal,
+  env,
+}) {
   installGlobals(globalThis, client);
+  // The person's own helpers before the prompt, so the session starts with
+  // them or not at all.
+  try {
+    await loadHelperModule(env?.KAMAPATHY_WORKSPACE, globalThis);
+  } catch (error) {
+    if (!(error instanceof KamapathyError)) throw error;
+    output.write(`error: ${error.code}: ${printable(error.message)}\n`);
+    return 1;
+  }
   output.write(
     "Kamapathy scripting session. Type help() for the API and .exit to leave.\n",
   );

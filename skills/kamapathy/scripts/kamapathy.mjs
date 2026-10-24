@@ -598,6 +598,7 @@ export const PARSERS = {
       session,
       client: await connect({ session, lazy: true }),
       terminal: true,
+      env: options.env,
     });
   },
   workspace: async (_args, { env, json, stdout }) => {

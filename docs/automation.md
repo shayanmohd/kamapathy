@@ -610,6 +610,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `site_pack_invalid` | client | not retryable | `packId`, `dir`, `problems` | The pack or a tool file breaks a rule. |
 | `invalid_tool_args` | client | not retryable | `packId`, `tool`, `problems`, `expected` | The arguments do not match the tool's declaration. |
 | `site_tool_failed` | client | not retryable | `packId`, `tool`, `at`, `cause` | The Node tool threw an error of its own. |
+| `helpers_failed` | client | not retryable | `path`, `export`, `cause` | helpers.mjs could not be loaded or its exports installed. |
 <!-- /generated:errors -->
 
 ## Versions and API levels

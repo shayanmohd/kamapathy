@@ -646,6 +646,13 @@ export const ERRORS = {
     ["packId", "tool", "at", "cause"],
     4,
   ),
+  helpers_failed: code(
+    null,
+    false,
+    "helpers.mjs could not be loaded or its exports installed.",
+    ["path", "export", "cause"],
+    4,
+  ),
 };
 
 // Whether an error can clear without the request changing: its code says

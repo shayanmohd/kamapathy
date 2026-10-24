@@ -1071,6 +1071,14 @@ describe("API schema", () => {
       });
       expect(ERRORS[code].fields, code).toEqual(fields);
     }
+    // run and repl raise one code of their own for a workspace helpers.mjs
+    // they cannot load or install.
+    expect(ERRORS.helpers_failed).toMatchObject({
+      status: null,
+      transient: false,
+      since: 4,
+    });
+    expect(ERRORS.helpers_failed.fields).toEqual(["path", "export", "cause"]);
     // The generated reference carries every form.
     const reference = read("skills/kamapathy/references/api.md");
     for (const text of [
