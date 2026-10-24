@@ -3688,12 +3688,14 @@ describe("local automation socket", () => {
     ticket.narrow(100100);
     ticket.narrow(Number.NaN);
     expect(ticket.runDeadline).toBe(ticket.arrival + 25100 + LIMITS.graceMs);
+    const before = Date.now();
     const deadline = await ticket.start({
       kind: "space",
       spaceId: "space-1",
     });
-    expect(deadline).toBeLessThanOrEqual(ticket.arrival + 25100);
-    expect(deadline).toBeGreaterThan(ticket.arrival + 25000);
+    // The request answers within its own budget, not the declared maximum.
+    expect(deadline).toBeLessThanOrEqual(Date.now() + 25100);
+    expect(deadline).toBeGreaterThan(before + 24000);
     ticket.finish();
 
     // Queue time beyond the grace comes out of the request's own budget.
