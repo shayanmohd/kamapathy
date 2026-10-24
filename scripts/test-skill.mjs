@@ -2629,6 +2629,146 @@ try {
   });
   await cli(["close", details.id]);
   passed("agents keep working with the window closed on the same instance");
+  // Section 17 in the real app: the person's extensions reach a shared agent
+  // space, an isolated space keeps them out, and what an extension opens or
+  // changes while an agent works follows the isolation rules.
+  const markerFolder = resolve("tests/fixtures/extensions/marker");
+  await chrome.evaluate(() =>
+    window.kamapathy.dispatch({
+      type: "settings:update",
+      settings: { extensionDeveloperMode: true },
+    }),
+  );
+  await waitForState(chrome, (state) => state.settings.extensionDeveloperMode);
+  // Load unpacked asks for a folder and for the person's OK; both are native
+  // dialogs, answered here as the person would.
+  await browser.evaluate(({ dialog }, folder) => {
+    globalThis.__kamapathyDialogs = {
+      open: dialog.showOpenDialog,
+      message: dialog.showMessageBox,
+    };
+    dialog.showOpenDialog = async () => ({
+      canceled: false,
+      filePaths: [folder],
+    });
+    dialog.showMessageBox = async () => ({
+      response: 1,
+      checkboxChecked: false,
+    });
+  }, markerFolder);
+  await chrome.evaluate(() =>
+    window.kamapathy.extensionCommand({ type: "load-unpacked" }),
+  );
+  const loaded = await poll(
+    async () => {
+      const view = await chrome.evaluate(() => window.kamapathy.extensions());
+      return view.rows.length && view.actions.some((action) => action.badge)
+        ? view
+        : null;
+    },
+    { timeoutMs: 30000, label: "the marker extension and its badge" },
+  );
+  await browser.evaluate(({ dialog }) => {
+    const kept = globalThis.__kamapathyDialogs;
+    if (!kept) return;
+    dialog.showOpenDialog = kept.open;
+    dialog.showMessageBox = kept.message;
+  });
+  assert.deepEqual(
+    loaded.rows.map((row) => [row.name, row.source, row.enabled]),
+    [["Kamapathy marker", "unpacked", true]],
+  );
+  const extensionSpace = (await json(["space", "create", "Extension review"]))
+    .space;
+  const extensionTab = (
+    await json([
+      "open",
+      extensionSpace.id,
+      `${fixture.origin}/extensions/agent`,
+    ])
+  ).tab;
+  await cli(["wait", extensionTab.id, "--stdin"], {
+    selector: "#kamapathy-marker",
+    timeoutMs: 10000,
+  });
+  const marked = await observe(extensionTab.id);
+  assert.match(marked.text, /Marker from the extension/);
+  passed(
+    "the person's extension runs in a shared agent space and its marker shows in a snapshot",
+  );
+  // The person is looking at a page of their own while the agent works, so a
+  // tab the extension opens has a personal space to land in.
+  const personalSpaceId = (
+    await chrome.evaluate(() => window.kamapathy.getState())
+  ).activeSpaceId;
+  assert.equal(personalSpaceId, "personal");
+  const openedUrl = `${fixture.origin}/extensions/opened`;
+  await cli([
+    "click",
+    extensionTab.id,
+    ref(marked, "Open a tab through the extension"),
+  ]);
+  const opened = await poll(
+    async () => {
+      const state = await chrome.evaluate(() => window.kamapathy.getState());
+      const tab = state.tabs.find((item) => item.url === openedUrl);
+      return tab ? { state, tab } : null;
+    },
+    { timeoutMs: 15000, label: "the tab the extension opens" },
+  );
+  const openedSpace = opened.state.spaces.find(
+    (item) => item.id === opened.tab.spaceId,
+  );
+  assert.equal(openedSpace.kind, "personal");
+  assert.notEqual(openedSpace.id, extensionSpace.id);
+  assert.deepEqual(
+    (await json(["tabs", extensionSpace.id])).tabs.filter(
+      (item) => item.url === openedUrl,
+    ),
+    [],
+  );
+  await cli(["wait", extensionTab.id, "--stdin"], {
+    selector: "#kamapathy-marker-result",
+    text: "opened",
+    timeoutMs: 10000,
+  });
+  assert.match((await observe(extensionTab.id)).text, /opened \d+/);
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    opened.tab.id,
+  );
+  passed(
+    "a tab an extension opens during agent work lands in a personal space",
+  );
+  // The agent's own tab is not the extension's to change.
+  await cli([
+    "click",
+    extensionTab.id,
+    ref(marked, "Change this tab through the extension"),
+  ]);
+  await cli(["wait", extensionTab.id, "--stdin"], {
+    selector: "#kamapathy-marker-result",
+    text: "An agent is using this tab.",
+    timeoutMs: 10000,
+  });
+  const unchanged = await observe(extensionTab.id);
+  assert.match(unchanged.text, /An agent is using this tab\./);
+  assert.equal(unchanged.url, `${fixture.origin}/extensions/agent`);
+  passed("an extension cannot change the tab an agent is working in");
+  // An isolated space has its own session, which no extension runs in.
+  const isolated = (
+    await json(["space", "create", "Isolated extension review", "--isolated"])
+  ).space;
+  const isolatedTab = (
+    await json(["open", isolated.id, `${fixture.origin}/extensions/agent`])
+  ).tab;
+  const bare = await observe(isolatedTab.id);
+  assert.doesNotMatch(bare.text, /Marker from the extension/);
+  await cli(["space", "close", isolated.id]);
+  await cli(["space", "close", extensionSpace.id]);
+  passed(
+    "an isolated agent space runs no extension, so the page has no marker",
+  );
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");

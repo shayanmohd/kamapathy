@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { createCipheriv, createHash, pbkdf2Sync } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, lstatSync, readlinkSync, statSync } from "node:fs";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -357,6 +357,13 @@ try {
   await chromeProfile.waitFor();
   assert.equal(await chromeProfile.isChecked(), true);
   await welcome.getByRole("button", { name: "Import", exact: true }).click();
+  // Section 17's step comes between the import and its outcome, and this
+  // profile has no extensions to bring over yet.
+  await welcome.getByText("Add your extensions").waitFor();
+  await welcome
+    .getByText("No extensions to bring over from this profile.")
+    .waitFor();
+  await welcome.getByRole("button", { name: "Continue" }).click();
   await welcome.getByText("Imported 2 bookmarks and 3 sites.").waitFor();
   await welcome.getByRole("button", { name: "Continue" }).click();
   await welcome.getByRole("heading", { name: "Connect your agent" }).waitFor();
@@ -2466,6 +2473,8 @@ try {
     await page.getByRole("button", { name: "Close dialog", exact: true }).click();
   } else {
     await page.getByRole("button", { name: "Import", exact: true }).click();
+    await page.getByText("Add your extensions").waitFor();
+    await page.getByRole("button", { name: "Continue" }).click();
     await page
       .getByText(/^Imported \d+ bookmarks, \d+ sites and 1 sign-in\.$/)
       .waitFor();
@@ -2624,6 +2633,299 @@ try {
   checked(
     "a PDF given to a second instance opens as a foreground tab in a personal space",
   );
+  // Section 17 in the real app: the person adds an extension from a folder,
+  // uses its button and popup, turns it off, removes it, and brings one over
+  // from another browser. Chromium's own PDF viewer is an extension too, so
+  // it is read before and after a removal.
+  const markerFolder = resolve("tests/fixtures/extensions/marker");
+  const PDF_VIEWER = "mhjfbmdgcfjbbpaeojofohoefgiehjai";
+  // Load unpacked, Add, Remove and the import all ask through native dialogs,
+  // which are answered here as the person would answer them.
+  const stubExtensionDialogs = (folder) =>
+    app.evaluate(({ dialog }, pick) => {
+      globalThis.__kamapathyDialogs ??= {
+        open: dialog.showOpenDialog,
+        message: dialog.showMessageBox,
+      };
+      dialog.showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [pick],
+      });
+      dialog.showMessageBox = async () => ({
+        response: 1,
+        checkboxChecked: false,
+      });
+    }, folder);
+  const restoreExtensionDialogs = () =>
+    app.evaluate(({ dialog }) => {
+      const kept = globalThis.__kamapathyDialogs;
+      if (!kept) return;
+      dialog.showOpenDialog = kept.open;
+      dialog.showMessageBox = kept.message;
+    });
+  const extensionsModal = page.getByRole("dialog", { name: "Extensions" });
+  const openExtensionsModal = async () => {
+    await page
+      .getByRole("button", { name: "Browser menu", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Extensions" }).click();
+    await extensionsModal.waitFor();
+  };
+  const closeDialog = () =>
+    page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  const markerButton = page.getByRole("button", {
+    name: "Kamapathy marker",
+    exact: true,
+  });
+  const markerRow = extensionsModal.getByText("Kamapathy marker", {
+    exact: true,
+  });
+  const extensionWindows = () =>
+    app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()
+        .filter((item) =>
+          item.webContents.getURL().startsWith("chrome-extension://"),
+        )
+        .map((item) => ({ visible: item.isVisible(), ...item.getBounds() })),
+    );
+  // Every frame of the tab showing this address, the viewer's own included.
+  const framesOfTab = (url) =>
+    app.evaluate(
+      ({ webContents }, wanted) =>
+        webContents
+          .getAllWebContents()
+          .filter((contents) => contents.getURL() === wanted)
+          .flatMap((contents) =>
+            contents.mainFrame.framesInSubtree.map((frame) => frame.url),
+          ),
+      url,
+    );
+  await stubExtensionDialogs(markerFolder);
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("switch", { name: "Developer mode" }).click();
+  await waitForState(page, (next) => next.settings.extensionDeveloperMode);
+  await closeDialog();
+  await openExtensionsModal();
+  await extensionsModal
+    .getByRole("button", { name: "Load unpacked", exact: true })
+    .click();
+  await markerRow.waitFor();
+  await closeDialog();
+  await markerButton.waitFor();
+  // The badge is the extension's own service worker reaching chrome.action.
+  await poll(
+    async () =>
+      (await page
+        .locator(".extension-button .extension-badge")
+        .textContent()) === "on",
+    { label: "the badge the extension's worker sets" },
+  );
+  checked("Load unpacked shows the button and badge");
+  // The popup belongs to the tab the person is looking at.
+  const shownTab = (await page.evaluate(() => window.kamapathy.getState()))
+    .activeTabId;
+  await page.evaluate(
+    ({ id, url }) =>
+      window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    { id: shownTab, url: `${origin}/` },
+  );
+  await waitForState(page, (next) =>
+    next.tabs.some(
+      (tab) => tab.id === shownTab && tab.url === `${origin}/` && !tab.loading,
+    ),
+  );
+  const buttonBox = await page.evaluate(() =>
+    document
+      .querySelector(".extension-button")
+      .getBoundingClientRect()
+      .toJSON(),
+  );
+  const shellBounds = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].getContentBounds(),
+  );
+  const popupOpened = app.waitForEvent("window");
+  await markerButton.click();
+  const popup = await popupOpened;
+  await popup.waitForSelector("#shown");
+  // A popup sizes itself from its page, which Chromium reports to the window
+  // as a preferred size. That report never arrives while the end-to-end
+  // runner holds the application, so this run makes it, and Kamapathy places
+  // and shows the window from there.
+  const popupSize = { width: 280, height: 160 };
+  await app.evaluate(({ BrowserWindow }, size) => {
+    const window = BrowserWindow.getAllWindows().find((item) =>
+      item.webContents.getURL().startsWith("chrome-extension://"),
+    );
+    window.webContents.emit("preferred-size-changed", {}, size);
+  }, popupSize);
+  const placed = await poll(
+    async () => {
+      const [found] = await extensionWindows();
+      return found?.visible ? found : null;
+    },
+    { label: "the popup shown under its button" },
+  );
+  assert.deepEqual(
+    [placed.width, placed.height],
+    [popupSize.width, popupSize.height],
+  );
+  assert.ok(
+    placed.y >= shellBounds.y + buttonBox.bottom,
+    `The popup at ${placed.y} is not under the button ending at ${shellBounds.y + buttonBox.bottom}`,
+  );
+  assert.ok(
+    Math.abs(placed.x + placed.width - (shellBounds.x + buttonBox.right)) <= 2,
+    `The popup ends at ${placed.x + placed.width}, the button at ${shellBounds.x + buttonBox.right}`,
+  );
+  await popup.waitForFunction(
+    () => document.getElementById("shown").textContent !== "waiting",
+  );
+  assert.equal(await popup.locator("#shown").textContent(), `${origin}/`);
+  checked(
+    "the popup opens under its button, and its tabs.query returns the shown tab",
+  );
+  // Escape is the person's key, so it is sent to the popup itself.
+  await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows().find((item) =>
+      item.webContents.getURL().startsWith("chrome-extension://"),
+    );
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
+  });
+  await poll(async () => (await extensionWindows()).length === 0, {
+    label: "the popup closing on Escape",
+  });
+  checked("Escape closes the popup");
+  const markerSwitch = extensionsModal.getByRole("switch", {
+    name: "Turn Kamapathy marker on or off",
+  });
+  await openExtensionsModal();
+  await markerSwitch.click();
+  await poll(
+    async () => (await markerSwitch.getAttribute("aria-checked")) === "false",
+    { label: "the extension turned off" },
+  );
+  await closeDialog();
+  await poll(
+    async () => (await page.locator(".extension-button").count()) === 0,
+    { label: "the button going away with the extension" },
+  );
+  checked("turning the extension off hides the button");
+  await openExtensionsModal();
+  await markerSwitch.click();
+  await poll(
+    async () => (await markerSwitch.getAttribute("aria-checked")) === "true",
+    { label: "the extension turned on again" },
+  );
+  await closeDialog();
+  await markerButton.waitFor();
+  // The viewer is a component extension, which keeps working beside the
+  // person's own and after one is removed.
+  const viewerShows = async () => {
+    await waitForState(page, (next) =>
+      next.tabs.some(
+        (tab) => tab.id === shownTab && tab.url === pdfFileUrl && !tab.loading,
+      ),
+    );
+    await poll(
+      async () =>
+        (await framesOfTab(pdfFileUrl)).some((url) =>
+          url.startsWith(`chrome-extension://${PDF_VIEWER}/`),
+        ),
+      { label: "the PDF viewer's own frame" },
+    );
+  };
+  await page.evaluate(
+    ({ id, url }) =>
+      window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    { id: shownTab, url: pdfFileUrl },
+  );
+  await viewerShows();
+  const markerId = (await page.evaluate(() => window.kamapathy.extensions()))
+    .rows[0].id;
+  await openExtensionsModal();
+  await extensionsModal.getByText("About Kamapathy marker").click();
+  await extensionsModal
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await markerRow.waitFor({ state: "detached" });
+  await closeDialog();
+  await poll(
+    async () => (await page.locator(".extension-button").count()) === 0,
+    { label: "the button going away with the removed extension" },
+  );
+  const recorded = JSON.parse(
+    await readFile(join(profile, "extensions.json"), "utf8"),
+  );
+  assert.deepEqual(
+    recorded.extensions.filter((entry) => entry.id === markerId),
+    [],
+  );
+  assert.ok(existsSync(markerFolder), "the unpacked folder is the person's");
+  checked("Remove deletes the extension");
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:reload", id }),
+    shownTab,
+  );
+  await viewerShows();
+  checked(
+    "a PDF renders in the viewer while the extension is loaded and again after Remove",
+  );
+  // The other browser's profile offers the same extension from a folder of
+  // its own, so Kamapathy gives it an id of its own.
+  const importedFolder = join(home, "chrome-unpacked", "marker");
+  await cp(markerFolder, importedFolder, { recursive: true });
+  await writeFile(
+    join(chromeData, "Default", "Preferences"),
+    JSON.stringify({
+      extensions: {
+        settings: {
+          mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm: {
+            location: 4,
+            state: 1,
+            path: importedFolder,
+            manifest: { name: "Kamapathy marker", version: "1.0.0" },
+          },
+        },
+        pinned_extensions: ["mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"],
+      },
+    }),
+  );
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Import...", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Import bookmarks and history" })
+    .waitFor();
+  const importDialog = page.getByRole("dialog", {
+    name: "Import bookmarks and history",
+  });
+  await importDialog.getByRole("checkbox", { name: "Bookmarks" }).uncheck();
+  await importDialog.getByRole("checkbox", { name: "History" }).uncheck();
+  assert.equal(
+    await importDialog.getByRole("checkbox", { name: "Extensions" }).isChecked(),
+    true,
+  );
+  await importDialog.getByRole("button", { name: "Import", exact: true }).click();
+  await importDialog.getByText("Add your extensions").waitFor();
+  const candidate = importDialog.getByRole("checkbox", {
+    name: "Kamapathy marker",
+  });
+  assert.equal(await candidate.isChecked(), true);
+  await importDialog.getByRole("button", { name: "Add 1 extension" }).click();
+  await importDialog.getByText("Added").waitFor();
+  await importDialog.getByRole("button", { name: "Continue" }).click();
+  await markerButton.waitFor();
+  const imported = (await page.evaluate(() => window.kamapathy.extensions()))
+    .rows;
+  assert.deepEqual(
+    imported.map((row) => [row.name, row.source, row.importedFrom]),
+    [["Kamapathy marker", "unpacked", "Google Chrome"]],
+  );
+  assert.notEqual(imported[0].id, markerId);
+  await restoreExtensionDialogs();
+  checked("import adds the fake profile's unpacked extension");
   if (process.platform === "darwin") {
     await page.evaluate(
       (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
