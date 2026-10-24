@@ -33,18 +33,25 @@ export type PageOperation =
   | "input"
   | "frame"
   | "ready"
-  | "frameIndex";
+  | "frameIndex"
+  | "actionPoint"
+  | "stableBox"
+  | "scrollRequest"
+  | "viewport"
+  | "focusedKind";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
-// selector engine and the outline builder travel the same way, as arguments,
-// so operations that resolve no selector and read no outline work without them.
+// selector engine, the outline builder and the action operations travel the
+// same way, as arguments, so operations that resolve no selector, read no
+// outline and check no actionability work without them.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
   namespace: string,
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
   outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
+  actionOperations?: typeof import("./agent/dom/actions").actionOperations,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -2151,6 +2158,40 @@ export function pageOperation(
       return failure("The element is not a frame shown in this page.");
     const around = framePath(element);
     return { ok: true, path: around ? `${around}/${index}` : `${index}` };
+  }
+  // Section 5's actionability, measured by its own module with this page's
+  // helpers.
+  if (
+    operation === "actionPoint" ||
+    operation === "stableBox" ||
+    operation === "scrollRequest" ||
+    operation === "viewport" ||
+    operation === "focusedKind"
+  ) {
+    const actions = actionOperations!({
+      select: (spec: unknown) => target(spec as ElementTarget),
+      isElement,
+      visible,
+      placed,
+      hitAt,
+      within,
+      emptyBox,
+      walk,
+      labelOf,
+      roleOf,
+      styleOf,
+      docOf,
+      parentOf,
+      framePath,
+      framesOf,
+      frameDocument,
+      opaqueFrame,
+      live,
+      normalizeText: clean,
+      failure,
+      reboundResult,
+    });
+    return actions[operation](payload);
   }
   // The listed controls themselves, for the main process to read their
   // backend nodes from.

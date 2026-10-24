@@ -1,4 +1,5 @@
 import { pageOperation, type PageOperation } from "../../automation-dom";
+import { actionOperations } from "../dom/actions";
 import { outlineBuilder } from "../dom/outline";
 import { pageState, type PageStateOperation } from "../dom/page-state";
 import { selectorEngine } from "../dom/select";
@@ -6,10 +7,10 @@ import { selectorEngine } from "../dom/select";
 // Kamapathy's isolated world in each frame. Isolated init scripts use the
 // same name, so they share it.
 export const WORLD_NAME = "kamapathy";
-// The page script with the selector engine and the outline builder passed in
-// beside it, so selectors travel as JSON and the code that reads the page
-// travels as code.
-export const PAGE_SOURCE = `function(operation,payload,namespace){return (${pageOperation})(operation,payload,namespace,(${selectorEngine}),(${outlineBuilder}))}`;
+// The page script with the selector engine, the outline builder and the
+// action operations passed in beside it, so selectors travel as JSON and the
+// code that reads the page travels as code.
+export const PAGE_SOURCE = `function(operation,payload,namespace){return (${pageOperation})(operation,payload,namespace,(${selectorEngine}),(${outlineBuilder}),(${actionOperations}))}`;
 export const PAGE_STATE_SOURCE = pageState.toString();
 
 // Operations that change the page themselves. The others only read it, even
@@ -34,6 +35,11 @@ export const OPERATIONS: Record<
   frame: { mutates: false },
   ready: { mutates: false },
   frameIndex: { mutates: false },
+  actionPoint: { mutates: false },
+  stableBox: { mutates: false },
+  scrollRequest: { mutates: false },
+  viewport: { mutates: false },
+  focusedKind: { mutates: false },
   info: { mutates: false, source: "pageState" },
   loadProbe: { mutates: false, source: "pageState" },
 };
