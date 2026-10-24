@@ -49,6 +49,22 @@ document.querySelector("#ask-alert").onclick = () => { alert("A note for you"); 
 document.querySelector("#ask-confirm").onclick = () => { result.textContent = "confirm " + confirm("Delete the draft?"); };
 document.querySelector("#ask-prompt").onclick = () => { result.textContent = "prompt " + prompt("What is the title?", "Untitled"); };`,
   ),
+  // A frame that shares the page's process has no binding of its own, so its
+  // answer reaches the page at once and the log only after a drain.
+  "/prompts/frames": page(
+    "Frame dialog lab",
+    `<h1>Frame dialog lab</h1><iframe id="inner" src="/prompts/frame" title="Inner frame" width="300" height="80"></iframe><p><button id="ask-in-frame">Ask inside the frame</button></p><p id="frames-result" role="status">Nothing asked yet</p>`,
+    `document.querySelector("#ask-in-frame").onclick = () => {
+  document.querySelector("#frames-result").textContent =
+    "frame confirm " + document.querySelector("#inner").contentWindow.askInFrame();
+};`,
+  ),
+  "/prompts/frame": page(
+    "Inner frame",
+    '<p id="inner-frame">A frame of the same site</p>',
+    `window.askInFrame = () => confirm("Delete from the frame?");
+parent.document.querySelector("#frames-result").textContent = "frame ready";`,
+  ),
   "/prompts/delayed": page(
     "Delayed pages",
     `<h1>Delayed pages</h1><button id="open-later">Open a page in a moment</button><button id="open-two">Open two pages</button><p id="opened" role="status">Nothing opened</p>`,

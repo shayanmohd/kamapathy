@@ -2344,6 +2344,30 @@ try {
   assert.match((await observe(filesTab.id)).text, /Chose notes\.txt 12/);
   await cli(["space", "close", dialogSpace.id]);
   passed("a change-handler confirm during setInputFiles");
+  const frameSpace = (await json(["space", "create", "Frame dialog review"])).space;
+  const frameTab = (await json(["open", frameSpace.id, `${fixture.origin}/prompts/frames`])).tab;
+  await poll(async () => (await observe(frameTab.id)).text.includes("frame ready"), {
+    timeoutMs: 10000,
+    label: "the frame of the same site",
+  });
+  assert.equal(
+    (await cli(["dialog-policy", frameTab.id, "accept"])).output,
+    "policy accept 1 left\n",
+  );
+  // A frame that shares the page's process has no binding of its own, so its
+  // answer reaches the page at once and the log once something drains the tab.
+  assert.equal((await cli(["click", frameTab.id, "#ask-in-frame"])).output, "ok\n");
+  assert.match((await observe(frameTab.id)).text, /frame confirm true/);
+  assert.deepEqual((await cli(["dialogs", frameTab.id])).output.trim().split("\n"), [
+    "policy none",
+    'confirm "Delete from the frame?" accepted',
+  ]);
+  // No box was raised for it either: a dialog still waiting would have
+  // failed every read above with dialog_open.
+  const frameInfo = await (await promptSocket(`/tabs/${frameTab.id}/info`)).json();
+  assert.equal(frameInfo.dialog, undefined, JSON.stringify(frameInfo));
+  await cli(["space", "close", frameSpace.id]);
+  passed("a dialog in a frame of the page's own process, answered and logged after a drain");
   const downloadSpace = (await json(["space", "create", "Download review"])).space;
   const downloadTab = (await json(["open", downloadSpace.id, `${fixture.origin}/prompts/download`])).tab;
   // Nothing armed: the file never arrives, and the click says so.
