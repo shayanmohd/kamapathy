@@ -143,6 +143,13 @@ export const ERRORS = {
     [],
     2,
   ),
+  file_chooser_not_found: code(
+    404,
+    false,
+    "No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out.",
+    [],
+    2,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -379,6 +386,13 @@ export const ERRORS = {
     false,
     "The target holds several file inputs, so none of them is the one to file.",
     ["count"],
+    2,
+  ),
+  file_chooser_opened: code(
+    422,
+    false,
+    "An action opened a file chooser no wait was armed for, so Kamapathy closed it.",
+    [],
     2,
   ),
   invalid_value: code(422, false, "The control cannot take this value."),

@@ -4921,6 +4921,120 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+
+  // A file chooser the page opens on the tab's own session, with an armed
+  // wait to receive it, as Chromium reports one while interception is on.
+  const openChooser = async (tabId: string, mode = "selectSingle") => {
+    const armed = await request(`/tabs/${tabId}/expectations`, "POST", {
+      event: "filechooser",
+      timeoutMs: 60000,
+    });
+    expect(armed.status).toBe(201);
+    const { expectation } = await armed.json();
+    const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
+    controller.contents.debugger.event("Page.fileChooserOpened", {
+      frameId: "main",
+      backendNodeId: 9,
+      mode,
+    });
+    const answered = await waiting;
+    expect(answered.status).toBe(200);
+    const { fileChooser } = await answered.json();
+    return fileChooser as {
+      id: string;
+      tabId: string;
+      multiple: boolean;
+      accept: string[];
+    };
+  };
+  // A page whose input answers the calls the chooser makes on the node it
+  // resolved: the accept it advertises, and the files it took.
+  const chooserNode = () => {
+    const page = controller.contents;
+    page.debugger.reply("DOM.resolveNode", () => ({
+      object: { objectId: "node-1" },
+    }));
+    page.debugger.reply("Runtime.callFunctionOn", (params) => {
+      const declaration = String(params.functionDeclaration);
+      if (!declaration.includes('"applyFiles"'))
+        return { result: { value: { ok: true, accept: ["image/png"] } } };
+      const { files } = params.arguments[0].value as { files: unknown[] };
+      return { result: { value: { ok: true, selected: files.length } } };
+    });
+  };
+
+  it("the chooser files route runs in its tab's space lane, answers 404 file_chooser_not_found and takes 0 to 8 files up to 16 MiB", async () => {
+    const { tab } = await createPage();
+    chooserNode();
+    // An id that names no live chooser is refused before any body is read.
+    const unknown = await request("/file-choosers/0123456789abcdef/files", "POST", { files: [] });
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()).error.code).toBe("file_chooser_not_found");
+
+    const chooser = await openChooser(tab.id, "selectMultiple");
+    expect(chooser).toEqual({
+      id: expect.any(String),
+      tabId: tab.id,
+      multiple: true,
+      accept: ["image/png"],
+    });
+    const path = `/file-choosers/${chooser.id}/files`;
+    const file = { name: "listing.png", type: "image/png", data: "AAEC/w==" };
+    const refused = [
+      {},
+      { files: Array(9).fill(file) },
+      { files: [{ ...file, data: "not base64" }] },
+      { files: [{ name: "listing.png", type: "image/png", path: "/private/listing.png" }] },
+      { files: [file], ref: "@e1" },
+    ];
+    for (const body of refused)
+      expect((await request(path, "POST", body)).status, JSON.stringify(body)).toBe(400);
+    const half = Buffer.alloc(8 * 1024 * 1024 + 1).toString("base64");
+    const tooLarge = await request(path, "POST", {
+      files: ["first.aab", "second.aab"].map((name) => ({
+        name,
+        type: "application/octet-stream",
+        data: half,
+      })),
+    });
+    expect(tooLarge.status).toBe(413);
+    expect((await tooLarge.json()).error.code).toBe("files_too_large");
+    expect(await declaredSize(path, 24 * 1024 * 1024 + 1)).toBe(413);
+
+    // An empty list cancels the chooser and uses it up.
+    const cancelled = await request(path, "POST", { files: [] });
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toEqual({ ok: true, selected: 0 });
+    expect((await request(path, "POST", { files: [] })).status).toBe(404);
+
+    // The route runs in the lane of its chooser's tab, so it waits for the
+    // page work before it.
+    const next = await openChooser(tab.id);
+    let releaseClick!: () => void;
+    controller.contents.result = (code: string) =>
+      code.includes(')("target",')
+        ? new Promise((resolve) => {
+            releaseClick = () => resolve({ ok: true, x: 25, y: 45 });
+          })
+        : { ok: true };
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" });
+    await expect.poll(() => releaseClick).toBeDefined();
+    const queued = request(`/file-choosers/${next.id}/files`, "POST", {
+      files: [file],
+    });
+    expect(
+      await Promise.race([
+        queued.then(() => "answered"),
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]),
+    ).toBe("waiting");
+    releaseClick();
+    expect((await click).status).toBe(200);
+    const filed = await queued;
+    expect(filed.status).toBe(200);
+    expect(await filed.json()).toEqual({ ok: true, selected: 1 });
+  });
+
   // How a request ended: its status and error code, or "closed" if its
   // connection dropped first.
   const settled = (response: Promise<Response>) =>
@@ -5276,6 +5390,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/screenshot": {},
       "POST /tabs/:id/upload": uploadBody(),
       "POST /tabs/:id/set-input-files": uploadBody(),
+      "POST /file-choosers/:id/files": { files: [] },
       "POST /update/check": {},
       "POST /update/download": {},
       "POST /tabs/:id/pdf/text": { from: 1, maxChars: 0 },
@@ -5309,6 +5424,7 @@ describe("local automation socket", () => {
       new FakeDownloadItem({ filename: "report.pdf" }),
     );
     const downloadId = (captured as { id: string }).id;
+    const chooser = await openChooser(tab.id);
     const tabs = controller.state.tabs.length;
     for (const route of ROUTES.filter((item) => item.method === "POST" && item.body)) {
       const key = routeKey(route);
@@ -5321,7 +5437,9 @@ describe("local automation socket", () => {
             ? expectationId
             : route.path.startsWith("/downloads/")
               ? downloadId
-              : tab.id,
+              : route.path.startsWith("/file-choosers/")
+                ? chooser.id
+                : tab.id,
       );
       const response = await request(path, "POST", { ...SAMPLES[key], extra: true });
       expect(response.status, key).toBe(400);

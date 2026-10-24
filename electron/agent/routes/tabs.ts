@@ -1,11 +1,12 @@
 import type { WebContents } from "electron";
-import { envelope, fail } from "../errors";
+import { envelope, fail, FileChooserOpenedError } from "../errors";
 import {
   send,
   type RouteCall,
   type RouteDeps,
   type RouteImpl,
 } from "../http";
+import type { ReceiptFields, ReceiptScope } from "../receipts";
 import type { TabSession } from "../session/tab-session";
 import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
@@ -26,6 +27,26 @@ export function takeTransfer(): (() => void) | undefined {
   return () => {
     uploading = false;
   };
+}
+// The receipt wrapper every action goes through, with the file chooser
+// guard after the page work: an action that opened a chooser nothing was
+// waiting for never answers, since the page is left waiting for files.
+export function withReceipt<T extends object>(
+  deps: Pick<RouteDeps, "receipts" | "choosers">,
+  tabId: string,
+  work: (scope: ReceiptScope) => Promise<T>,
+  options?: { settleMs?: number },
+): Promise<T & ReceiptFields> {
+  return deps.receipts.with(
+    tabId,
+    async (scope) => {
+      const result = await work(scope);
+      if (deps.choosers.openedSince(tabId, scope.fromSeq))
+        throw new FileChooserOpenedError();
+      return result;
+    },
+    options,
+  );
 }
 /** The page and session a transfer reserved. */
 export interface Transfer {
@@ -80,7 +101,6 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     authority,
     actions: { evaluatePage, executeToolAction },
     navigation,
-    receipts,
     presence,
   } = deps;
   const { authorizeTab, authorizeSpace } = authority;
@@ -92,7 +112,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     run: RouteCall["run"],
   ) =>
     RECEIPT_ACTIONS.includes(action.type)
-      ? receipts.with(tabId, () => executeToolAction(tabId, action, run))
+      ? withReceipt(deps, tabId, () => executeToolAction(tabId, action, run))
       : executeToolAction(tabId, action, run);
   const snapshot = async ({ response, body, tab, run }: RouteCall) =>
     send(
@@ -269,7 +289,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
           );
         const { session } = transfer;
         const payload = uploadFields(body!);
-        const result = await receipts.with(tab!.id, async () => {
+        const result = await withReceipt(deps, tab!.id, async () => {
           const selected = await evaluatePage(
             tab!.id,
             session,

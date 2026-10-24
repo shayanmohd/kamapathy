@@ -678,3 +678,9 @@ export function setInputFilesFields(body: Record<string, unknown>) {
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
 }
+// A file chooser names its own input, so its body carries the files alone.
+export function chooserFilesFields(body: Record<string, unknown>): {
+  files: { name: string; type: string; data: string }[];
+} {
+  return { files: filesField(body, { min: 0, max: MAX_INPUT_FILES }) };
+}

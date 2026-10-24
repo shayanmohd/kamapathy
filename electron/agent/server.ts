@@ -21,6 +21,7 @@ import { createDialogs } from "./dialogs";
 import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
 import { createExpectations } from "./expectations";
+import { createFileChoosers, watchTakeover } from "./file-choosers";
 import {
   buildRoutes,
   findRoute,
@@ -331,6 +332,31 @@ export async function startAutomation(
       ),
   });
   const stopDecider = controller.onDownload(downloads.decide);
+  // Every agent tab holds its file choosers back, so no panel the agent
+  // caused ever opens on the person's screen.
+  const choosers = createFileChoosers({
+    tabLog,
+    arms: () => expectations,
+    controller,
+    sessions,
+  });
+  const chooserStops = new Set<() => void>();
+  const stopChooserSessions = sessions.onSession((session, tab) => {
+    const stop = choosers.attach(session, tab.id);
+    chooserStops.add(stop);
+    session.on("closed", () => {
+      chooserStops.delete(stop);
+    });
+  });
+  // The person taking a space, its Stop and agent access off all end what
+  // the agent armed there: its waits, its arms, its choosers and the
+  // dialog policy of each of its tabs.
+  const stopTakeover = watchTakeover({
+    controller,
+    expectations,
+    choosers,
+    dialogs,
+  });
   // A long run keeps no ring, request window or arm for a tab that is gone.
   const stopTabForget = controller.registry.on((event) => {
     if (event.type !== "closed") return;
@@ -338,6 +364,7 @@ export async function startAutomation(
     tabLog.forget(event.tabId);
     receipts.forget(event.tabId);
     dialogs.forget(event.tabId);
+    choosers.forget(event.tabId);
   });
   // Refs a closed tab was issued are nobody's, so the book forgets them.
   const forgetClosedTabs = controller.subscribe(() =>
@@ -353,6 +380,7 @@ export async function startAutomation(
     expectations,
     dialogs,
     downloads,
+    choosers,
     presence,
     refs,
   });
@@ -367,6 +395,7 @@ export async function startAutomation(
     expectations,
     dialogs,
     downloads,
+    choosers,
     presence,
     refs,
   };
@@ -622,6 +651,12 @@ export async function startAutomation(
         for (const stop of dialogStops) stop();
         dialogStops.clear();
         stopDialogSessions();
+        // No tab keeps a chooser, and nothing intercepts one, once the
+        // server stops.
+        stopTakeover();
+        for (const stop of chooserStops) stop();
+        chooserStops.clear();
+        stopChooserSessions();
         // Nothing an agent downloaded outlives its access.
         stopDecider();
         downloads.clearAll();

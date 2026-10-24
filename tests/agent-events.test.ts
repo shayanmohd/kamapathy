@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuthority } from "../electron/agent/authority";
 import { createDialogs } from "../electron/agent/dialogs";
-import type { ApiError } from "../electron/agent/errors";
-import { createExpectations } from "../electron/agent/expectations";
+import { envelope, type ApiError } from "../electron/agent/errors";
+import {
+  createExpectations,
+  type FileChooserWaitView,
+} from "../electron/agent/expectations";
+import {
+  CHOOSER_TTL_MS,
+  createFileChoosers,
+  watchTakeover,
+} from "../electron/agent/file-choosers";
 import type { Run } from "../electron/agent/http";
 import {
   createReceipts,
@@ -10,11 +18,20 @@ import {
   SETTLE_MS,
   type ReceiptFields,
 } from "../electron/agent/receipts";
-import type { TabSession } from "../electron/agent/session/tab-session";
+import { withReceipt } from "../electron/agent/routes/tabs";
+import { EventBufferPool } from "../electron/agent/session/event-buffer";
+import { TabSession } from "../electron/agent/session/tab-session";
+import type { SessionHost } from "../electron/agent/session/types";
 import { createTabLog, watchPopups } from "../electron/agent/tab-log";
 import { expectationFields } from "../electron/agent/validate";
 import type { Tab } from "../shared/types";
 import { FakeController } from "./fake-automation";
+import {
+  FakeHost,
+  frameNavigated,
+  lifecycleEvent,
+  type FakeDebugger,
+} from "./fake-cdp";
 
 // Receipts over the fake controller, without the socket: the log, the
 // settle and the request window as a route sees them.
@@ -733,5 +750,288 @@ describe("agent event expectations", () => {
       { download: DOWNLOAD },
     );
     expect(expectations.get(arm.id)).toBeUndefined();
+  });
+});
+
+// The chooser registry over a real tab session and a scripted debugger: the
+// interception hook, the chooser a page opens and the bytes setFiles files.
+function choosing() {
+  const base = setup();
+  const authority = createAuthority(base.controller);
+  authority.managedSpaces.add(base.space.id);
+  const sessions = new Map<string, TabSession>();
+  const look = { get: (tabId: string) => sessions.get(tabId) };
+  const expectations = createExpectations({
+    tabLog: base.tabLog,
+    controller: base.controller,
+    authority,
+    sessions: look,
+  });
+  // Each call the chooser made on its input, with the arguments it carried.
+  const calls: { declaration: string; arguments: unknown[] }[] = [];
+  const host = new FakeHost({
+    replies: {
+      "DOM.resolveNode": () => ({ object: { objectId: "node-1" } }),
+      "Runtime.callFunctionOn": (params) => {
+        const declaration = String(params.functionDeclaration);
+        const values = (params.arguments ?? []).map(
+          (item: { value: unknown }) => item.value,
+        );
+        calls.push({ declaration, arguments: values });
+        if (declaration.includes('"applyFiles"')) {
+          const { files } = values[0] as { files: unknown[] };
+          return { result: { value: { ok: true, selected: files.length } } };
+        }
+        if (declaration.includes("getAttribute"))
+          return {
+            result: { value: { ok: true, accept: ["image/*", ".png"] } },
+          };
+        return { result: { value: { ok: true } } };
+      },
+    },
+  });
+  const session = new TabSession(host as unknown as SessionHost, {
+    tabId: base.tab.id,
+    waitForSpaceIdle: async () => {},
+    buffer: new EventBufferPool().create(base.tab.id),
+  });
+  sessions.set(base.tab.id, session);
+  const dialogs = createDialogs({
+    tabLog: base.tabLog,
+    controller: base.controller,
+    sessions: look,
+  });
+  const choosers = createFileChoosers({
+    tabLog: base.tabLog,
+    arms: () => expectations,
+    controller: base.controller,
+    sessions: look,
+  });
+  dialogs.attach(session, base.tab.id);
+  choosers.attach(session, base.tab.id);
+  session.attach();
+  return {
+    ...base,
+    authority,
+    expectations,
+    dialogs,
+    choosers,
+    session,
+    cdp: host.debugger,
+    calls,
+  };
+}
+// The chooser Chromium reports while interception is on, in place of the
+// panel it would have shown.
+const chooserOpened = (
+  cdp: FakeDebugger,
+  options: { frameId?: string; backendNodeId?: number; mode?: string } = {},
+) =>
+  cdp.event("Page.fileChooserOpened", {
+    frameId: options.frameId ?? "main",
+    backendNodeId: options.backendNodeId ?? 7,
+    mode: options.mode ?? "selectSingle",
+  });
+// Every enabled flag interception was switched with, oldest first.
+const switches = (cdp: FakeDebugger) =>
+  cdp.sent
+    .filter(
+      (command) => command.method === "Page.setInterceptFileChooserDialog",
+    )
+    .map((command) => command.params.enabled as boolean);
+const FILE = { name: "listing.png", type: "image/png", data: "AAEC/w==" };
+
+describe("file choosers in agent tabs", () => {
+  // The chooser an armed wait receives, as the agent reads it.
+  const opened = async (
+    { expectations, choosers, cdp, tab }: ReturnType<typeof choosing>,
+    backendNodeId: number,
+    mode?: string,
+  ) => {
+    const arm = expectations.arm(tab, "filechooser", 60000);
+    const waiting = expectations.wait(arm, fakeRun());
+    chooserOpened(cdp, {
+      backendNodeId,
+      ...(mode === undefined ? {} : { mode }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const result = (await waiting) as { fileChooser: FileChooserWaitView };
+    expect(choosers.get(result.fileChooser.id)).toBeDefined();
+    return result.fileChooser;
+  };
+
+  it("an armed chooser resolves the wait with its id, multiple flag and accept list, and setFiles applies the bytes once", async () => {
+    const context = choosing();
+    const { tab, tabLog, choosers, cdp, calls } = context;
+    await vi.advanceTimersByTimeAsync(0);
+    // Interception is on before any page can open a chooser.
+    expect(switches(cdp)).toEqual([true]);
+
+    const chooser = await opened(context, 12, "selectMultiple");
+    expect(chooser).toEqual({
+      id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      tabId: tab.id,
+      multiple: true,
+      accept: ["image/*", ".png"],
+    });
+    // The log carries the chooser for the receipt and for the guard, and an
+    // armed one never fails the action that opened it.
+    expect(
+      tabLog.since(tab.id, 0, ["file_chooser"]).map((entry) => entry.data),
+    ).toEqual([{ id: chooser.id, multiple: true }]);
+    expect(choosers.openedSince(tab.id, 0)).toBe(false);
+
+    expect(await choosers.setFiles(chooser.id, [FILE], fakeRun())).toEqual({
+      ok: true,
+      selected: 1,
+    });
+    // The bytes went to the node the chooser named, through the same apply
+    // the file input route uses, and a selection sends no cancel.
+    expect(
+      calls.map((call) => call.declaration.includes('"applyFiles"')),
+    ).toEqual([false, true]);
+    expect(calls[1].arguments).toEqual([{ files: [FILE] }]);
+    expect(
+      cdp.sent
+        .filter((command) => command.method === "DOM.resolveNode")
+        .map((command) => command.params.backendNodeId),
+    ).toEqual([12, 12]);
+    // A chooser is filed once.
+    await expect(
+      choosers.setFiles(chooser.id, [FILE], fakeRun()),
+    ).rejects.toMatchObject({
+      code: "file_chooser_not_found",
+      status: 404,
+    });
+  });
+
+  it("an unarmed chooser is closed, the input gets a cancel event, and the action fails 422 file_chooser_opened", async () => {
+    const { tab, tabLog, receipts, choosers, cdp, calls } = choosing();
+    await vi.advanceTimersByTimeAsync(0);
+    // The action that opened it fails, naming the two ways forward.
+    const failing = withReceipt({ receipts, choosers }, tab.id, async () => {
+      chooserOpened(cdp, { backendNodeId: 4 });
+      return { ok: true as const };
+    });
+    // The gesture did reach the page, so the failure says so.
+    const failed = await failing.then(
+      () => undefined,
+      (error: unknown) => envelope(error, true),
+    );
+    expect(failed).toEqual({
+      status: 422,
+      error: {
+        code: "file_chooser_opened",
+        message:
+          'This action opened a file chooser, which Kamapathy closed. Use setInputFiles for a file input on the page, or call waitForEvent("filechooser") before the action when the page creates the input.',
+        dispatched: true,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // Nothing is filed, and the page is told the chooser closed, as it is
+    // when a person cancels one.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].declaration).toContain('"cancel"');
+    const logged = tabLog.since(tab.id, 0, ["file_chooser"]);
+    expect(logged.map((entry) => entry.data)).toEqual([
+      { id: expect.any(String), multiple: false },
+    ]);
+    expect(choosers.get(logged[0].data.id)).toBeUndefined();
+    expect(choosers.openedSince(tab.id, 0)).toBe(true);
+    // The action after it answers as usual.
+    const next = withReceipt({ receipts, choosers }, tab.id, async () => ({
+      ok: true as const,
+    }));
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    expect(await next).toEqual({ ok: true });
+  });
+
+  it("a chooser expires after 60 seconds, on its frame's navigation and once it is used", async () => {
+    const context = choosing();
+    const { choosers, cdp, calls } = context;
+    await vi.advanceTimersByTimeAsync(0);
+    // Sixty seconds with no files end it.
+    const stale = await opened(context, 1);
+    await vi.advanceTimersByTimeAsync(CHOOSER_TTL_MS);
+    expect(choosers.get(stale.id)).toBeUndefined();
+    await expect(
+      choosers.setFiles(stale.id, [FILE], fakeRun()),
+    ).rejects.toMatchObject({ code: "file_chooser_not_found" });
+
+    // The frame's next document ends it; its own document leaves it.
+    lifecycleEvent(cdp, {
+      frameId: "main",
+      loaderId: "loader-1",
+      name: "init",
+    });
+    const navigating = await opened(context, 2);
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-1",
+      url: "https://example.com/",
+    });
+    expect(choosers.get(navigating.id)).toBeDefined();
+    frameNavigated(cdp, {
+      frameId: "main",
+      loaderId: "loader-2",
+      url: "https://example.com/next",
+    });
+    expect(choosers.get(navigating.id)).toBeUndefined();
+
+    // An empty list cancels the chooser and uses it up.
+    const cancelled = await opened(context, 3);
+    expect(await choosers.setFiles(cancelled.id, [], fakeRun())).toEqual({
+      ok: true,
+      selected: 0,
+    });
+    expect(calls.at(-1)!.declaration).toContain('"cancel"');
+    expect(choosers.get(cancelled.id)).toBeUndefined();
+  });
+
+  it("takeover cancels waits, choosers and the policy", async () => {
+    const context = choosing();
+    const { controller, space, tab, expectations, dialogs, choosers, cdp } =
+      context;
+    await vi.advanceTimersByTimeAsync(0);
+    const stopTakeover = watchTakeover({
+      controller,
+      expectations,
+      choosers,
+      dialogs,
+    });
+    const chooser = await opened(context, 5);
+    const arm = expectations.arm(tab, "download", 60000);
+
+    // A hold gives the person one answer and hands control straight back, so
+    // what the agent armed waits for them.
+    const hold = controller.holdForPerson(space.id, "permission", "location");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(choosers.get(chooser.id)).toBeDefined();
+    expect(expectations.get(arm.id)).toBeDefined();
+    controller.releaseHold(hold);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      dialogs.setPolicy(tab.id, {
+        accept: true,
+        times: 2,
+        lifetimeMs: 60000,
+      }),
+    ).toMatchObject({ accept: true, remaining: 2 });
+
+    const waiting = rejection(
+      expectations.wait(expectations.get(arm.id)!, fakeRun()),
+    );
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(await waiting).toMatchObject({ code: "human_control", status: 409 });
+    expect(expectations.count()).toBe(0);
+    expect(choosers.get(chooser.id)).toBeUndefined();
+    expect(dialogs.policy(tab.id)).toBeNull();
+    // The person's own choosers open for them while they have the tab.
+    expect(switches(cdp)).toEqual([true, false, true, false]);
+    stopTakeover();
   });
 });

@@ -821,6 +821,23 @@ export const ROUTES = [
   ),
   route(
     "POST",
+    "/file-choosers/:id/files",
+    "Files bytes on the input of a file chooser an armed wait received, even one the page has removed. An empty list cancels the chooser.",
+    "{ ok: true, selected }",
+    {
+      files: {
+        kind: "array",
+        required: true,
+        of: uploadFile,
+        since: 2,
+        description:
+          "0 to 8 files, at most 16 MiB together. An empty list cancels the chooser.",
+      },
+    },
+    { budget: 30000, limit: 24 * 1024 * 1024, since: 2 },
+  ),
+  route(
+    "POST",
     "/tabs/:id/pdf/text",
     "Reads a PDF's text by page without entering Chromium's viewer.",
     "PdfText",
