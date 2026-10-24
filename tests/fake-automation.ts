@@ -276,6 +276,15 @@ export class FakeController implements AutomationController {
       this.leaveGuards.delete(listener);
     };
   }
+  // The hook listeners still subscribed, so a test can see a closed server
+  // let go of them.
+  get hookCount() {
+    return (
+      this.blockedRedirects.size +
+      this.downloadStarts.size +
+      this.leaveGuards.size
+    );
+  }
   // The controller's own hooks, as a test fires them.
   blockRedirect(tabId: string, url: string) {
     for (const listener of this.blockedRedirects) listener(tabId, url);

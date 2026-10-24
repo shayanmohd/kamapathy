@@ -387,6 +387,7 @@ export async function startAutomation(
         authority.stop();
         requests.close();
         scheduler.close();
+        navigation.dispose();
         closing = new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();

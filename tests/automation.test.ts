@@ -186,6 +186,15 @@ describe("local automation socket", () => {
     expect(api.instance).not.toBe(previous);
   });
 
+  it("lets go of the controller's navigation hooks when it closes", async () => {
+    const subscribed = controller.hookCount;
+    expect(subscribed).toBeGreaterThan(0);
+    await api.close();
+    expect(controller.hookCount).toBe(0);
+    api = await startAutomation(controller, { socketPath: socket.path });
+    expect(controller.hookCount).toBe(subscribed);
+  });
+
   it("answers health immediately even while a page action is still running", async () => {
     const { tab } = await createPage();
     let release!: () => void;

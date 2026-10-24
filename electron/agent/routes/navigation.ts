@@ -28,6 +28,8 @@ export interface Navigation {
     action: ToolAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
+  // Unsubscribes the trackers from the controller when the server closes.
+  dispose(): void;
 }
 // What pageState("info") reads in the page. The route adds the frame's load
 // state, which a document cannot see about itself.
@@ -235,5 +237,6 @@ export function createNavigation(
       }
       throw new Error("This batch step has no navigation handler.");
     },
+    dispose: () => trackers.dispose(),
   };
 }
