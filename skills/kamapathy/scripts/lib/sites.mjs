@@ -725,3 +725,92 @@ export async function listSitePacks(env, target, options) {
     };
   return { host, packs: matchPacks(packs, host).map(summarize), skipped };
 }
+
+// One note, read under the file rules and cleaned: control characters other
+// than tab and newline, and bidirectional controls, are dropped.
+async function noteText(pack, file) {
+  const buffer = await readTrustedFile(
+    { path: pack.dir, source: pack.source },
+    file,
+    { owner: pack.source === "workspace", kind: "note" },
+  );
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    throw new PackProblem(`${file} must be UTF-8 text.`, { file });
+  }
+  return cleanText(text, { newlines: true });
+}
+
+/** Each declared note, read and cleaned, in declaration order. Throws PackProblem. */
+export async function readNotes(pack) {
+  const notes = [];
+  for (const file of pack.notes)
+    notes.push({ file, text: await noteText(pack, file) });
+  return notes;
+}
+
+// A required argument in an example: a string as "<name>", every other type
+// as <name>.
+const shownArg = (arg) =>
+  arg.type === "string" ? `"<${arg.name}>"` : `<${arg.name}>`;
+
+/** `await runSiteTool("github", "search_repositories", { query: "<query>" }, { page })`. */
+export function exampleCall(pack, tool) {
+  const required = tool.args.filter((arg) => arg.required);
+  const args = required.length
+    ? `{ ${required.map((arg) => `${arg.name}: ${shownArg(arg)}`).join(", ")} }`
+    : "{}";
+  const call = tool.kind === "page" ? "runPageTool" : "runSiteTool";
+  return `await ${call}(${JSON.stringify(pack.id)}, ${JSON.stringify(tool.name)}, ${args}, { page })`;
+}
+
+/** The pack as siteContext gives it: the entry that matched, each note's text and each tool's arguments and example. */
+export function contextOf(pack, notes) {
+  return {
+    id: pack.id,
+    name: pack.name,
+    source: pack.source,
+    dir: pack.dir,
+    domains: [...pack.domains],
+    matchedBy: pack.matchedBy,
+    notes,
+    tools: [...pack.tools, ...pack.pageTools].map((tool) => ({
+      name: tool.name,
+      kind: tool.kind,
+      description: tool.description,
+      args: tool.args.map(({ name, type, required, description }) => ({
+        name,
+        type,
+        required,
+        description,
+      })),
+      returns: { ...tool.returns },
+      example: exampleCall(pack, tool),
+    })),
+  };
+}
+
+/** What Client.siteContext and kamapathy sites <url> print. */
+export async function siteContextFor(env, target, options) {
+  const { url, host } = hostOf(target, { entry: "siteContext" });
+  const { packs, skipped } = await loadPacks(env, options);
+  const contexts = [];
+  for (const pack of matchPacks(packs, host))
+    try {
+      contexts.push(contextOf(pack, await readNotes(pack)));
+    } catch (error) {
+      if (!(error instanceof PackProblem)) throw error;
+      // A context holding half a pack's notes would mislead an agent, so the
+      // whole pack is reported instead.
+      if (skipped.length < LIMITS.skipped)
+        skipped.push({
+          path: pack.dir,
+          source: pack.source,
+          problem: problemText(error),
+        });
+    }
+  return { url: url ?? "", host, packs: contexts, skipped };
+}

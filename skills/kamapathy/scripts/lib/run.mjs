@@ -35,6 +35,8 @@ const GLOBALS = [
   "space",
   "spaces",
   "requestSpace",
+  "sitePacks",
+  "siteContext",
 ];
 
 function deadline(value, name) {

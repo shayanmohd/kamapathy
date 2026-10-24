@@ -56,6 +56,18 @@ Asks the person to let an agent use one of their spaces and waits for their answ
 
 Returns `Promise<Space>`. Route `POST /space-requests`. Errors: `request_declined`, `request_timeout`, `busy`, `invalid_field`, `automation_stopped`. Since API level 2.
 
+### `sitePacks(target?)`
+
+Lists the site packs in the workspace and the skill, or the ones matching a page.
+
+Returns `Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `siteContext(target)`
+
+Reads the notes and tools of every pack matching a page, with example calls.
+
+Returns `Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
 ### `help(...names)`
 
 Prints the API, or one entry such as help("page.click"), or the topics errors and routes.
@@ -138,6 +150,18 @@ Downloads this computer's installer and waits for it; only the person installs i
 | `interval` | milliseconds from 250 to 10000 | `1000` | How often the status is read, 1000 by default. |
 
 Returns `Promise<UpdateStatus>`. Route `POST /update/download`. Errors: `update_unsupported`, `update_check_failed`, `update_download_failed`, `update_verify_failed`, `timeout`. Since API level 3.
+
+### `kamapathy.sitePacks(target?)`
+
+Lists the site packs in the workspace and the skill, or the ones matching a page.
+
+Returns `Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
+
+### `kamapathy.siteContext(target)`
+
+Reads the notes and tools of every pack matching a page, with example calls.
+
+Returns `Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>`. Errors: `invalid_argument`. Since API level 4.
 
 ## Space
 

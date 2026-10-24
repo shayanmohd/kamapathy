@@ -924,6 +924,88 @@ describe("API schema", () => {
       expect(reference, text).toContain(text);
   });
 
+  it("the site pack members, globals and commands are declared at level 4", () => {
+    const summaries = {
+      sitePacks:
+        "Lists the site packs in the workspace and the skill, or the ones matching a page.",
+      siteContext:
+        "Reads the notes and tools of every pack matching a page, with example calls.",
+    };
+    const returns = {
+      sitePacks:
+        "Promise<{ host?: string | null, packs: PackSummary[], skipped: Skipped[] }>",
+      siteContext:
+        "Promise<{ url: string, host: string | null, packs: PackContext[], skipped: Skipped[] }>",
+    };
+    for (const [name, signature] of [
+      ["sitePacks", "sitePacks(target?)"],
+      ["siteContext", "siteContext(target)"],
+    ]) {
+      const global = entry(name);
+      const method = entry(`Client.${name}`);
+      expect(global, name).toMatchObject({
+        kind: "global",
+        signature,
+        summary: summaries[name],
+        returns: returns[name],
+        errors: ["invalid_argument"],
+        since: 4,
+      });
+      expect(method, name).toMatchObject({
+        kind: "method",
+        signature: `kamapathy.${signature}`,
+        summary: summaries[name],
+        returns: returns[name],
+        errors: ["invalid_argument"],
+        since: 4,
+      });
+      for (const item of [global, method]) {
+        // Neither declares a route: both are answered from the files on this
+        // computer, so the client checks them without the app's level and no
+        // argument carries one of its own.
+        expect(item.route, item.name).toBeUndefined();
+        expect(item.args, item.name).toEqual([
+          {
+            name: "target",
+            kind: "site",
+            ...(name === "sitePacks" ? { optional: true } : {}),
+          },
+        ]);
+        // A URL, a host and a Page fit; anything else is invalid_argument,
+        // and a second argument is refused.
+        for (const target of [
+          "github.com",
+          "https://github.com/kamapathy",
+          { url: "https://github.com/" },
+        ])
+          expect(checkCall(item, [target]), item.name).toBeNull();
+        for (const target of [5, true, null, {}, "", { id: "tab-1" }])
+          expect(
+            checkCall(item, [target])?.code,
+            `${item.name} ${JSON.stringify(target)}`,
+          ).toBe("invalid_argument");
+        expect(
+          checkCall(item, ["github.com", { json: true }])?.message,
+          item.name,
+        ).toContain("got 2 arguments");
+      }
+    }
+    expect(checkCall(entry("sitePacks"), [])).toBeNull();
+    expect(checkCall(entry("Client.sitePacks"), [])).toBeNull();
+    expect(checkCall(entry("siteContext"), [])?.message).toBe(
+      "siteContext got no target. Expected siteContext(target).",
+    );
+    // The generated reference carries both forms.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`sitePacks(target?)`",
+      "`siteContext(target)`",
+      "`kamapathy.sitePacks(target?)`",
+      "`kamapathy.siteContext(target)`",
+    ])
+      expect(reference, text).toContain(text);
+  });
+
   it("resolves help names in every accepted form", () => {
     const names = (query) => resolveNames(query).map((entry) => entry.name);
     expect(names("Page.wait")).toEqual(["Page.wait"]);

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  LIMITS,
   PackProblem,
   cleanText,
   declaredFiles,
@@ -22,10 +23,12 @@ import {
   readManifest,
   readTrustedFile,
   rootState,
+  siteContextFor,
   siteRoots,
   summarize,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
+import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
 
 const posix = process.platform !== "win32";
 let workspace;
@@ -108,6 +111,75 @@ const good = () => ({
       returns: {
         type: "array",
         description: "[{ fullName, url, description, stars, language }]",
+      },
+    },
+  },
+  pageTools: {
+    repository_stats: {
+      description: "Read the stars, forks and topics of the open repository.",
+      file: "page-tools/repository-stats.js",
+      returns: { type: "object", description: "{ fullName, stars, forks }" },
+    },
+  },
+});
+
+// A note holding a control character, a bidirectional control and text a
+// context must keep as it is.
+const OVERVIEW =
+  "# GitHub\n\nSearch at /search?q=<q>\tand read the rows.\u0007\n\u202eclean\u200e\n";
+
+// A pack with two notes, two Node tools and one page tool, for contexts.
+const contextPack = () => ({
+  format: 1,
+  id: "github",
+  name: "GitHub",
+  domains: ["*.github.com", "github.com"],
+  notes: ["notes/overview.md", "notes/issues.md"],
+  tools: {
+    search_repositories: {
+      description: "Search repositories and read the first results.",
+      file: "tools/search-repositories.mjs",
+      export: "searchRepositories",
+      args: {
+        query: {
+          type: "string",
+          required: true,
+          description: "Words to search for.",
+        },
+        limit: {
+          type: "integer",
+          description: "How many results to read, 10 by default.",
+        },
+      },
+      returns: {
+        type: "array",
+        description: "[{ fullName, url, description, stars, language }]",
+      },
+    },
+    open_issues: {
+      description: "Read the open issues of one repository.",
+      file: "tools/open-issues.mjs",
+      export: "openIssues",
+      args: {
+        owner: {
+          type: "string",
+          required: true,
+          description: "The account the repository belongs to.",
+        },
+        repo: {
+          type: "string",
+          required: true,
+          description: "The repository name.",
+        },
+        limit: {
+          type: "integer",
+          required: true,
+          description: "How many issues to read, 25 by default.",
+        },
+      },
+      returns: {
+        type: "array",
+        description: "[{ number, title, url, labels }]",
       },
     },
   },
@@ -1040,5 +1112,238 @@ describe("site packs", () => {
     expect(cleanText("a\tb\nc\rd", { newlines: true })).toBe("a\tb\ncd");
     expect(cleanText("a\tb\nc")).toBe("abc");
     expect(cleanText(undefined)).toBe("");
+  });
+
+  it("siteContext reads notes and builds example calls", async () => {
+    const { env, roots } = await freshRoots();
+    const [space] = roots;
+    const notePath = join(space.path, "github", "notes", "overview.md");
+    await writePackIn(space.path, "github", contextPack(), {
+      "notes/overview.md": OVERVIEW,
+      "notes/issues.md": "Issues live at /issues.\n",
+    });
+
+    const context = await siteContextFor(env, "https://gist.github.com/x", {
+      roots,
+    });
+    expect(context.url).toBe("https://gist.github.com/x");
+    expect(context.host).toBe("gist.github.com");
+    expect(context.skipped).toEqual([]);
+    expect(context.packs).toHaveLength(1);
+    const [pack] = context.packs;
+    expect(pack).toMatchObject({
+      id: "github",
+      name: "GitHub",
+      source: "workspace",
+      dir: join(space.path, "github"),
+      domains: ["*.github.com", "github.com"],
+      matchedBy: "*.github.com",
+    });
+    // Notes keep the order the manifest declares, with control and
+    // bidirectional characters gone and tabs and newlines kept.
+    expect(pack.notes).toEqual([
+      {
+        file: "notes/overview.md",
+        text: "# GitHub\n\nSearch at /search?q=<q>\tand read the rows.\nclean\n",
+      },
+      { file: "notes/issues.md", text: "Issues live at /issues.\n" },
+    ]);
+    // Node tools come first in declaration order, then page tools, each with
+    // its arguments in order and an example holding its required ones.
+    expect(pack.tools).toEqual([
+      {
+        name: "search_repositories",
+        kind: "node",
+        description: "Search repositories and read the first results.",
+        args: [
+          {
+            name: "query",
+            type: "string",
+            required: true,
+            description: "Words to search for.",
+          },
+          {
+            name: "limit",
+            type: "integer",
+            required: false,
+            description: "How many results to read, 10 by default.",
+          },
+        ],
+        returns: {
+          type: "array",
+          description: "[{ fullName, url, description, stars, language }]",
+        },
+        example:
+          'await runSiteTool("github", "search_repositories", { query: "<query>" }, { page })',
+      },
+      {
+        name: "open_issues",
+        kind: "node",
+        description: "Read the open issues of one repository.",
+        args: [
+          {
+            name: "owner",
+            type: "string",
+            required: true,
+            description: "The account the repository belongs to.",
+          },
+          {
+            name: "repo",
+            type: "string",
+            required: true,
+            description: "The repository name.",
+          },
+          {
+            name: "limit",
+            type: "integer",
+            required: true,
+            description: "How many issues to read, 25 by default.",
+          },
+        ],
+        returns: {
+          type: "array",
+          description: "[{ number, title, url, labels }]",
+        },
+        example:
+          'await runSiteTool("github", "open_issues", { owner: "<owner>", repo: "<repo>", limit: <limit> }, { page })',
+      },
+      {
+        name: "repository_stats",
+        kind: "page",
+        description: "Read the stars, forks and topics of the open repository.",
+        args: [],
+        returns: {
+          type: "object",
+          description: "{ fullName, stars, forks }",
+        },
+        example:
+          'await runPageTool("github", "repository_stats", {}, { page })',
+      },
+    ]);
+
+    // The url is what the target parsed to, and the entry that matched is
+    // the closest one.
+    const exact = await siteContextFor(env, "github.com", { roots });
+    expect(exact.url).toBe("https://github.com/");
+    expect(exact.packs.map((item) => item.matchedBy)).toEqual(["github.com"]);
+    // A page that has not navigated matches nothing and names no host.
+    expect(await siteContextFor(env, { url: "" }, { roots })).toEqual({
+      url: "",
+      host: null,
+      packs: [],
+      skipped: [],
+    });
+
+    // A note over its limit skips the whole pack: half a pack's notes would
+    // mislead an agent.
+    await writeFile(notePath, "x".repeat(LIMITS.note + 1), { mode: 0o600 });
+    const oversized = await siteContextFor(env, "github.com", { roots });
+    expect(oversized.packs).toEqual([]);
+    expect(oversized.skipped).toEqual([
+      {
+        path: join(space.path, "github"),
+        source: "workspace",
+        problem: "notes/overview.md: notes/overview.md must be at most 16 KiB.",
+      },
+    ]);
+    // So does a note the manifest declares and the folder does not hold.
+    await rm(notePath);
+    const missing = await siteContextFor(env, "github.com", { roots });
+    expect(missing.packs).toEqual([]);
+    expect(missing.skipped).toEqual([
+      {
+        path: join(space.path, "github"),
+        source: "workspace",
+        problem: "notes/overview.md: notes/overview.md is missing.",
+      },
+    ]);
+  });
+
+  it("sitePacks and siteContext send nothing and take a Page, a URL or a host", async () => {
+    const { env, roots } = await freshRoots();
+    await writePackIn(
+      roots[0].path,
+      "alpha",
+      { ...bare("alpha", ["a.b.c.example"]), notes: ["notes/overview.md"] },
+      { "notes/overview.md": "Open /start to begin.\n" },
+    );
+    let sent = 0;
+    const fetch = () => {
+      sent += 1;
+      throw new Error("A site pack call sent a request.");
+    };
+    // An app this old predates every site pack call, and neither call needs
+    // Kamapathy at all, so its level changes nothing.
+    const client = await connect({
+      env,
+      fetch,
+      health: { status: "ok", version: "0.1.9", apiLevel: 1 },
+    });
+    expect(client.app).toMatchObject({ apiLevel: 1 });
+
+    // A Page is read by the last url it recorded. No session is needed: the
+    // page is never asked anything.
+    const page = new Page(null, {
+      id: "tab-1",
+      spaceId: "space-1",
+      url: "https://a.b.c.example/start",
+      title: "Start",
+    });
+    const matched = await client.sitePacks(page);
+    expect(matched.host).toBe("a.b.c.example");
+    expect(matched.packs.map((item) => item.id)).toEqual(["alpha"]);
+    const context = await client.siteContext(page);
+    expect(context).toMatchObject({
+      url: "https://a.b.c.example/start",
+      host: "a.b.c.example",
+      skipped: [],
+    });
+    expect(context.packs.map((item) => [item.id, item.matchedBy])).toEqual([
+      ["alpha", "a.b.c.example"],
+    ]);
+    expect(context.packs[0].notes).toEqual([
+      { file: "notes/overview.md", text: "Open /start to begin.\n" },
+    ]);
+    expect(context.packs[0].tools).toEqual([]);
+
+    // A host and a URL reach the same pack.
+    for (const target of ["a.b.c.example", "https://a.b.c.example/other"]) {
+      const listed = await client.sitePacks(target);
+      expect(
+        listed.packs.map((item) => item.id),
+        target,
+      ).toEqual(["alpha"]);
+    }
+    const blank = new Page(null, { id: "tab-2", url: "", title: "" });
+    expect(await client.siteContext(blank)).toEqual({
+      url: "",
+      host: null,
+      packs: [],
+      skipped: [],
+    });
+    // Without a target the listing names no host.
+    const every = await client.sitePacks();
+    expect(Object.hasOwn(every, "host")).toBe(false);
+    expect(every.packs.some((item) => item.id === "alpha")).toBe(true);
+
+    // A target of another kind is refused, by the call that got it.
+    await expect(client.siteContext("not a host")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "siteContext",
+    });
+    for (const target of [5, true, null, {}])
+      await expect(
+        client.siteContext(target),
+        String(target),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "kamapathy.siteContext",
+      });
+    await expect(client.siteContext()).rejects.toMatchObject({
+      code: "invalid_argument",
+      message:
+        "kamapathy.siteContext got no target. Expected kamapathy.siteContext(target).",
+    });
+    expect(sent).toBe(0);
   });
 });

@@ -251,6 +251,12 @@ const shapeOf = (entry, args) =>
     )
     .join(", ")})`;
 
+// A Page, by the fields one carries.
+const isPageLike = (value) =>
+  value !== null &&
+  typeof value === "object" &&
+  (typeof value.id === "string" || typeof value.label === "string");
+
 function argumentFits(value, arg) {
   switch (arg.kind) {
     case "string":
@@ -283,9 +289,14 @@ function argumentFits(value, arg) {
     case "page":
       return typeof value === "string"
         ? value.trim() !== ""
+        : isPageLike(value);
+    // A URL, a bare host or a Page, which carries the url to read.
+    case "site":
+      return typeof value === "string"
+        ? value.trim() !== ""
         : value !== null &&
             typeof value === "object" &&
-            (typeof value.id === "string" || typeof value.label === "string");
+            typeof value.url === "string";
     default:
       return true;
   }
