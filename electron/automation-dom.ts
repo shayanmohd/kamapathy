@@ -33,19 +33,29 @@ export type PageOperation =
   | "input"
   | "frame"
   | "ready"
-  | "frameIndex";
+  | "frameIndex"
+  | "fetch";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
-// selector engine and the outline builder travel the same way, as arguments,
-// so operations that resolve no selector and read no outline work without them.
+// selector engine, the outline builder and the in-page fetch travel the same
+// way, as arguments, so operations that resolve no selector, read no outline
+// and fetch nothing work without them.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
   namespace: string,
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
   outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
+  fetchOperation?: typeof import("./agent/dom/fetch").fetchOperation,
 ) {
+  // Section 8's fetch reads no element and keeps its own handles, so it
+  // answers before any registry work.
+  if (operation === "fetch")
+    return fetchOperation!(
+      payload.phase as import("./agent/dom/fetch").FetchPhase,
+      payload,
+    );
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
   type Fingerprint = {

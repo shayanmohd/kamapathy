@@ -349,7 +349,23 @@ export const ERRORS = {
     422,
     false,
     "The result is larger than the route returns.",
-    ["bytes", "limit"],
+    ["bytes", "limit", "status", "url", "headers"],
+    4,
+  ),
+  fetch_failed: code(
+    422,
+    false,
+    "The page could not fetch the URL.",
+    [
+      "url",
+      "pageOrigin",
+      "crossOrigin",
+      "mode",
+      "name",
+      "corsError",
+      "blockedReason",
+      "netError",
+    ],
     4,
   ),
   no_match: code(
@@ -460,6 +476,13 @@ export const ERRORS = {
       "mayHaveLateEffects",
       "pageResponsive",
     ],
+    4,
+  ),
+  fetch_timeout: code(
+    504,
+    false,
+    "The fetch did not answer within the timeout.",
+    ["awaited", "timeoutMs"],
     4,
   ),
   pdf_timeout: code(

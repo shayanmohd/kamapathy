@@ -1312,6 +1312,8 @@ describe("evaluateInFrame", () => {
     }
     expect(marked.sort()).toEqual([
       "click",
+      // A request the page sends can change what the server holds.
+      "fetch",
       "fill",
       "focus",
       "scroll",
@@ -2957,6 +2959,78 @@ describe("lifecycle and network", () => {
     const last = session.network.lastActivityAt();
     loadingEnded(cdp, "before-attach");
     expect(session.network.lastActivityAt()).toBe(last);
+  });
+
+  it("network.failureFor keeps the newest failure per URL", async () => {
+    const { session, cdp } = await tracked();
+    const url = "https://shop.example/api/cart";
+    const sent = (requestId: string, target = url) =>
+      requestWillBeSent(cdp, {
+        requestId,
+        frameId: "main",
+        loaderId: "loader-1",
+        url: target,
+      });
+    const failed = (
+      requestId: string,
+      params: Record<string, unknown> = {},
+    ) => {
+      cdp.event("Network.loadingFailed", {
+        requestId,
+        timestamp: 2,
+        type: "Fetch",
+        errorText: "net::ERR_FAILED",
+        canceled: false,
+        ...params,
+      });
+    };
+    expect(session.network.failureFor(url)).toBeUndefined();
+    sent("cors.1");
+    failed("cors.1", {
+      corsErrorStatus: { corsError: "MissingAllowOriginHeader" },
+    });
+    expect(session.network.failureFor(url)).toEqual({
+      url,
+      at: Date.now(),
+      corsError: "MissingAllowOriginHeader",
+      netError: "net::ERR_FAILED",
+    });
+    // A blocked request reports why it was blocked instead.
+    await vi.advanceTimersByTimeAsync(100);
+    sent("blocked.1");
+    failed("blocked.1", {
+      blockedReason: "mixed-content",
+      errorText: "net::ERR_BLOCKED_BY_CLIENT",
+    });
+    expect(session.network.failureFor(url)).toEqual({
+      url,
+      at: Date.now(),
+      blockedReason: "mixed-content",
+      netError: "net::ERR_BLOCKED_BY_CLIENT",
+    });
+    // A cancel is Kamapathy's or the page's own doing, so it leaves the
+    // reason that explains the URL in place.
+    sent("cancel.1");
+    failed("cancel.1", { canceled: true, errorText: "net::ERR_ABORTED" });
+    expect(session.network.failureFor(url)).toMatchObject({
+      blockedReason: "mixed-content",
+    });
+    // A request that ended well leaves nothing to explain.
+    sent("ok.1");
+    loadingEnded(cdp, "ok.1");
+    expect(session.network.failureFor(url)).toBeUndefined();
+    // Only the newest 32 URLs are kept, and the page's own URL is not one.
+    for (let index = 0; index < 33; index += 1) {
+      sent(`many.${index}`, `https://shop.example/item/${index}`);
+      failed(`many.${index}`, { errorText: "net::ERR_TIMED_OUT" });
+    }
+    const item = (index: number) =>
+      session.network.failureFor(`https://shop.example/item/${index}`);
+    expect(item(0)).toBeUndefined();
+    expect(item(32)).toMatchObject({ netError: "net::ERR_TIMED_OUT" });
+    // A request Kamapathy never saw start has no URL to file under.
+    failed("before-attach");
+    expect(session.network.failureFor(url)).toBeUndefined();
   });
 
   it("ignores /favicon.ico requests and agent sessions", async () => {

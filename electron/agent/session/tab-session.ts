@@ -17,7 +17,7 @@ import {
 import type { EventBuffer } from "./event-buffer";
 import { FrameRegistry, type FrameRecord } from "./frames";
 import { LifecycleTracker, reached } from "./lifecycle";
-import { NetworkTracker } from "./network";
+import { NetworkTracker, type RequestFailure } from "./network";
 import {
   OPERATIONS,
   PAGE_SOURCE,
@@ -217,11 +217,13 @@ export class TabSession {
     inFlight(): number;
     pending(limit: number): string[];
     lastActivityAt(): number;
+    failureFor(url: string): RequestFailure | undefined;
     waitForIdle(idleMs: number, step: Step): Promise<void>;
   } = {
     inFlight: () => this.requests.inFlight(),
     pending: (limit) => this.requests.pending(limit),
     lastActivityAt: () => this.requests.lastActivityAt(),
+    failureFor: (url) => this.requests.failureFor(url),
     waitForIdle: (idleMs, step) =>
       this.requests.waitForIdle(idleMs, {
         ...step,

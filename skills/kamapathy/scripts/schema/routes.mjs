@@ -309,6 +309,119 @@ const FIELDS = {
         "How long the script may run. The page itself gets this less 1000 ms.",
     },
   },
+  fetch: {
+    url: {
+      kind: "string",
+      max: 8192,
+      required: true,
+      since: 4,
+      description:
+        "What to fetch. A relative URL resolves against the tab's URL; it must end up http or https without credentials, or a blob of the page's own origin.",
+    },
+    method: {
+      kind: "string",
+      max: 32,
+      default: "GET",
+      since: 4,
+      description: "The request method. CONNECT, TRACE and TRACK are refused.",
+    },
+    headers: {
+      kind: "json",
+      since: 4,
+      description:
+        "Request headers as an object of at most 64 string pairs. Headers the browser sets itself, such as Cookie, Host, Origin, Referer, Sec- and Proxy-, are refused.",
+    },
+    body: {
+      kind: "string",
+      min: 0,
+      max: 524288,
+      since: 4,
+      description: "The request body. Not with GET or HEAD.",
+    },
+    cache: {
+      kind: "enum",
+      values: [
+        "default",
+        "no-store",
+        "reload",
+        "no-cache",
+        "force-cache",
+        "only-if-cached",
+      ],
+      since: 4,
+      description: "The cache mode, as in the Fetch standard.",
+    },
+    credentials: {
+      kind: "enum",
+      values: ["omit", "same-origin", "include"],
+      since: 4,
+      description:
+        "Which cookies and credentials the request carries. The page's own default applies without it.",
+    },
+    integrity: {
+      kind: "string",
+      max: 256,
+      since: 4,
+      description: "A subresource integrity value the body must match.",
+    },
+    keepalive: {
+      kind: "boolean",
+      since: 4,
+      description: "Let the request outlive the page.",
+    },
+    mode: {
+      kind: "enum",
+      values: ["cors", "no-cors", "same-origin"],
+      default: "cors",
+      since: 4,
+      description:
+        "cors reads a cross-origin answer the server allows; no-cors answers opaquely; same-origin refuses another origin.",
+    },
+    redirect: {
+      kind: "enum",
+      values: ["follow", "error", "manual"],
+      since: 4,
+      description: "What a redirect does.",
+    },
+    referrer: {
+      kind: "string",
+      max: 8192,
+      since: 4,
+      description: "The referrer the request carries.",
+    },
+    referrerPolicy: {
+      kind: "enum",
+      values: [
+        "",
+        "no-referrer",
+        "no-referrer-when-downgrade",
+        "same-origin",
+        "origin",
+        "strict-origin",
+        "origin-when-cross-origin",
+        "strict-origin-when-cross-origin",
+        "unsafe-url",
+      ],
+      since: 4,
+      description: "Which referrer policy applies.",
+    },
+    stream: {
+      kind: "boolean",
+      default: false,
+      since: 4,
+      description:
+        "Answer NDJSON head, data and end lines instead of one body, which is how a client saves a large body to a file.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 1000,
+      max: 300000,
+      default: 20000,
+      since: 4,
+      description:
+        "How long the request and its body may take. Above 60000 ms only with stream.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -697,6 +810,19 @@ export const ROUTES = [
     "Runs the agent's own expression or function in the page's main frame.",
     "{ ok: true, tab: TabView, value?: json } or { ok: true, tab: TabView, unserializable } or { ok: true, tab: TabView }",
     FIELDS.evaluate,
+    {
+      limit: 1048576,
+      budget: { field: "timeoutMs" },
+      follow: true,
+      since: 4,
+    },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/fetch",
+    "Fetches a URL from the page, with its cookies, origin and CORS.",
+    "{ ok: true, tab: TabView, response: { ok, status, statusText, url, redirected, type, headers, body } }, or NDJSON head, data and end lines with stream",
+    FIELDS.fetch,
     {
       limit: 1048576,
       budget: { field: "timeoutMs" },

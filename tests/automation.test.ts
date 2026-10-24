@@ -4054,6 +4054,464 @@ describe("local automation socket", () => {
     running.release();
   });
 
+  // Section 8's in-page fetch: the page runs the request in Kamapathy's
+  // world and the route reads its body.
+  const fetchRoute = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/fetch`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  const FETCH_HEAD = {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    url: "https://example.com/api/cart",
+    redirected: false,
+    type: "basic",
+    headers: { "content-type": "application/json; charset=utf-8" },
+  };
+  // A page that answers the fetch operation itself. Each phase arrives as
+  // the payload the route sent, in order.
+  const servePageFetch = (
+    answer: (payload: Record<string, any>, count: number) => unknown,
+  ) => {
+    const marker = ')("fetch",';
+    const calls: Record<string, any>[] = [];
+    controller.contents.result = (code: string) => {
+      const at = code.indexOf(marker);
+      if (at < 0) return {};
+      const payload = JSON.parse(
+        code.slice(at + marker.length, code.lastIndexOf(',"')),
+      );
+      calls.push(payload);
+      return answer(payload, calls.length);
+    };
+    return calls;
+  };
+  // The page's answers for one response: the head, then its body in chunks.
+  const servePageBody = (
+    head: Record<string, unknown>,
+    chunks: Buffer[],
+    read?: (count: number) => unknown,
+  ) =>
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return { ok: true, phase: "start", handle: payload.handle, head };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      const held = read?.(count);
+      if (held !== undefined) return held;
+      const chunk = chunks.shift() ?? Buffer.alloc(0);
+      return {
+        ok: true,
+        phase: "read",
+        data: chunk.toString("base64"),
+        bytes: chunk.length,
+        done: chunks.length === 0,
+      };
+    });
+  // The lines of an NDJSON answer, in order.
+  const ndjson = async (response: Response) =>
+    (await response.text())
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, any>);
+
+  it("fetch validates its options before the lane", async () => {
+    const { tab } = await createPage();
+    const calls = servePageBody(FETCH_HEAD, [Buffer.from("{}")]);
+    const many = Object.fromEntries(
+      Array.from({ length: 65 }, (_, index) => [`x-item-${index}`, "1"]),
+    );
+    for (const [body, field] of [
+      [{ url: "/api/cart", method: "CONNECT" }, "method"],
+      [{ url: "/api/cart", method: "TRACE" }, "method"],
+      [{ url: "/api/cart", method: "TRACK" }, "method"],
+      [{ url: "/api/cart", method: "GET POST" }, "method"],
+      [{ url: "/api/cart", body: "q=1" }, "body"],
+      [{ url: "/api/cart", method: "HEAD", body: "q=1" }, "body"],
+      [{ url: "/api/cart", headers: many }, "headers"],
+      [{ url: "/api/cart", headers: [["accept", "*/*"]] }, "headers"],
+      [{ url: "/api/cart", headers: { Cookie: "lab=sugar" } }, "headers"],
+      [{ url: "/api/cart", headers: { Host: "example.com" } }, "headers"],
+      [{ url: "/api/cart", headers: { Origin: "https://example.com" } }, "headers"],
+      [{ url: "/api/cart", headers: { Referer: "https://example.com/" } }, "headers"],
+      [{ url: "/api/cart", headers: { "Sec-Fetch-Mode": "cors" } }, "headers"],
+      [{ url: "/api/cart", headers: { "Proxy-Authorization": "Basic x" } }, "headers"],
+      [{ url: "/api/cart", mode: "navigate" }, "mode"],
+      [{ url: "/api/cart", timeoutMs: 999 }, "timeoutMs"],
+      [{ url: "/api/cart", timeoutMs: 300001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await failure(await fetchRoute(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    // A forbidden header says which name the browser sets itself.
+    const forbidden = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", headers: { Cookie: "a=b" } }),
+    );
+    expect(forbidden.error.expected).toContain("Cookie");
+    for (const url of [
+      "ftp://example.com/file",
+      "data:text/plain,hello",
+      "https://reader:secret@example.com/",
+      "blob:https://other.example/8d1",
+      "javascript:fetch('/api')",
+    ]) {
+      const { status, error } = await failure(await fetchRoute(tab.id, { url }));
+      expect(status, url).toBe(400);
+      expect(error, url).toMatchObject({ code: "invalid_url" });
+    }
+    expect(calls).toEqual([]);
+    expect(await declaredSize(`/tabs/${tab.id}/fetch`, 1048577)).toBe(413);
+  });
+
+  it("only a streamed fetch may ask for more than 60000 ms", async () => {
+    const { tab } = await createPage();
+    servePageBody(FETCH_HEAD, [Buffer.from("saved")]);
+    const refused = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 120000 }),
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.error).toMatchObject({
+      code: "invalid_field",
+      field: "timeoutMs",
+      expected: "1000 to 60000 ms, or up to 300000 with saveAs",
+    });
+    // Saving a body may take the longer limit, which only a stream asks for.
+    const streamed = await fetchRoute(tab.id, {
+      url: "/api/cart",
+      timeoutMs: 300000,
+      stream: true,
+    });
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get("content-type")).toBe("application/x-ndjson");
+    const lines = await ndjson(streamed);
+    expect(lines.at(-1)).toEqual({ end: { bytes: 5 } });
+  });
+
+  it("a relative URL resolves against the tab's URL and a blob of the page's origin is allowed", async () => {
+    const { tab } = await createPage();
+    const calls = servePageBody(FETCH_HEAD, [Buffer.from("{}")]);
+    expect((await fetchRoute(tab.id, { url: "/api/cart?q=1" })).status).toBe(200);
+    const blob = "blob:https://example.com/8d1f6a1e-0b36-4c3a-9d3e-1f6a1e0b3645";
+    expect((await fetchRoute(tab.id, { url: blob })).status).toBe(200);
+    expect(
+      calls.filter((call) => call.phase === "start").map((call) => call.url),
+    ).toEqual(["https://example.com/api/cart?q=1", blob]);
+  });
+
+  it("a non-2xx response resolves", async () => {
+    const { tab } = await createPage();
+    const head = {
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      url: "https://example.com/api/cart",
+      redirected: true,
+      type: "basic",
+      headers: { "Content-Type": "text/plain", "X-Request-Id": "r-7" },
+    };
+    servePageBody(head, [Buffer.from("No such cart")]);
+    const answered = await fetchRoute(tab.id, { url: "/api/cart" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      response: {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        url: "https://example.com/api/cart",
+        redirected: true,
+        type: "basic",
+        headers: { "content-type": "text/plain", "x-request-id": "r-7" },
+        body: "No such cart",
+      },
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent fetched a URL in the page",
+    });
+  });
+
+  it("a body over 8 MiB answers result_too_large with the response fields", async () => {
+    const { tab } = await createPage();
+    const chunks = Array.from({ length: 9 }, () =>
+      Buffer.alloc(1024 * 1024, 97),
+    );
+    const calls = servePageBody(FETCH_HEAD, chunks);
+    const refused = await failure(await fetchRoute(tab.id, { url: "/api/cart" }));
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "result_too_large",
+      limit: 8 * 1024 * 1024,
+      status: 200,
+      url: "https://example.com/api/cart",
+      headers: FETCH_HEAD.headers,
+    });
+    expect(refused.error.bytes).toBeGreaterThan(8 * 1024 * 1024);
+    // The page stops reading the body it will not answer.
+    expect(calls.at(-1)).toMatchObject({ phase: "cancel" });
+  });
+
+  it("a CORS failure explains itself", async () => {
+    const { tab } = await createPage();
+    const url = "https://shop.example/api/cart";
+    const calls = servePageFetch(() => ({
+      ok: false,
+      code: "fetch_failed",
+      name: "TypeError",
+      error: "Failed to fetch",
+      pageOrigin: "https://example.com",
+    }));
+    // The tab's own session saw the request fail, which is where the reason
+    // comes from.
+    controller.contents.emitProtocol("Network.requestWillBeSent", {
+      requestId: "r-1",
+      loaderId: "loader-1",
+      documentURL: "https://example.com/",
+      request: { url, method: "GET", headers: {} },
+      timestamp: 1,
+      wallTime: 1,
+      initiator: { type: "script" },
+      type: "Fetch",
+      frameId: "main",
+    });
+    controller.contents.emitProtocol("Network.loadingFailed", {
+      requestId: "r-1",
+      timestamp: 2,
+      type: "Fetch",
+      errorText: "net::ERR_FAILED",
+      canceled: false,
+      corsErrorStatus: {
+        corsError: "MissingAllowOriginHeader",
+        failedParameter: "",
+      },
+    });
+    const refused = await failure(await fetchRoute(tab.id, { url }));
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "fetch_failed",
+      url,
+      pageOrigin: "https://example.com",
+      crossOrigin: true,
+      mode: "cors",
+      name: "TypeError",
+      corsError: "MissingAllowOriginHeader",
+      netError: "net::ERR_FAILED",
+    });
+    expect(refused.error.message).toContain("https://example.com");
+    expect(refused.error.message).toContain(url);
+    expect(refused.error.message).toContain("no-cors");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a timeout cancels the request", async () => {
+    const { tab } = await createPage();
+    const silent = new Promise(() => {});
+    // Nothing answers the start, so the response is what ran out.
+    const starting = servePageFetch((payload) =>
+      payload.phase === "cancel" ? { ok: true, phase: "cancel" } : silent,
+    );
+    const awaited = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 1000 }),
+    );
+    expect(awaited.status).toBe(504);
+    expect(awaited.error).toMatchObject({
+      code: "fetch_timeout",
+      awaited: "response",
+      timeoutMs: 1000,
+    });
+    expect(starting.at(-1)).toMatchObject({
+      phase: "cancel",
+      handle: starting[0].handle,
+    });
+    // A head that arrived and a body that stalls ran out of body time.
+    const reading = servePageBody(FETCH_HEAD, [], (count) =>
+      count > 1 ? silent : undefined,
+    );
+    const body = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 1000 }),
+    );
+    expect(body.status).toBe(504);
+    expect(body.error).toMatchObject({
+      code: "fetch_timeout",
+      awaited: "body",
+      timeoutMs: 1000,
+    });
+    expect(reading.at(-1)).toMatchObject({ phase: "cancel" });
+  });
+
+  it("stream true answers NDJSON head, data and end lines", async () => {
+    const { tab } = await createPage();
+    const chunk = Buffer.alloc(1024 * 1024, 98);
+    servePageBody(FETCH_HEAD, [chunk, Buffer.from("tail")]);
+    const streamed = await fetchRoute(tab.id, {
+      url: "/api/cart",
+      stream: true,
+    });
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get("content-type")).toBe("application/x-ndjson");
+    expect(streamed.headers.get("cache-control")).toBe("no-store");
+    const lines = await ndjson(streamed);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)).toEqual({ end: { bytes: chunk.length + 4 } });
+    for (const line of lines.slice(1, -1)) {
+      expect(typeof line.data).toBe("string");
+      expect(Buffer.from(line.data, "base64").length).toBeLessThanOrEqual(
+        1024 * 1024,
+      );
+    }
+    expect(
+      Buffer.concat(
+        lines.slice(1, -1).map((line) => Buffer.from(line.data, "base64")),
+      ).equals(Buffer.concat([chunk, Buffer.from("tail")])),
+    ).toBe(true);
+    // A failure after the head is a line of its own, and no end follows.
+    servePageFetch((payload, count) =>
+      payload.phase === "start"
+        ? { ok: true, phase: "start", handle: payload.handle, head: FETCH_HEAD }
+        : payload.phase === "cancel"
+          ? { ok: true, phase: "cancel" }
+          : count > 2
+            ? {
+                ok: false,
+                code: "fetch_failed",
+                name: "TypeError",
+                error: "network error",
+                pageOrigin: "https://example.com",
+              }
+            : {
+                ok: true,
+                phase: "read",
+                data: Buffer.from("part").toString("base64"),
+                bytes: 4,
+                done: false,
+              },
+    );
+    const broken = await ndjson(
+      await fetchRoute(tab.id, { url: "/api/cart", stream: true }),
+    );
+    expect(broken[0]).toEqual({ head: FETCH_HEAD });
+    expect(broken.at(-1)!.error).toMatchObject({ code: "fetch_failed" });
+    expect(broken.some((line) => line.end !== undefined)).toBe(false);
+    // Half a gigabyte is as much as one body may stream.
+    servePageBody(FETCH_HEAD, [], () => ({
+      ok: true,
+      phase: "read",
+      data: Buffer.from("x").toString("base64"),
+      bytes: 64 * 1024 * 1024,
+      done: false,
+    }));
+    const capped = await ndjson(
+      await fetchRoute(tab.id, { url: "/api/cart", stream: true }),
+    );
+    expect(capped.at(-1)!.error).toMatchObject({
+      code: "result_too_large",
+      limit: 512 * 1024 * 1024,
+    });
+    expect(capped.some((line) => line.end !== undefined)).toBe(false);
+  });
+
+  it("a takeover between chunks aborts the read and withholds the result", async () => {
+    const { space, tab } = await createPage();
+    let taken: (() => void) | undefined;
+    // The first chunk arrives, the second waits for this test.
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return {
+          ok: true,
+          phase: "start",
+          handle: payload.handle,
+          head: FETCH_HEAD,
+        };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      if (count === 2)
+        return {
+          ok: true,
+          phase: "read",
+          data: Buffer.from("the agent's bytes").toString("base64"),
+          bytes: 17,
+          done: false,
+        };
+      return new Promise((resolve) => {
+        taken = () =>
+          resolve({
+            ok: true,
+            phase: "read",
+            data: Buffer.from("the person's bytes").toString("base64"),
+            bytes: 18,
+            done: true,
+          });
+      });
+    });
+    const streaming = fetchRoute(tab.id, { url: "/api/cart", stream: true });
+    await expect.poll(() => typeof taken).toBe("function");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    taken!();
+    const lines = await ndjson(await streaming);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)!.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+    });
+    expect(lines.some((line) => line.end !== undefined)).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("person's bytes");
+  });
+
+  it("a navigation between chunks ends the stream and withholds the result", async () => {
+    const { tab } = await createPage();
+    let navigated: (() => void) | undefined;
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return {
+          ok: true,
+          phase: "start",
+          handle: payload.handle,
+          head: FETCH_HEAD,
+        };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      if (count === 2)
+        return {
+          ok: true,
+          phase: "read",
+          data: Buffer.from("the first page's bytes").toString("base64"),
+          bytes: 22,
+          done: false,
+        };
+      // This chunk belongs to the document the page has left.
+      return new Promise((resolve) => {
+        navigated = () =>
+          resolve({
+            ok: true,
+            phase: "read",
+            data: Buffer.from("the old document's bytes").toString("base64"),
+            bytes: 24,
+            done: true,
+          });
+      });
+    });
+    const streaming = fetchRoute(tab.id, { url: "/api/cart", stream: true });
+    await expect.poll(() => typeof navigated).toBe("function");
+    controller.contents.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    navigated!();
+    const lines = await ndjson(await streaming);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)!.error).toMatchObject({ code: "page_changed" });
+    expect(lines.some((line) => line.end !== undefined)).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("old document");
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -5471,6 +5929,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
       "POST /tabs/:id/wait-for-function": { expression: "true" },
       "POST /tabs/:id/evaluate": { expression: "true" },
+      "POST /tabs/:id/fetch": { url: "/api/cart" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },
