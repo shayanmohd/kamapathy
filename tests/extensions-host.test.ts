@@ -1408,7 +1408,10 @@ describe("extension management", () => {
     const next = await hostFor(userData);
     for (const folder of gone) expect(existsSync(folder)).toBe(false);
     expect(existsSync(kept)).toBe(true);
-    expect(saved(userData)).toEqual({ extensions: [storeEntry(B)], removals: [] });
+    expect(saved(userData)).toEqual({
+      extensions: [storeEntry(B)],
+      removals: [],
+    });
     const later = sessionOf("persist:space-y");
     await next.attach("persist:space-y", asSession(later));
     expect([...next.loadedIds("persist:space-y")]).toEqual([B]);
@@ -1632,13 +1635,17 @@ describe("extension management", () => {
       extensionRemoveCopy.pinLimit,
     );
     expect(host.entry(ids[8])?.pinned).toBe(false);
-    expect(saved(userData).extensions.filter((entry) => entry.pinned)).toHaveLength(8);
+    expect(
+      saved(userData).extensions.filter((entry) => entry.pinned),
+    ).toHaveLength(8);
 
     await host.setPinned(ids[0], false);
     await host.setPinned(ids[8], true);
     expect(host.entry(ids[0])?.pinned).toBe(false);
     expect(host.entry(ids[8])?.pinned).toBe(true);
-    expect(saved(userData).extensions.filter((entry) => entry.pinned)).toHaveLength(8);
+    expect(
+      saved(userData).extensions.filter((entry) => entry.pinned),
+    ).toHaveLength(8);
   });
 });
 
