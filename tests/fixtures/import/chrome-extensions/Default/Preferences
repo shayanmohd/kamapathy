@@ -1,0 +1,56 @@
+{
+  "extensions": {
+    "settings": {
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+        "location": 1,
+        "state": 1,
+        "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.2.0_0",
+        "manifest": {
+          "manifest_version": 3,
+          "name": "__MSG_appName__",
+          "version": "1.2.0"
+        }
+      },
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+        "location": 1,
+        "state": 1,
+        "from_webstore": true,
+        "disable_reasons": [1],
+        "path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/2.0.0_0"
+      },
+      "cccccccccccccccccccccccccccccccc": {
+        "location": 1,
+        "state": 1,
+        "path": "cccccccccccccccccccccccccccccccc/3.0_0",
+        "manifest": {
+          "manifest_version": 3,
+          "name": "Edge Add-on",
+          "version": "3.0",
+          "update_url": "https://edge.microsoft.com/extensionwebstorebase/v1/crx"
+        }
+      },
+      "dddddddddddddddddddddddddddddddd": {
+        "location": 1,
+        "state": 1,
+        "from_webstore": true,
+        "was_installed_by_default": true,
+        "path": "dddddddddddddddddddddddddddddddd/1.0_0"
+      },
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+        "location": 7,
+        "state": 1,
+        "from_webstore": true,
+        "path": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/1.0_0"
+      },
+      "mhjfbmdgcfjbbpaeojofohoefgiehjai": {
+        "location": 5,
+        "state": 1
+      },
+      "ffffffffffffffffffffffffffffffff": {
+        "location": 4,
+        "state": 1,
+        "path": "UNPACKED_PATH"
+      }
+    }
+  }
+}

@@ -367,7 +367,18 @@ export function parsePlistXml(xml: string): unknown {
   return value(root);
 }
 
-function dataDir(id: BrowserId, env: ImportEnv): string | undefined {
+// The browser's own name, as the app shows it.
+export function browserName(id: BrowserId): string {
+  const browser: BrowserInfo | undefined = browsers[id];
+  return browser ? browser.name : id;
+}
+// Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera: the browsers whose
+// profiles hold cookies and extensions Kamapathy can read.
+export function isChromiumFamily(id: BrowserId): boolean {
+  return browsers[id]?.engine === "chromium";
+}
+
+export function dataDir(id: BrowserId, env: ImportEnv): string | undefined {
   const browser = browsers[id];
   if (env.platform === "win32") {
     const base = browser.roaming ? env.appData : env.localAppData;
@@ -382,7 +393,7 @@ function dataDir(id: BrowserId, env: ImportEnv): string | undefined {
   return relative ? join(env.home, relative) : undefined;
 }
 
-function chromiumProfiles(dir: string): ImportProfile[] {
+export function chromiumProfiles(dir: string): ImportProfile[] {
   const state = record(record(readJson(join(dir, "Local State"))).profile);
   const cache = record(state.info_cache);
   const found = Object.keys(cache)

@@ -88,6 +88,8 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
   </tr>
 </table>
 
+Kamapathy also runs your extensions. Add one from the Chrome Web Store with the **Add to Kamapathy** button in the address bar or from the Extensions dialog, after Kamapathy checks the store's signatures and asks you, or bring the ones you already have over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera, whose data stays behind. Manifest V3 only, and only part of the extension API works, so the dialog that asks you lists what won't. They run in your spaces and in agent spaces that share your sign-ins, never in isolated ones. If you add extensions, Kamapathy asks the Chrome Web Store once a day whether they have updates, sending their IDs and versions. Turn this off in Settings, under Extensions.
+
 ## Take the tour
 
 Each section opens to a screenshot. Want to click around instead? The [live demo](https://kamapathy.app/#demo) runs a working copy of the interface in your browser, agent included.
@@ -367,6 +369,9 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - Agent pages are created at the size of Kamapathy's content area instead of 1200 by 800, so a page you have not looked at yet reports the viewport it will have when you do.
 - Closing the window keeps Kamapathy running while agents can work, so a script keeps the same instance, screenshots included. A quit while an agent is working or waiting for you asks first, and for ten minutes after it the client refuses to start Kamapathy, failing with `not_connected` and reason `quit_by_person`.
 - A space's activity carries the agent's own words: the label of each action, a line for every status change, and how the task ended.
+- The person's extensions run in agent spaces that share their sign-ins, so their content scripts can change agent pages. Isolated agent spaces never run them.
+- A frame of one of the person's extensions is a blocked `iframe` entry with `extension` and the label `Extension: <name>`, and input there returns `403 input_target_blocked` with `frame` and `extension`.
+- CDP commands aimed at an extension's frame or content-script world return `403 cdp_method_blocked` with `reason: "scope"`.
 
 </details>
 
@@ -451,7 +456,7 @@ Kamapathy's trust boundary is your operating system account. Web pages run sandb
 
 ## What's not here yet
 
-Kamapathy is an early preview. Browser extensions, a password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed yet, so Kamapathy can download updates but never installs them itself, and Kamapathy hasn't had an independent security audit. Kamapathy presents itself to sites as Chromium. If Google rejects a sign-in, Kamapathy offers to continue in your default browser, or to sign in there and import the sign-in.
+Kamapathy is an early preview. A password manager, sync, an ad blocker and DRM playback are not part of it yet. The installers aren't signed yet, so Kamapathy can download updates but never installs them itself, and Kamapathy hasn't had an independent security audit. Kamapathy presents itself to sites as Chromium. If Google rejects a sign-in, Kamapathy offers to continue in your default browser, or to sign in there and import the sign-in.
 
 ## Contributing
 

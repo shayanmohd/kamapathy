@@ -8,13 +8,27 @@ import {
   type ExtensionAnchor,
   type ExtensionCommand,
   type ExtensionCommandResult,
+  type ExtensionImportList,
   type ExtensionImportProgress,
+  type ExtensionImportRequest,
+  type ExtensionImportResult,
   type ExtensionsView,
 } from "../../shared/extensions";
-import { extensionInstallCopy, extensionRemoveCopy } from "../../src/copy";
+import type { ImportSelection } from "../../shared/types";
+import {
+  extensionInstallCopy,
+  extensionRemoveCopy,
+  importCopy,
+} from "../../src/copy";
 import { SHARED_PARTITION, type BrowserController } from "../controller";
+import { isChromiumFamily, type BrowserId, type ImportEnv } from "../import";
 import type { ExtensionBridge } from "./bridge";
 import type { ExtensionHost } from "./host";
+import {
+  extensionCandidates,
+  importExtensions,
+  type ExtensionImportContext,
+} from "./import";
 import { InstallError, type ExtensionInstaller } from "./install";
 import type { ExtensionUpdates } from "./updates";
 import { extensionsView } from "./view";
@@ -22,12 +36,18 @@ import { extensionsView } from "./view";
 export const EXTENSIONS_CHANNEL = "kamapathy:extensions";
 export const EXTENSIONS_CHANGED = "kamapathy:extensions-changed";
 export const EXTENSION_COMMAND = "kamapathy:extension-command";
+export const EXTENSION_IMPORT_CANDIDATES =
+  "kamapathy:extension-import-candidates";
+export const IMPORT_EXTENSIONS = "kamapathy:import-extensions";
 
 // The longest store link the field takes.
 const INPUT_LIMIT = 2048;
 // Shell pixels a button can sit at.
 const ANCHOR_MIN = -10_000;
 const ANCHOR_MAX = 100_000;
+// A profile folder's name, and how many extensions one import may name.
+const PROFILE_LIMIT = 255;
+const IDS_LIMIT = 100;
 
 function invalid(): never {
   throw new Error("Invalid extension command.");
@@ -137,6 +157,57 @@ export function parseExtensionCommand(value: unknown): ExtensionCommand {
   }
 }
 
+function invalidImport(): never {
+  throw new Error(importCopy.errors.import_invalid_request);
+}
+function recordOf(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    invalidImport();
+  return value as Record<string, unknown>;
+}
+// These keys, and no others; profile may be left out.
+function onlyFields(record: Record<string, unknown>, names: string[]): void {
+  for (const key of Object.keys(record))
+    if (!names.includes(key)) invalidImport();
+}
+// Only the browsers whose extensions Kamapathy can read.
+function sourceOf(value: unknown): string {
+  if (typeof value !== "string" || !isChromiumFamily(value as BrowserId))
+    invalidImport();
+  return value;
+}
+function profileOf(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > PROFILE_LIMIT)
+    invalidImport();
+  return value;
+}
+export function parseImportSelection(value: unknown): ImportSelection {
+  const record = recordOf(value);
+  onlyFields(record, ["source", "profile"]);
+  const profile = profileOf(record.profile);
+  return {
+    source: sourceOf(record.source),
+    ...(profile === undefined ? {} : { profile }),
+  };
+}
+export function parseExtensionImportRequest(
+  value: unknown,
+): ExtensionImportRequest {
+  const record = recordOf(value);
+  onlyFields(record, ["source", "profile", "ids"]);
+  const ids = record.ids;
+  if (!Array.isArray(ids) || ids.length > IDS_LIMIT) invalidImport();
+  for (const id of ids)
+    if (!isExtensionId(id) || isComponentExtension(id)) invalidImport();
+  const profile = profileOf(record.profile);
+  return {
+    source: sourceOf(record.source),
+    ...(profile === undefined ? {} : { profile }),
+    ids: ids as string[],
+  };
+}
+
 export interface ExtensionIpcDeps {
   ipc: Pick<IpcMain, "handle">;
   validateSender(event: IpcMainInvokeEvent): BrowserController;
@@ -147,6 +218,13 @@ export interface ExtensionIpcDeps {
   updates: ExtensionUpdates;
   bridge: ExtensionBridge;
   confirmRemove(name: string): Promise<boolean>;
+  confirmImport(browser: string, count: number): Promise<boolean>;
+  // app.getLocale() and process.versions.chrome, for reading manifests.
+  locale: string;
+  chromeVersion: string;
+  // Where the other browsers keep their data; this computer unless a test
+  // says otherwise.
+  env?: ImportEnv;
 }
 export interface ExtensionIpc {
   push(): void;
@@ -159,6 +237,8 @@ export interface ExtensionIpc {
 export function registerExtensionIpc(deps: ExtensionIpcDeps): ExtensionIpc {
   let imports: ExtensionImportProgress[] = [];
   let pending: ReturnType<typeof setTimeout> | undefined;
+  // One import at a time, as in section 15's panel.
+  let importing = false;
 
   function view(): ExtensionsView {
     const controller = deps.controller();
@@ -180,6 +260,22 @@ export function registerExtensionIpc(deps: ExtensionIpcDeps): ExtensionIpc {
   }
   function push(): void {
     pending ??= setTimeout(send, 0);
+  }
+  function setImports(rows: ExtensionImportProgress[]): void {
+    imports = rows;
+    push();
+  }
+  // Developer mode is the person's setting, never the shell's claim.
+  function importContext(
+    controller: BrowserController,
+  ): ExtensionImportContext {
+    return {
+      host: deps.host,
+      developerMode: controller.state.settings.extensionDeveloperMode,
+      chromeVersion: deps.chromeVersion,
+      locale: deps.locale,
+      ...(deps.env ? { env: deps.env } : {}),
+    };
   }
   // The space the person is looking at, when it runs extensions: where an
   // options page opens.
@@ -253,12 +349,43 @@ export function registerExtensionIpc(deps: ExtensionIpcDeps): ExtensionIpc {
     },
   );
 
+  deps.ipc.handle(
+    EXTENSION_IMPORT_CANDIDATES,
+    async (event, value: unknown): Promise<ExtensionImportList> => {
+      const controller = deps.validateSender(event);
+      const selection = parseImportSelection(value);
+      const { list } = await extensionCandidates(
+        selection.source as BrowserId,
+        selection.profile,
+        importContext(controller),
+      );
+      return list;
+    },
+  );
+  deps.ipc.handle(
+    IMPORT_EXTENSIONS,
+    async (event, value: unknown): Promise<ExtensionImportResult> => {
+      const controller = deps.validateSender(event);
+      const request = parseExtensionImportRequest(value);
+      if (importing) throw new Error(importCopy.errors.import_busy);
+      importing = true;
+      try {
+        return await importExtensions(request, {
+          ...importContext(controller),
+          installer: deps.installer,
+          confirm: deps.confirmImport,
+          progress: setImports,
+        });
+      } finally {
+        importing = false;
+        setImports([]);
+      }
+    },
+  );
+
   return {
     push,
-    setImports(rows) {
-      imports = rows;
-      push();
-    },
+    setImports,
     dispose() {
       if (pending) clearTimeout(pending);
       pending = undefined;

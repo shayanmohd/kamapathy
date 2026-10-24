@@ -6,7 +6,11 @@ import type {
   KamapathyBridge,
   PromptAnswer,
 } from "../shared/types";
-import type { ExtensionCommand, ExtensionsView } from "../shared/extensions";
+import type {
+  ExtensionCommand,
+  ExtensionImportRequest,
+  ExtensionsView,
+} from "../shared/extensions";
 
 // Electron wraps a rejection in "Error invoking remote method ..."; the
 // interface shows the message itself.
@@ -82,6 +86,10 @@ const bridge: KamapathyBridge = {
   },
   extensionCommand: (command: ExtensionCommand) =>
     invoke("kamapathy:extension-command", command),
+  extensionImportCandidates: (selection) =>
+    invoke("kamapathy:extension-import-candidates", selection),
+  importExtensions: (request: ExtensionImportRequest) =>
+    invoke("kamapathy:import-extensions", request),
   importSafariArchive: (bytes, request) =>
     invoke("kamapathy:import-safari", bytes, request),
   openImportPermissions: (pane) =>

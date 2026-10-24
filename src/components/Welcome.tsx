@@ -7,8 +7,13 @@ import type {
   ImportOutcome,
   ImportProfile,
   ImportReply,
+  ImportSelection,
   ImportSource,
 } from "../../shared/types";
+import type {
+  ExtensionImportList,
+  ExtensionImportProgress,
+} from "../../shared/extensions";
 import { topSites } from "../../shared/topsites";
 import { bridge } from "../lib/bridge";
 import {
@@ -28,12 +33,198 @@ import {
   stepNumber,
   type OnboardingStep,
 } from "../lib/onboarding";
-import { defaultBrowserCopy, importCopy, welcomeCopy } from "../copy";
+import {
+  defaultBrowserCopy,
+  extensionImportCopy,
+  importCopy,
+  welcomeCopy,
+} from "../copy";
 import { Modal, SiteIcon } from "./ui";
 import "./Welcome.css";
 
 /** How often a blocked source is read again while the panel is open. */
 const RECHECK_MS = 1500;
+
+/** The extensions one source profile offers, which the person picks from. */
+export function ExtensionImportStep({
+  selection,
+  onDone,
+}: {
+  selection: ImportSelection;
+  onDone: () => void;
+}) {
+  const [list, setList] = useState<ExtensionImportList | null>(null);
+  const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
+  const [rows, setRows] = useState<ExtensionImportProgress[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    bridge.extensionImportCandidates(selection).then(
+      (found) => {
+        if (!alive) return;
+        setList(found);
+        setChecked(
+          new Set(
+            found.candidates
+              .filter((candidate) => candidate.checked)
+              .map((candidate) => candidate.id),
+          ),
+        );
+      },
+      (failure: unknown) => {
+        if (!alive) return;
+        setList({
+          source: selection.source,
+          profile: selection.profile ?? "",
+          browser: "",
+          profileName: "",
+          candidates: [],
+        });
+        setError(
+          failure instanceof Error ? failure.message : importCopy.failed,
+        );
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [selection]);
+  // What each extension is doing while the import runs.
+  useEffect(
+    () =>
+      bridge.onExtensions((view) => {
+        if (view.imports.length) setRows(view.imports);
+      }),
+    [],
+  );
+  if (!list)
+    return (
+      <p className="import-status" role="status">
+        {importCopy.looking}
+      </p>
+    );
+  const picked = list.candidates.filter((candidate) =>
+    checked.has(candidate.id),
+  );
+  async function add(found: ExtensionImportList) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await bridge.importExtensions({
+        source: found.source,
+        ...(found.profile ? { profile: found.profile } : {}),
+        ids: picked.map((candidate) => candidate.id),
+      });
+      setRows(result.results);
+      // Nothing added means the person cancelled, so they may try again.
+      if (result.results.length) setDone(true);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : importCopy.failed);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function toggle(id: string, on: boolean) {
+    const next = new Set(checked);
+    if (on) next.add(id);
+    else next.delete(id);
+    setChecked(next);
+  }
+  return (
+    <div className="import-extensions">
+      <strong>{extensionImportCopy.title}</strong>
+      <p className="import-note">
+        {extensionImportCopy.from(list.browser, list.profileName)}
+      </p>
+      {list.candidates.length === 0 ? (
+        <p className="info-note">{extensionImportCopy.none}</p>
+      ) : (
+        <div
+          className="import-sources"
+          role="group"
+          aria-label={extensionImportCopy.title}
+        >
+          {list.candidates.map((candidate) => {
+            const row = rows.find((item) => item.id === candidate.id);
+            const status =
+              row?.status === "adding"
+                ? extensionImportCopy.adding
+                : row?.status === "added"
+                  ? extensionImportCopy.added
+                  : row?.status === "failed"
+                    ? row.message
+                    : candidate.added
+                      ? extensionImportCopy.added
+                      : candidate.note;
+            // Only store items, and unpacked folders in developer mode, can
+            // come over; the rest say why.
+            const blocked =
+              candidate.added ||
+              candidate.kind === "unavailable" ||
+              (candidate.kind === "unpacked" && candidate.note !== undefined);
+            return (
+              <label key={candidate.id} className="import-source">
+                <span className="import-source-head">
+                  <input
+                    type="checkbox"
+                    aria-label={candidate.name}
+                    disabled={blocked || busy || done}
+                    checked={checked.has(candidate.id)}
+                    onChange={(event) =>
+                      toggle(candidate.id, event.target.checked)
+                    }
+                  />
+                  <span className="import-source-name">{candidate.name}</span>
+                  {status && (
+                    <span className="import-source-tag">{status}</span>
+                  )}
+                </span>
+                {candidate.lines.length > 0 && (
+                  <p className="import-note">{candidate.lines.join(", ")}</p>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="modal-actions">
+        {!done && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onDone}
+            disabled={busy}
+          >
+            {extensionImportCopy.skip}
+          </button>
+        )}
+        {done || list.candidates.length === 0 ? (
+          <button type="button" className="primary-button" onClick={onDone}>
+            {extensionImportCopy.continue} <ArrowRight size={16} />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || picked.length === 0}
+            onClick={() => void add(list)}
+          >
+            {busy
+              ? extensionImportCopy.adding
+              : extensionImportCopy.add(picked.length)}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ImportPanel({
   onDone,
@@ -51,9 +242,12 @@ export function ImportPanel({
   const [bookmarks, setBookmarks] = useState(true);
   const [history, setHistory] = useState(true);
   const [signIns, setSignIns] = useState(startSignIns);
+  const [extensions, setExtensions] = useState(true);
   const [destination, setDestination] = useState<"shared" | "separate">(
     "shared",
   );
+  // The chosen Chromium family profiles still to offer extensions for.
+  const [queue, setQueue] = useState<ImportSelection[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
@@ -125,6 +319,18 @@ export function ImportPanel({
     signIns: signIns && canSignIns,
     destination,
   });
+  // One step per chosen profile of a Chromium family browser, in order.
+  const extensionSteps: ImportSelection[] =
+    extensions && canSignIns
+      ? (sources ?? []).flatMap((source) =>
+          source.signInsAvailable && selectableSource(source)
+            ? [...(selection.get(source.id) ?? [])].map((profile) => ({
+                source: source.id,
+                profile,
+              }))
+            : [],
+        )
+      : [];
   function choose(source: string, profiles: Set<string>) {
     setSelection((current) => new Map(current).set(source, profiles));
   }
@@ -147,7 +353,11 @@ export function ImportPanel({
       new Set(allChosen(source) ? [] : source.profiles.map((item) => item.id)),
     );
   }
-  async function send(call: () => Promise<ImportReply>, signInsSent: boolean) {
+  async function send(
+    call: () => Promise<ImportReply>,
+    signInsSent: boolean,
+    steps: ImportSelection[] = [],
+  ) {
     setBusy(true);
     setError("");
     try {
@@ -156,6 +366,7 @@ export function ImportPanel({
       else {
         setWithSignIns(signInsSent);
         setOutcome(reply);
+        setQueue(steps);
       }
     } catch {
       setError(importCopy.failed);
@@ -164,11 +375,22 @@ export function ImportPanel({
     }
   }
   function run() {
-    if (!request) return;
+    // With only extensions chosen there is nothing to import first.
+    if (!request) {
+      setQueue(extensionSteps);
+      return;
+    }
     void send(
       () => bridge.importBrowserData(request),
       request.signIns !== "none",
+      extensionSteps,
     );
+  }
+  // The outcome waits until the last profile's extensions are done.
+  function nextProfile() {
+    const rest = queue.slice(1);
+    setQueue(rest);
+    if (!rest.length && !outcome) onDone(null);
   }
   // The Safari export carries no sign-ins.
   async function runSafari(file: File) {
@@ -187,6 +409,14 @@ export function ImportPanel({
       <p className="import-status" role="status">
         {importCopy.looking}
       </p>
+    );
+  if (queue.length)
+    return (
+      <ExtensionImportStep
+        key={`${queue[0].source}:${queue[0].profile ?? ""}`}
+        selection={queue[0]}
+        onDone={nextProfile}
+      />
     );
   if (outcome)
     return (
@@ -341,6 +571,16 @@ export function ImportPanel({
           />
           {importCopy.signIns}
         </label>
+        {canSignIns && (
+          <label>
+            <input
+              type="checkbox"
+              checked={extensions}
+              onChange={(event) => setExtensions(event.target.checked)}
+            />
+            {extensionImportCopy.checkbox}
+          </label>
+        )}
       </div>
       {!canSignIns && <p className="import-note">{importCopy.signInsHint}</p>}
       {signIns && canSignIns && (
@@ -442,7 +682,7 @@ export function ImportPanel({
           type="submit"
           className="primary-button"
           autoFocus
-          disabled={busy || !request}
+          disabled={busy || (!request && !extensionSteps.length)}
         >
           {busy ? importCopy.working : importCopy.import}
           <DownloadSimple size={16} />

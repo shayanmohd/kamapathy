@@ -1,6 +1,9 @@
 import type {
   ExtensionCommand,
   ExtensionCommandResult,
+  ExtensionImportList,
+  ExtensionImportRequest,
+  ExtensionImportResult,
   ExtensionsView,
 } from "./extensions";
 import type { PermissionKey, PromptKind } from "./permissions";
@@ -574,6 +577,13 @@ export interface KamapathyBridge {
   extensions(): Promise<ExtensionsView>;
   onExtensions(callback: (view: ExtensionsView) => void): () => void;
   extensionCommand(command: ExtensionCommand): Promise<ExtensionCommandResult>;
+  // The extensions one source profile offers, and the ones the person picked.
+  extensionImportCandidates(
+    selection: ImportSelection,
+  ): Promise<ExtensionImportList>;
+  importExtensions(
+    request: ExtensionImportRequest,
+  ): Promise<ExtensionImportResult>;
   importBrowserData(request: ImportRequest): Promise<ImportReply>;
   // Safari comes in through the file its own export writes.
   importSafariArchive(

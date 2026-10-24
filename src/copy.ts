@@ -577,6 +577,29 @@ export const extensionsCopy = {
   details: (name: string) => `About ${name}`,
 } as const;
 
+// The import panel's extension step and the native dialog it opens.
+export const extensionImportCopy = {
+  checkbox: "Extensions",
+  title: "Add your extensions",
+  from: (browser: string, profile: string) => `From ${profile} in ${browser}`,
+  add: (count: number) =>
+    `Add ${count} ${count === 1 ? "extension" : "extensions"}`,
+  adding: "Adding...",
+  added: "Added",
+  skip: "Skip",
+  continue: "Continue",
+  unavailable: "Not available here",
+  needsDeveloperMode: "Turn on developer mode to add this.",
+  none: "No extensions to bring over from this profile.",
+  dialogTitle: (count: number, browser: string) =>
+    `Add ${count} ${count === 1 ? "extension" : "extensions"} from ${browser}?`,
+  dialogDetail: (browser: string) =>
+    `They keep the access they had in ${browser} and also run in agent spaces that share your sign-ins. Their data isn't copied.`,
+  cancel: "Cancel",
+  confirm: (count: number) =>
+    count === 1 ? "Add extension" : "Add extensions",
+} as const;
+
 export const fileCopy = {
   icon: "File on this computer",
   scriptsOff: "Scripts are off for files on this computer.",
