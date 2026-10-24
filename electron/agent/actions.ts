@@ -5,7 +5,12 @@ import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
-import { nativeDrag } from "./input/actions";
+import {
+  createInputActions,
+  nativeDrag,
+  type PointerAction,
+  type PointerKind,
+} from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import { confirmDelivery } from "./input/wait";
 import type { RefBook } from "./refs";
@@ -23,6 +28,9 @@ import type { Step } from "./session/types";
 import { PRESS_KEYS, type ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
+
+// The step types the pointer runner owns.
+const POINTER_KINDS: readonly PointerKind[] = ["click", "dblclick", "hover"];
 
 export const finitePoint = (point: unknown): point is Point =>
   !!point &&
@@ -217,7 +225,9 @@ export function createActions(deps: {
     });
     authorizeTab(id);
     if (
-      ["snapshot", "target", "focus", "drag"].includes(operation) &&
+      ["snapshot", "target", "actionPoint", "focus", "drag"].includes(
+        operation,
+      ) &&
       session.epoch !== epoch
     )
       return fail(
@@ -314,6 +324,15 @@ export function createActions(deps: {
       deliver: () => deliver(armed),
     });
   };
+  const dispatcherFor = (_id: string, session: TabSession) =>
+    dispatchers.for(session);
+  // Section 5's element actions, which drive the attempt loop themselves.
+  const input = createInputActions({
+    controller,
+    authority,
+    actions: { readyContents, evaluatePage, dispatcher: dispatcherFor },
+    dispatchers,
+  });
   const executeToolAction = async (
     id: string,
     action: ToolAction,
@@ -357,82 +376,14 @@ export function createActions(deps: {
         deadline,
         step,
       );
-    } else if (action.type === "click") {
-      const point = await evaluatePage(
+    } else if (POINTER_KINDS.includes(action.type as PointerKind)) {
+      // Click, dblclick and hover wait for a target that can take the input,
+      // scroll it into view and press it on the loop in input/actions.ts.
+      result = await input.pointer(
         id,
-        session,
-        "target",
-        payload,
-        deadline,
-        step,
+        payload as unknown as PointerAction,
+        run,
       );
-      // A control drawn with no size has no point to press, so the page
-      // clicks it, once its surroundings are on screen and uncovered.
-      const empty = point.empty === true;
-      if (empty) {
-        if (session.epoch !== epoch)
-          return fail(
-            "page_changed",
-            "The page navigated during this operation. Inspect the new page before continuing.",
-          );
-        await evaluatePage(id, session, "click", payload, deadline, step);
-      }
-      else {
-        if (!finitePoint(point))
-          return fail(
-            "invalid_target",
-            "The page did not provide a valid click target.",
-          );
-        await deliverNativeInput(
-          id,
-          session,
-          "mouse",
-          () =>
-            nativeInput(
-              id,
-              session,
-              [
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: { type: "mouseMoved", x: point.x, y: point.y },
-                },
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: {
-                    type: "mousePressed",
-                    x: point.x,
-                    y: point.y,
-                    button: "left",
-                    clickCount: 1,
-                  },
-                },
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: {
-                    type: "mouseReleased",
-                    x: point.x,
-                    y: point.y,
-                    button: "left",
-                    clickCount: 1,
-                  },
-                },
-              ],
-              gesture,
-              epoch,
-            ),
-          step,
-        );
-      }
-      // Let synchronous submit/navigation handlers start, then wait for their load.
-      // No input operation is retried, including when navigation times out.
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = {
-        ok: true,
-        url: contents.getURL(),
-        ...(empty ? { fallback: "dom_click" } : {}),
-        ...reboundOf(point),
-      };
     } else if (action.type === "fill") {
       result = await evaluatePage(id, session, "fill", payload, deadline, step);
     } else if (action.type === "drag") {
@@ -586,6 +537,8 @@ export function createActions(deps: {
     const descriptions: Record<string, string> = {
       snapshot: "Agent read a page snapshot",
       click: "Agent clicked an element",
+      dblclick: "Agent double-clicked an element",
+      hover: "Agent hovered an element",
       fill: "Agent filled a field",
       press: "Agent pressed a key",
       scroll: "Agent scrolled a page",
@@ -600,6 +553,6 @@ export function createActions(deps: {
     readyContents,
     evaluatePage,
     executeToolAction,
-    dispatcher: (_id, session) => dispatchers.for(session),
+    dispatcher: dispatcherFor,
   };
 }

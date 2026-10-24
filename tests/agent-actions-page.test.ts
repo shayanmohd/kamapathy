@@ -832,4 +832,41 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     expect(stalled).toMatchObject({ ok: true, moved: 0 });
     expect(stalled.blocked).toBeUndefined();
   }, 30000);
+
+  it("measures a position from the border box and refuses one outside the clip", async () => {
+    await open("/input/buttons");
+    const box = await page.evaluate(() => {
+      const rect = document.getElementById("save")!.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+    });
+    const corner = await point("#save", { position: { x: 3, y: 4 } });
+    expect(corner.blocked).toBeUndefined();
+    expect(corner.point.x).toBeCloseTo(box.left + 3, 5);
+    expect(corner.point.y).toBeCloseTo(box.top + 4, 5);
+    // Without a position the centre is what the press lands on.
+    const middle = await point("#save");
+    expect(middle.point.x).toBeCloseTo(box.left + box.width / 2, 5);
+    expect(middle.point.y).toBeCloseTo(box.top + box.height / 2, 5);
+    // A point past the viewport, past the 10000 px limit, or no number at
+    // all, has nowhere to land.
+    for (const position of [
+      { x: 1000 - box.left, y: 0 },
+      { x: 0, y: -box.top - 40 },
+      { x: 10001, y: 0 },
+      { x: Number.NaN, y: 0 },
+    ])
+      expect(
+        (await point("#save", { position })).blocked,
+        JSON.stringify(position),
+      ).toEqual({ blocker: "outside_viewport" });
+    // A position inside the element but under something else is covered.
+    expect(
+      await point("#overlaid", { position: { x: 2, y: 2 } }),
+    ).toMatchObject({ blocked: { blocker: "covered", interceptor: "div#shade" } });
+  }, 30000);
 });

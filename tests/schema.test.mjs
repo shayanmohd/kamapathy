@@ -227,8 +227,8 @@ describe("API schema", () => {
     expect(ACTIONS.map((item) => item.type).sort()).toEqual(
       [...union.matchAll(/"([\w-]+)"/g)].map((m) => m[1]).sort(),
     );
-    expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+    expect(() => parseToolAction("nope", {})).toThrow(
+      "Batch actions support snapshot, click, dblclick, hover, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -556,6 +556,8 @@ describe("API schema", () => {
     const types = [
       "snapshot",
       "click",
+      "dblclick",
+      "hover",
       "fill",
       "press",
       "scroll",
@@ -567,10 +569,10 @@ describe("API schema", () => {
       "wait-for-load-state",
       "wait-for-function",
     ];
-    expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
+    expect(checkBody(batch, { actions: [{ type: "nope" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+        "Batch actions support snapshot, click, dblclick, hover, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])
@@ -769,7 +771,7 @@ describe("API schema", () => {
     );
     expect(requestBudget(route("POST /tabs/:id/actions"))).toBe(60000);
     expect(requestBudget(route("POST /tabs/:id/click"), { ref: "@e1" })).toBe(
-      30000,
+      18100,
     );
     expect(route("POST /tabs/:id/upload").limit).toBe(24 * 1024 * 1024);
     expect(route("GET /health").lane).toBe("preadmission");
@@ -818,7 +820,7 @@ describe("API schema", () => {
       "POST /tabs/:id/click budgets on noBudget, which the schema does not compute.",
     );
     expect(() =>
-      routeBudget({ ...click, budget: { field: "timeoutMs" } }),
+      routeBudget({ ...click, budget: { field: "force" } }),
     ).toThrow("POST /tabs/:id/click budgets on a field without a maximum.");
   });
 
@@ -860,7 +862,15 @@ describe("API schema", () => {
   });
 
   it("the input routes and their batch steps declare label at level 3", () => {
-    const inputs = ["click", "fill", "press", "scroll", "drag"];
+    const inputs = [
+      "click",
+      "dblclick",
+      "hover",
+      "fill",
+      "press",
+      "scroll",
+      "drag",
+    ];
     for (const type of inputs) {
       const key = `POST /tabs/:id/${type}`;
       const item = route(key);

@@ -43,6 +43,19 @@ export function fakePng(width: number, height: number): Buffer {
   return png;
 }
 
+// A node the tab's hit test finds at one point: the element itself, and the
+// frame it holds when it owns one.
+export type FakeHit = {
+  x: number;
+  y: number;
+  // The frame the hit belongs to, as DOM.getNodeForLocation reports it.
+  frameId?: string;
+  nodeName: string;
+  attributes?: Record<string, string>;
+  // The frame this node owns, as DOM.describeNode reports it.
+  holds?: string;
+};
+
 // A page whose debugger answers page operations with `result`. It records
 // each operation with the world it ran in, and each input command.
 export class FakeContents extends FakeHost {
@@ -83,6 +96,23 @@ export class FakeContents extends FakeHost {
     interactables: [],
     truncated: false,
   };
+  // What section 5's action operations answer with. Each entry is a value, or
+  // a function of what `result` already gave, so a test that sets a point or
+  // a refusal still drives them, and one that needs a blocker, a scroll or a
+  // moving box replaces the entry. A refusal is never adapted.
+  pageActions: Record<string, unknown> = {
+    actionPoint: (given: any) =>
+      given && Number.isFinite(given.x) && Number.isFinite(given.y)
+        ? { ...given, point: { x: given.x, y: given.y } }
+        : given,
+    stableBox: (given: any) => ({ ...given, moved: 0 }),
+    scrollRequest: (given: any) => ({ ...given, settled: true }),
+    viewport: () => ({ ok: true, width: 1200, height: 800, zoom: 1 }),
+    focusedKind: () => ({ ok: true, kind: "none" }),
+  };
+  // What the tab's own hit test finds under a point, for section 5's guards.
+  // Without a spot the hit test finds nothing, so an ordinary press goes out.
+  hits: FakeHit[] = [];
   // What the controller asked the page to load or reload. A load is not a
   // commit, so a test drives the page's own events itself.
   loads: { url: string; options?: Electron.LoadURLOptions }[] = [];
@@ -104,7 +134,32 @@ export class FakeContents extends FakeHost {
       const value = await (typeof this.result === "function"
         ? this.result(code)
         : this.result);
-      return { result: { type: "object", value } };
+      return {
+        result: { type: "object", value: this.actionReply(code, value) },
+      };
+    });
+    this.debugger.reply("DOM.getNodeForLocation", (params) => {
+      const at = this.hits.findIndex(
+        (hit) => hit.x === params.x && hit.y === params.y,
+      );
+      if (at < 0) throw new Error("No node found at given location");
+      const hit = this.hits[at];
+      return {
+        backendNodeId: at + 1,
+        ...(hit.frameId === undefined ? {} : { frameId: hit.frameId }),
+      };
+    });
+    this.debugger.reply("DOM.describeNode", (params) => {
+      const hit = this.hits[params.backendNodeId - 1];
+      if (!hit) throw new Error("Could not find node with given id");
+      return {
+        node: {
+          nodeType: 1,
+          nodeName: hit.nodeName.toUpperCase(),
+          attributes: Object.entries(hit.attributes ?? {}).flat(),
+          ...(hit.holds === undefined ? {} : { frameId: hit.holds }),
+        },
+      };
     });
     this.debugger.reply("Page.getLayoutMetrics", () => this.metrics);
     // Chromium sizes the image from the clip, in device-independent pixels,
@@ -147,6 +202,20 @@ export class FakeContents extends FakeHost {
   }
   getZoomFactor() {
     return this.zoom;
+  }
+  // The operation a page script names, and what pageActions answers it with.
+  private actionReply(code: string, value: unknown) {
+    const operation = Object.keys(this.pageActions).find((name) =>
+      code.includes(`)(${JSON.stringify(name)},`),
+    );
+    const reply =
+      operation === undefined ? undefined : this.pageActions[operation];
+    if (
+      reply === undefined ||
+      (value && typeof value === "object" && (value as any).ok === false)
+    )
+      return value;
+    return typeof reply === "function" ? reply(value) : reply;
   }
 }
 // Profile folders the fakes made, removed by FakeController.cleanup.

@@ -66,6 +66,61 @@ const label = {
   description:
     "A few words naming this step, shown by the cursor and in the agent bar.",
 };
+// The pointer options an element press takes, with Playwright's meanings.
+const button = {
+  kind: "enum",
+  values: ["left", "middle", "right"],
+  default: "left",
+  since: 4,
+  description: "Which mouse button to press.",
+};
+const clickCount = {
+  kind: "integer",
+  min: 1,
+  max: 3,
+  default: 1,
+  since: 4,
+  description: "How many presses the one gesture sends.",
+};
+const pressDelay = {
+  kind: "ms",
+  min: 0,
+  max: 5000,
+  default: 0,
+  since: 4,
+  description: "How long to hold each press, and to wait between presses.",
+};
+const positionAxis = (way) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `Pixels ${way} the element's top left corner.`,
+});
+const position = {
+  kind: "object",
+  fields: { x: positionAxis("right of"), y: positionAxis("below") },
+  since: 4,
+  description: "Where in the element to act, instead of its centre.",
+};
+const force = {
+  kind: "boolean",
+  default: false,
+  since: 4,
+  description:
+    "Act even when something covers the target. A disabled target is never forced.",
+};
+// How long an element action waits for a target that can take its input.
+const actionTimeout = {
+  kind: "ms",
+  min: 0,
+  max: 60000,
+  default: 3000,
+  since: 4,
+  description:
+    "How long to wait for a target that can take the input. 0 looks once.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -136,7 +191,26 @@ const FIELDS = {
         "Give each control a locator: a selector that names it alone, which outlives refs.",
     },
   },
-  click: { ...target, label },
+  click: {
+    ...target,
+    button,
+    clickCount,
+    delayMs: pressDelay,
+    position,
+    force,
+    timeoutMs: actionTimeout,
+    label,
+  },
+  dblclick: {
+    ...target,
+    button,
+    delayMs: pressDelay,
+    position,
+    force,
+    timeoutMs: actionTimeout,
+    label,
+  },
+  hover: { ...target, position, force, timeoutMs: actionTimeout, label },
   fill: {
     ...target,
     value: {
@@ -357,11 +431,12 @@ const route = (method, path, summary, response, body, options = {}) => ({
 });
 // An action route takes a label exactly when its fields declare one, so the
 // flag and the field can never disagree.
-const action = (type, summary, response) =>
+const action = (type, summary, response, options = {}) =>
   route("POST", `/tabs/:id/${type}`, summary, response, FIELDS[type], {
     budget: 30000,
     follow: true,
     label: Object.hasOwn(FIELDS[type], "label"),
+    ...options,
   });
 
 export const ROUTES = [
@@ -722,8 +797,21 @@ export const ROUTES = [
   ),
   action(
     "click",
-    "Clicks a control with native mouse input.",
-    "{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Clicks a control with native mouse input, waiting until it can take the press.",
+    "{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "clickBudget", maxMs: 100100 } },
+  ),
+  action(
+    "dblclick",
+    "Double-clicks a control with native mouse input.",
+    "{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "dblclickBudget", maxMs: 90100 }, since: 4 },
+  ),
+  action(
+    "hover",
+    "Moves the mouse onto a control and leaves it there.",
+    "{ ok: true, point, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
   ),
   action(
     "fill",
@@ -1036,6 +1124,18 @@ export const ACTIONS = [
     summary: "Clicks a control.",
     fields: FIELDS.click,
     since: 1,
+  },
+  {
+    type: "dblclick",
+    summary: "Double-clicks a control.",
+    fields: FIELDS.dblclick,
+    since: 4,
+  },
+  {
+    type: "hover",
+    summary: "Moves the mouse onto a control.",
+    fields: FIELDS.hover,
+    since: 4,
   },
   {
     type: "fill",

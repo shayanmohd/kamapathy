@@ -15,6 +15,8 @@ import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
+import type { PointerAction, PointerKind } from "./input/actions";
+import type { Button } from "./input/state";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
 import type { UrlWaitBody } from "./navigation/waits";
@@ -51,6 +53,8 @@ export type ToolAction = {
   type:
     | "snapshot"
     | "click"
+    | "dblclick"
+    | "hover"
     | "fill"
     | "press"
     | "scroll"
@@ -248,6 +252,61 @@ export function targetFields(
     ? { ref: parsed.ast.ref }
     : { selector, query: { ast: parsed.ast } };
 }
+/** The mouse buttons an agent may press. */
+export const BUTTONS: readonly Button[] = ["left", "middle", "right"];
+// A point inside an element, measured from its border box's top left. The
+// schema has already refused a wrong shape; this reads it back.
+export function positionField(
+  body: Record<string, unknown>,
+  name: string,
+): { x: number; y: number } | undefined {
+  const value = body[name];
+  if (value === undefined) return undefined;
+  const expected = "an object with x and y, each a number from -10000 to 10000";
+  const refuse = (): never =>
+    fail("invalid_field", `${name} must be ${expected}.`, {
+      field: name,
+      expected,
+    });
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return refuse();
+  const point = value as Record<string, unknown>;
+  const axis = (key: "x" | "y") => {
+    const number = point[key];
+    if (
+      typeof number !== "number" ||
+      !Number.isFinite(number) ||
+      Math.abs(number) > 10000
+    )
+      return refuse();
+    return number;
+  };
+  return { x: axis("x"), y: axis("y") };
+}
+// The fields click, dblclick and hover share. Each kind reads only the ones
+// its route declares, so the schema and this never disagree.
+export function pointerFields(
+  body: Record<string, unknown>,
+  kind: PointerKind,
+): PointerAction {
+  const position = positionField(body, "position");
+  return {
+    kind,
+    target: targetFields(body) as TargetPayload,
+    button:
+      kind === "hover" ? "left" : enumField(body, "button", BUTTONS, "left"),
+    clickCount:
+      kind === "click"
+        ? integerField(body, "clickCount", 1, 1, 3)
+        : kind === "dblclick"
+          ? 2
+          : 1,
+    delayMs: kind === "hover" ? 0 : integerField(body, "delayMs", 0, 0, 5000),
+    ...(position === undefined ? {} : { position }),
+    force: booleanField(body, "force", false),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
 // The one grammar check that runs before the request waits for its lane, so
 // a malformed selector costs no page work, no activity and no batch step.
 export function checkSelectors(
@@ -343,14 +402,17 @@ function parseAction(
     };
     return { type, payload: options };
   }
-  if (type === "click" || type === "fill")
+  if (type === "click" || type === "dblclick" || type === "hover")
+    return {
+      type,
+      payload: pointerFields(body, type) as unknown as Record<string, unknown>,
+    };
+  if (type === "fill")
     return {
       type,
       payload: {
         ...targetFields(body),
-        ...(type === "fill"
-          ? { value: stringField(body, "value", 16384, true) }
-          : {}),
+        value: stringField(body, "value", 16384, true),
       },
     };
   if (type === "press") {
