@@ -376,7 +376,6 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - A URL wait takes a glob in every surface, and a RegExp or a predicate in a script only; a match in a popup this page opened ends it with `409 url_opened_in_popup`, so continue in that page rather than repeating the action. `page.waitForTimeout(ms)` sleeps in the script and sends nothing.
 - `POST /tabs/:id/wait` is unchanged: the same body, a 5000 ms default, a 15000 ms cap and `408 wait_timeout`. A tab accepts four navigations and waits at once, and a fifth answers `429 busy` with `scope: "tab"`.
 - `page.url` and `page.title` refresh after every navigation and wait, not only after `navigate` and `snapshot`.
-- A navigate that recovers a page whose process stopped can answer `409 page_crashed` with `dispatched: true`: the load is sent, but the wait cannot read a page whose process is gone. Read `info` or navigate again instead of treating it as a refusal.
 
 </details>
 

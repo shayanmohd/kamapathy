@@ -327,7 +327,6 @@ A script written against the earlier version can notice these changes:
 - `POST /tabs/:id/wait` is unchanged: the same body, a 5,000 ms default, a 15,000 ms cap and `408 wait_timeout`.
 - A tab accepts four navigations and waits at once; a fifth answers `429 busy` with `scope: "tab"`.
 - `page.url` and `page.title` refresh after every navigation and wait, not only after `navigate` and `snapshot`.
-- A navigate that recovers a page whose process stopped can answer `409 page_crashed` with `dispatched: true`: the load was sent, but the wait cannot read a page whose process is gone. The load does happen, so read `info` or navigate again rather than treating it as a refusal.
 
 ## Scripts
 
