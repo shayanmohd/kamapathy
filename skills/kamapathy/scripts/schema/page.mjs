@@ -19,7 +19,6 @@ const NAVIGATION = [
   "navigation_download",
   "navigation_interrupted",
   "navigation_timeout",
-  "navigation_blocked",
   "invalid_field",
   "busy",
 ];

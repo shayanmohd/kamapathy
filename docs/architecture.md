@@ -41,7 +41,7 @@ The agent server lives in `electron/agent/`. `server.ts` listens on the private 
 
 ## State and sessions
 
-`shared/types.ts` defines the browser state, spaces, tabs, settings, actions, and bridge contract. `shared/url.ts` normalizes addresses and search text while rejecting unsupported schemes and URL credentials, and its options say what a space accepts besides web pages: files on this computer of the types Kamapathy shows, and an installed extension's own pages, both only in personal spaces no agent can reach. Native navigation also validates destinations.
+`shared/types.ts` defines the browser state, spaces, tabs, settings, actions, and bridge contract. `shared/url.ts` normalizes addresses and search text while rejecting unsupported schemes and URL credentials, and its options say what a space accepts besides web pages: files on this computer of the types Kamapathy shows, and an installed extension's own pages, both only in personal spaces no agent can reach. The same module holds the one rule for every address an agent asks for, `agentUrlProblem` with `isAgentUrl` and `agentUrlHint`: HTTP, HTTPS and `about:blank`, its one extra destination, which an agent may open as a blank page to work in. Native navigation also validates destinations.
 
 `electron/identity.ts` builds Chrome's reduced user agent around Electron's platform group, and `electron/main.ts` sets `app.userAgentFallback` from it before anything loads, so every session, page, worker and subresource request carries one string with no Electron or application token. Client hints are Electron's own and are left alone.
 
@@ -87,6 +87,7 @@ Signing and publishing are disabled in the development configuration. macOS also
 | `electron/agent/`                    | Agent socket server, per-space lanes, routes and tab sessions            |
 | `electron/agent/selectors.ts`        | Selector grammar parser and the role words role= and outlines share      |
 | `electron/agent/dom/`                | Self-contained page-side selector engine and outline builder             |
+| `electron/agent/navigation/`         | The URL glob, the navigation log, the waits, navigate, reload and info   |
 | `electron/capture-host.ts`           | Lends a hidden tab's view to a never-shown window for one capture        |
 | `electron/agent/setup/`              | Skill copies, agent links, the kamapathy command                         |
 | `electron/updates.ts`                | Daily release check, verified download, the person's install             |

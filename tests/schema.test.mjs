@@ -1127,4 +1127,98 @@ describe("hand written docs", () => {
         sentence,
       );
   });
+  it("documents the navigation and wait surface", () => {
+    const promised = [
+      // The agent URL rule, in the three places a reader looks.
+      ["docs/automation.md", "Agents open HTTP, HTTPS and `about:blank` only"],
+      ["docs/SECURITY.md", "Agents open HTTP, HTTPS and `about:blank` only"],
+      ["docs/architecture.md", "its one extra destination"],
+      ["docs/architecture.md", "`electron/agent/navigation/`"],
+      // The section, the states, the commands and the methods.
+      ["docs/automation.md", "## Navigate and wait"],
+      [
+        "docs/automation.md",
+        "`commit`, `domcontentloaded`, `load` or `networkidle`",
+      ],
+      ["docs/automation.md", "wait-for-selector"],
+      ["docs/automation.md", "waitForFunction"],
+      ["docs/automation.md", "four navigations and waits"],
+      ["docs/automation.md", "`ignoreCache` runs no page script"],
+      ["docs/automation.md", "refreshes the page's `url` and `title`"],
+      // The guard policy and the waits SECURITY.md names.
+      [
+        "docs/SECURITY.md",
+        "waits for a URL, a load state, an element state or a page function",
+      ],
+      ["docs/SECURITY.md", "overridden only under agent control"],
+      ["docs/SECURITY.md", "The person in control is always asked"],
+      // What a reader of README learns.
+      ["README.md", "`goto`, `reload`, `info`"],
+      [
+        "README.md",
+        "wait for a URL, a load state, an element or a page condition",
+      ],
+      [
+        "README.md",
+        "wait for the new document instead of returning as soon as the load",
+      ],
+      ["README.md", "url_opened_in_popup"],
+      // The skill's own rules.
+      ["skills/kamapathy/SKILL.md", "returns once the new document commits"],
+      ["skills/kamapathy/SKILL.md", "waits for the page's load event"],
+      ["skills/kamapathy/SKILL.md", "never on a sleep"],
+      ["skills/kamapathy/SKILL.md", "`url_opened_in_popup`"],
+      ["skills/kamapathy/SKILL.md", "waitForSelector"],
+      // The six batch steps.
+      ["skills/kamapathy/references/actions.md", "| `navigate` |"],
+      ["skills/kamapathy/references/actions.md", "| `reload` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-url` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-load-state` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-selector` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-function` |"],
+      // The methods, with ignoreCache and the commit rule.
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`goto(url, { waitUntil?, timeout?, referer? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`reload({ waitUntil?, timeout?, ignoreCache? })`",
+      ],
+      ["skills/kamapathy/references/scripting.md", "`info()`"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForURL(url, { timeout?, waitUntil? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForLoadState(state?, { timeout?, idleMs? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForSelector(selector, { state?, timeout? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForFunction(pageFunction, arg?, { timeout?, interval? })`",
+      ],
+      ["skills/kamapathy/references/scripting.md", "`waitForTimeout(ms)`"],
+      ["skills/kamapathy/references/scripting.md", "`ignoreCache`"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "returns once the new document commits",
+      ],
+    ];
+    for (const [path, sentence] of promised)
+      expect(read(path), `${path} is missing ${sentence}`).toContain(sentence);
+    // The sentences this section made wrong.
+    for (const [path, sentence] of [
+      ["docs/automation.md", "Navigation accepts only complete HTTP or HTTPS"],
+      ["docs/SECURITY.md", "conditional waits"],
+      ["README.md", "wait for changes"],
+    ])
+      expect(read(path), `${path} still says ${sentence}`).not.toContain(
+        sentence,
+      );
+  });
 });

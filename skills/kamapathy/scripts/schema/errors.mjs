@@ -245,13 +245,6 @@ export const ERRORS = {
     ["url", "by"],
     2,
   ),
-  navigation_blocked: code(
-    409,
-    false,
-    "The page's leave guard kept it open.",
-    ["url", "reason"],
-    2,
-  ),
   reload_would_resubmit: code(
     409,
     false,

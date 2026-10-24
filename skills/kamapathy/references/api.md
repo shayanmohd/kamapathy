@@ -361,7 +361,7 @@ Returns `boolean | undefined`. Since API level 1.
 
 Loads a complete http or https URL, or about:blank, and returns once the new document commits. Refs from before become stale.
 
-Returns `Promise<Page>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `navigation_blocked`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<Page>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.goto(url, options?)`
 
@@ -373,7 +373,7 @@ Loads a URL and waits for the new document to reach a state, load by default.
 | `timeout` | milliseconds from 1 to 60000 | `15000` | How long to wait for the state. |
 | `referer` | URL of at most 8192 characters |  | The Referer header to send, exactly as given. |
 
-Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `navigation_blocked`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.reload(options?)`
 
@@ -385,7 +385,7 @@ Reloads the page and waits for the new document to reach a state. The tab keeps 
 | `timeout` | milliseconds from 1 to 60000 | `15000` | How long to wait for the state. |
 | `ignoreCache` | true or false | `false` | Fetch the page and its subresources past the cache. |
 
-Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/reload`. Errors: `reload_would_resubmit`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `navigation_blocked`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/reload`. Errors: `reload_would_resubmit`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.info()`
 
@@ -869,7 +869,6 @@ Show the commands, or help on one
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
-| `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
 | `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
 | `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
 | `not_pdf` | 409 | not retryable | `contentType` | The tab is not showing a PDF. |
