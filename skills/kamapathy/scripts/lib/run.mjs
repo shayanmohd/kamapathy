@@ -316,6 +316,8 @@ export async function runScript(args, options = {}) {
     run: true,
     envFileNames: applied,
   });
+  // A long poll waits no further than the run itself.
+  session.deadline = Date.now() + timeoutMs;
   for (const hook of options.endHooks ?? []) session.onRunEnd(hook);
   const client = await connect({ session, lazy: true });
   let temporary;

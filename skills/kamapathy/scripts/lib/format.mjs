@@ -182,6 +182,12 @@ export function eventLine(result) {
   return JSON.stringify(result);
 }
 
+/** One held download: its id, state, bytes so far and the site's name. */
+export const downloadLine = (download) =>
+  `${line(download.id)} ${line(download.state)} ${Number(
+    download.receivedBytes,
+  )}/${Number(download.totalBytes)} ${line(download.suggestedFilename)}`;
+
 /** A tab's dialog policy, then one line per dialog it answered. */
 export function dialogLines(body) {
   const policy = body?.policy;
@@ -305,6 +311,20 @@ export function formatResult(data, command) {
       ...(data.noText ? ["No text on these pages; they may be scans."] : []),
     ].join("\n");
   if (command === "wait-expectation") return eventLine(data);
+  if (command === "downloads")
+    return data.downloads?.length
+      ? data.downloads.map(downloadLine).join("\n")
+      : "No downloads.";
+  if (command === "cancel-download") return downloadLine(data.download ?? {});
+  if (["set-input-files", "set-files"].includes(command))
+    return [
+      `ok: selected ${Number(data.selected)}`,
+      ...receiptLines(data),
+    ].join("\n");
+  if (command === "http-credentials")
+    return data.origin === undefined
+      ? "ok: credentials cleared"
+      : `ok: ${line(data.origin)}`;
   if (data?.expectation) return expectationLine(data.expectation);
   if (data && typeof data === "object" && "policy" in data)
     return dialogLines(data).join("\n");

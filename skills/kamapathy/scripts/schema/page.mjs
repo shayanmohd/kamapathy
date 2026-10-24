@@ -6,6 +6,8 @@ const body = (key) => ROUTES.find((route) => routeKey(route) === key).body;
 const pdfText = body("POST /tabs/:id/pdf/text");
 // waitForEvent's event names and its timeout come from the arming route.
 const expectation = body("POST /tabs/:id/expectations");
+// setInputFiles takes the route's own wait for the target it names.
+const setInputFiles = body("POST /tabs/:id/set-input-files");
 // Every input method takes the label its route declares, in an options
 // object after its own arguments.
 const labelOption = (type) => ({
@@ -319,6 +321,36 @@ export const PAGE_ENTRIES = [
       "stale_ref",
       "invalid_target",
     ],
+  ),
+  method(
+    "Page.setInputFiles",
+    "page.setInputFiles(target, files, options?)",
+    "Puts 0 to 8 local files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the selection.",
+    [target(), { name: "files", kind: "files", max: 8 }, OPTIONS],
+    "Promise<{ ok: true, selected }>",
+    "POST /tabs/:id/set-input-files",
+    [
+      "invalid_files",
+      "files_too_large",
+      "invalid_upload_target",
+      "invalid_file_type",
+      "multiple_file_inputs",
+      "upload_busy",
+      "file_chooser_opened",
+      ...TARGET,
+    ],
+    {
+      expected:
+        "page.setInputFiles(target, files, { timeout? }) with 0 to 8 file paths",
+      options: {
+        timeout: {
+          ...setInputFiles.timeoutMs,
+          field: "timeoutMs",
+          description: "How long to wait for the target. 0 looks once.",
+        },
+      },
+      since: 2,
+    },
   ),
   method(
     "Page.screenshot",

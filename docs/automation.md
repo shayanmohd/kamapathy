@@ -610,6 +610,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_option` | client | not retryable | `entry`, `option`, `expected`, `suggestion` | Options are not a plain object, or have an undeclared key or a bad value. |
 | `invalid_argument` | client | not retryable | `entry`, `expected` | Arguments are missing, extra or of the wrong kind. |
 | `app_outdated` | client | not retryable | `entry`, `option`, `required`, `available`, `appVersion` | The running Kamapathy predates this call. |
+| `file_exists` | client | not retryable | `path` | The file a download would be written to exists, so nothing was written. |
+| `download_interrupted` | client | not retryable | `downloadId`, `path` | A download's bytes stopped arriving, so the incomplete file was removed. |
 <!-- /generated:errors -->
 
 ## Versions and API levels

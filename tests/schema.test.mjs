@@ -325,8 +325,13 @@ describe("API schema", () => {
       "invalid_option",
       "invalid_argument",
       "app_outdated",
+      "file_exists",
+      "download_interrupted",
     ])
       expect(ERRORS[code].status, code).toBeNull();
+    // What the client raises while it writes a download's bytes.
+    expect(ERRORS.file_exists).toMatchObject({ transient: false, fields: ["path"] });
+    expect(ERRORS.download_interrupted.fields).toEqual(["downloadId", "path"]);
     // One upstream service failure, and codes that only ride in a status
     // name the response that carries them.
     expect(
@@ -728,6 +733,53 @@ describe("API schema", () => {
       checkCall(screenshot, [{ fullPage: true }], { apiLevel: 2 }),
     ).toMatchObject({ code: "app_outdated", fields: { option: "fullPage" } });
     expect(checkCall(screenshot, [5])?.code).toBe("invalid_option");
+
+    // File lists are counted, and credentials are checked as a body, before
+    // anything is read or sent.
+    const setInputFiles = entry("Page.setInputFiles");
+    for (const args of [
+      ["@e1", []],
+      ["#resume", ["a.pdf"]],
+      ["#resume", Array(8).fill("a.pdf"), { timeout: 0 }],
+    ])
+      expect(checkCall(setInputFiles, args), JSON.stringify(args)).toBeNull();
+    for (const files of [Array(9).fill("a.pdf"), "a.pdf", ["a.pdf", ""], [5], undefined])
+      expect(checkCall(setInputFiles, ["@e1", files]), JSON.stringify(files)).toMatchObject({
+        code: "invalid_argument",
+        fields: {
+          entry: "page.setInputFiles",
+          expected: "page.setInputFiles(target, files, { timeout? }) with 0 to 8 file paths",
+        },
+      });
+    expect(checkCall(setInputFiles, ["@e1", [], { timeoutMs: 1000 }])).toMatchObject({
+      code: "invalid_option",
+      fields: { option: "timeoutMs", suggestion: "timeout" },
+    });
+    const setFiles = entry("FileChooser.setFiles");
+    expect(checkCall(setFiles, [[]])).toBeNull();
+    expect(checkCall(setFiles, [Array(9).fill("a.pdf")])?.fields.expected).toBe(
+      "fileChooser.setFiles(files) with 0 to 8 file paths",
+    );
+    const credentials = entry("Space.setHTTPCredentials");
+    for (const value of [null, { origin: "https://example.com", username: "a", password: "b" }])
+      expect(checkCall(credentials, [value]), JSON.stringify(value)).toBeNull();
+    for (const value of [undefined, "https://example.com", 5, [], {}, { origin: 5 }])
+      expect(checkCall(credentials, [value]), JSON.stringify(value)).toMatchObject({
+        code: "invalid_argument",
+        fields: {
+          entry: "space.setHTTPCredentials",
+          expected:
+            "space.setHTTPCredentials({ origin, username, password }) or space.setHTTPCredentials(null)",
+        },
+      });
+    const signIn = route("POST /spaces/:id/http-credentials");
+    expect(checkBody(signIn, { origin: "https://example.com", username: "a", password: "" })).toBeNull();
+    expect(checkBody(signIn, { origin: "https://example.com", username: "a" })?.message).toBe(
+      "password must be a string of at most 1024 characters.",
+    );
+    expect(checkBody(signIn, { origin: "https://example.com", username: "a", password: "b", host: "x" })).toMatchObject(
+      { code: "unknown_field", fields: { field: "host" } },
+    );
 
     expect(suggest("timeout", ["selector", "timeoutMs"])).toBe("timeoutMs");
     expect(suggest("selecter", ["selector", "text"])).toBe("selector");

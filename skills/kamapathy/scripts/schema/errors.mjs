@@ -632,6 +632,20 @@ export const ERRORS = {
     ["entry", "option", "required", "available", "appVersion"],
     2,
   ),
+  file_exists: code(
+    null,
+    false,
+    "The file a download would be written to exists, so nothing was written.",
+    ["path"],
+    2,
+  ),
+  download_interrupted: code(
+    null,
+    false,
+    "A download's bytes stopped arriving, so the incomplete file was removed.",
+    ["downloadId", "path"],
+    2,
+  ),
 };
 
 // Whether an error can clear without the request changing: its code says

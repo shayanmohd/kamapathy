@@ -24,6 +24,15 @@ const TARGET = {
   description:
     "A ref such as @e3 from a current snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=.",
 };
+const FILE = {
+  name: "file",
+  description:
+    "A local file to put on the input, up to 8 of them and 16 MiB together.",
+};
+const DOWNLOAD_ID = {
+  name: "id",
+  description: "A download ID from downloads or an armed download wait.",
+};
 // The action commands take a label anywhere in their arguments.
 const LABEL = {
   name: "--label",
@@ -649,6 +658,149 @@ export const COMMANDS = [
       arguments: [TAB_ID],
       route: "GET /tabs/:id/dialogs",
       script: "page.dialogs",
+      since: 2,
+    },
+  ),
+  command(
+    "set-input-files",
+    "Page actions",
+    "set-input-files <tab-id> <target> [file...]",
+    "Put files on the file input a ref or selector names, hidden ones included; no file clears the selection",
+    {
+      arguments: [TAB_ID, TARGET, FILE],
+      route: "POST /tabs/:id/set-input-files",
+      script: "page.setInputFiles",
+      examples: ["set-input-files 8c1f2e04:p2 #resume ./resume.pdf"],
+      since: 2,
+    },
+  ),
+  command(
+    "set-files",
+    "Page actions",
+    "set-files <chooser-id> [file...]",
+    "Put files on the input of a file chooser an armed wait received; no file cancels the chooser",
+    {
+      arguments: [
+        {
+          name: "chooser-id",
+          description: "A file chooser ID from wait-expectation.",
+        },
+        FILE,
+      ],
+      route: "POST /file-choosers/:id/files",
+      script: "fileChooser.setFiles",
+      since: 2,
+    },
+  ),
+  command(
+    "download",
+    "Downloads",
+    "download <tab-id> <target> <path> [--timeout <ms>]",
+    "Arm a download wait, click the target, and save the file that arrives to a new path",
+    {
+      arguments: [
+        TAB_ID,
+        TARGET,
+        {
+          name: "path",
+          description: "A new file to write; it is never overwritten.",
+        },
+      ],
+      flags: [
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long to wait for the download, 1 to 60000, 60000 by default.",
+          since: 2,
+        },
+      ],
+      route: "GET /downloads/:id/content",
+      script: "download.saveAs",
+      examples: ["download 8c1f2e04:p2 text=Export ./export.csv"],
+      since: 2,
+    },
+  ),
+  command(
+    "downloads",
+    "Downloads",
+    "downloads <space-id>",
+    "List the downloads a space holds, newest first",
+    {
+      arguments: [SPACE_ID],
+      route: "GET /spaces/:id/downloads",
+      script: "space.downloads",
+      since: 2,
+    },
+  ),
+  command(
+    "save-download",
+    "Downloads",
+    "save-download <id> <path>",
+    "Wait for a held download to finish and write its bytes to a new path",
+    {
+      arguments: [
+        DOWNLOAD_ID,
+        {
+          name: "path",
+          description: "A new file to write; it is never overwritten.",
+        },
+      ],
+      route: "GET /downloads/:id/content",
+      script: "download.saveAs",
+      since: 2,
+    },
+  ),
+  command(
+    "cancel-download",
+    "Downloads",
+    "cancel-download <id>",
+    "Stop a download that is still running",
+    {
+      arguments: [DOWNLOAD_ID],
+      route: "POST /downloads/:id/cancel",
+      script: "download.cancel",
+      since: 2,
+    },
+  ),
+  command(
+    "delete-download",
+    "Downloads",
+    "delete-download <id>",
+    "Delete a held download's bytes from the browser's profile",
+    {
+      arguments: [DOWNLOAD_ID],
+      route: "DELETE /downloads/:id",
+      script: "download.delete",
+      since: 2,
+    },
+  ),
+  command(
+    "http-credentials",
+    "Spaces",
+    "http-credentials <space-id> <origin> --stdin | http-credentials <space-id> clear",
+    "Store a name and password for one origin in memory, to answer its first server sign-in in this space, or forget every origin",
+    {
+      arguments: [
+        SPACE_ID,
+        {
+          name: "origin",
+          description:
+            "An http or https origin such as https://example.com, with no path, or clear to forget them all.",
+        },
+      ],
+      flags: [
+        {
+          name: "--stdin",
+          description:
+            "Read JSON with username and password from standard input.",
+          since: 2,
+        },
+      ],
+      stdin: "JSON with a username and a password, with --stdin.",
+      route: "POST /spaces/:id/http-credentials",
+      script: "space.setHTTPCredentials",
+      examples: ["http-credentials 8c1f2e04 https://intranet.example --stdin"],
       since: 2,
     },
   ),
