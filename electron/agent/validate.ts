@@ -1,3 +1,8 @@
+import {
+  AGENT_TEXT_LIMITS,
+  cleanAgentText,
+  type AgentTextField,
+} from "../../shared/agent-text";
 import { isWebUrl } from "../../shared/url";
 import {
   ACTIONS,
@@ -57,6 +62,8 @@ export type ToolAction = {
     | "wait-for-load-state"
     | "wait-for-function";
   payload: Record<string, unknown>;
+  // The step's cleaned label; only the batch loop reads it.
+  label?: string;
 };
 
 export function integerField(
@@ -268,7 +275,7 @@ export function checkSelectors(
     if (step && typeof step === "object" && !Array.isArray(step))
       targets(step as Record<string, unknown>, index);
 }
-export function parseToolAction(
+function parseAction(
   type: string,
   body: Record<string, unknown>,
   // A batch validates its whole plan first, so a step the Page scripts
@@ -422,6 +429,18 @@ export function parseToolAction(
   );
 }
 
+// A step, with the label its own route or batch entry may carry.
+export function parseToolAction(
+  type: string,
+  body: Record<string, unknown>,
+  deps?: { controller: AutomationController },
+): ToolAction {
+  const action = parseAction(type, body, deps);
+  return body.label === undefined
+    ? action
+    : { ...action, label: agentTextField(body, "label", "label") };
+}
+
 // Rejects a body with a field its route does not declare, or a declared
 // field of the wrong kind, before the request waits for its lane.
 export function validateBody(
@@ -438,6 +457,35 @@ export function validateBody(
         : problem.fields,
     );
   checkSelectors(route, body);
+}
+
+// Checks every agent label a body carries, including each batch step's,
+// before the request waits for its lane. The schema has already refused a
+// label where no field declares one, so only the cleaning rule is left.
+export function checkAgentText(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): void {
+  if (!body) return;
+  if (route.schema.label && body.label !== undefined)
+    agentTextField(body, "label", "label");
+  const steps =
+    route.schema.body?.actions?.of === "action" ? body.actions : undefined;
+  if (!Array.isArray(steps)) return;
+  for (const [index, step] of steps.entries()) {
+    const fields = (step ?? {}) as Record<string, unknown>;
+    if (fields.label !== undefined)
+      agentTextField(fields, "label", "label", { index });
+  }
+}
+
+// The cleaned label of a single input route's body, or undefined.
+export function bodyLabel(
+  route: Route,
+  body: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!route.schema.label || body?.label === undefined) return undefined;
+  return agentTextField(body, "label", "label");
 }
 
 // The segment after /spaces or /tabs is shown as :id.
@@ -473,6 +521,31 @@ export function stringField(
       `${key} must be ${empty ? "a" : "a nonempty"} string of at most ${max} characters.`,
     );
   return value;
+}
+// Text an agent wrote for the person to read. The raw length is checked
+// against its limit before cleaning, so nothing is silently trimmed, and an
+// empty result is refused unless an empty value means something to the route.
+export function agentTextField(
+  body: Record<string, unknown>,
+  key: string,
+  field: AgentTextField,
+  options: { allowEmpty?: boolean; index?: number } = {},
+): string {
+  const limit = AGENT_TEXT_LIMITS[field];
+  const refuse = (expected: string): never =>
+    fail("invalid_field", `${key} must be ${expected}.`, {
+      field: key,
+      expected,
+      ...(options.index === undefined ? {} : { index: options.index }),
+    });
+  const value = body[key];
+  if (typeof value !== "string")
+    return refuse(`a string of at most ${limit} characters`);
+  if (value.length > limit) return refuse(`at most ${limit} characters`);
+  const cleaned = cleanAgentText(value);
+  if (!cleaned && !options.allowEmpty)
+    return refuse("text that is not empty after cleaning");
+  return cleaned;
 }
 export function urlField(body: Record<string, unknown>): string {
   const value = stringField(body, "url", 8192);

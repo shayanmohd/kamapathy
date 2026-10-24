@@ -58,6 +58,14 @@ const idleMs = {
   since: 2,
   description: "How long nothing may be in flight before networkidle answers.",
 };
+const label = {
+  kind: "string",
+  min: 1,
+  max: 60,
+  since: 3,
+  description:
+    "A few words naming this step, shown by the cursor and in the agent bar.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -128,7 +136,7 @@ const FIELDS = {
         "Give each control a locator: a selector that names it alone, which outlives refs.",
     },
   },
-  click: { ...target },
+  click: { ...target, label },
   fill: {
     ...target,
     value: {
@@ -138,6 +146,7 @@ const FIELDS = {
       required: true,
       description: "The field's new value, exactly.",
     },
+    label,
   },
   press: {
     key: {
@@ -148,6 +157,7 @@ const FIELDS = {
         "Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown or Space.",
     },
     ...target,
+    label,
   },
   scroll: {
     direction: {
@@ -164,6 +174,7 @@ const FIELDS = {
       description: "How far to scroll.",
     },
     ...target,
+    label,
   },
   drag: {
     source: {
@@ -178,6 +189,7 @@ const FIELDS = {
       required: true,
       description: "The element to drop on: a ref or selector.",
     },
+    label,
   },
   wait: {
     selector: {
@@ -340,13 +352,16 @@ const route = (method, path, summary, response, body, options = {}) => ({
   budget: options.budget ?? 10000,
   lane: options.lane ?? "space",
   follow: options.follow ?? false,
-  label: false,
+  label: options.label ?? false,
   since: options.since ?? 1,
 });
+// An action route takes a label exactly when its fields declare one, so the
+// flag and the field can never disagree.
 const action = (type, summary, response) =>
   route("POST", `/tabs/:id/${type}`, summary, response, FIELDS[type], {
     budget: 30000,
     follow: true,
+    label: Object.hasOwn(FIELDS[type], "label"),
   });
 
 export const ROUTES = [
@@ -447,6 +462,42 @@ export const ROUTES = [
     "Hands the space to the person.",
     '{ ok: true, owner: "human" }',
     {},
+  ),
+  route(
+    "POST",
+    "/spaces/:id/status",
+    "Shows the person what the agent is doing.",
+    "{ ok: true, status? }",
+    {
+      text: {
+        kind: "string",
+        min: 0,
+        max: 120,
+        required: true,
+        since: 3,
+        description:
+          "What the agent is doing now, shown as the agent's words. An empty string clears it.",
+      },
+    },
+    { since: 3 },
+  ),
+  route(
+    "POST",
+    "/spaces/:id/fail",
+    "Reports that the task cannot be done and hands the space to the person.",
+    '{ ok: true, owner: "human", state: "failed", status }',
+    {
+      message: {
+        kind: "string",
+        min: 1,
+        max: 300,
+        required: true,
+        since: 3,
+        description:
+          "Why the task cannot be finished, shown as the agent's words.",
+      },
+    },
+    { since: 3 },
   ),
   route(
     "POST",

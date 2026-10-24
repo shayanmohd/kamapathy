@@ -68,6 +68,9 @@ export interface Arg {
   optional?: boolean;
   values?: readonly string[];
   since?: number;
+  min?: number;
+  max?: number;
+  nullable?: boolean;
 }
 export interface Entry {
   name: string;

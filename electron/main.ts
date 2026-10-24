@@ -1,10 +1,11 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, safeStorage, session, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, powerMonitor, safeStorage, session, shell, systemPreferences } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent, Session } from "electron";
 import { existsSync } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BackgroundService } from "./background";
 import {
   BrowserController,
   NO_EXTENSIONS,
@@ -72,6 +73,7 @@ import { execRunner } from "./agent/setup/probe";
 import {
   agentPaths,
   chooseSocketPath,
+  clearQuitMarker,
   clearStaleEndpoint,
   launchCommand,
   prepareAgentDirectory,
@@ -146,6 +148,21 @@ let forms: FormBroker | null = null;
 let vaultOpenScheduled = false;
 let updater: Updater | null = null;
 let updaterStarted = false;
+// A quit the person has answered: the question is asked once.
+let quitConfirmed = false;
+// Closing the window keeps agents working, so the window and the application
+// no longer end together.
+const background = new BackgroundService({
+  window: () => window,
+  controller: () => controller,
+  serviceRunning: () => !!automation,
+  quitting: () => quitting,
+  show: () => {
+    if (!window) createWindow();
+    else background.leaveBackground();
+  },
+  agent,
+});
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -415,6 +432,9 @@ async function openWindow(): Promise<void> {
   // A window built later shows what the updater already knows. The first one
   // keeps its saved record, which the updater reads when it starts.
   if (updater && updaterStarted) currentController.setUpdate(updater.state);
+  // The tray, the Dock menu and the badge follow the same state the window
+  // shows.
+  currentController.subscribe(() => background.update());
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
@@ -432,15 +452,23 @@ async function openWindow(): Promise<void> {
     vaultOpenScheduled = true;
     setTimeout(() => void vault?.open(), 2000);
   });
-  currentWindow.on("close", () => {
-    currentForms?.dispose();
-    currentController.dispose();
-  });
   currentWindow.once("ready-to-show", () => {
     currentWindow.show();
     refreshAgentSkill();
   });
-  currentWindow.on("close", () => currentController.dispose());
+  // Windows ends the session through the window, not the application.
+  currentWindow.on("session-end", () => background.shuttingDown());
+  currentWindow.on("close", (event) => {
+    // The person's pages close either way; with agents at work the window
+    // only goes away.
+    if (background.hidesOnClose()) {
+      event.preventDefault();
+      background.enterBackground();
+      return;
+    }
+    currentForms?.dispose();
+    currentController.dispose();
+  });
   currentWindow.on("closed", () => {
     unbindBridge?.();
     if (window === currentWindow) {
@@ -859,6 +887,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", async (_event, argv, workingDirectory) => {
     if (!window) await createWindow();
+    else background.leaveBackground();
     if (window?.isMinimized()) window.restore();
     window?.focus();
     deliverIncoming(
@@ -882,7 +911,18 @@ else {
       controller.prompts.selectClientCertificate(contents, url, list, callback);
     else callback();
   });
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
+    // A quit that would stop agents at work asks first. The answer comes back
+    // after this handler, so the second quit is the one that ends Kamapathy.
+    if (!quitConfirmed && background.needsQuestion()) {
+      event.preventDefault();
+      void background.confirmQuit().then((confirmed) => {
+        if (!confirmed) return;
+        quitConfirmed = true;
+        app.quit();
+      });
+      return;
+    }
     quitting = true;
     // Closing the service may not finish before exit; stop advertising it now.
     try {
@@ -901,7 +941,7 @@ else {
   });
   app.on("activate", () => {
     if (!window) void createWindow();
-    else window.show();
+    else background.leaveBackground();
   });
   void app.whenReady().then(async () => {
     if (
@@ -929,11 +969,17 @@ else {
     // Downloads an agent held are never kept across starts, so a crash
     // leaves nothing behind.
     clearDownloadFolder(app.getPath("userData"));
+    // A shutdown or a logout is not a quit the person can answer: Kamapathy
+    // neither asks nor stays behind. powerMonitor is ready only now.
+    powerMonitor.on("shutdown", () => background.shuttingDown());
     try {
       // A crash leaves the last endpoint behind; record how agents can start
       // this Kamapathy again.
       prepareAgentDirectory(agent);
       clearStaleEndpoint(agent);
+      // Kamapathy is running again, so the person's last quit no longer
+      // stands in an agent's way.
+      clearQuitMarker(agent);
       const launch = launchCommand({
         env: process.env,
         execPath: process.execPath,

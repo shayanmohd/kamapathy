@@ -201,6 +201,18 @@ When the person got control, in milliseconds since 1970.
 
 Returns `number | undefined`. Since API level 1.
 
+### `space.status`
+
+The status the person is reading, set through setStatus or read from a listing.
+
+Returns `string | undefined`. Since API level 3.
+
+### `space.state`
+
+How the space stands: it needs the person, the task is done or failed, or a page stopped working.
+
+Returns `"needs-you" | "done" | "failed" | "error" | undefined`. Since API level 3.
+
 ### `space.open(url)`
 
 Opens a background tab.
@@ -264,6 +276,18 @@ Returns `Promise<{ ok: true, owner: "agent", active?: Page | null, opened?: Page
 The page the space showed when control last came back to this Space object, or null.
 
 Returns `Page | null`. Since API level 2.
+
+### `space.setStatus(text)`
+
+Shows the person what the agent is doing. null or an empty text clears it.
+
+Returns `Promise<{ ok: true, status?: string }>`. Route `POST /spaces/:id/status`. Errors: `invalid_field`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 3.
+
+### `space.fail(message)`
+
+Reports that the task cannot be done and hands the space to the person.
+
+Returns `Promise<{ ok: true, owner: "human", state: "failed", status: string }>`. Route `POST /spaces/:id/fail`. Errors: `invalid_field`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 3.
 
 ### `space.handoff()`
 
@@ -377,33 +401,53 @@ The same compact text the CLI's snapshot command prints.
 
 Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.click(target)`
+### `page.click(target, options?)`
 
 Clicks a control.
 
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
 Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.fill(target, value)`
+### `page.fill(target, value, options?)`
 
 Replaces the value of a field, select or editable region.
 
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
 Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.press(key, target?)`
+### `page.press(key, target?, options?)`
 
 Presses a supported key, focusing a control first when given.
 
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
 Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.scroll(direction, pixels?, target?)`
+### `page.scroll(direction, pixels?, target?, options?)`
 
 Scrolls the page, the panel holding a control, or the panel in the middle when the page cannot scroll.
 
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
 Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
-### `page.drag(source, target)`
+### `page.drag(source, target, options?)`
 
 Drags one element onto another with native mouse input or HTML drag and drop.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
 Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
@@ -516,6 +560,14 @@ Pause automation for human control
 
 Take control back when the person says to continue
 
+### `status <space-id> <text> | status <space-id> --clear`
+
+Show the person what the agent is doing
+
+### `fail <space-id> <message>`
+
+Report that the task cannot be done and hand the space to the person
+
 ### `tabs <space-id>`
 
 List tabs in an agent space
@@ -548,11 +600,11 @@ Close a tab
 
 Read bounded page text and control refs
 
-### `click <tab-id> <ref-or-selector>`
+### `click <tab-id> <ref-or-selector> [--label <text>]`
 
 Click a control
 
-### `fill <tab-id> <ref-or-selector> --stdin`
+### `fill <tab-id> <ref-or-selector> --stdin [--label <text>]`
 
 Read the exact field value from stdin
 
@@ -560,15 +612,15 @@ Read the exact field value from stdin
 
 Select up to 8 files, 16 MiB total
 
-### `press <tab-id> <key> [ref-or-selector]`
+### `press <tab-id> <key> [ref-or-selector] [--label <text>]`
 
 Press a supported key
 
-### `drag <tab-id> <source> <target>`
+### `drag <tab-id> <source> <target> [--label <text>]`
 
 Drag one element onto another (refs or selectors)
 
-### `scroll <tab-id> <direction> [pixels] [ref-or-selector]`
+### `scroll <tab-id> <direction> [pixels] [ref-or-selector] [--label <text>]`
 
 Scroll up, down, left or right: the page, the panel holding a control, or the panel in the middle when the page cannot scroll
 
@@ -617,6 +669,8 @@ Show the commands, or help on one
 | GET | `/spaces/:id` |  | Reads one space the agent can reach, also while the person has control. Returns `{ space: SpaceView }`. |
 | DELETE | `/spaces/:id` |  | Closes an agent space and its tabs. A space holding tabs the person opened is refused. Returns `{ ok: true }`. |
 | POST | `/spaces/:id/handoff` | `{}` | Hands the space to the person. Returns `{ ok: true, owner: "human" }`. |
+| POST | `/spaces/:id/status` | `text` | Shows the person what the agent is doing. Returns `{ ok: true, status? }`. |
+| POST | `/spaces/:id/fail` | `message` | Reports that the task cannot be done and hands the space to the person. Returns `{ ok: true, owner: "human", state: "failed", status }`. |
 | POST | `/spaces/:id/resume` | `{}` | Takes control of the space back after the person took over, a handoff or a reported failure, and lists what changed meanwhile. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/wait-for-control` | `timeoutMs?` | Waits until the agent has control of the space, answering at once when it already has, and lists what changed while the person had control. Returns `{ ok: true, owner: "agent", active: TabView \| null, opened: TabView[], closed: label[] }`. |
 | POST | `/spaces/:id/finish` | `keep` | Ends the agent's task in a space: closes the pages it does not keep, keeps the person's tabs and ends its access. Returns `{ ok: true, spaceId, closedSpace, closed: label[], kept: label[], protected: label[] }`. |
@@ -637,11 +691,11 @@ Show the commands, or help on one
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}. Returns `image/png`. |
 | POST | `/tabs/:id/screenshot` | `fullPage?`, `clip?`, `scale?`, `timeoutMs?` | Captures the viewport, the whole page or a clip as PNG, at CSS or device scale. Returns `image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio`. |
-| POST | `/tabs/:id/click` | `ref?`, `selector?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/drag` | `source`, `target` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/click` | `ref?`, `selector?`, `label?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value`, `label?` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `label?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?`, `label?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/drag` | `source`, `target`, `label?` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |

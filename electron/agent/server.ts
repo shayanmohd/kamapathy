@@ -3,6 +3,7 @@ import { chmodSync } from "node:fs";
 import { createServer } from "node:http";
 import type { WebContents } from "electron";
 import type {
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -14,6 +15,7 @@ import type {
 import { API_LEVEL } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import type { PromptCenter } from "../prompts";
 import { createActions } from "./actions";
+import type { CursorPoint } from "./cursor";
 import { activeSpace, createAuthority } from "./authority";
 import { createDialogs } from "./dialogs";
 import { createDownloads } from "./downloads";
@@ -29,6 +31,7 @@ import {
 import { createDispatchers } from "./input/dispatch";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
+import { createPresence } from "./presence";
 import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
 import { downloadRoutes } from "./routes/downloads";
@@ -37,6 +40,7 @@ import { createNavigation } from "./routes/navigation";
 import { pdfRoutes } from "./routes/pdf";
 import { spaceRequestRoutes } from "./routes/space-requests";
 import { spaceRoutes } from "./routes/spaces";
+import { statusRoutes } from "./routes/status";
 import { tabRoutes } from "./routes/tabs";
 import { updateRoutes, type UpdateService } from "./routes/update";
 import { Scheduler, type Lane } from "./scheduler";
@@ -45,7 +49,12 @@ import { TabSessions } from "./session/tab-sessions";
 import type { FrameInfo } from "./session/types";
 import { createTabLog, watchPopups } from "./tab-log";
 import type { TabRegistry } from "./tab-registry";
-import { routeNotFound, validateBody } from "./validate";
+import {
+  bodyLabel,
+  checkAgentText,
+  routeNotFound,
+  validateBody,
+} from "./validate";
 
 export interface AutomationController {
   readonly state: BrowserState;
@@ -73,7 +82,17 @@ export interface AutomationController {
     spaceId: string | undefined,
     message: string,
     kind: "info" | "success" | "warning",
+    /** The agent's own words for this entry; a label or status otherwise. */
+    agentText?: string,
   ): void;
+  /**
+   * The only writer of a space's task: undefined fields are deleted, null
+   * deletes the task, and changedAt moves only when the state does.
+   */
+  setTask(
+    spaceId: string,
+    patch: Partial<AgentTask> | null,
+  ): AgentTask | undefined;
   subscribe(listener: (state: BrowserState) => void): () => void;
   /** The tab's live page, if it has one. Never creates a view. */
   peekWebContents(tabId: string): WebContents | undefined;
@@ -83,6 +102,13 @@ export interface AutomationController {
   ): () => void;
   /** The tab the space shows, or would show when the person opens it. */
   shownTab(spaceId: string): Tab | undefined;
+  /**
+   * Makes the tab's own space show it, then waits for its next frame. The
+   * active space, the window and keyboard focus never change.
+   */
+  showAgentTab(tabId: string): Promise<void>;
+  /** Draws the agent's cursor at a point it just dispatched. Never throws. */
+  reportPointer(tabId: string, point: CursorPoint, label?: string): void;
   /** A managed agent tab in the background; a blank page without url. */
   openAgentTab(spaceId: string, url?: string): Tab;
   /** Not a BrowserAction: only the agent server navigates an agent tab. */
@@ -236,11 +262,14 @@ export async function startAutomation(
     },
   });
   const referenceSession = randomBytes(12).toString("hex");
+  const presence = createPresence({ controller, authority });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
     guard: (tabId) => {
       authority.authorizeTab(tabId);
     },
+    // Every point agent input lands on is where the cursor glides to.
+    cursor: (tabId, point) => presence.pointer(tabId, point),
   });
   const actions = createActions({
     controller,
@@ -323,6 +352,7 @@ export async function startAutomation(
     expectations,
     dialogs,
     downloads,
+    presence,
   });
   const deps: RouteDeps = {
     controller,
@@ -335,6 +365,7 @@ export async function startAutomation(
     expectations,
     dialogs,
     downloads,
+    presence,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -348,6 +379,7 @@ export async function startAutomation(
     options.pdf?.extractor ?? createExtractor({ fork: forkPdfWorker });
   const routes = buildRoutes({
     ...spaceRoutes(deps),
+    ...statusRoutes(deps),
     ...tabRoutes(deps),
     ...navigation.routes,
     ...pdfRoutes({ ...deps, pdf: { extractor, documents } }),
@@ -476,33 +508,53 @@ export async function startAutomation(
           method === "POST"
             ? await readBody(request, route.bodyLimit)
             : undefined;
-        // A malformed body never waits behind page work.
+        // A malformed body, or a label the person could not be shown,
+        // never waits behind page work.
         validateBody(route, body);
+        checkAgentText(route, body);
         const lane: Lane =
           route.lane === "space"
             ? { kind: "space", spaceId: spaceId! }
             : { kind: route.lane };
         const deadline = await ticket.start(lane);
-        await route.handler({
-          request,
-          response,
-          body,
-          ...authorize(),
-          resumeFromHuman,
-          run: {
+        const current = authorize();
+        // A route that reads or acts on a page makes it the one its space
+        // shows, after authorization and before the handler's first step.
+        if (route.schema.follow && current.tab)
+          await presence.follow(current.tab.id, {
             deadline,
             signal: abort.signal,
-            dispatch,
-            park: async (wait) => {
-              try {
-                return await ticket.park(wait);
-              } finally {
-                authorize();
-              }
+          });
+        // An input route's label shows while the action runs and for five
+        // seconds after, so even a failed action leaves its own behind.
+        const labelSpace = route.schema.label
+          ? (current.space?.id ?? current.tab?.spaceId)
+          : undefined;
+        if (labelSpace) presence.labelStart(labelSpace, bodyLabel(route, body));
+        try {
+          await route.handler({
+            request,
+            response,
+            body,
+            ...current,
+            resumeFromHuman,
+            run: {
+              deadline,
+              signal: abort.signal,
+              dispatch,
+              park: async (wait) => {
+                try {
+                  return await ticket.park(wait);
+                } finally {
+                  authorize();
+                }
+              },
             },
-          },
-          prepared: before?.prepared,
-        });
+            prepared: before?.prepared,
+          });
+        } finally {
+          if (labelSpace) presence.labelEnd(labelSpace);
+        }
       } finally {
         ticket.finish();
         before?.release?.();
@@ -551,6 +603,7 @@ export async function startAutomation(
         if (probe && host.__kamapathyTest === probe)
           delete host.__kamapathyTest;
         authority.stop();
+        presence.close();
         requests.close();
         scheduler.close();
         // The dispatchers go last, so each session's release still lets go

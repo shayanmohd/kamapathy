@@ -12,6 +12,8 @@ files:
   # The PDF reader needs no canvas, so its native build stays out.
   - "!**/node_modules/@napi-rs/**"
 extraResources:
+  - from: build/tray
+    to: tray
   - from: build/icon.png
     to: icon.png
   - from: build/icon.ico

@@ -50,6 +50,8 @@ export const settingsCopy = {
     "Agent spaces use your sign-ins unless you isolate them, and disappear when you quit. Take over at any time.",
   activity: "Recent activity",
   noActivity: "Actions will appear here when an agent gets to work.",
+  background:
+    "While agents are working, closing the window keeps Kamapathy running. Quit to stop them.",
   import: "Import bookmarks and history",
   importNote:
     "Bring your bookmarks, history and sign-ins over from another browser on this computer.",
@@ -179,9 +181,13 @@ export const agentBarCopy = {
     paused: "Agent access is off",
     "in-control": "You're in control",
     "needs-you": "You're in control",
-    finished: "Agent finished",
+    done: "Agent is done",
     stopped: "You stopped the agent",
+    failed: "Agent could not finish",
+    error: "A page stopped working",
   },
+  // What the bar says for needs-you while the agent still has the space.
+  agentNeedsYou: "Agent needs you",
   takeOver: "Take over",
   letContinue: "Let agent continue",
   stop: "Stop",
@@ -192,13 +198,30 @@ export const agentBarCopy = {
   keepWarning: "Its temporary sign-ins end and its pages reload.",
 } as const;
 
+// The one phrase the bar announces. The agent's own words never join it;
+// they follow in the status line.
+export function agentBarPhrase(
+  status: keyof typeof agentBarCopy.status,
+  agentOwns: boolean,
+): string {
+  return status === "needs-you" && agentOwns
+    ? agentBarCopy.agentNeedsYou
+    : agentBarCopy.status[status];
+}
+
 export const spacesCopy = {
   menu: "Spaces",
-  button: (space: string, working: number, needsYou: boolean) =>
+  button: (
+    space: string,
+    working: number,
+    needsYou: boolean,
+    failed: boolean,
+  ) =>
     [
       `Spaces: ${space}`,
       working ? `${working} ${working === 1 ? "agent" : "agents"} working` : "",
       needsYou ? "an agent needs you" : "",
+      failed ? "an agent could not finish" : "",
     ]
       .filter(Boolean)
       .join(", "),
@@ -241,8 +264,10 @@ export const statusCopy = {
   "needs-you": "Needs you",
   "in-control": "You're in control",
   paused: "Agent access is off",
-  finished: "Agent finished",
+  done: "Done",
   stopped: "You stopped the agent",
+  failed: "Failed",
+  error: "Page stopped",
 } as const;
 
 export const overviewCopy = {

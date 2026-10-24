@@ -24,6 +24,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     sessions,
     navigation,
     receipts,
+    presence,
   } = deps;
   const { authorizeTab, authorizeSpace } = authority;
   let uploading = false;
@@ -145,6 +146,9 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
           try {
             if (response.destroyed) return;
             authorizeTab(tab!.id);
+            // Each step shows its own label, which replaces the step
+            // before it and stays for five seconds after this one.
+            presence.labelStart(tab!.spaceId, action.label);
             results.push({
               index,
               type: action.type,
@@ -181,6 +185,8 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
               failedIndex: index,
               error: failure,
             });
+          } finally {
+            presence.labelEnd(tab!.spaceId);
           }
         }
         authorizeTab(tab!.id);

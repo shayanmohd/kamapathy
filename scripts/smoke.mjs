@@ -233,6 +233,73 @@ const livePages = (page, count) =>
       (await page.locator("img.frozen-frame").count()) === 0,
     { label: `${count} live pages and no still frame` },
   );
+// The agent cursor is a view of its own, which Playwright does not see as a
+// window, so it is found among the window's children by the page it loads.
+// `last` says it still sits above every page view, and `label` is the pill
+// the agent's words are drawn in.
+const cursorView = () =>
+  app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return null;
+    const children = window.contentView.children;
+    const index = children.findIndex((view) =>
+      (view.webContents?.getURL() ?? "").endsWith("src/cursor/index.html"),
+    );
+    if (index < 0) return null;
+    const view = children[index];
+    const placement = {
+      bounds: view.getBounds(),
+      visible: view.getVisible(),
+      last: index === children.length - 1,
+    };
+    return view.webContents
+      .executeJavaScript(
+        "[document.getElementById('pill').textContent, getComputedStyle(document.querySelector('#arrow path')).fill]",
+      )
+      .then(([label, arrow]) => ({ ...placement, label, arrow }));
+  });
+// The person's own pointer, sent to the cursor view alone. Nothing else in
+// this suite sends input there.
+const touchCursor = () =>
+  app.evaluate(({ BrowserWindow }) => {
+    const view = BrowserWindow.getAllWindows()[0].contentView.children.find(
+      (item) => (item.webContents?.getURL() ?? "").endsWith("src/cursor/index.html"),
+    );
+    view.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
+  });
+// The quit question is a native box, so it is answered inside the
+// application: the replacement records what the person would read and gives
+// back the button this check wants. The quit follows the reply, so answering
+// never races this call. Returns what was asked.
+async function answerQuit(response) {
+  await app.evaluate(
+    ({ app, dialog }, button) => {
+      globalThis.__kamapathyQuitQuestion = [];
+      const original = dialog.showMessageBox;
+      dialog.showMessageBox = async (first, second) => {
+        const options = second ?? first;
+        globalThis.__kamapathyQuitQuestion.push(
+          [options.title, options.message, options.detail, ...(options.buttons ?? [])].join(" | "),
+        );
+        dialog.showMessageBox = original;
+        return { response: button, checkboxChecked: false };
+      };
+      setTimeout(() => app.quit(), 0);
+    },
+    response === "quit" ? 0 : 1,
+  );
+  // A confirmed quit takes the application with it, so a question it can no
+  // longer report counts as none.
+  return poll(
+    async () => {
+      const asked = await app
+        .evaluate(() => globalThis.__kamapathyQuitQuestion ?? [])
+        .catch(() => []);
+      return asked.length ? asked : null;
+    },
+    { timeoutMs: 10000, label: "the quit question" },
+  ).catch(() => []);
+}
 async function overlapsNativePage(locator) {
   const box = await locator.boundingBox();
   return (await visibleViews()).some(
@@ -1730,6 +1797,225 @@ try {
   await page.keyboard.press("Escape");
   await overview.waitFor({ state: "detached" });
   checked("the spaces grid marks the space an agent controls with a glow and its status");
+  // The agent's cursor over the page it is working in. Section 5's input
+  // dispatcher reports each point it sends, so the cursor draws here; the
+  // check still steps aside rather than failing where no point reaches it.
+  await livePages(page, 1);
+  const labelled = await api(`/tabs/${agentTab}/click`, "POST", {
+    selector: "#save",
+    label: "Save the topic",
+  });
+  assert.equal(labelled.status, 200, await labelled.text());
+  const cursor = await poll(
+    async () => {
+      const found = await cursorView();
+      return found?.visible ? found : null;
+    },
+    { timeoutMs: 3000, label: "the agent cursor" },
+  ).catch(() => null);
+  if (!cursor)
+    console.log(
+      "SKIP the cursor appears at the click point: no point reached the cursor",
+    );
+  else {
+    assert.equal(cursor.last, true, "the cursor stays above every page view");
+    // The tip sits 14 px into the 44 px view, as tests/cursor.test.ts pins,
+    // and lands on the control the agent pressed.
+    const tip = { x: cursor.bounds.x + 14, y: cursor.bounds.y + 14 };
+    const pressed = await app.evaluate(({ webContents }, address) => {
+      // The agent's tab is the only page here with a debugger session.
+      const contents = webContents
+        .getAllWebContents()
+        .find((item) => item.debugger.isAttached() && item.getURL().startsWith(address));
+      return contents.executeJavaScript(
+        "(() => { const box = document.getElementById('save').getBoundingClientRect(); return { left: box.left, top: box.top, right: box.right, bottom: box.bottom }; })()",
+      );
+    }, origin);
+    const [agentPage] = (await visibleViews()).filter((view) =>
+      view.url.startsWith(origin),
+    );
+    assert.ok(
+      tip.x >= agentPage.x + pressed.left &&
+        tip.x <= agentPage.x + pressed.right &&
+        tip.y >= agentPage.y + pressed.top &&
+        tip.y <= agentPage.y + pressed.bottom,
+      `the cursor tip ${JSON.stringify(tip)} is not on the control the agent clicked`,
+    );
+    assert.equal(cursor.label, "Save the topic");
+    // Its own stylesheet loaded under the page's strict policy, so the arrow
+    // is drawn in one of the accent colours tests/theme.test.ts pins.
+    assert.ok(
+      ["rgb(47, 107, 79)", "rgb(95, 174, 136)"].includes(cursor.arrow),
+      `the cursor arrow is drawn in ${cursor.arrow}`,
+    );
+    // A page capture is the page alone: the same still page captures the
+    // same bytes with the cursor over it and without.
+    const capture = async () =>
+      Buffer.from(await (await api(`/tabs/${agentTab}/screenshot`)).arrayBuffer());
+    const drawn = await capture();
+    await touchCursor();
+    await poll(async () => (await cursorView())?.visible === false, {
+      timeoutMs: 5000,
+      label: "the cursor stepping aside for the person",
+    });
+    assert.ok(
+      drawn.equals(await capture()),
+      "the cursor changed what a page capture holds",
+    );
+    // A point a second later is the agent's again, and Take over ends it.
+    await page.waitForTimeout(1100);
+    const next = await api(`/tabs/${agentTab}/click`, "POST", {
+      selector: "#query",
+      label: "Name the topic",
+    });
+    assert.equal(next.status, 200, await next.text());
+    const again = await poll(
+      async () => {
+        const found = await cursorView();
+        return found?.visible ? found : null;
+      },
+      { timeoutMs: 5000, label: "the cursor after a later point" },
+    );
+    assert.equal(again.label, "Name the topic");
+    await page.evaluate(
+      (id) =>
+        window.kamapathy.dispatch({ type: "space:ownership", id, owner: "human" }),
+      task,
+    );
+    await poll(async () => (await cursorView())?.visible === false, {
+      timeoutMs: 5000,
+      label: "the cursor after Take over",
+    });
+    assert.equal((await api(`/spaces/${task}/resume`, "POST", {})).status, 200);
+    checked(
+      "the cursor appears at the click point, never in page screenshots, steps aside for the person's pointer and hides on takeover",
+    );
+  }
+  // What the person reads about a task: the agent's own status beside the
+  // bar's live region, a page that stopped, a reported failure and a finish.
+  const researchBar = page.getByRole("region", { name: "Research helper" });
+  assert.equal(
+    (await api(`/spaces/${task}/status`, "POST", { text: "Comparing three sites" })).status,
+    200,
+  );
+  const researchLine = researchBar.locator(".status-line.agent-text");
+  // A label from the check above outranks the status for five seconds.
+  await poll(
+    async () => (await researchLine.textContent()) === "Comparing three sites",
+    { timeoutMs: 10000, label: "the status line the agent wrote" },
+  );
+  assert.match(
+    await researchBar.locator(".agent-bar-status").textContent(),
+    /^Research helper · Agent is (browsing|idle)$/,
+  );
+  assert.equal(
+    (await (await api(`/spaces/${task}`)).json()).space.status,
+    "Comparing three sites",
+  );
+  await app.evaluate(({ webContents }, address) => {
+    const contents = webContents
+      .getAllWebContents()
+      .find((item) => item.debugger.isAttached() && item.getURL().startsWith(address));
+    contents.forcefullyCrashRenderer();
+  }, origin);
+  await researchBar.getByText("Research helper · A page stopped working").waitFor();
+  // A space whose page stopped is still a space with an agent in it.
+  assert.match(await spacesButton.getAttribute("aria-label"), /1 agent working/);
+  assert.equal((await (await api(`/spaces/${task}`)).json()).space.state, "error");
+  assert.equal(
+    (await api(`/tabs/${agentTab}/navigate`, "POST", { url: origin })).status,
+    200,
+  );
+  await poll(
+    async () => (await (await api(`/spaces/${task}`)).json()).space.state === undefined,
+    { timeoutMs: 10000, label: "the page the agent loaded again" },
+  );
+  const failing = (
+    await (await api("/spaces", "POST", { name: "Trip planning" })).json()
+  ).space.id;
+  assert.equal((await api(`/spaces/${failing}/tabs`, "POST", { url: origin })).status, 201);
+  const reported = await (
+    await api(`/spaces/${failing}/fail`, "POST", {
+      message: "The site needs a phone number I do not have",
+    })
+  ).json();
+  assert.deepEqual(
+    [reported.ok, reported.owner, reported.state, reported.status],
+    [true, "human", "failed", "The site needs a phone number I do not have"],
+  );
+  const finishing = (
+    await (await api("/spaces", "POST", { name: "Errand run" })).json()
+  ).space.id;
+  const keptTab = (
+    await (await api(`/spaces/${finishing}/tabs`, "POST", { url: origin })).json()
+  ).tab.id;
+  assert.equal(
+    (await api(`/spaces/${finishing}/finish`, "POST", { keep: [keptTab] })).status,
+    200,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    failing,
+  );
+  const failedBar = page.getByRole("region", { name: "Trip planning" });
+  await failedBar.getByText("Trip planning · Agent could not finish").waitFor();
+  assert.equal(
+    await failedBar.locator(".status-line.agent-text").textContent(),
+    "The site needs a phone number I do not have",
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    finishing,
+  );
+  await page
+    .getByRole("region", { name: "Errand run" })
+    .getByText("Errand run · Agent is done")
+    .waitFor();
+  // The Spaces button marks a failure the person has not opened yet.
+  await spacesButton.click();
+  const row = (name) => spacesMenu.locator(".space-row").filter({ hasText: name });
+  assert.equal(
+    await row("Trip planning").locator(".space-row-meta").textContent(),
+    "Failed",
+  );
+  assert.equal(
+    await row("Trip planning").locator(".status-line.agent-text").textContent(),
+    "The site needs a phone number I do not have",
+  );
+  assert.equal(await row("Errand run").locator(".space-row-meta").textContent(), "Done");
+  assert.equal(
+    await row("Research helper").locator(".status-line.agent-text").textContent(),
+    "Comparing three sites",
+  );
+  await page.keyboard.press("Escape");
+  await spacesMenu.waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "Browser menu", exact: true }).focus();
+  await page.keyboard.press("Alt+KeyS");
+  await overview.waitFor();
+  const card = (name) =>
+    overview.locator(".space-card").filter({
+      has: page.getByRole("button", { name: `Open ${name}` }),
+    });
+  assert.equal(await card("Trip planning").locator(".status-chip").textContent(), "Failed");
+  assert.equal(
+    await card("Trip planning").locator(".status-line.agent-text").textContent(),
+    "The site needs a phone number I do not have",
+  );
+  assert.equal(await card("Errand run").locator(".status-chip").textContent(), "Done");
+  await page.keyboard.press("Escape");
+  await overview.waitFor({ state: "detached" });
+  checked(
+    "the bar, the popover and the overview show the agent's status, Done, Failed and Page stopped",
+  );
+  for (const id of [failing, finishing])
+    await page.evaluate(
+      (space) => window.kamapathy.dispatch({ type: "space:delete", id: space }),
+      id,
+    );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    task,
+  );
   const watcher = (
     await (await api("/spaces", "POST", { name: "Grid watcher" })).json()
   ).space.id;
@@ -2354,6 +2640,18 @@ try {
       ),
       1,
     );
+    // Closing the window now hides it while agents can work, so this check
+    // turns agent access off to close it for real.
+    await page.evaluate(() =>
+      window.kamapathy.dispatch({
+        type: "settings:update",
+        settings: { automationEnabled: false },
+      }),
+    );
+    await waitForState(
+      page,
+      (state) => !state.settings.automationEnabled && !state.automation.running,
+    );
     const nextWindow = app.waitForEvent("window", {
       predicate: async (candidate) => {
         try {
@@ -2417,6 +2715,128 @@ try {
     );
     checked("closing the last empty tab closes the window");
   }
+  // Last, because the confirmed quit at its end stops Kamapathy: closing the
+  // window keeps the agents and the socket, the Dock brings it back, and a
+  // quit over a working agent asks first.
+  if (!(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length))) {
+    const reopened = app.waitForEvent("window", {
+      predicate: async (candidate) => {
+        try {
+          await candidate.waitForFunction(() => !!window.kamapathy, null, {
+            timeout: 5000,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    await app.evaluate(({ app }) => app.emit("activate"));
+    page = await reopened;
+  }
+  await page.evaluate(() =>
+    window.kamapathy.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: true },
+    }),
+  );
+  await waitForState(page, (state) => state.automation.running);
+  const background = socketFetch(
+    await poll(() => resolveSocket(agentEnv).catch(() => null), {
+      timeoutMs: 10000,
+      label: "the agent socket for the background check",
+    }),
+  );
+  const backgroundApi = async (path, method = "GET", body) =>
+    background(path, {
+      method,
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const nightShift = (
+    await (await backgroundApi("/spaces", "POST", { name: "Night shift" })).json()
+  ).space.id;
+  const nightTab = (
+    await (await backgroundApi(`/spaces/${nightShift}/tabs`, "POST", { url: origin })).json()
+  ).tab.id;
+  await page.evaluate(
+    (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+    `${origin}/second`,
+  );
+  await waitForState(page, (state) =>
+    state.tabs.some((tab) => tab.title === "Second page" && !tab.loading),
+  );
+  const windowPages = () =>
+    app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return window
+        ? {
+            visible: window.isVisible(),
+            pages: window.contentView.children.map(
+              (view) => view.webContents?.getURL() ?? "",
+            ),
+          }
+        : null;
+    });
+  assert.ok((await windowPages()).pages.some((url) => url.endsWith("/second")));
+  assert.equal(
+    (await page.evaluate(() => window.kamapathy.getState())).settings
+      .backgroundNoticeShown,
+    false,
+  );
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  const away = await poll(
+    async () => {
+      const found = await windowPages();
+      return found && !found.visible ? found : null;
+    },
+    { label: "the window closing into the background" },
+  );
+  // Nothing of the person's runs unseen, and the agent's page stays.
+  assert.deepEqual(
+    away.pages.filter((url) => url.endsWith("/second")),
+    [],
+  );
+  assert.ok(away.pages.includes(`${origin}/`), JSON.stringify(away.pages));
+  assert.equal((await backgroundApi(`/tabs/${nightTab}/snapshot`)).status, 200);
+  assert.equal((await backgroundApi(`/spaces/${nightShift}`)).status, 200);
+  // The person is told once per profile that Kamapathy is still running.
+  await waitForState(page, (state) => state.settings.backgroundNoticeShown);
+  await app.evaluate(({ app }) => app.emit("activate"));
+  await poll(async () => (await windowPages())?.visible === true, {
+    label: "the window coming back",
+  });
+  await poll(
+    async () => (await windowPages()).pages.some((url) => url.endsWith("/second")),
+    { label: "the person's page laid out again" },
+  );
+  checked(
+    "closing the window keeps agent pages and the socket, and the window comes back with the person's pages",
+  );
+  const asked = await answerQuit("cancel");
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  assert.equal(
+    asked[0],
+    "Quit Kamapathy | Quit while \u201cNight shift\u201d is still running? | Agent spaces close and their agents stop. Changes already made on websites stay. | Quit | Cancel",
+  );
+  assert.equal((await backgroundApi(`/tabs/${nightTab}/snapshot`)).status, 200);
+  assert.equal(existsSync(join(agentFolder, "quit")), false);
+  // A confirmed quit stops the agents and leaves the marker that keeps the
+  // client from starting Kamapathy again behind the person's back.
+  await answerQuit("quit");
+  await poll(() => existsSync(join(agentFolder, "quit")), {
+    timeoutMs: 15000,
+    label: "the quit marker",
+  });
+  assert.equal(
+    typeof JSON.parse(await readFile(join(agentFolder, "quit"), "utf8")).at,
+    "number",
+  );
+  await app.close().catch(() => {});
+  app = undefined;
+  checked(
+    "a quit over a working agent asks first, Cancel keeps Kamapathy and its socket, and Quit writes the marker",
+  );
   // Section 13 on a second profile, with the first Kamapathy closed: What's
   // new after a version change, and an update the person installs.
   if (app) {
@@ -2576,7 +2996,16 @@ try {
   }
   throw error;
 } finally {
-  if (app) await app.close().catch(() => {});
+  if (app) {
+    // A quit while agents are at work asks the person first, and no one is
+    // here to answer it, so this run answers its own question.
+    await app
+      .evaluate(({ dialog }) => {
+        dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+      })
+      .catch(() => {});
+    await app.close().catch(() => {});
+  }
   await new Promise((resolve) => fixture.close(resolve));
   if (updateFeed) await updateFeed.close();
   for (const folder of [profile, updateProfile].filter(Boolean))

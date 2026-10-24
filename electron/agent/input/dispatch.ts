@@ -16,6 +16,7 @@
 // the window stayed hidden and unfocused. Whether an unhandled chord reaches
 // an application menu role could not be observed, since the probe never shows
 // or focuses a window; the spanned flag stays as the spec asks for it.
+import type { CursorPoint } from "../cursor";
 import type { TabSession } from "../session/tab-session";
 import type { SendStep, Step } from "../session/types";
 import {
@@ -81,6 +82,14 @@ const pointOf = (params: Record<string, unknown>) =>
   Number.isFinite(params.y)
     ? { x: params.x, y: params.y }
     : undefined;
+// A press rings the cursor and a release ends the ring; everything else,
+// a wheel included, only moves it.
+const moveOf = (params: Record<string, unknown>): CursorPoint["type"] =>
+  params.type === "mousePressed"
+    ? "press"
+    : params.type === "mouseReleased"
+      ? "release"
+      : "move";
 const KEY_TYPES = ["keyDown", "rawKeyDown", "keyUp"] as const;
 const MASKED = [
   "Input.dispatchKeyEvent",
@@ -91,7 +100,7 @@ const MASKED = [
 export function createDispatchers(deps: {
   guard(tabId: string): void;
   marker?: InputMarker;
-  cursor?(tabId: string, point: { x: number; y: number }): void;
+  cursor?(tabId: string, point: CursorPoint): void;
   platform?: NodeJS.Platform;
   idleMs?: number;
   now?(): number;
@@ -193,7 +202,8 @@ export function createDispatchers(deps: {
           const sent = prepare(command);
           if (sent.method === "Input.dispatchKeyEvent") mark(sent.params);
           const point = mode.pointer ? pointOf(sent.params) : undefined;
-          if (point) deps.cursor?.(tabId, point);
+          if (point)
+            deps.cursor?.(tabId, { ...point, type: moveOf(sent.params) });
           epoch = session.epoch;
           input.touch(now());
           await session.send(sent.method, sent.params, sending);

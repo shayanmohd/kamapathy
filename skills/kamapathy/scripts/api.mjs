@@ -22,6 +22,10 @@ export * as schema from "./schema/index.mjs";
 
 const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
 
+// The label an input method was given, for its body.
+const labelOf = (options) =>
+  options?.label === undefined ? {} : { label: options.label };
+
 /**
  * @typedef {"@e1" | string} Target A ref such as "@e3" from a current
  * snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=, with an
@@ -105,6 +109,11 @@ const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
  * @property {string} [selector]
  * @property {string} [text]
  * @property {number} [timeoutMs] 0 to 15000, default 5000.
+ */
+/**
+ * @typedef {object} ActionOptions
+ * @property {string} [label] A few words naming this step, at most 60
+ * characters, shown by the agent's cursor and in the agent bar.
  */
 /**
  * @typedef {object} Action One batch step, as documented in actions.md.
@@ -325,32 +334,39 @@ export class Page {
   }
   /**
    * @param {Target} control
+   * @param {ActionOptions} [options]
    * @returns {Promise<{ ok: true, url: string, fallback?: "dom_click", rebound?: string[] }>}
    */
-  click(control) {
-    return this.#call("click", [control], () =>
-      this.#post("click", target(control)),
+  click(control, options) {
+    return this.#call("click", [control, options], () =>
+      this.#post("click", { ...target(control), ...labelOf(options) }),
     );
   }
   /**
    * Replaces the value of a field, select or editable region.
    * @param {Target} control
    * @param {string} value
+   * @param {ActionOptions} [options]
    * @returns {Promise<{ ok: true, rebound?: string[] }>}
    */
-  fill(control, value) {
-    return this.#call("fill", [control, value], () =>
-      this.#post("fill", { ...target(control), value }),
+  fill(control, value, options) {
+    return this.#call("fill", [control, value, options], () =>
+      this.#post("fill", { ...target(control), value, ...labelOf(options) }),
     );
   }
   /**
    * @param {"Enter" | "Tab" | "Escape" | "Backspace" | "Delete" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp" | "PageDown" | "Space"} key
    * @param {Target} [control] Focus this control first.
+   * @param {ActionOptions} [options]
    * @returns {Promise<{ ok: true, rebound?: string[] }>}
    */
-  press(key, control) {
-    return this.#call("press", [key, control], () =>
-      this.#post("press", { key, ...(control ? target(control) : {}) }),
+  press(key, control, options) {
+    return this.#call("press", [key, control, options], () =>
+      this.#post("press", {
+        key,
+        ...(control ? target(control) : {}),
+        ...labelOf(options),
+      }),
     );
   }
   /**
@@ -359,15 +375,19 @@ export class Page {
    * @param {"up" | "down" | "left" | "right"} direction
    * @param {number} [pixels] 1 to 2000, default 600.
    * @param {Target} [control]
+   * @param {ActionOptions} [options]
    * @returns {Promise<{ ok: true, scrolled: "page" | "element", selector?: string, x: number, y: number, moved: boolean }>}
    */
-  scroll(direction, pixels, control) {
-    return this.#call("scroll", [direction, pixels, control], () => {
-      if (typeof pixels === "string") [pixels, control] = [undefined, pixels];
+  scroll(direction, pixels, control, options) {
+    return this.#call("scroll", [direction, pixels, control, options], () => {
+      // A target in the pixels' place moves the options along with it.
+      if (typeof pixels === "string")
+        [pixels, control, options] = [undefined, pixels, control];
       return this.#post("scroll", {
         direction,
         ...(pixels !== undefined ? { pixels } : {}),
         ...(control ? target(control) : {}),
+        ...labelOf(options),
       });
     });
   }
@@ -375,11 +395,16 @@ export class Page {
    * Drags one element onto another with native mouse input or HTML drag and drop.
    * @param {Target} source
    * @param {Target} destination
+   * @param {ActionOptions} [options]
    * @returns {Promise<{ ok: true, url: string, drag: "html5" | "mouse", rebound?: string[] }>}
    */
-  drag(source, destination) {
-    return this.#call("drag", [source, destination], () =>
-      this.#post("drag", { source: target(source), target: target(destination) }),
+  drag(source, destination, options) {
+    return this.#call("drag", [source, destination, options], () =>
+      this.#post("drag", {
+        source: target(source),
+        target: target(destination),
+        ...labelOf(options),
+      }),
     );
   }
   /**
@@ -515,6 +540,10 @@ export class Space {
     this.prompt = info.prompt;
     /** @type {number | undefined} When the person got control. */
     this.since = info.since;
+    /** @type {string | undefined} The status the person is reading. */
+    this.status = info.status;
+    /** @type {"needs-you" | "done" | "failed" | "error" | undefined} How the space stands. */
+    this.state = info.state;
   }
   #call(name, args, send) {
     return call(this.#session, `Space.${name}`, args, send);
@@ -672,6 +701,39 @@ export class Space {
     return this.#call("tabs", [], async () => {
       const { tabs } = await this.#session.request(`/spaces/${this.id}/tabs`);
       return tabs.map((tab) => new Page(this.#session, tab));
+    });
+  }
+  /**
+   * Shows the person what the agent is doing, and updates `status`.
+   * @param {string | null} text At most 120 characters; null or "" clears it.
+   * @returns {Promise<{ ok: true, status?: string }>}
+   */
+  setStatus(text) {
+    return this.#call("setStatus", [text], async () => {
+      const result = await this.#session.request(`/spaces/${this.id}/status`, {
+        method: "POST",
+        body: { text: text ?? "" },
+      });
+      this.status = result.status;
+      return result;
+    });
+  }
+  /**
+   * Reports that the task cannot be done and hands the space to the person,
+   * updating `owner`, `state` and `status`.
+   * @param {string} message At most 300 characters.
+   * @returns {Promise<{ ok: true, owner: "human", state: "failed", status: string }>}
+   */
+  fail(message) {
+    return this.#call("fail", [message], async () => {
+      const result = await this.#session.request(`/spaces/${this.id}/fail`, {
+        method: "POST",
+        body: { message },
+      });
+      this.owner = result.owner;
+      this.state = result.state;
+      this.status = result.status;
+      return result;
     });
   }
   /**

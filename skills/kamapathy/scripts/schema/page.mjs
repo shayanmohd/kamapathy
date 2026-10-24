@@ -4,6 +4,12 @@ import { ROUTES, routeKey } from "./routes.mjs";
 const body = (key) => ROUTES.find((route) => routeKey(route) === key).body;
 // pdfText's client options are the route's fields, with timeout for timeoutMs.
 const pdfText = body("POST /tabs/:id/pdf/text");
+// Every input method takes the label its route declares, in an options
+// object after its own arguments.
+const labelOption = (type) => ({
+  options: { label: body(`POST /tabs/:id/${type}`).label },
+});
+const OPTIONS = { name: "options", kind: "options", optional: true };
 const PAGE = [
   "human_control",
   "tab_not_found",
@@ -172,34 +178,37 @@ export const PAGE_ENTRIES = [
   ),
   method(
     "Page.click",
-    "page.click(target)",
+    "page.click(target, options?)",
     "Clicks a control.",
-    [target()],
+    [target(), OPTIONS],
     "Promise<{ ok: true, url, fallback?, rebound? }>",
     "POST /tabs/:id/click",
     [...TARGET, ...INPUT],
+    labelOption("click"),
   ),
   method(
     "Page.fill",
-    "page.fill(target, value)",
+    "page.fill(target, value, options?)",
     "Replaces the value of a field, select or editable region.",
-    [target(), { name: "value", kind: "string" }],
+    [target(), { name: "value", kind: "string" }, OPTIONS],
     "Promise<{ ok: true, rebound? }>",
     "POST /tabs/:id/fill",
     [...TARGET, "invalid_value", "invalid_field"],
+    labelOption("fill"),
   ),
   method(
     "Page.press",
-    "page.press(key, target?)",
+    "page.press(key, target?, options?)",
     "Presses a supported key, focusing a control first when given.",
-    [{ name: "key", kind: "string" }, target("target", true)],
+    [{ name: "key", kind: "string" }, target("target", true), OPTIONS],
     "Promise<{ ok: true, rebound? }>",
     "POST /tabs/:id/press",
     ["invalid_key", ...TARGET, ...INPUT],
+    labelOption("press"),
   ),
   method(
     "Page.scroll",
-    "page.scroll(direction, pixels?, target?)",
+    "page.scroll(direction, pixels?, target?, options?)",
     "Scrolls the page, the panel holding a control, or the panel in the middle when the page cannot scroll.",
     [
       {
@@ -209,6 +218,7 @@ export const PAGE_ENTRIES = [
       },
       { name: "pixels", kind: "integer", optional: true },
       target("target", true),
+      OPTIONS,
     ],
     "Promise<{ ok: true, scrolled, selector?, x, y, moved }>",
     "POST /tabs/:id/scroll",
@@ -223,6 +233,7 @@ export const PAGE_ENTRIES = [
           },
           { name: "pixels", kind: "integer", optional: true },
           target("target", true),
+          OPTIONS,
         ],
         [
           {
@@ -231,15 +242,17 @@ export const PAGE_ENTRIES = [
             values: ["up", "down", "left", "right"],
           },
           target(),
+          OPTIONS,
         ],
       ],
+      ...labelOption("scroll"),
     },
   ),
   method(
     "Page.drag",
-    "page.drag(source, target)",
+    "page.drag(source, target, options?)",
     "Drags one element onto another with native mouse input or HTML drag and drop.",
-    [target("source"), target()],
+    [target("source"), target(), OPTIONS],
     "Promise<{ ok: true, url, drag, rebound? }>",
     "POST /tabs/:id/drag",
     [
@@ -249,6 +262,7 @@ export const PAGE_ENTRIES = [
       "drag_unavailable",
       "drag_not_delivered",
     ],
+    labelOption("drag"),
   ),
   method(
     "Page.wait",

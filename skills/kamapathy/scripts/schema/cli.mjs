@@ -24,6 +24,13 @@ const TARGET = {
   description:
     "A ref such as @e3 from a current snapshot, or a selector: CSS, css=, text=, role=, href= or xpath=.",
 };
+// The action commands take a label anywhere in their arguments.
+const LABEL = {
+  name: "--label",
+  value: "<text>",
+  description: "A few words naming this step, in at most 60 characters.",
+  since: 3,
+};
 
 export const COMMANDS = [
   command("health", "Connection", "health", "Check the connection", {
@@ -195,6 +202,44 @@ export const COMMANDS = [
       script: "space.resume",
     },
   ),
+  command(
+    "status",
+    "Spaces",
+    "status <space-id> <text> | status <space-id> --clear",
+    "Show the person what the agent is doing",
+    {
+      arguments: [
+        SPACE_ID,
+        {
+          name: "text",
+          description: "What the agent is doing, in at most 120 characters.",
+        },
+      ],
+      flags: [{ name: "--clear", description: "Clear the status." }],
+      route: "POST /spaces/:id/status",
+      script: "space.setStatus",
+      since: 3,
+    },
+  ),
+  command(
+    "fail",
+    "Spaces",
+    "fail <space-id> <message>",
+    "Report that the task cannot be done and hand the space to the person",
+    {
+      arguments: [
+        SPACE_ID,
+        {
+          name: "message",
+          description:
+            "Why the task cannot be finished, in at most 300 characters.",
+        },
+      ],
+      route: "POST /spaces/:id/fail",
+      script: "space.fail",
+      since: 3,
+    },
+  ),
   command("tabs", "Pages", "tabs <space-id>", "List tabs in an agent space", {
     arguments: [SPACE_ID],
     route: "GET /spaces/:id/tabs",
@@ -322,10 +367,11 @@ export const COMMANDS = [
   command(
     "click",
     "Page actions",
-    "click <tab-id> <ref-or-selector>",
+    "click <tab-id> <ref-or-selector> [--label <text>]",
     "Click a control",
     {
       arguments: [TAB_ID, TARGET],
+      flags: [LABEL],
       route: "POST /tabs/:id/click",
       script: "page.click",
     },
@@ -333,12 +379,13 @@ export const COMMANDS = [
   command(
     "fill",
     "Page actions",
-    "fill <tab-id> <ref-or-selector> --stdin",
+    "fill <tab-id> <ref-or-selector> --stdin [--label <text>]",
     "Read the exact field value from stdin",
     {
       arguments: [TAB_ID, TARGET],
       flags: [
         { name: "--stdin", description: "Read the field value from stdin" },
+        LABEL,
       ],
       stdin: "The exact field value.",
       route: "POST /tabs/:id/fill",
@@ -366,7 +413,7 @@ export const COMMANDS = [
   command(
     "press",
     "Page actions",
-    "press <tab-id> <key> [ref-or-selector]",
+    "press <tab-id> <key> [ref-or-selector] [--label <text>]",
     "Press a supported key",
     {
       arguments: [
@@ -377,6 +424,7 @@ export const COMMANDS = [
         },
         TARGET,
       ],
+      flags: [LABEL],
       route: "POST /tabs/:id/press",
       script: "page.press",
     },
@@ -384,7 +432,7 @@ export const COMMANDS = [
   command(
     "drag",
     "Page actions",
-    "drag <tab-id> <source> <target>",
+    "drag <tab-id> <source> <target> [--label <text>]",
     "Drag one element onto another (refs or selectors)",
     {
       arguments: [
@@ -392,6 +440,7 @@ export const COMMANDS = [
         { name: "source", description: "The element to drag." },
         { name: "target", description: "The element to drop on." },
       ],
+      flags: [LABEL],
       route: "POST /tabs/:id/drag",
       script: "page.drag",
     },
@@ -399,7 +448,7 @@ export const COMMANDS = [
   command(
     "scroll",
     "Page actions",
-    "scroll <tab-id> <direction> [pixels] [ref-or-selector]",
+    "scroll <tab-id> <direction> [pixels] [ref-or-selector] [--label <text>]",
     "Scroll up, down, left or right: the page, the panel holding a control, or the panel in the middle when the page cannot scroll",
     {
       arguments: [
@@ -408,6 +457,7 @@ export const COMMANDS = [
         { name: "pixels", description: "1 to 2000, default 600." },
         TARGET,
       ],
+      flags: [LABEL],
       route: "POST /tabs/:id/scroll",
       script: "page.scroll",
     },

@@ -430,6 +430,7 @@ export function Settings({
           </p>
         )}
         <p className="setting-note">{settingsCopy.spaces}</p>
+        <p className="setting-note">{settingsCopy.background}</p>
         <h4 id="settings-activity" className="settings-subheading">
           {settingsCopy.activity}
         </h4>

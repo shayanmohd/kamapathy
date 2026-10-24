@@ -12,6 +12,7 @@ import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
+import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
@@ -112,6 +113,7 @@ export interface RouteDeps {
   expectations: Expectations;
   dialogs: Dialogs;
   downloads: Downloads;
+  presence: AgentPresence;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

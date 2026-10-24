@@ -2412,6 +2412,223 @@ try {
       "an agent sees the notice, downloads a verified installer and cannot install it",
     );
   }
+  // Section 10 in the real app: the agent's own account of its work, the
+  // page it works in coming forward, and agents at work with no window.
+  const spaceLine = async () =>
+    (await cli(["spaces"])).output
+      .split("\n")
+      .find((line) => line.startsWith(space.id)) ?? "";
+  const entriesOf = async (message) =>
+    (await chrome.evaluate(() => window.kamapathy.getState())).activity.filter(
+      (item) => item.spaceId === space.id && item.message === message,
+    );
+  // A status is cleaned on the way in: the tab and the bell never reach the
+  // person's screen.
+  assert.equal(
+    (await cli(["status", space.id, "Comparing\tprices on three\u0007 sites"])).output,
+    'ok: status "Comparing prices on three sites"\n',
+  );
+  assert.match(await spaceLine(), / status "Comparing prices on three sites"$/);
+  const written = await entriesOf("Agent updated its status");
+  assert.equal(written.length, 1);
+  assert.equal(written[0].agentText, "Comparing prices on three sites");
+  // The same status again is not news.
+  await cli(["status", space.id, "Comparing prices on three sites"]);
+  assert.equal((await entriesOf("Agent updated its status")).length, 1);
+  assert.equal(
+    (await cli(["status", space.id, "--clear"])).output,
+    "ok: status cleared\n",
+  );
+  assert.doesNotMatch(await spaceLine(), /status/);
+  assert.equal((await entriesOf("Agent cleared its status")).length, 1);
+  // A label names the action while it runs and for five seconds after.
+  await json(["navigate", tab.id, `${fixture.origin}/lab`]);
+  const labelled = await observe(tab.id);
+  await cli([
+    "click",
+    tab.id,
+    ref(labelled, "Show delayed result"),
+    "--label",
+    "Open the\u0007 details",
+  ]);
+  const task = (await chrome.evaluate(() => window.kamapathy.getState())).spaces.find(
+    (item) => item.id === space.id,
+  ).task;
+  assert.deepEqual(
+    [task.label.text, task.label.active],
+    ["Open the details", false],
+  );
+  // A reported failure hands the space over with the message as its status.
+  assert.equal(
+    (await cli(["fail", space.id, "The site needs a phone number I do not\u0007 have"]))
+      .output,
+    "ok: failure reported, the person has control\n",
+  );
+  assert.match(
+    await spaceLine(),
+    / human .*failed status "The site needs a phone number I do not have"$/,
+  );
+  const reported = await entriesOf("Agent could not finish");
+  assert.equal(reported.length, 1);
+  assert.equal(
+    reported[0].agentText,
+    "The site needs a phone number I do not have",
+  );
+  const blocked = await cli(
+    ["click", tab.id, ref(labelled, "Show delayed result")],
+    undefined,
+    { failure: true },
+  );
+  assert.match(
+    blocked.errors,
+    /409 human_control: You reported that this task could not be finished\./,
+  );
+  // The refusal says the agent's own report is why the person has control.
+  const underFailure = await socketFetch(await resolveSocket(environment))(
+    `/tabs/${tab.id}/snapshot`,
+  );
+  assert.equal(underFailure.status, 409);
+  assert.deepEqual(
+    (({ code, reason }) => ({ code, reason }))((await underFailure.json()).error),
+    { code: "human_control", reason: "failed" },
+  );
+  assert.match((await cli(["resume", space.id])).output, /^ok: agent control resumed/);
+  assert.doesNotMatch(await spaceLine(), /failed|status/);
+  await observe(tab.id);
+  passed(
+    "status, labels and a reported failure are cleaned, listed and logged, and resume clears the failure",
+  );
+  // Following the agent: inside its own space the page it acts in comes
+  // forward, and nothing of the person's moves.
+  const details = (await json(["open", space.id, `${fixture.origin}/lab`])).tab;
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    space.id,
+  );
+  await waitForState(chrome, (state, id) => state.activeSpaceId === id, space.id);
+  // The agent's own snapshot brings the first page back to the front.
+  await observe(tab.id);
+  const before = await chrome.evaluate(() => window.kamapathy.getState());
+  assert.equal(before.activeTabId, tab.id);
+  // The person is reading the shell, which keeps the keyboard throughout.
+  const windowState = () =>
+    browser.evaluate(({ BrowserWindow, webContents }) => ({
+      visible: BrowserWindow.getAllWindows()[0].isVisible(),
+      focused: BrowserWindow.getAllWindows()[0].isFocused(),
+      view: webContents.getFocusedWebContents()?.id ?? null,
+    }));
+  await browser.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.focus(),
+  );
+  const windowBefore = await windowState();
+  assert.equal(
+    (await json(["tabs", space.id])).tabs.find((item) => item.id === tab.id).active,
+    true,
+  );
+  await cli(["click", details.id, "#delayed", "--label", "Open the details"]);
+  await waitForState(chrome, (state, id) => state.activeTabId === id, details.id);
+  const after = await chrome.evaluate(() => window.kamapathy.getState());
+  assert.equal(after.activeSpaceId, space.id);
+  assert.equal(after.splitTabId, before.splitTabId);
+  assert.deepEqual(
+    (await json(["tabs", space.id])).tabs
+      .filter((item) => item.active)
+      .map((item) => item.id),
+    [details.id],
+  );
+  assert.deepEqual(await windowState(), windowBefore);
+  // A listing is an observation: it leaves the shown page where it is.
+  await json(["tabs", space.id]);
+  assert.equal(
+    (await chrome.evaluate(() => window.kamapathy.getState())).activeTabId,
+    details.id,
+  );
+  passed(
+    "a labeled click brings its tab forward in the shown agent space without changing the active space",
+  );
+  // Closing the window keeps the agents working on the same Kamapathy.
+  const endpoint = () => readFile(join(temporary, "profile", "agent", "endpoint"), "utf8");
+  const windowPages = () =>
+    browser.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return window
+        ? {
+            visible: window.isVisible(),
+            pages: window.contentView.children.map(
+              (view) => view.webContents?.getURL() ?? "",
+            ),
+          }
+        : null;
+    });
+  // The person is looking at a page of their own when the window closes.
+  const personalPage = `${fixture.origin}/forms/new`;
+  await chrome.evaluate(() =>
+    window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
+  );
+  await chrome.evaluate(
+    (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+    personalPage,
+  );
+  await waitForState(
+    chrome,
+    (state, url) =>
+      state.tabs.some(
+        (tab) => tab.url === url && tab.id === state.activeTabId && !tab.loading,
+      ),
+    personalPage,
+  );
+  await poll(async () => (await windowPages()).pages.includes(personalPage), {
+    timeoutMs: 10000,
+    label: "the person's own page",
+  });
+  const instance = await endpoint();
+  const spacesBefore = (await json(["spaces"])).spaces;
+  await browser.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].close(),
+  );
+  const away = await poll(
+    async () => {
+      const found = await windowPages();
+      return found && !found.visible ? found : null;
+    },
+    { timeoutMs: 10000, label: "the window closing into the background" },
+  );
+  // Nothing of the person's runs unseen; the agent's pages stay.
+  assert.deepEqual(
+    away.pages.filter((url) => url === personalPage),
+    [],
+  );
+  assert.ok(away.pages.includes(`${fixture.origin}/lab`), JSON.stringify(away.pages));
+  assert.equal(await endpoint(), instance);
+  assert.equal((await cli(["health"])).output.trim(), `ok Kamapathy ${packageVersion}`);
+  await json(["navigate", details.id, `${fixture.origin}/lab`]);
+  const hidden = await observe(details.id);
+  await cli([
+    "click",
+    details.id,
+    ref(hidden, "Show delayed result"),
+    "--label",
+    "Open the details",
+  ]);
+  await cli(["wait", details.id, "--stdin"], {
+    selector: "#delayed-result",
+    text: "Delayed content ready",
+    timeoutMs: 5000,
+  });
+  assert.deepEqual((await json(["spaces"])).spaces, spacesBefore);
+  await browser.evaluate(({ app }) => app.emit("activate"));
+  await poll(async () => (await windowPages())?.visible === true, {
+    timeoutMs: 10000,
+    label: "the window coming back",
+  });
+  // The page the person was looking at is laid out again; their other pages
+  // are made as they open them.
+  await poll(async () => (await windowPages()).pages.includes(personalPage), {
+    timeoutMs: 10000,
+    label: "the person's page laid out again",
+  });
+  await cli(["close", details.id]);
+  passed("agents keep working with the window closed on the same instance");
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");
@@ -2444,7 +2661,16 @@ try {
       : [];
     await writeFile(join(diagnostics, "events.json"), JSON.stringify(events, null, 2)).catch(() => {});
   }
-  if (browser) await browser.close().catch(() => {});
+  if (browser) {
+    // A quit while agents are at work asks the person first, and no one is
+    // here to answer it, so this run answers its own question.
+    await browser
+      .evaluate(({ dialog }) => {
+        dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+      })
+      .catch(() => {});
+    await browser.close().catch(() => {});
+  }
   await fixture.close();
   await feed.close();
   await rm(temporary, {

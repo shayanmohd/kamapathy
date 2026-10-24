@@ -5,6 +5,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
+import type { CursorPoint } from "../electron/agent/cursor";
 import type { LayoutMetrics } from "../electron/agent/screenshot";
 import type { AutomationController } from "../electron/agent/server";
 import type { HttpCredentials, PromptReceipts } from "../electron/prompts";
@@ -16,8 +17,10 @@ import {
   newTab,
   openingTab,
   PAGE_BUDGET,
+  patchTask,
 } from "../shared/state";
 import type {
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -212,7 +215,12 @@ export class FakeController implements AutomationController {
     (tabId: string, contents: WebContents) => void
   >();
   calls: BrowserAction[] = [];
-  activity: { spaceId?: string; message: string; kind: string }[] = [];
+  activity: {
+    spaceId?: string;
+    message: string;
+    kind: string;
+    agentText?: string;
+  }[] = [];
   accessedTabs: string[] = [];
   private blockedRedirects = new Set<(tabId: string, url: string) => void>();
   private downloadStarts = new Set<(tabId: string) => void>();
@@ -374,13 +382,51 @@ export class FakeController implements AutomationController {
   pdfDocument(tabId: string) {
     return this.pdfTabs.has(tabId);
   }
-  addActivity(spaceId: string | undefined, message: string, kind: string) {
-    this.activity.push({ spaceId, message, kind });
+  addActivity(
+    spaceId: string | undefined,
+    message: string,
+    kind: string,
+    agentText?: string,
+  ) {
+    this.activity.push({
+      spaceId,
+      message,
+      kind,
+      ...(agentText ? { agentText } : {}),
+    });
+  }
+  setTask(spaceId: string, patch: Partial<AgentTask> | null) {
+    const space = this.state.spaces.find((item) => item.id === spaceId);
+    if (!space) throw new Error("Space was not found.");
+    if (patchTask(space, patch)) this.emit();
+    return space.task;
   }
   shownTab(spaceId: string): Tab | undefined {
     if (spaceId === this.state.activeSpaceId)
       return this.state.tabs.find((tab) => tab.id === this.state.activeTabId);
-    return openingTab(this.state, spaceId);
+    return openingTab(this.state, spaceId, this.lastShown.get(spaceId));
+  }
+  // The tab ids showAgentTab was called with, in order, and how many turns
+  // the fake takes over a reveal, so tests can order it without timers.
+  shown: string[] = [];
+  frames = 0;
+  private lastShown = new Map<string, string>();
+  async showAgentTab(tabId: string) {
+    this.shown.push(tabId);
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (tab) {
+      if (tab.spaceId === this.state.activeSpaceId)
+        this.state.activeTabId = tab.id;
+      else this.lastShown.set(tab.spaceId, tab.id);
+      this.emit();
+    }
+    for (let frame = 0; frame < this.frames; frame += 1)
+      await new Promise((resolve) => setImmediate(resolve));
+  }
+  // Every point reported for the agent's cursor, with the label it carried.
+  pointers: { tabId: string; point: CursorPoint; label?: string }[] = [];
+  reportPointer(tabId: string, point: CursorPoint, label?: string) {
+    this.pointers.push({ tabId, point, ...(label ? { label } : {}) });
   }
   // Also recorded in calls, as the tab:create it replaces.
   openAgentTab(spaceId: string, url?: string): Tab {

@@ -1,6 +1,6 @@
 // The members of Space.
 
-const property = (name, signature, summary, returns) => ({
+const property = (name, signature, summary, returns, since = 1) => ({
   name,
   kind: "property",
   signature,
@@ -8,7 +8,7 @@ const property = (name, signature, summary, returns) => ({
   args: [],
   returns,
   errors: [],
-  since: 1,
+  since,
 });
 const method = (
   name,
@@ -85,6 +85,20 @@ export const SPACE = [
     "space.since",
     "When the person got control, in milliseconds since 1970.",
     "number | undefined",
+  ),
+  property(
+    "Space.status",
+    "space.status",
+    "The status the person is reading, set through setStatus or read from a listing.",
+    "string | undefined",
+    3,
+  ),
+  property(
+    "Space.state",
+    "space.state",
+    "How the space stands: it needs the person, the task is done or failed, or a page stopped working.",
+    '"needs-you" | "done" | "failed" | "error" | undefined',
+    3,
   ),
   method(
     "Space.open",
@@ -195,6 +209,33 @@ export const SPACE = [
     errors: [],
     since: 2,
   },
+  method(
+    "Space.setStatus",
+    "space.setStatus(text)",
+    "Shows the person what the agent is doing. null or an empty text clears it.",
+    [{ name: "text", kind: "text", min: 0, max: 120, nullable: true }],
+    "Promise<{ ok: true, status?: string }>",
+    "POST /spaces/:id/status",
+    ["invalid_field", "human_control"],
+    {
+      expected:
+        "space.setStatus(text) with at most 120 characters, or null to clear",
+      since: 3,
+    },
+  ),
+  method(
+    "Space.fail",
+    "space.fail(message)",
+    "Reports that the task cannot be done and hands the space to the person.",
+    [{ name: "message", kind: "text", max: 300 }],
+    'Promise<{ ok: true, owner: "human", state: "failed", status: string }>',
+    "POST /spaces/:id/fail",
+    ["invalid_field", "human_control"],
+    {
+      expected: "space.fail(message) with 1 to 300 characters",
+      since: 3,
+    },
+  ),
   method(
     "Space.handoff",
     "space.handoff()",

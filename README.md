@@ -51,7 +51,7 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
     </td>
     <td width="33%" valign="top">
       <h3>Agents in plain sight</h3>
-      A green ring and a small bar show when an agent is working. <b>Take over</b> pauses it, <b>Let agent continue</b> hands it back, <b>Stop</b> ends its work in that space.
+      A green ring, the agent's own cursor and a short status show what an agent is doing. <b>Take over</b> pauses it, <b>Let agent continue</b> hands it back, <b>Stop</b> ends its work in that space.
     </td>
     <td width="33%" valign="top">
       <h3>Your sign-ins, on purpose</h3>
@@ -221,7 +221,7 @@ sequenceDiagram
     A->>K: space create "Dinner booking"
     K-->>Y: Dinner booking started with your sign-ins
     A->>K: open, snapshot, fill the form
-    K-->>Y: the ring and the agent bar show every step
+    K-->>Y: the ring, the cursor and the agent's status show every step
     A->>K: handoff, because the site asks for a card
     K-->>Y: You're in control
     Y->>K: pay, then Let agent continue
@@ -302,6 +302,7 @@ Controls:
 - Snapshots are compact: visible text plus controls with short refs such as `@e12`, their state and current values. Password, one-time code and card fields read as `(value hidden)`. Snapshots read open shadow roots and same-origin frames, nested ones included, and list cross-origin frames without reading them. A snapshot can print the page's structure as an outline instead of its text, keep only what is on screen, read one control's subtree, continue in parts, and give each control a locator that still names it in a later run.
 - Agents name a control by its ref or by a selector: CSS, `text=`, `role=`, `href=`, `xpath=`, an ending `:has-text("...")` or `:text-is("...")`, and an ending `>> nth=N`. A selector that matches nothing, or several controls an action could take, is answered with counts and candidates instead of a guess.
 - Agents can click, fill, select files, press keys, drag, scroll, wait for changes and run several steps in one batch or one script.
+- Agents show a short status, label their clicks, say when they cannot finish, and keep working after you close the window until you quit. A cursor glides to the point an agent acts on, the status and the latest label sit under the space's name, and a quit while an agent is working asks you first.
 - Cross-origin frames, canvas editors and JavaScript dialogs still need a handoff: the agent asks you to continue there.
 - Agents can download an update with `upgrade`; only you install it.
 - The connection is a Unix socket or Windows named pipe that only your account can open, with no token. Any program running as you can drive agent spaces while access is on, now including the sites you are signed in to, which is why the isolation switches exist. **Stop** in the agent bar ends the agent's access to that one space, and turning off **Agent access** in Settings is the hard stop: it refuses every agent at once, including `resume`.
@@ -359,6 +360,13 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - `GET /tabs/:id/screenshot` allows 15000 ms, not 30000, for the load wait and the capture together.
 - `screenshot` prints `saved <path> (<width>x<height>)`, and `--json` adds `width`, `height`, `clip` and `pixelRatio`.
 - With a JavaScript dialog open, `role=` selectors, snapshot locators and screenshots fail at once with `409 dialog_open` instead of waiting out their timeout.
+- Agents can say what they are doing with `status SPACE_ID "<text>"` and give up with `fail SPACE_ID "<message>"` (`space.setStatus(text)` and `space.fail(message)`), and `spaces` lines and a `Space` carry the space's `state` and `status`. A reported failure hands the space to you with its message as the status, and the agent's later requests there answer `409 human_control` with `reason: "failed"` until you let it continue.
+- `click`, `fill`, `press`, `scroll` and `drag` take `--label "<a few words>"` anywhere in their arguments, and those batch steps take a `label` field. Every input method now ends with an options object: `page.click(target, options?)`, `page.fill(target, value, options?)`, `page.press(key, target?, options?)`, `page.scroll(direction, pixels?, target?, options?)` and `page.drag(source, target, options?)`. A bad option is refused before anything is sent, naming the new shape, as in `page.click got unknown option "labl". Expected page.click(target, { label? }).`
+- An agent space whose agent finished reads **Done** instead of **Agent finished**, and **Needs you** follows the agent's own task state, so it also shows while the agent still holds the space. The activity entry still says Agent finished and now carries the agent's last status.
+- A route that reads or acts on a page makes its tab the one its space shows: in the space you are looking at that tab becomes active, and in another space it becomes the tab that space opens on. Your space, the window and keyboard focus never change, and the routes that only list or read state move nothing.
+- Agent pages are created at the size of Kamapathy's content area instead of 1200 by 800, so a page you have not looked at yet reports the viewport it will have when you do.
+- Closing the window keeps Kamapathy running while agents can work, so a script keeps the same instance, screenshots included. A quit while an agent is working or waiting for you asks first, and for ten minutes after it the client refuses to start Kamapathy, failing with `not_connected` and reason `quit_by_person`.
+- A space's activity carries the agent's own words: the label of each action, a line for every status change, and how the task ended.
 
 </details>
 

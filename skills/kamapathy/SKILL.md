@@ -39,6 +39,16 @@ For files, read the [file selection guidance](references/actions.md#select-files
 
 When a task takes many steps, write them as one script in JavaScript or TypeScript and run it with `node scripts/kamapathy.mjs run task.mjs` (or `task.mts` for TypeScript), `run -` for stdin, or `run -e "<code>"`; add `--ts` for TypeScript through stdin or `-e`. The script gets the client as the global `kamapathy` plus `openSpace`, `createSpace`, `space`, `spaces`, `requestSpace` and `help`, and connects on its first call. A space has `page(label)`, `pages`, `tabs`, `open`, `newPage`, `adopt`, `release`, `handoff`, `resume`, `waitForControl` and `finish({ keep })`; a page has `snapshot`, `text`, `click`, `fill`, `press`, `scroll`, `drag`, `wait`, `batch`, `upload`, `screenshot`, `pdfText`, `navigate`, `opener` and `close`. A Page, a tab ID or a label works wherever a page goes. Every call sends one documented route; nothing runs inside the page. Check `help("page.click")` instead of guessing, because unknown options are refused. The run holds its output until it ends and stops after 300000 ms unless `--timeout <ms>` allows longer, so keep your shell tool's timeout above --timeout. repl is for people; agents use run. Read [scripting.md](references/scripting.md) for the full surface, examples, errors and the same safety rules as actions, and [api.md](references/api.md) for every call.
 
+## Keep the person informed
+
+The person watching Kamapathy sees only what you tell them, so keep a space's status current and name the steps that matter.
+
+- `status SPACE_ID "<what you are doing>"` (`space.setStatus(text)`) shows the person what you are doing, in at most 120 characters. Set one when the task starts and at each milestone, and clear it with `status SPACE_ID --clear` when nothing is happening. Repeating the same text changes nothing.
+- Add `--label "<3 to 6 words>"` to the clicks, drags and other actions that matter, as in `click SPACE_ID:p1 @e4 --label "Open the details"`, or `{ label: "Open the details" }` as the last argument in a script. The label shows beside the agent's cursor and under the space's name while the action runs, and stays on its activity entry. Observation commands take no label.
+- When the task cannot be done, run `fail SPACE_ID "<why it cannot be done>"` (`space.fail(message)`), tell the person, and stop. The space goes to them with your message as its status, and your later requests there are refused with `human_control` and `reason: "failed"` until they let you continue.
+- Never put a field value, a secret or personal data in a label or a status. Both are on the person's screen and in the space's activity.
+- Closing the window does not stop you: Kamapathy keeps running, snapshots and actions keep working, and only screenshots wait until the person opens the window again. When the client says the person quit Kamapathy while an agent was working, they stopped the work on purpose: ask them before starting it again, and never work around it.
+
 ## Stop and verify
 
 Batch execution stops on its first failure. Earlier actions may already have changed the page. Inspect the returned completed actions and current page before deciding what remains. Never replay an entire form batch after a timeout or retry a submission without checking its outcome. A successful click is not proof of a successful submission.

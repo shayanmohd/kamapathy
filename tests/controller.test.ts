@@ -154,6 +154,16 @@ class FakeContents extends EventEmitter {
   focus = () => this.emit("focus");
   isDestroyed = () => this.destroyed;
   getURL = () => this.url;
+  // Only the cursor page is loaded from a file, and only it is scripted.
+  loadFile = vi.fn(async (file: string) => {
+    this.url = `file://${file}`;
+  });
+  executeJavaScript = vi.fn(async () => ({
+    width: 44,
+    height: 44,
+    reducedMotion: false,
+  }));
+  getZoomFactor = () => 1.2 ** this.zoom;
   getZoomLevel = () => this.zoom;
   setZoomLevel = (value: number) => {
     this.zoom = value;
@@ -166,6 +176,19 @@ class FakeContents extends EventEmitter {
         this.pending.push({ url, reject });
       }),
   );
+  frames?: (image: unknown) => void;
+  beginFrameSubscription = vi.fn(
+    (_onlyDirty: boolean, callback: (image: unknown) => void) => {
+      this.frames = callback;
+    },
+  );
+  endFrameSubscription = vi.fn(() => {
+    this.frames = undefined;
+  });
+  // One rendered frame, as Chromium reports it to a subscriber.
+  frame() {
+    this.frames?.({});
+  }
   close() {
     // Chromium can finish stopping a navigation while a view is being closed.
     this.emit("did-stop-loading");
@@ -188,6 +211,7 @@ class FakeView {
   setBounds = vi.fn((value: Bounds) => {
     this.bounds = value;
   });
+  setBackgroundColor = vi.fn();
   setBorderRadius = vi.fn();
   getVisible() {
     return this.visible;
@@ -329,6 +353,16 @@ function preferencesOf(page: FakeContents) {
 function windowOf(browser: BrowserController) {
   return browser.window as unknown as WindowFake;
 }
+// The cursor's view is the only one that loads a local file.
+function overlayViews() {
+  return vi
+    .mocked(WebContentsView)
+    .mock.results.map((result) => result.value as FakeView)
+    .filter((view) => view.webContents.loadFile.mock.calls.length > 0);
+}
+const overlayView = () => overlayViews()[0];
+// Everything the overlay awaits is already resolved, so one turn is enough.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 type OpenDecision =
   | { action: "deny" }
   | {
@@ -874,12 +908,13 @@ describe("native browser lifecycle", () => {
     browser.releaseHold(browser.holdForPerson(space.id, "device", "usb"));
     expect(space.owner).toBe("agent");
     expect(space).not.toHaveProperty("control");
+    // Only a handoff and a reported failure name their own reason.
     await expect(
       browser.dispatch({
         type: "space:ownership",
         id: space.id,
         owner: "human",
-        reason: "failed",
+        reason: "approval",
       } as never),
     ).rejects.toThrow();
     expect(space.owner).toBe("agent");
@@ -2689,7 +2724,8 @@ describe("agent captures", () => {
   it("a capture of a background tab lends its view to a never-shown capture window and puts it back at its old index", async () => {
     const browser = controller();
     const window = windowOf(browser);
-    // The person shrank the window below the size a never-shown view keeps.
+    // The person shrank the window below the content area a never-shown
+    // agent view was made at.
     window.getBounds = () => ({ x: 40, y: 60, width: 900, height: 600 });
     const first = browser.state.activeTabId;
     await browser.dispatch({
@@ -2732,7 +2768,7 @@ describe("agent captures", () => {
       inHost: true,
       visible: true,
       bounds: { x: 40, y: 60, width: 900, height: 600 },
-      grown: [[1200, 800]],
+      grown: [[1200, 780]],
     });
     const host = captureWindow();
     expect(vi.mocked(BaseWindow).mock.calls).toEqual([
@@ -2753,7 +2789,7 @@ describe("agent captures", () => {
     expect(host.contentView.children).toEqual([]);
     expect(window.contentView.children.indexOf(view)).toBe(index);
     expect(view.visible).toBe(false);
-    expect(view.bounds).toEqual({ x: 0, y: 0, width: 1200, height: 800 });
+    expect(view.bounds).toEqual({ x: 200, y: 80, width: 1000, height: 700 });
     expect(layout).toHaveBeenCalledTimes(1);
     for (const spy of [window.show, window.focus, host.show, host.focus])
       expect(spy).not.toHaveBeenCalled();
@@ -5186,5 +5222,496 @@ describe("links and files from other apps", () => {
         .map((tab) => tab.url)
         .slice(3),
     ).toEqual(["https://b.example/", "https://c.example/"]);
+  });
+});
+
+
+describe("agent task state", () => {
+  it("setTask creates, patches and deletes a space's task and bumps changedAt only on a state change", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const browser = controller();
+      const space = browser.createAgentSpace("Task");
+      let emits = 0;
+      browser.subscribe(() => (emits += 1));
+      expect(browser.setTask(space.id, { status: "Comparing prices" })).toEqual({
+        status: "Comparing prices",
+        changedAt: 1000,
+      });
+      expect(emits).toBe(1);
+      // A status change leaves the key the renderer marks as seen alone.
+      vi.setSystemTime(2000);
+      expect(browser.setTask(space.id, { status: "Checking stock" })).toEqual({
+        status: "Checking stock",
+        changedAt: 1000,
+      });
+      expect(emits).toBe(2);
+      browser.setTask(space.id, { status: "Checking stock" });
+      expect(emits).toBe(2);
+      expect(
+        browser.setTask(space.id, { state: "needs-you", reason: "Sign in" }),
+      ).toEqual({
+        status: "Checking stock",
+        state: "needs-you",
+        reason: "Sign in",
+        changedAt: 2000,
+      });
+      expect(emits).toBe(3);
+      vi.setSystemTime(3000);
+      expect(
+        browser.setTask(space.id, { state: undefined, reason: undefined }),
+      ).toEqual({ status: "Checking stock", changedAt: 3000 });
+      expect(space.task).not.toHaveProperty("state");
+      expect(space.task).not.toHaveProperty("reason");
+      expect(emits).toBe(4);
+      expect(browser.setTask(space.id, null)).toBeUndefined();
+      expect(space).not.toHaveProperty("task");
+      expect(emits).toBe(5);
+      browser.setTask(space.id, null);
+      expect(emits).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a crashed agent page is flagged, logged once and cleared when its next main-frame navigation starts", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: space.id,
+      url: "https://example.com/",
+      background: true,
+    });
+    const tab = browser.state.tabs.at(-1)!;
+    const page = contents(browser, tab.id);
+    const crashes = () =>
+      browser.state.activity.filter(
+        (entry) => entry.message === "A page stopped working in this space",
+      );
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(tab.crashed).toBe(true);
+    expect(tab.error).toBe(
+      "The page process stopped (crashed). Reload to try again.",
+    );
+    expect(crashes()).toEqual([
+      expect.objectContaining({ spaceId: space.id, kind: "warning" }),
+    ]);
+    // The flag itself keeps a second crash of the same page quiet.
+    page.emit("render-process-gone", {}, { reason: "oom" });
+    expect(crashes()).toHaveLength(1);
+    page.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+      url: "https://example.com/again",
+    });
+    expect(tab).not.toHaveProperty("crashed");
+    expect(tab).not.toHaveProperty("error");
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(crashes()).toHaveLength(2);
+    // A crash while the person has control is theirs to see on the page.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    page.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+      url: "https://example.com/third",
+    });
+    page.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(tab.crashed).toBe(true);
+    expect(crashes()).toHaveLength(2);
+    // A personal space nobody granted writes nothing either.
+    const own = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    contents(browser, own.id).emit(
+      "render-process-gone",
+      {},
+      { reason: "crashed" },
+    );
+    expect(own.crashed).toBe(true);
+    expect(crashes()).toHaveLength(2);
+  });
+
+  it("activity entries carry the active label, the finish entry the status, and nothing else", () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    browser.setTask(space.id, {
+      status: "Booking a table",
+      label: { text: "Pick a time", active: true, at: Date.now() },
+    });
+    browser.addActivity(space.id, "Agent clicked Reserve");
+    expect(browser.state.activity[0]).toMatchObject({
+      message: "Agent clicked Reserve",
+      agentText: "Pick a time",
+    });
+    // An explicit text wins over the label, and keeps its own limit.
+    browser.addActivity(
+      space.id,
+      "Agent updated its status",
+      "info",
+      "y".repeat(400),
+    );
+    expect(browser.state.activity[0].agentText).toBe("y".repeat(300));
+    browser.setTask(space.id, {
+      label: { text: "Pick a time", active: false, at: Date.now() },
+    });
+    browser.addActivity(space.id, "Agent opened example.com");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+    browser.addActivity(space.id, "Agent finished", "success");
+    expect(browser.state.activity[0].agentText).toBe("Booking a table");
+    // Kamapathy's own words and the person's are never shown as the agent's.
+    browser.addActivity(space.id, "You took control. Agent access is paused.");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+    browser.setTask(space.id, null);
+    browser.addActivity(space.id, "Agent finished", "success");
+    expect(browser.state.activity[0]).not.toHaveProperty("agentText");
+  });
+
+  it("a failure handover changes the owner without a control entry", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+      reason: "failed",
+    });
+    expect(space.owner).toBe("human");
+    expect(space.control).toMatchObject({ reason: "failed" });
+    expect(
+      browser.state.activity.some((entry) =>
+        entry.message.startsWith("You took control"),
+      ),
+    ).toBe(false);
+  });
+
+  it("space names are cleaned as agent text", async () => {
+    const browser = controller();
+    await browser.dispatch({
+      type: "space:create",
+      name: "Pa\u202eid\u200e work",
+      color: "blue",
+      kind: "personal",
+    });
+    const space = browser.state.spaces.at(-1)!;
+    expect(space.name).toBe("Paid work");
+    await browser.dispatch({
+      type: "space:rename",
+      id: space.id,
+      name: "\u200e\u202a ",
+    });
+    expect(space.name).toBe("Untitled space");
+    await expect(
+      browser.dispatch({
+        type: "space:rename",
+        id: space.id,
+        name: "x".repeat(49),
+      }),
+    ).rejects.toThrow("Invalid text value.");
+    expect(browser.createAgentSpace("Trip\u200e planning").name).toBe(
+      "Trip planning",
+    );
+    expect(browser.createAgentSpace("\u202a\u200f").name).toBe("Agent space");
+  });
+
+  it("showAgentTab reveals a tab in place and waits at most 500 ms for a frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = controller();
+      const space = browser.createAgentSpace("Task");
+      const first = browser.openAgentTab(space.id, "https://example.com/one");
+      const second = browser.openAgentTab(space.id, "https://example.com/two");
+      await browser.dispatch({ type: "tab:activate", id: first.id });
+      const page = contents(browser, second.id);
+      // The reveal makes the tab the shown one at once and then waits for
+      // the frame the view draws in its place.
+      let revealed = false;
+      const reveal = browser
+        .showAgentTab(second.id)
+        .then(() => (revealed = true));
+      expect(browser.state.activeTabId).toBe(second.id);
+      expect(browser.state.activeSpaceId).toBe(space.id);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(revealed).toBe(false);
+      page.frame();
+      await reveal;
+      expect(revealed).toBe(true);
+      expect(page.endFrameSubscription).toHaveBeenCalledTimes(1);
+      // A page that never draws lets the reveal through at the cap.
+      let capped = false;
+      const next = browser.showAgentTab(first.id).then(() => (capped = true));
+      await vi.advanceTimersByTimeAsync(499);
+      expect(capped).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await next;
+      expect(capped).toBe(true);
+      // A tab the window is not showing has no frame to wait for: another
+      // space's page, and any page while the content area is hidden.
+      const other = browser.createAgentSpace("Other");
+      const elsewhere = browser.openAgentTab(
+        other.id,
+        "https://example.com/three",
+      );
+      const background = contents(browser, elsewhere.id);
+      await browser.showAgentTab(elsewhere.id);
+      expect(browser.state.activeSpaceId).toBe(space.id);
+      expect(background.beginFrameSubscription).not.toHaveBeenCalled();
+      browser.setContentBounds({
+        x: 200,
+        y: 80,
+        width: 1000,
+        height: 700,
+        hidden: true,
+      });
+      vi.mocked(page.beginFrameSubscription).mockClear();
+      await browser.showAgentTab(second.id);
+      expect(browser.state.activeTabId).toBe(second.id);
+      expect(page.beginFrameSubscription).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("entering the background destroys only ungranted personal views and leaving it lays out again", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    browser.grantAccess("work");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: "work",
+      url: "https://example.org/",
+      background: true,
+    });
+    const grantedTab = browser.state.tabs.at(-1)!;
+    const own = browser.state.tabs.find((tab) => tab.spaceId === "personal")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.net/",
+    });
+    const state = await browser.dispatch({
+      type: "tab:create",
+      spaceId: "personal",
+      url: "https://example.com/two",
+      background: true,
+    });
+    const second = state.tabs.at(-1)!;
+    const ownPage = contents(browser, own.id);
+    const secondPage = contents(browser, second.id);
+    const agentPage = contents(browser, agentTab.id);
+    const grantedPage = contents(browser, grantedTab.id);
+    expect(browser.state.activeTabId).toBe(own.id);
+    browser.enterBackground();
+    // Only the person's own pages go.
+    expect(ownPage.isDestroyed()).toBe(true);
+    expect(secondPage.isDestroyed()).toBe(true);
+    expect(agentPage.isDestroyed()).toBe(false);
+    expect(grantedPage.isDestroyed()).toBe(false);
+    expect(viewFor(agentPage).getVisible()).toBe(false);
+    // Restore tabs is on, so their tabs stay as the next start would have
+    // them and the page the person was looking at is made again on the way
+    // back.
+    expect(browser.state.tabs.filter((tab) => tab.spaceId === "personal")).toEqual([
+      expect.objectContaining({ id: own.id, loading: false }),
+      expect.objectContaining({ id: second.id }),
+    ]);
+    expect(browser.peekWebContents(own.id)).toBeUndefined();
+    browser.leaveBackground();
+    const again = browser.peekWebContents(own.id) as unknown as FakeContents;
+    expect(again).toBeTruthy();
+    expect(again).not.toBe(ownPage);
+    expect(viewFor(again).getVisible()).toBe(true);
+    // With Restore tabs off the person's spaces keep one new tab, their old
+    // ones retire as theirs, and what the space shows still exists.
+    const closed: string[] = [];
+    const stop = browser.registry.on((event) => {
+      if (event.type === "closed")
+        closed.push(`${event.tabId}:${event.closedBy}`);
+    });
+    browser.state.settings.restoreSession = false;
+    browser.enterBackground();
+    stop();
+    expect(closed.sort()).toEqual(
+      [`${own.id}:person`, `${second.id}:person`].sort(),
+    );
+    const personal = browser.state.tabs.filter(
+      (tab) => tab.spaceId === "personal",
+    );
+    expect(personal).toHaveLength(1);
+    expect(personal[0].url).toBe(HOME_URL);
+    expect(browser.state.activeTabId).toBe(personal[0].id);
+    expect(browser.shownTab("personal")?.id).toBe(personal[0].id);
+    expect(browser.state.tabs.filter((tab) => tab.spaceId === "work")).toHaveLength(2);
+    expect(agentPage.isDestroyed()).toBe(false);
+  });
+
+  it("agent views are created at the content area size and other views keep 1200 by 800", async () => {
+    const browser = controller();
+    const area = { x: 200, y: 80, width: 1000, height: 700 };
+    const space = browser.createAgentSpace("Task");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    expect(viewFor(contents(browser, agentTab.id)).getBounds()).toEqual(area);
+    // The person's own page keeps the size it has always had.
+    const own = browser.state.tabs.find((tab) => tab.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    expect(viewFor(contents(browser, own.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
+    // A granted space follows agent rules, so its next page does too.
+    browser.grantAccess("work");
+    await browser.dispatch({
+      type: "tab:create",
+      spaceId: "work",
+      url: "https://example.net/",
+      background: true,
+    });
+    const granted = browser.state.tabs.at(-1)!;
+    expect(viewFor(contents(browser, granted.id)).getBounds()).toEqual(area);
+    // Without a content area to copy, agent pages keep today's size.
+    browser.setContentBounds({ ...area, hidden: true });
+    const hidden = browser.openAgentTab(space.id, "https://example.com/two");
+    expect(viewFor(contents(browser, hidden.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
+    browser.setContentBounds({ ...area, width: 0, hidden: false });
+    const zero = browser.openAgentTab(space.id, "https://example.com/three");
+    expect(viewFor(contents(browser, zero.id)).getBounds()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    });
+  });
+});
+
+describe("agent cursor", () => {
+  it("the cursor overlay is created once, raised above each new page view and disposed with the controller", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.openAgentTab(space.id, "https://example.com/");
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    const window = windowOf(browser);
+    const added = () =>
+      window.contentView.addChildView.mock.calls.map(([view]) => view);
+    browser.reportPointer(tab.id, { type: "move", x: 100, y: 50 });
+    await settle();
+    const overlay = overlayView();
+    expect(overlay.getVisible()).toBe(true);
+    expect(added().filter((view) => view === overlay)).toHaveLength(1);
+    // A page view made later joins the window above the cursor, so the
+    // overlay is added again over it.
+    browser.openAgentTab(space.id, "https://example.com/two");
+    expect(added().at(-1)).toBe(overlay);
+    expect(added().filter((view) => view === overlay)).toHaveLength(2);
+    expect(overlayViews()).toHaveLength(1);
+    // Every layout re-checks the rules: the page view moved, so the place
+    // the cursor had is no longer the point the agent acted on.
+    browser.setContentBounds({
+      x: 200,
+      y: 80,
+      width: 900,
+      height: 700,
+      hidden: false,
+    });
+    expect(overlay.getVisible()).toBe(false);
+    browser.dispose();
+    expect(window.contentView.removeChildView).toHaveBeenCalledWith(overlay);
+    expect(overlay.webContents.isDestroyed()).toBe(true);
+  });
+
+  it("reportPointer shows the cursor only for the shown tab of an agent-owned space", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Task");
+    const tab = browser.openAgentTab(space.id, "https://example.com/");
+    const background = browser.openAgentTab(
+      space.id,
+      "https://example.com/two",
+    );
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    const point = async (id: string) => {
+      browser.reportPointer(
+        id,
+        { type: "press", x: 100, y: 50 },
+        "Pick a time",
+      );
+      await settle();
+      return overlayView().getVisible();
+    };
+    expect(await point(tab.id)).toBe(true);
+    expect(overlayView().getBounds()).toMatchObject({
+      x: 200 + 100 - 14,
+      y: 80 + 50 - 14,
+    });
+    // A page of the same space that the person is not looking at.
+    expect(await point(background.id)).toBe(false);
+    expect(await point(tab.id)).toBe(true);
+    // The person's own page, even while they are looking at it.
+    const own = browser.state.tabs.find((item) => item.spaceId === "work")!;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id: own.id,
+      url: "https://example.org/",
+    });
+    await browser.dispatch({ type: "tab:activate", id: own.id });
+    expect(await point(own.id)).toBe(false);
+    await browser.dispatch({ type: "tab:activate", id: tab.id });
+    expect(await point(tab.id)).toBe(true);
+    // The person has control of the agent's space.
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    // The change hides it where it stands, without waiting for a point.
+    expect(overlayView().getVisible()).toBe(false);
+    expect(await point(tab.id)).toBe(false);
+    await browser.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+    expect(await point(tab.id)).toBe(true);
+    // Agent access off is the hard stop.
+    await browser.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: false },
+    });
+    expect(overlayView().getVisible()).toBe(false);
+    expect(await point(tab.id)).toBe(false);
+    await browser.dispatch({
+      type: "settings:update",
+      settings: { automationEnabled: true },
+    });
+    expect(await point(tab.id)).toBe(true);
+    // A space whose access ended is no agent's any more.
+    browser.endAccess(space.id, { by: "agent", reason: "finished" });
+    expect(await point(tab.id)).toBe(false);
+    // Nothing an agent reports can cost it its action.
+    expect(() =>
+      browser.reportPointer("missing", { type: "move", x: 1, y: 1 }),
+    ).not.toThrow();
+    browser.dispose();
+    expect(() =>
+      browser.reportPointer(tab.id, { type: "move", x: 1, y: 1 }),
+    ).not.toThrow();
   });
 });

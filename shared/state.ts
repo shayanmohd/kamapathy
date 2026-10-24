@@ -1,4 +1,5 @@
 import type {
+  AgentTask,
   BrowserState,
   Space,
   Tab,
@@ -17,6 +18,41 @@ export function agentRules(space: Pick<Space, "kind" | "access">): boolean {
   return space.kind === "agent" || space.access === "granted";
 }
 export const id = () => globalThis.crypto.randomUUID();
+// The one way a space's task changes, shared so the controller and the test
+// controller behave alike. Fields a patch leaves undefined are deleted, a
+// null patch deletes the task, and changedAt moves only when the state does,
+// so a status or label change keeps the key the renderer marks as seen. A
+// patch cannot set changedAt itself. True when anything changed.
+export function patchTask(
+  space: Space,
+  patch: Partial<AgentTask> | null,
+): boolean {
+  if (!patch) {
+    if (!space.task) return false;
+    delete space.task;
+    return true;
+  }
+  const now = Date.now();
+  const task: AgentTask = space.task ? { ...space.task } : { changedAt: now };
+  let changed = !space.task;
+  const fields = task as unknown as Record<string, unknown>;
+  const next = patch as Record<string, unknown>;
+  for (const key of ["status", "state", "reason", "label"]) {
+    if (!(key in patch)) continue;
+    if (next[key] === undefined) {
+      if (!(key in fields)) continue;
+      delete fields[key];
+    } else {
+      if (fields[key] === next[key]) continue;
+      fields[key] = next[key];
+    }
+    changed = true;
+  }
+  if (task.state !== space.task?.state) task.changedAt = now;
+  if (!changed) return false;
+  space.task = task;
+  return true;
+}
 export function newTab(spaceId: string, url = HOME_URL): Tab {
   return {
     id: id(),
@@ -130,6 +166,7 @@ export function initialState(
       seenVersion: version,
       extensionUpdates: true,
       extensionDeveloperMode: false,
+      backgroundNoticeShown: false,
     },
     platform,
     version,

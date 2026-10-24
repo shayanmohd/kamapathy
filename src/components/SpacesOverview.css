@@ -103,6 +103,9 @@
   white-space: nowrap;
   color: var(--secondary);
 }
+.space-card > .status-line {
+  margin-top: -4px;
+}
 .space-card-actions {
   position: absolute;
   top: 8px;

@@ -17,6 +17,7 @@ import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AGENT_TEXT_LIMITS, cleanAgentText } from "../shared/agent-text";
 import { isPermissionKey } from "../shared/permissions";
 import {
   agentRules,
@@ -24,6 +25,7 @@ import {
   newTab,
   openingTab,
   PAGE_BUDGET,
+  patchTask,
 } from "../shared/state";
 import { extensionIdOf } from "../shared/extensions";
 import {
@@ -40,6 +42,7 @@ import {
 import type { UrlOptions } from "../shared/url";
 import type {
   Activity,
+  AgentTask,
   BrowserAction,
   BrowserState,
   ClosedBy,
@@ -58,6 +61,7 @@ import type {
 } from "../shared/types";
 import { inputMarker } from "./agent/input/marker";
 import { activeSpace } from "./agent/authority";
+import { CursorOverlay, type CursorPoint } from "./agent/cursor";
 import { PDF_VIEWER_ID } from "./agent/session/frames";
 import { TabRegistry } from "./agent/tab-registry";
 import { CaptureHost } from "./capture-host";
@@ -179,6 +183,8 @@ function importedPages(value: unknown, now: number): ImportedVisit[] {
 }
 
 const CAPTURE_TIMEOUT = 300;
+// How long a reveal waits for the revealed page to draw.
+const REVEAL_FRAME_TIMEOUT = 500;
 // Keeps frames sharp on 2x displays without sending larger captures.
 const FRAME_SCALE = 2;
 const THUMBNAIL_WIDTH = 480;
@@ -252,6 +258,7 @@ export class BrowserController {
   private lastFind = { text: "", tabId: "" };
   private splitLeadingTabId: string | null = null;
   private frozen = false;
+  private background = false;
   private captures = new Map<string, string>();
   // The extension ids each session loaded. Section 17 supplies them.
   private extensionLookup: (partition: string) => readonly string[] = () => [];
@@ -261,6 +268,7 @@ export class BrowserController {
   // Space ids, most recently active first.
   private recentSpaces: string[];
   private captureHost: CaptureHost;
+  private overlay: CursorOverlay;
   // The agent server's download decision, asked before a space that follows
   // agent rules refuses a download.
   private downloadDecider?: (
@@ -313,6 +321,11 @@ export class BrowserController {
       }
     }
     nativeTheme.themeSource = state.settings.theme;
+    this.overlay = new CursorOverlay({
+      window,
+      view: (tabId) => this.views.get(tabId),
+      shows: (tabId) => this.cursorShows(tabId),
+    });
     this.bindShortcuts(window.webContents);
     window.on("resize", () => this.layout());
     this.layout();
@@ -376,17 +389,46 @@ export class BrowserController {
     }
   }
 
+  // A space's task, or nothing when no agent is at work in it.
+  private taskOf(spaceId: string | undefined): AgentTask | undefined {
+    if (!spaceId) return undefined;
+    return this.state.spaces.find((space) => space.id === spaceId)?.task;
+  }
+
+  // The only writer of a space's task.
+  setTask(
+    spaceId: string,
+    patch: Partial<AgentTask> | null,
+  ): AgentTask | undefined {
+    const space = this.getSpace(spaceId);
+    if (patchTask(space, patch)) this.emit();
+    return space.task;
+  }
+
   addActivity(
     spaceId: string | undefined,
     message: string,
     kind: Activity["kind"] = "info",
+    agentText?: string,
   ): void {
+    // An entry about the agent carries what the agent said it was doing: the
+    // label of the action it logs, or the status its run ended on. Kamapathy's
+    // own notices and the person's entries carry none.
+    const task = this.taskOf(spaceId);
+    const text =
+      agentText ??
+      (message === "Agent finished"
+        ? task?.status
+        : message.startsWith("Agent ") && task?.label?.active
+          ? task.label.text
+          : undefined);
     this.state.activity.unshift({
       id: randomUUID(),
       spaceId,
       message: message.slice(0, 500),
       kind,
       time: Date.now(),
+      ...(text ? { agentText: text.slice(0, AGENT_TEXT_LIMITS.message) } : {}),
     });
     this.state.activity = this.state.activity.slice(0, 100);
     this.emit();
@@ -444,6 +486,22 @@ export class BrowserController {
     this.layout();
   }
 
+  // The area the shell left for the pages, clamped to the window.
+  private contentArea(): ContentBounds {
+    const [windowWidth, windowHeight] = this.window.getContentSize();
+    return {
+      ...this.bounds,
+      width: Math.max(
+        0,
+        Math.min(this.bounds.width, windowWidth - this.bounds.x),
+      ),
+      height: Math.max(
+        0,
+        Math.min(this.bounds.height, windowHeight - this.bounds.y),
+      ),
+    };
+  }
+
   private layout(): void {
     if (this.destroyed || this.window.isDestroyed()) return;
     const active = this.state.tabs.find(
@@ -470,22 +528,14 @@ export class BrowserController {
     }
     const { activeTabId, splitTabId } = this.state;
     const ids = [activeTabId, splitTabId].filter((id): id is string => !!id);
-    const [windowWidth, windowHeight] = this.window.getContentSize();
-    const area = {
-      ...this.bounds,
-      width: Math.max(
-        0,
-        Math.min(this.bounds.width, windowWidth - this.bounds.x),
-      ),
-      height: Math.max(
-        0,
-        Math.min(this.bounds.height, windowHeight - this.bounds.y),
-      ),
-    };
-    for (const id of ids) {
-      const tab = this.state.tabs.find((item) => item.id === id);
-      if (tab && this.loadable(tab)) this.ensureView(tab);
-    }
+    const area = this.contentArea();
+    // While the window is hidden the person's pages stay closed; agents make
+    // the pages they work in themselves.
+    if (!this.background)
+      for (const id of ids) {
+        const tab = this.state.tabs.find((item) => item.id === id);
+        if (tab && this.loadable(tab)) this.ensureView(tab);
+      }
     for (const [id, view] of this.views) {
       // A view lent for a capture is the capture window's until it is back.
       if (this.captureHost.lends(view)) continue;
@@ -515,6 +565,39 @@ export class BrowserController {
         });
       }
     }
+    this.overlay.refresh();
+  }
+
+  // Where the agent's cursor may show: over the page the person is looking
+  // at, in a space an agent is working in, with the window in front of them.
+  // A view lent to the capture window is not on this window's screen, so it
+  // shows no cursor either.
+  private cursorShows(tabId: string): boolean {
+    // The window test a capture needs is this one: it exists, it is on
+    // screen and it is not minimized.
+    if (this.destroyed || !this.canCapturePage() || this.frozen) return false;
+    if (!this.state.settings.automationEnabled) return false;
+    const area = this.contentArea();
+    if (area.hidden || area.width <= 0 || area.height <= 0) return false;
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    const space =
+      tab && this.state.spaces.find((item) => item.id === tab.spaceId);
+    if (
+      !space ||
+      space.id !== this.state.activeSpaceId ||
+      !agentRules(space) ||
+      space.access === "ended" ||
+      space.owner !== "agent"
+    )
+      return false;
+    const view = this.views.get(tabId);
+    if (!view || this.captureHost.lends(view)) return false;
+    return view.getVisible() === true;
+  }
+
+  /** The agent dispatched input at this point. Never throws. */
+  reportPointer(tabId: string, point: CursorPoint, label?: string): void {
+    this.overlay.point(tabId, point, label);
   }
 
   private getSpace(id: string): Space {
@@ -1037,6 +1120,47 @@ export class BrowserController {
     this.layout();
   }
 
+  // Closing the window keeps agents working, so the person's own pages close
+  // as a real close would: nothing of theirs runs unseen, and each of their
+  // spaces keeps what the next start would give it. Spaces an agent may use
+  // keep their tabs and their pages.
+  enterBackground(): void {
+    if (this.destroyed) return;
+    this.background = true;
+    for (const space of this.state.spaces) {
+      if (agentRules(space)) continue;
+      const tabs = this.state.tabs.filter((tab) => tab.spaceId === space.id);
+      for (const tab of tabs) {
+        this.destroyTab(tab.id);
+        // A page closed mid-load reports no end of its own.
+        tab.loading = false;
+      }
+      if (this.state.settings.restoreSession) continue;
+      for (const tab of tabs) this.registry.retire(tab, "person");
+      const replacement = newTab(space.id);
+      this.registry.register(replacement, {
+        openedBy: "person",
+        managed: false,
+      });
+      this.state.tabs = this.state.tabs.filter(
+        (tab) => tab.spaceId !== space.id,
+      );
+      this.state.tabs.push(replacement);
+      this.lastActive.delete(space.id);
+      if (this.state.activeSpaceId === space.id)
+        this.state.activeTabId = replacement.id;
+    }
+    this.emit();
+  }
+
+  // The window is visible again. The pages it shows are laid out, and the
+  // person's others are made again as they open them.
+  leaveBackground(): void {
+    if (this.destroyed) return;
+    this.background = false;
+    this.layout();
+  }
+
   async thumbnails(): Promise<Record<string, string>> {
     if (this.canCapturePage())
       await Promise.all(
@@ -1071,6 +1195,71 @@ export class BrowserController {
     if (spaceId === this.state.activeSpaceId)
       return this.state.tabs.find((tab) => tab.id === this.state.activeTabId);
     return openingTab(this.state, spaceId, this.lastActive.get(spaceId));
+  }
+
+  // Makes the tab's own space show it, then waits for its next rendered
+  // frame. The active space, the window and keyboard focus never change, so
+  // this is not activate(): a space the person is not looking at only
+  // changes the tab it opens on.
+  async showAgentTab(tabId: string): Promise<void> {
+    const tab = this.state.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const space = this.state.spaces.find((item) => item.id === tab.spaceId);
+    // A space no agent may use now is never revealed.
+    if (!space || !agentRules(space) || space.access === "ended") return;
+    if (tab.spaceId !== this.state.activeSpaceId) {
+      if (this.lastActive.get(tab.spaceId) === tab.id) return;
+      this.lastActive.set(tab.spaceId, tab.id);
+      this.emit();
+      return;
+    }
+    if (tab.id === this.state.activeTabId || tab.id === this.state.splitTabId)
+      return;
+    // As in activate(), the leading pane follows the tab that was active;
+    // the other pane stays where the person put it.
+    if (this.splitLeadingTabId === this.state.activeTabId)
+      this.splitLeadingTabId = tab.id;
+    this.state.activeTabId = tab.id;
+    this.lastActive.set(tab.spaceId, tab.id);
+    this.emit();
+    await this.nextFrame(tab.id);
+  }
+
+  // The page the person now looks at gets to draw before the agent's next
+  // step. A window that cannot composite reports no frames at all, as a
+  // probe confirmed, so a hidden window and a page that is not showing wait
+  // for nothing.
+  private nextFrame(tabId: string): Promise<void> {
+    const view = this.views.get(tabId);
+    const contents = view?.webContents;
+    if (
+      !view ||
+      !contents ||
+      contents.isDestroyed() ||
+      !view.getVisible() ||
+      !this.canCapturePage()
+    )
+      return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          contents.endFrameSubscription();
+        } catch {
+          // A page that went away needs no unsubscribing.
+        }
+        resolve();
+      };
+      const timer = setTimeout(finish, REVEAL_FRAME_TIMEOUT);
+      try {
+        contents.beginFrameSubscription(false, () => finish());
+      } catch {
+        finish();
+      }
+    });
   }
 
   // Tabs and the popups their pages open share these. A popup's session is
@@ -1130,7 +1319,18 @@ export class BrowserController {
     this.views.set(tab.id, view);
     this.viewKinds.set(tab.id, kind);
     this.window.contentView.addChildView(view);
-    view.setBounds({ x: 0, y: 0, width: 1200, height: 800 });
+    // A page view joins the window on top, so the cursor goes back above it.
+    this.overlay.raise();
+    // An agent page is made at the size the content area has now, so a page
+    // the person is not looking at reports the viewport it will have when
+    // they are, and a first reveal does not reflow it. Without an area to
+    // copy, pages keep the size they have always had.
+    const { x, y, width, height, hidden } = this.contentArea();
+    view.setBounds(
+      agentRules(space) && !hidden && width > 0 && height > 0
+        ? { x, y, width, height }
+        : { x: 0, y: 0, width: 1200, height: 800 },
+    );
     view.setVisible(false);
     view.setBorderRadius(10);
     this.wireView(tab, view);
@@ -1342,6 +1542,7 @@ export class BrowserController {
         return;
       tab.url = details.url;
       delete tab.error;
+      delete tab.crashed;
       if (!details.isSameDocument) {
         tab.title = details.url;
         delete tab.favicon;
@@ -1415,9 +1616,19 @@ export class BrowserController {
     );
     contents.on("render-process-gone", (_event, details) => {
       if (!isCurrentView()) return;
+      // One entry per crash, for a space an agent is working in; the flag
+      // itself keeps a second crash of the same page quiet.
+      const log = !tab.crashed && agentRules(space) && space.owner === "agent";
       tab.loading = false;
+      tab.crashed = true;
       tab.error = `The page process stopped (${details.reason}). Reload to try again.`;
-      this.emit();
+      if (log)
+        this.addActivity(
+          space.id,
+          "A page stopped working in this space",
+          "warning",
+        );
+      else this.emit();
     });
     contents.on("context-menu", (_event, params) => {
       // No native menu follows a right click an agent sent, until the
@@ -1614,7 +1825,7 @@ export class BrowserController {
       throw new Error("The maximum of 200 tabs has been reached.");
     const space: Space = {
       id: randomUUID(),
-      name: cleanText(name, 48) || "Agent space",
+      name: cleanAgentText(cleanText(name, 48)) || "Agent space",
       color: colors.includes(color) ? color : "purple",
       kind: "agent",
       owner: "agent",
@@ -2352,7 +2563,8 @@ export class BrowserController {
           throw new Error("The maximum of 30 spaces has been reached.");
         if (this.state.tabs.length >= 200)
           throw new Error("The maximum of 200 tabs has been reached.");
-        const name = cleanText(action.name, 48) || "Untitled space";
+        const name =
+          cleanAgentText(cleanText(action.name, 48)) || "Untitled space";
         const signIns = signInsOf(action.signIns);
         let space: Space;
         if (action.kind === "agent") {
@@ -2393,7 +2605,7 @@ export class BrowserController {
       }
       case "space:rename":
         this.getSpace(action.id).name =
-          cleanText(action.name, 48) || "Untitled space";
+          cleanAgentText(cleanText(action.name, 48)) || "Untitled space";
         break;
       case "space:color":
         if (!colors.includes(action.color))
@@ -2431,7 +2643,7 @@ export class BrowserController {
         if (
           !agentRules(space) ||
           !["human", "agent"].includes(action.owner) ||
-          ![undefined, "handoff"].includes(action.reason)
+          ![undefined, "handoff", "failed"].includes(action.reason)
         )
           throw new Error("Only agent spaces can change ownership.");
         if (action.owner === "human")
@@ -2439,13 +2651,15 @@ export class BrowserController {
             reason: action.reason ?? "manual",
           });
         else this.registry.takeBack(space.id, this.shownTab(space.id) ?? null);
-        this.addActivity(
-          space.id,
-          action.owner === "human"
-            ? "You took control. Agent access is paused."
-            : "Control returned to the agent.",
-          "info",
-        );
+        // A reported failure has its own entry, so this one would repeat it.
+        if (action.reason !== "failed")
+          this.addActivity(
+            space.id,
+            action.owner === "human"
+              ? "You took control. Agent access is paused."
+              : "Control returned to the agent.",
+            "info",
+          );
         break;
       }
       case "space:grant":
@@ -2764,6 +2978,7 @@ export class BrowserController {
     this.destroyed = true;
     // Every request waiting for the person is answered no as Kamapathy goes.
     this.prompts.clearAll();
+    this.overlay.dispose();
     for (const id of this.views.keys()) this.destroyTab(id);
     this.captureHost.dispose();
     for (const cleanup of this.sessionCleanups.values()) cleanup();

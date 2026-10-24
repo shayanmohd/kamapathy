@@ -1,3 +1,4 @@
+import { cleanAgentText } from "./agent-text";
 import { isPermissionKey, SAVED_SITE_PERMISSIONS } from "./permissions";
 import { HOME_URL, initialState, newTab } from "./state";
 import { isWebUrl } from "./url";
@@ -105,6 +106,10 @@ export function validSettings(value: unknown, base: Settings): Settings {
     seenVersion: isVersion(settings.seenVersion)
       ? settings.seenVersion
       : base.seenVersion,
+    backgroundNoticeShown:
+      typeof settings.backgroundNoticeShown === "boolean"
+        ? settings.backgroundNoticeShown
+        : base.backgroundNoticeShown,
   };
 }
 
@@ -218,7 +223,7 @@ export function restoreState(
           .map(
             (space): Space => ({
               id: space.id,
-              name: space.name,
+              name: cleanAgentText(space.name) || "Untitled space",
               color: space.color,
               kind: "personal",
               owner: "human",

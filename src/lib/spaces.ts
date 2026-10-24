@@ -1,8 +1,7 @@
 import type { Activity, BrowserState, Space, SpaceColor } from "../../shared/types";
 
+// How long an agent action counts as recent, and how long a label stays.
 export const RECENT_ACTION_MS = 5000;
-// electron/agent/routes/spaces.ts records this when an agent hands a space over.
-export const HANDOFF_MESSAGE = "Agent handed this space to you";
 
 export type AgentStatus =
   | "browsing"
@@ -10,8 +9,10 @@ export type AgentStatus =
   | "needs-you"
   | "in-control"
   | "paused"
-  | "finished"
-  | "stopped";
+  | "done"
+  | "stopped"
+  | "failed"
+  | "error";
 
 export function isAgentAction(item: Activity): boolean {
   return !!item.spaceId && item.message.startsWith("Agent ");
@@ -24,29 +25,57 @@ export function spaceActivity(
   return activity.filter((item) => item.spaceId === spaceId);
 }
 
-export function latestHandoffId(
-  activity: Activity[],
+// The key the person marks by opening a space. Only a state asks for them,
+// and changedAt moves on state changes alone, so a status or a label never
+// unmarks what they have already seen.
+export function taskKey(space: Space): string | undefined {
+  const task = space.task;
+  return task?.state ? `${space.id}:${task.changedAt}` : undefined;
+}
+
+function isSeen(space: Space, seen: ReadonlySet<string>): boolean {
+  const key = taskKey(space);
+  return key !== undefined && seen.has(key);
+}
+
+export function acknowledgeTask(
+  seen: ReadonlySet<string>,
+  spaces: readonly Space[],
   spaceId: string,
-): string | undefined {
-  const latest = activity.find((item) => item.spaceId === spaceId);
-  return latest?.message === HANDOFF_MESSAGE ? latest.id : undefined;
+): ReadonlySet<string> {
+  const space = spaces.find((item) => item.id === spaceId);
+  const key = space && taskKey(space);
+  return key && !seen.has(key) ? new Set([...seen, key]) : seen;
 }
 
 export function agentStatus(
   space: Space,
-  state: Pick<BrowserState, "activity" | "settings">,
+  state: Pick<BrowserState, "activity" | "settings" | "tabs">,
   now: number,
   seen: ReadonlySet<string>,
 ): AgentStatus | undefined {
   // A personal space has a status only while an agent may use it.
   if (space.kind !== "agent" && space.access !== "granted") return undefined;
-  if (space.access === "ended")
-    return space.ended?.by === "agent" ? "finished" : "stopped";
-  if (space.owner === "human") {
-    const handoff = latestHandoffId(state.activity, space.id);
-    return handoff && !seen.has(handoff) ? "needs-you" : "in-control";
-  }
+  const task = space.task;
+  // How the task ended comes before who holds the space.
+  if (task?.state === "failed") return "failed";
+  if (
+    task?.state === "done" ||
+    (space.access === "ended" && space.ended?.by === "agent")
+  )
+    return "done";
+  if (space.access === "ended") return "stopped";
+  // The agent asks for the person whoever has control; a space they already
+  // hold asks only until they open it.
+  if (
+    task?.state === "needs-you" &&
+    !(space.owner === "human" && isSeen(space, seen))
+  )
+    return "needs-you";
+  if (space.owner === "human") return "in-control";
   if (!state.settings.automationEnabled) return "paused";
+  if (state.tabs.some((tab) => tab.spaceId === space.id && tab.crashed))
+    return "error";
   const recent = state.activity.find(
     (item) => item.spaceId === space.id && isAgentAction(item),
   );
@@ -55,13 +84,22 @@ export function agentStatus(
 
 export const spaceColors: SpaceColor[] = ["green", "blue", "orange", "purple"];
 
-export function acknowledgeHandoff(
-  seen: ReadonlySet<string>,
-  activity: Activity[],
-  spaceId: string,
-): ReadonlySet<string> {
-  const id = latestHandoffId(activity, spaceId);
-  return id && !seen.has(id) ? new Set([...seen, id]) : seen;
+// The line under a space's name: a label while it is fresh, then Kamapathy's
+// own reason, then whatever the agent last said. `agent` marks the agent's
+// own words, which the shell styles as theirs.
+export function statusLine(
+  space: Space,
+  now: number,
+): { text: string; agent: boolean } | undefined {
+  const task = space.task;
+  if (!task) return undefined;
+  const label = task.label;
+  if (label && (label.active || now - label.at < RECENT_ACTION_MS))
+    return { text: label.text, agent: true };
+  if (task.state === "needs-you" && task.reason)
+    return { text: task.reason, agent: false };
+  if (task.status) return { text: task.status, agent: true };
+  return undefined;
 }
 
 export interface SpaceButtonState {
@@ -69,6 +107,7 @@ export interface SpaceButtonState {
   working: number;
   spinning: boolean;
   needsYou: boolean;
+  failed: boolean;
 }
 
 export function spaceButtonState(
@@ -85,11 +124,15 @@ export function spaceButtonState(
   return {
     color: current.color,
     working: statuses.filter(
-      (status) => status === "browsing" || status === "idle",
+      (status) =>
+        status === "browsing" || status === "idle" || status === "error",
     ).length,
     spinning: statuses.includes("browsing"),
     needsYou:
       statuses.includes("needs-you") || state.spaceRequests.length > 0,
+    failed: state.spaces.some(
+      (space, index) => statuses[index] === "failed" && !isSeen(space, seen),
+    ),
   };
 }
 

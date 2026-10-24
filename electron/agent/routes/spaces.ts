@@ -42,6 +42,7 @@ export function checkPageBudget(
 export function spaceRoutes({
   controller,
   authority,
+  presence,
 }: RouteDeps): Record<string, RouteImpl> {
   const { managedSpaces, authorizeSpace } = authority;
   // What this connection sees, in creation order: spaces it manages and may
@@ -280,6 +281,7 @@ export function spaceRoutes({
         // A granted personal space is never deleted. closeTab gives it a
         // blank tab if the last one closed.
         controller.endAccess(id, { by: "agent", reason: "finished" });
+        presence.setState(id, "done");
         return send(response, 200, {
           ok: true,
           spaceId: id,
@@ -412,6 +414,9 @@ export function spaceRoutes({
           return fail("tab_creation_failed", "Could not create an agent tab.");
         }
         authorizeSpace(space!.id);
+        // The router cannot follow this route: its page does not exist
+        // until here.
+        await presence.follow(tab.id, run);
         controller.addActivity(
           space!.id,
           url

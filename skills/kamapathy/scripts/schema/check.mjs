@@ -255,6 +255,13 @@ function argumentFits(value, arg) {
   switch (arg.kind) {
     case "string":
       return typeof value === "string";
+    // Agent text within its limit; nullable text also takes null.
+    case "text":
+      return arg.nullable && value === null
+        ? true
+        : typeof value === "string" &&
+            ((arg.min ?? 1) === 0 || value.trim() !== "") &&
+            (arg.max === undefined || value.length <= arg.max);
     case "url":
     case "target":
       return typeof value === "string" && value.trim() !== "";

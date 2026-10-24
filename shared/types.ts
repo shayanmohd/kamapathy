@@ -33,6 +33,18 @@ export interface SpaceEnd {
   reason: "finished" | "stopped";
   at: number;
 }
+// What an agent is doing in a space and how its work ended, for this run
+// only. The controller is the only writer.
+export interface AgentTask {
+  // Cleaned status text, or a failure message.
+  status?: string;
+  state?: "needs-you" | "done" | "failed";
+  // Kamapathy's own words for a needs-you.
+  reason?: string;
+  label?: { text: string; active: boolean; at: number };
+  // Bumped on state changes; keys "seen" in the renderer.
+  changedAt: number;
+}
 export interface Space {
   id: string;
   name: string;
@@ -48,6 +60,7 @@ export interface Space {
   access?: "granted" | "ended";
   ended?: SpaceEnd;
   control?: SpaceControl;
+  task?: AgentTask;
 }
 export interface Tab {
   id: string;
@@ -67,6 +80,8 @@ export interface Tab {
   managed?: boolean;
   createdAt?: number;
   unseen?: true;
+  // Set while the page's renderer is gone.
+  crashed?: true;
 }
 export interface Bookmark {
   id: string;
@@ -95,6 +110,8 @@ export interface Activity {
   message: string;
   time: number;
   kind: "info" | "success" | "warning";
+  // The agent's own words, shown after the message.
+  agentText?: string;
 }
 export interface Settings {
   theme: Theme;
@@ -111,6 +128,7 @@ export interface Settings {
   seenVersion: string;
   extensionUpdates: boolean;
   extensionDeveloperMode: boolean;
+  backgroundNoticeShown: boolean;
 }
 export interface ImportProfile {
   id: string;
@@ -480,7 +498,7 @@ export type BrowserAction =
       type: "space:ownership";
       id: string;
       owner: "human" | "agent";
-      reason?: "handoff";
+      reason?: "handoff" | "failed";
     }
   | { type: "space:grant"; id: string }
   | { type: "space:stop"; id: string }

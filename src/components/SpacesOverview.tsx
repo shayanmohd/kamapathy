@@ -8,7 +8,7 @@ import type {
 } from "../../shared/types";
 import { openingTab } from "../../shared/state";
 import { gridMove } from "../lib/navigation";
-import { agentStatus, spaceColors } from "../lib/spaces";
+import { agentStatus, spaceColors, statusLine } from "../lib/spaces";
 import { useEscape } from "../lib/useEscape";
 import { overviewCopy, spacesCopy, statusCopy } from "../copy";
 import { Favicon, IconButton } from "./ui";
@@ -103,7 +103,9 @@ function Overview({ state, now, seen, thumbnails, dispatch, onClose }: Props) {
               ? state.tabs.find((item) => item.id === state.activeTabId)
               : openingTab(state, space.id);
           const canClose = space.kind === "agent" || personalCount > 1;
-          const glow = status === "browsing" || status === "idle";
+          const glow =
+            status === "browsing" || status === "idle" || status === "error";
+          const line = statusLine(space, now);
           return (
             <div
               key={space.id}
@@ -148,6 +150,15 @@ function Overview({ state, now, seen, thumbnails, dispatch, onClose }: Props) {
                 </span>
                 {status && <span className="status-chip">{statusCopy[status]}</span>}
               </div>
+              {line && (
+                <p
+                  className={
+                    line.agent ? "status-line agent-text" : "status-line"
+                  }
+                >
+                  {line.text}
+                </p>
+              )}
               <div className="space-card-actions">
                 <IconButton
                   label={overviewCopy.rename(space.name)}

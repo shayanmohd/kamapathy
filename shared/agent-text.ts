@@ -12,3 +12,13 @@ export function cleanAgentText(value: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// How long each kind of agent text may be, counted in UTF-16 units before
+// cleaning, as for every other field.
+export const AGENT_TEXT_LIMITS = {
+  label: 60,
+  status: 120,
+  message: 300,
+  name: 48,
+} as const;
+export type AgentTextField = keyof typeof AGENT_TEXT_LIMITS;

@@ -1,16 +1,18 @@
 import { useState } from "react";
 import type { BrowserAction, Space } from "../../shared/types";
 import type { AgentStatus } from "../lib/spaces";
-import { agentBarCopy } from "../copy";
+import { agentBarCopy, agentBarPhrase } from "../copy";
 import "./AgentBar.css";
 
 export function AgentBar({
   space,
   status,
+  line,
   attempt,
 }: {
   space: Space;
   status: AgentStatus;
+  line?: { text: string; agent: boolean };
   attempt: (action: BrowserAction) => Promise<string>;
 }) {
   const [confirming, setConfirming] = useState<"stop" | "keep" | null>(null);
@@ -27,8 +29,13 @@ export function AgentBar({
         aria-hidden="true"
       />
       <span className="agent-bar-status" role="status">
-        {space.name} · {agentBarCopy.status[status]}
+        {space.name} · {agentBarPhrase(status, space.owner === "agent")}
       </span>
+      {line && (
+        <span className={line.agent ? "status-line agent-text" : "status-line"}>
+          {line.text}
+        </span>
+      )}
       {confirming === "stop" ? (
         <>
           <span className="agent-bar-question">{agentBarCopy.confirmStop}</span>

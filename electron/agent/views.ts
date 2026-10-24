@@ -40,6 +40,8 @@ export interface SpaceView {
   reason?: ControlReason;
   prompt?: string;
   since?: number;
+  status?: string;
+  state?: "needs-you" | "done" | "failed" | "error";
   recentTabTitles?: string[];
 }
 
@@ -110,6 +112,17 @@ export function spaceView(space: Space, tabs: readonly Tab[]): SpaceView {
     createdBy: space.createdBy ?? "person",
     pageBudget: space.pageBudget ?? PAGE_BUDGET,
   };
+  // What the agent said and how its task stands, reported while the person
+  // has control too. A crashed page in a space the agent still drives is a
+  // state of its own.
+  if (space.task?.status !== undefined) view.status = space.task.status;
+  const state =
+    space.task?.state ??
+    (space.owner === "agent" &&
+    tabs.some((tab) => tab.spaceId === space.id && tab.crashed)
+      ? "error"
+      : undefined);
+  if (state !== undefined) view.state = state;
   if (space.owner === "human") {
     const control = space.control;
     view.reason = control?.reason ?? "manual";
