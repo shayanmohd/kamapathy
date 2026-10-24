@@ -432,6 +432,9 @@ export interface PendingPrompt {
     expires: number;
   }[];
   signIn?: { host: string; realm?: string; proxy: boolean; retry: boolean };
+  // Saved sign-ins for an http_sign_in challenge: ids and usernames only.
+  savedLogins?: { id: string; username: string }[];
+  canSave?: true;
 }
 // The person's Allow or Block, kept per space, origin and permission.
 export interface SitePermission {
@@ -447,6 +450,10 @@ export interface PromptAnswer {
   deviceId?: string;
   certificateId?: string;
   credentials?: { username: string; password: string };
+  // A saved sign-in to use instead of typed credentials, and whether to
+  // save what was typed.
+  savedLoginId?: string;
+  save?: boolean;
 }
 export interface BrowserState {
   spaces: Space[];

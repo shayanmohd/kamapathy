@@ -62,6 +62,7 @@ import { connectForms, type FormBroker } from "./passwords/forms";
 import { registerPasswordIpc } from "./passwords/ipc";
 import { createReauth } from "./passwords/reauth";
 import { safeStorageSealer } from "./passwords/seal";
+import { createSignInPasswords } from "./passwords/sign-in";
 import { Vault, type ImportedLogin } from "./passwords/vault";
 import {
   createAgentSetup,
@@ -430,6 +431,27 @@ async function openWindow(): Promise<void> {
       openManager: () => shortcut("passwords"),
     });
   forms = currentForms;
+  // Section 7's sign-in bar offers saved HTTP sign-ins by name; main opens
+  // the one the person picks and answers the page itself.
+  if (vault)
+    currentController.prompts.setPasswords(
+      createSignInPasswords({
+        vault,
+        state: () => currentController.state,
+        confirm: async (message, button) =>
+          !currentWindow.isDestroyed() &&
+          (
+            await dialog.showMessageBox(currentWindow, {
+              type: "question",
+              message,
+              buttons: [button, "Cancel"],
+              defaultId: 0,
+              cancelId: 1,
+              noLink: true,
+            })
+          ).response === 0,
+      }),
+    );
   // A window built later shows what the updater already knows. The first one
   // keeps its saved record, which the updater reads when it starts.
   if (updater && updaterStarted) currentController.setUpdate(updater.state);

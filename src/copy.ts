@@ -386,6 +386,10 @@ export const passwordsCopy = {
     exported: (count: number) =>
       count === 1 ? "Exported 1 password." : `Exported ${count} passwords.`,
   },
+  signIn: {
+    as: (username: string) => `Sign in as ${username}`,
+    save: "Save password",
+  },
 } as const;
 // The Move to Applications offer at start on macOS.
 export const moveCopy = {

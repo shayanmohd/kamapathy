@@ -10,8 +10,12 @@ import {
   type PromptCenter,
   type PromptHost,
 } from "../electron/prompts";
+import type {
+  SignInChallenge,
+  SignInPasswords,
+} from "../electron/passwords/sign-in";
 import { HOME_URL } from "../shared/state";
-import type { Space, Tab } from "../shared/types";
+import type { BrowserState, Space, Tab } from "../shared/types";
 import { FakeContents, FakeController } from "./fake-automation";
 
 type Callback = (allow: boolean) => void;
@@ -793,6 +797,39 @@ describe("the prompt center", () => {
       issuerName: "Example CA",
       validExpiry: 1800000000,
     }) as unknown as Electron.Certificate;
+  // The challenge the helper above raises, as section 18 reads it.
+  const members: SignInChallenge = {
+    origin: "https://example.com",
+    realm: "Members",
+    isProxy: false,
+    mainFrame: true,
+  };
+  // Section 18's vault, which keeps every password in main. The center
+  // learns ids and usernames and answers with an id.
+  function signInPasswords(state: BrowserState) {
+    const held: {
+      logins: { id: string; username: string }[];
+      found?: { username: string; password: string };
+    } = { logins: [] };
+    return {
+      held,
+      savedLogins: vi.fn<SignInPasswords["savedLogins"]>((asked) =>
+        asked.isProxy ? [] : held.logins,
+      ),
+      canSave: vi.fn<SignInPasswords["canSave"]>(
+        (asked) =>
+          !asked.isProxy &&
+          asked.mainFrame &&
+          state.settings.offerToSavePasswords,
+      ),
+      useSaved: vi.fn<SignInPasswords["useSaved"]>(async () => held.found),
+      saveAfterCommit: vi.fn<SignInPasswords["saveAfterCommit"]>(),
+    };
+  }
+  // A saved sign-in is opened in main, so its answer settles on its own.
+  const settled = async () => {
+    for (let step = 0; step < 20; step += 1) await Promise.resolve();
+  };
 
   it("agent credentials apply once to their origin", () => {
     const { controller, center, space, page } = setup();
@@ -1111,5 +1148,118 @@ describe("the prompt center", () => {
       controller.state.spaces.find((item) => item.id === "personal"),
     ).not.toHaveProperty("control");
     expect(own).not.toHaveBeenCalled();
+  });
+
+  it("a saved http login answers the held sign-in without reaching the renderer", async () => {
+    const { controller, center, space, tab, page } = setup();
+    const passwords = signInPasswords(controller.state);
+    center.setPasswords(passwords);
+    passwords.held.logins = [{ id: "l1", username: "ada" }];
+    passwords.held.found = { username: "ada", password: "hunter2" };
+    const first = challenge(center, page, { navigation: true });
+    expect(first.taken).toBe(true);
+    expect(passwords.savedLogins).toHaveBeenCalledWith(members);
+    expect(controller.state.prompts).toMatchObject([
+      {
+        kind: "http_sign_in",
+        savedLogins: [{ id: "l1", username: "ada" }],
+        canSave: true,
+      },
+    ]);
+    expect(JSON.stringify(controller.state)).not.toContain("hunter2");
+    // The bar sends back an id, and main answers the page itself.
+    center.answer({
+      id: controller.state.prompts[0].id,
+      allow: true,
+      savedLoginId: "l1",
+    });
+    await settled();
+    expect(passwords.useSaved).toHaveBeenCalledExactlyOnceWith(
+      tab.id,
+      "l1",
+      members,
+    );
+    expect(first.callback).toHaveBeenCalledExactlyOnceWith("ada", "hunter2");
+    expect(center.prompts()).toEqual([]);
+    expect(space.owner).toBe("agent");
+    expect(passwords.saveAfterCommit).not.toHaveBeenCalled();
+
+    // A cancelled confirmation leaves the request waiting for the person.
+    delete passwords.held.found;
+    const second = challenge(center, page, { navigation: true });
+    const promptId = center.prompts()[0].id;
+    center.answer({ id: promptId, allow: true, savedLoginId: "l1" });
+    await settled();
+    expect(second.callback).not.toHaveBeenCalled();
+    expect(center.prompts()).toMatchObject([{ id: promptId }]);
+    // Typing instead, with the box ticked, saves once the page commits.
+    center.answer({
+      id: promptId,
+      allow: true,
+      credentials: { username: "zoe", password: "typed" },
+      save: true,
+    });
+    expect(second.callback).toHaveBeenCalledExactlyOnceWith("zoe", "typed");
+    expect(passwords.saveAfterCommit).toHaveBeenCalledExactlyOnceWith(
+      page,
+      members,
+      { username: "zoe", password: "typed" },
+    );
+    expect(passwords.saveAfterCommit.mock.invocationCallOrder[0]).toBeLessThan(
+      second.callback.mock.invocationCallOrder[0],
+    );
+
+    // A proxy asks the person alone, and a tick on it changes nothing.
+    const proxy = challenge(center, page, {
+      proxy: true,
+      host: "proxy.example",
+      navigation: true,
+    });
+    const shown = center.prompts()[0];
+    expect(shown.kind).toBe("proxy_sign_in");
+    expect(shown).not.toHaveProperty("savedLogins");
+    expect(shown).not.toHaveProperty("canSave");
+    center.answer({
+      id: shown.id,
+      allow: true,
+      savedLoginId: "l1",
+      credentials: { username: "zoe", password: "typed" },
+      save: true,
+    });
+    await settled();
+    expect(proxy.callback).toHaveBeenCalledExactlyOnceWith("zoe", "typed");
+    expect(passwords.saveAfterCommit).toHaveBeenCalledTimes(1);
+    expect(passwords.useSaved).toHaveBeenCalledTimes(2);
+  });
+
+  it("agent credentials and saving off never save", () => {
+    const { controller, center, space, page } = setup();
+    const passwords = signInPasswords(controller.state);
+    center.setPasswords(passwords);
+    center.setHTTPCredentials(space.id, {
+      origin: "https://example.com",
+      username: "agent",
+      password: "stored",
+    });
+    const armed = challenge(center, page, { navigation: true });
+    expect(armed.callback).toHaveBeenCalledExactlyOnceWith("agent", "stored");
+    // The vault is not even asked about a challenge the agent answered.
+    expect(passwords.savedLogins).not.toHaveBeenCalled();
+    expect(passwords.saveAfterCommit).not.toHaveBeenCalled();
+
+    // With saving off the bar gets no box, and a tick changes nothing.
+    controller.state.settings.offerToSavePasswords = false;
+    const typed = challenge(center, page, { navigation: true });
+    const shown = center.prompts()[0];
+    expect(shown).not.toHaveProperty("canSave");
+    expect(shown).not.toHaveProperty("savedLogins");
+    center.answer({
+      id: shown.id,
+      allow: true,
+      credentials: { username: "zoe", password: "typed" },
+      save: true,
+    });
+    expect(typed.callback).toHaveBeenCalledExactlyOnceWith("zoe", "typed");
+    expect(passwords.saveAfterCommit).not.toHaveBeenCalled();
   });
 });
