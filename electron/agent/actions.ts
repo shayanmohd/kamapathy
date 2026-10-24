@@ -5,6 +5,7 @@ import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
+import { nativeDrag } from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
 import { createResolver } from "./resolve";
@@ -274,163 +275,6 @@ export function createActions(deps: {
       await session.send(command.method, command.parameters, gesture);
     }
   };
-  // Presses on the source, moves past the distance pages wait for before a
-  // drag starts (4 pixels in Chromium, 5 to 8 in pointer libraries), then on to
-  // the target in steps. An HTML drag the page starts is intercepted, so no
-  // operating system drag begins, and is moved with drag events instead.
-  const nativeDrag = async (
-    id: string,
-    session: TabSession,
-    from: Point,
-    to: Point,
-    armed: Record<string, unknown>,
-    gesture: Step,
-    epoch: number,
-  ): Promise<"html5" | "mouse"> => {
-    authorizeTab(id);
-    let data: unknown;
-    let intercepted = () => {};
-    const stopListening = session.on("Input.dragIntercepted", (event) => {
-      data = event.params.data;
-      intercepted();
-    });
-    let dragging = false;
-    let dropped = false;
-    let last = from;
-    // The final release or drop is still sent after a navigation starts.
-    const send = async (
-      method: string,
-      parameters: Record<string, unknown>,
-      final = false,
-    ) => {
-      authorizeTab(id);
-      if (!final && session.epoch !== epoch)
-        return fail(
-          "page_changed",
-          "The page navigated before input completed. Inspect the new page before continuing.",
-        );
-      await session.send(method, parameters, gesture);
-    };
-    const mouse = (type: string, point: Point, buttons: number, final = false) =>
-      send(
-        "Input.dispatchMouseEvent",
-        {
-          type,
-          x: point.x,
-          y: point.y,
-          button: type === "mouseMoved" && !buttons ? "none" : "left",
-          buttons,
-          ...(type === "mouseMoved" ? {} : { clickCount: 1 }),
-        },
-        final,
-      );
-    const drag = (type: string, point: Point, final = false) =>
-      send("Input.dispatchDragEvent", { type, x: point.x, y: point.y, data }, final);
-    const pause = () => new Promise((resolve) => setTimeout(resolve, 16));
-    try {
-      try {
-        // No guard: a takeover here is reported by the first mouse event.
-        await session.send(
-          "Input.setInterceptDrags",
-          { enabled: true },
-          { deadline: gesture.deadline, dispatch: gesture.dispatch },
-        );
-      } catch {
-        return fail(
-          "drag_unavailable",
-          "Kamapathy could not take over drags in this tab.",
-        );
-      }
-      const dx = to.x - from.x,
-        dy = to.y - from.y;
-      const distance = Math.hypot(dx, dy);
-      const start = distance
-        ? { x: from.x + (dx / distance) * 10, y: from.y + (dy / distance) * 10 }
-        : { x: from.x + 10, y: from.y };
-      const path = Array.from({ length: 8 }, (_, step) => ({
-        x: start.x + ((to.x - start.x) * (step + 1)) / 8,
-        y: start.y + ((to.y - start.y) * (step + 1)) / 8,
-      }));
-      path.push(to);
-      await mouse("mouseMoved", from, 0);
-      await mouse("mousePressed", from, 1);
-      await mouse("mouseMoved", start, 1);
-      last = start;
-      // The page decides in its dragstart handlers whether an HTML drag
-      // starts. Its data reaches Kamapathy shortly after.
-      await evaluatePage(id, session, "frame", {}, gesture.deadline, gesture);
-      const counts = await evaluatePage(
-        id,
-        session,
-        "input",
-        {},
-        gesture.deadline,
-        gesture,
-      );
-      if (
-        data === undefined &&
-        typeof armed.drag === "number" &&
-        typeof counts.drag === "number" &&
-        counts.drag > armed.drag
-      ) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 2000);
-          intercepted = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-        if (data === undefined) {
-          await mouse("mouseReleased", start, 0, true);
-          return fail(
-            "drag_not_delivered",
-            "The page started a drag that Kamapathy could not move. Inspect the page before retrying.",
-          );
-        }
-      }
-      if (data !== undefined) {
-        dragging = true;
-        await drag("dragEnter", start);
-      }
-      for (const point of path) {
-        await pause();
-        if (dragging) await drag("dragOver", point);
-        else if (data !== undefined) {
-          dragging = true;
-          await drag("dragEnter", point);
-        } else await mouse("mouseMoved", point, 1);
-        last = point;
-      }
-      await pause();
-      if (dragging) {
-        await drag("drop", to, true);
-        dropped = true;
-        return "html5";
-      }
-      await mouse("mouseReleased", to, 0, true);
-      return "mouse";
-    } finally {
-      // An intercepted drag holds the tab's mouse until it ends, so it is
-      // cancelled even after the person takes over. A mouse release is never
-      // sent then: pointer libraries drop on it.
-      if (data !== undefined && !dropped)
-        await session
-          .send(
-            "Input.dispatchDragEvent",
-            { type: "dragCancel", x: last.x, y: last.y, data },
-            { deadline: Date.now() + 2000, timeoutMs: 2000 },
-          )
-          .catch(() => {});
-      await session
-        .send(
-          "Input.setInterceptDrags",
-          { enabled: false },
-          { deadline: Date.now() + 2000, timeoutMs: 2000 },
-        )
-        .catch(() => {});
-      stopListening();
-    }
-  };
   // Chromium reports a successful dispatch for native input that it drops while a
   // page has not rendered a frame since its last navigation. Confirm the page
   // received the input and repeat only input that provably never arrived.
@@ -617,7 +461,18 @@ export function createActions(deps: {
         id,
         session,
         "mouse",
-        (armed) => nativeDrag(id, session, from, to, armed, gesture, epoch),
+        (armed) =>
+          nativeDrag({
+            session,
+            from,
+            to,
+            armed,
+            gesture,
+            epoch,
+            guard: () => authorizeTab(id),
+            evaluate: (operation, evaluateBy) =>
+              evaluatePage(id, session, operation, {}, evaluateBy, gesture),
+          }),
         step,
         epoch,
       );
