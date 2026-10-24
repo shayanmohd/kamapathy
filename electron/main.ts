@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, powerMonitor, session } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BackgroundService } from "./background";
 import { BrowserController } from "./controller";
 import { menuTemplate } from "./menu";
 import { readState } from "./persistence";
@@ -11,6 +12,7 @@ import { startAutomation } from "./agent/server";
 import {
   agentPaths,
   chooseSocketPath,
+  clearQuitMarker,
   clearStaleEndpoint,
   launchCommand,
   prepareAgentDirectory,
@@ -49,6 +51,21 @@ let automationSyncing = false;
 // never saved as their choice, which would also stop agents from starting Kamapathy.
 let automationFailed = false;
 let quitting = false;
+// A quit the person has answered: the question is asked once.
+let quitConfirmed = false;
+// Closing the window keeps agents working, so the window and the application
+// no longer end together.
+const background = new BackgroundService({
+  window: () => window,
+  controller: () => controller,
+  serviceRunning: () => !!automation,
+  quitting: () => quitting,
+  show: () => {
+    if (!window) createWindow();
+    else background.leaveBackground();
+  },
+  agent,
+});
 const rendererFile = join(moduleDirectory, "../renderer/index.html");
 const externalApplication = process.defaultApp === true;
 const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -207,6 +224,9 @@ function createWindow(): void {
   currentController.subscribe(() => {
     void syncAutomation();
   });
+  // The tray, the Dock menu and the badge follow the same state the window
+  // shows.
+  currentController.subscribe(() => background.update());
   currentWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   currentWindow.webContents.on("will-navigate", (event, url) => {
     if (!trustedUrl(url)) event.preventDefault();
@@ -218,7 +238,18 @@ function createWindow(): void {
     event.preventDefault(),
   );
   currentWindow.once("ready-to-show", () => currentWindow.show());
-  currentWindow.on("close", () => currentController.dispose());
+  // Windows ends the session through the window, not the application.
+  currentWindow.on("session-end", () => background.shuttingDown());
+  currentWindow.on("close", (event) => {
+    // The person's pages close either way; with agents at work the window
+    // only goes away.
+    if (background.hidesOnClose()) {
+      event.preventDefault();
+      background.enterBackground();
+      return;
+    }
+    currentController.dispose();
+  });
   currentWindow.on("closed", () => {
     if (window === currentWindow) {
       window = null;
@@ -363,12 +394,23 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", (_event, argv) => {
     if (!window) createWindow();
-    if (window?.isMinimized()) window.restore();
+    else background.leaveBackground();
     window?.focus();
     const url = argv.find((argument) => isWebUrl(argument));
     if (url) void controller?.dispatch({ type: "tab:create", url });
   });
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
+    // A quit that would stop agents at work asks first. The answer comes back
+    // after this handler, so the second quit is the one that ends Kamapathy.
+    if (!quitConfirmed && background.needsQuestion()) {
+      event.preventDefault();
+      void background.confirmQuit().then((confirmed) => {
+        if (!confirmed) return;
+        quitConfirmed = true;
+        app.quit();
+      });
+      return;
+    }
     quitting = true;
     // Closing the service may not finish before exit; stop advertising it now.
     try {
@@ -382,7 +424,7 @@ else {
   });
   app.on("activate", () => {
     if (!window) createWindow();
-    else window.show();
+    else background.leaveBackground();
   });
   void app.whenReady().then(() => {
     if (existsSync(iconPath)) app.dock?.setIcon(iconPath);
@@ -397,11 +439,17 @@ else {
       (_contents, _permission, callback) => callback(false),
     );
     session.defaultSession.setPermissionCheckHandler(() => false);
+    // A shutdown or a logout is not a quit the person can answer: Kamapathy
+    // neither asks nor stays behind. powerMonitor is ready only now.
+    powerMonitor.on("shutdown", () => background.shuttingDown());
     try {
       // A crash leaves the last endpoint behind; record how agents can start
       // this Kamapathy again.
       prepareAgentDirectory(agent);
       clearStaleEndpoint(agent);
+      // Kamapathy is running again, so the person's last quit no longer
+      // stands in an agent's way.
+      clearQuitMarker(agent);
       const launch = launchCommand({
         env: process.env,
         execPath: process.execPath,

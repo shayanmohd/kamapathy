@@ -21,6 +21,8 @@ export interface AgentPaths {
   directory: string;
   endpoint: string;
   off: string;
+  /** The person quit while an agent was working; the client reads this. */
+  quit: string;
   launch: string;
 }
 
@@ -30,6 +32,7 @@ export function agentPaths(userData: string): AgentPaths {
     directory,
     endpoint: join(directory, "endpoint"),
     off: join(directory, "off"),
+    quit: join(directory, "quit"),
     launch: join(directory, "launch.json"),
   };
 }
@@ -140,6 +143,17 @@ export function withdrawEndpoint(paths: AgentPaths): void {
 export function setAgentAccess(paths: AgentPaths, enabled: boolean): void {
   if (enabled) rmSync(paths.off, { force: true });
   else if (!existsSync(paths.off)) writePrivate(paths.off, "");
+}
+
+// The person quit Kamapathy while an agent was working. For ten minutes the
+// client refuses to start Kamapathy again instead of working against that
+// choice; only the time is recorded.
+export function writeQuitMarker(paths: AgentPaths, at = Date.now()): void {
+  writePrivate(paths.quit, JSON.stringify({ at }));
+}
+
+export function clearQuitMarker(paths: AgentPaths): void {
+  rmSync(paths.quit, { force: true });
 }
 
 // What an automatic start runs. The recorded program must still exist after

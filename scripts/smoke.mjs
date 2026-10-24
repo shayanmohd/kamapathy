@@ -1838,6 +1838,18 @@ try {
       ),
       1,
     );
+    // Closing the window now hides it while agents can work, so this check
+    // turns agent access off to close it for real.
+    await page.evaluate(() =>
+      window.kamapathy.dispatch({
+        type: "settings:update",
+        settings: { automationEnabled: false },
+      }),
+    );
+    await waitForState(
+      page,
+      (state) => !state.settings.automationEnabled && !state.automation.running,
+    );
     const nextWindow = app.waitForEvent("window", {
       predicate: async (candidate) => {
         try {

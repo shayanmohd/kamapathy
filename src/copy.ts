@@ -29,6 +29,8 @@ export const settingsCopy = {
     "Agent spaces use your sign-ins unless you isolate them, and disappear when you quit. Take over at any time.",
   activity: "Recent activity",
   noActivity: "Actions will appear here when an agent gets to work.",
+  background:
+    "While agents are working, closing the window keeps Kamapathy running. Quit to stop them.",
   import: "Import bookmarks and history",
   importNote: "Bring them over from another browser on this computer.",
   importButton: "Import...",

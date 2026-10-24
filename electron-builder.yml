@@ -10,6 +10,8 @@ files:
   - package.json
   - LICENSE
 extraResources:
+  - from: build/tray
+    to: tray
   - from: build/icon.png
     to: icon.png
   - from: build/icon.ico
