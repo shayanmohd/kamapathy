@@ -940,7 +940,8 @@ describe("scripted sessions", () => {
       { method: "POST", path: "/tabs/tab-1/drag", body: { source: { ref: "@e1" }, target: { selector: "#zone" } } },
       { method: "POST", path: "/tabs/tab-1/wait", body: { selector: "#slots", text: "Free", timeoutMs: 1000 } },
       { method: "POST", path: "/tabs/tab-1/actions", body: { actions: [{ type: "click", ref: "@e2" }] } },
-      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots" } },
+      // navigate waits for the new document to commit, so it sends waitUntil.
+      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } },
       { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
       { method: "DELETE", path: "/tabs/tab-1", body: undefined },
       { method: "POST", path: "/spaces/space-1/handoff", body: {} },
@@ -3103,6 +3104,412 @@ describe("scripted sessions", () => {
       message:
         'page.click got unknown option "labl". Expected page.click(target, { label? }). Did you mean "label"?',
     });
+  });
+
+  // Section 6: navigation, the waits and their CLI commands.
+  const level4 = { status: "ok", version: "0.4.0", apiLevel: 4 };
+  const slots = { ...tab, url: "https://example.test/slots", title: "Slots" };
+  const infoAnswer = {
+    tab: slots,
+    viewport: { width: 1200, height: 800 },
+    scroll: { x: 0, y: 640 },
+    document: { width: 1200, height: 5400 },
+    readyState: "complete",
+    loading: false,
+  };
+  const navigationRoutes = {
+    ...level3Routes,
+    "POST /tabs/tab-1/navigate": { ok: true, tab: slots, httpStatus: 200, waitUntil: "load" },
+    "POST /tabs/tab-1/reload": { ok: true, tab: slots, httpStatus: 200, waitUntil: "load" },
+    "GET /tabs/tab-1/info": infoAnswer,
+    "POST /tabs/tab-1/wait-for-url": { ok: true, tab: slots, url: slots.url },
+    "POST /tabs/tab-1/wait-for-load-state": { ok: true, tab: slots, state: "load" },
+    "POST /tabs/tab-1/wait-for-selector": { ok: true, tab: slots, state: "visible", matched: 1 },
+    "POST /tabs/tab-1/wait-for-function": { ok: true, tab: slots, value: { slots: 3 } },
+  };
+  // The page the navigation tests drive. Finding the space and opening the
+  // page are the two requests before each test's own.
+  const navigationPage = async (api, health = level4) => {
+    const client = await connect({ env, fetch: api.fetch, health });
+    return (await client.space("space-1")).open("https://example.test/reserve");
+  };
+  // The HTTP timeout a route's own field budget sets for a body.
+  const budgetOf = (key, body) => {
+    const route = schema.ROUTES.find((item) => schema.routeKey(item) === key);
+    return httpTimeout(schema.requestBudget(route, body), route);
+  };
+
+  it("goto, reload and the waits map their options", async () => {
+    const api = fakeApi(navigationRoutes);
+    const page = await navigationPage(api);
+    expect(await page.goto("https://example.test/slots", { waitUntil: "domcontentloaded", timeout: 3000, referer: "https://example.test/" })).toEqual({
+      ok: true,
+      tab: slots,
+      httpStatus: 200,
+      waitUntil: "load",
+    });
+    await page.reload({ waitUntil: "networkidle", timeout: 2000, ignoreCache: true });
+    expect(await page.info()).toEqual(infoAnswer);
+    await page.waitForURL("https://example.test/**/done", { waitUntil: "commit", timeout: 4000 });
+    await page.waitForLoadState("networkidle", { timeout: 5000, idleMs: 750 });
+    await page.waitForSelector("@e2", { state: "hidden", timeout: 6000 });
+    await page.waitForFunction("window.slots > 0", undefined, { timeout: 7000, interval: 250 });
+    expect(api.requests.slice(2)).toEqual([
+      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "domcontentloaded", timeoutMs: 3000, referer: "https://example.test/" } },
+      { method: "POST", path: "/tabs/tab-1/reload", body: { waitUntil: "networkidle", timeoutMs: 2000, ignoreCache: true } },
+      { method: "GET", path: "/tabs/tab-1/info", body: undefined },
+      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { url: "https://example.test/**/done", waitUntil: "commit", timeoutMs: 4000 } },
+      { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "networkidle", idleMs: 750, timeoutMs: 5000 } },
+      { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { ref: "@e2", state: "hidden", timeoutMs: 6000 } },
+      { method: "POST", path: "/tabs/tab-1/wait-for-function", body: { expression: "window.slots > 0", intervalMs: 250, timeoutMs: 7000 } },
+    ]);
+    // Each call's HTTP timeout is its operation timeout plus 5000 ms, from
+    // the route's own field budget.
+    expect(budgetOf("POST /tabs/:id/navigate", { timeoutMs: 3000 })).toBe(8000);
+    expect(budgetOf("POST /tabs/:id/navigate", {})).toBe(20000);
+    expect(budgetOf("POST /tabs/:id/reload", { timeoutMs: 2000 })).toBe(7000);
+    for (const key of [
+      "POST /tabs/:id/wait-for-url",
+      "POST /tabs/:id/wait-for-load-state",
+      "POST /tabs/:id/wait-for-selector",
+      "POST /tabs/:id/wait-for-function",
+    ]) {
+      expect(budgetOf(key, { timeoutMs: 4000 }), key).toBe(9000);
+      expect(budgetOf(key, {}), key).toBe(15000);
+    }
+    // What a call that names no options sends.
+    const defaults = fakeApi(navigationRoutes);
+    const plain = await navigationPage(defaults);
+    await plain.goto("https://example.test/slots");
+    await plain.reload();
+    await plain.waitForLoadState();
+    await plain.waitForSelector("#slots");
+    await plain.waitForFunction("window.slots > 0");
+    expect(defaults.requests.slice(2).map((item) => item.body)).toEqual([
+      { url: "https://example.test/slots", waitUntil: "load", timeoutMs: 15000 },
+      { waitUntil: "load", timeoutMs: 15000, ignoreCache: false },
+      { state: "load", idleMs: 500, timeoutMs: 10000 },
+      { selector: "#slots", state: "visible", timeoutMs: 10000 },
+      { expression: "window.slots > 0", intervalMs: 100, timeoutMs: 10000 },
+    ]);
+  });
+
+  it("navigate sends waitUntil commit and goto sends load", async () => {
+    const api = fakeApi(navigationRoutes);
+    const page = await navigationPage(api);
+    expect(await page.navigate("https://example.test/slots")).toBe(page);
+    await page.goto("https://example.test/slots");
+    expect(api.requests.slice(2).map((item) => item.body)).toEqual([
+      { url: "https://example.test/slots", waitUntil: "commit" },
+      { url: "https://example.test/slots", waitUntil: "load", timeoutMs: 15000 },
+    ]);
+    // The command without --wait-until returns at commit too.
+    const cli = fakeApi(navigationRoutes);
+    expect(await runCli(["navigate", "tab-1", "https://example.test/slots"], { env, fetch: cli.fetch, health: level4, stdout: sink() })).toBe(0);
+    expect(cli.requests).toEqual([
+      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } },
+    ]);
+    const flagged = fakeApi(navigationRoutes);
+    expect(
+      await runCli(["navigate", "tab-1", "https://example.test/slots", "--wait-until", "networkidle", "--timeout", "30000", "--referer", "https://example.test/"], {
+        env,
+        fetch: flagged.fetch,
+        health: level4,
+        stdout: sink(),
+      }),
+    ).toBe(0);
+    expect(flagged.requests.at(-1).body).toEqual({
+      url: "https://example.test/slots",
+      waitUntil: "networkidle",
+      timeoutMs: 30000,
+      referer: "https://example.test/",
+    });
+    // --ignore-cache refetches past the cache.
+    const cached = fakeApi(navigationRoutes);
+    expect(await runCli(["reload", "tab-1", "--ignore-cache"], { env, fetch: cached.fetch, health: level4, stdout: sink() })).toBe(0);
+    expect(cached.requests.at(-1).body).toEqual({ ignoreCache: true });
+    // A Kamapathy that predates the field is told which one, before anything
+    // is sent.
+    const older = fakeApi(navigationRoutes);
+    await expect(
+      runCli(["navigate", "tab-1", "https://example.test/slots", "--wait-until", "load"], {
+        env,
+        fetch: older.fetch,
+        health: { status: "ok", version: "0.1.9", apiLevel: 1 },
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "navigate", option: "waitUntil", required: 2 });
+    expect(older.requests).toEqual([]);
+  });
+
+  it("the watch loop tests every commit and throws on a popup match", async () => {
+    const committed = [
+      { navigation: 5, url: "" },
+      { navigation: 6, url: "https://example.test/step" },
+      { navigation: 7, url: "https://example.test/done" },
+    ];
+    const watched = [
+      { ok: true, tab: slots, url: "https://example.test/slots", navigation: 4, committed: [], popups: [] },
+      { ok: true, tab: slots, url: "https://example.test/done", navigation: 7, committed, popups: [] },
+    ];
+    const api = fakeApi({ ...navigationRoutes, "POST /tabs/tab-1/wait-for-url": () => Response.json(watched.shift()) });
+    const page = await navigationPage(api);
+    const seen = [];
+    const result = await page.waitForURL(
+      (address) => {
+        seen.push(address);
+        return address.pathname === "/done";
+      },
+      { timeout: 5000 },
+    );
+    expect(result).toMatchObject({ ok: true, url: "https://example.test/done" });
+    // The predicate saw the URL at entry and every commit, oldest first, as
+    // URL objects, and never an address that does not parse.
+    expect(seen.map(String)).toEqual(["https://example.test/slots", "https://example.test/step", "https://example.test/done"]);
+    expect(seen.every((address) => address instanceof URL)).toBe(true);
+    expect(api.requests.slice(2)).toEqual([
+      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { timeoutMs: expect.any(Number) } },
+      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { after: 4, timeoutMs: expect.any(Number) } },
+      { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "load", timeoutMs: expect.any(Number) } },
+    ]);
+    // A RegExp is reset before each test, so one matcher works twice.
+    const repeated = fakeApi({
+      ...navigationRoutes,
+      "POST /tabs/tab-1/wait-for-url": () =>
+        Response.json({ ok: true, tab: slots, url: "https://example.test/done", navigation: 2, committed: [], popups: [] }),
+    });
+    const twice = await navigationPage(repeated);
+    const pattern = /example\.test\/done/g;
+    for (const attempt of [1, 2])
+      expect((await twice.waitForURL(pattern, { timeout: 1000 })).url, String(attempt)).toBe("https://example.test/done");
+    // A popup that reached the URL ends the wait: the action already happened.
+    const popup = { id: "tab-9", label: "p3", url: "https://example.test/done" };
+    const opened = fakeApi({
+      ...navigationRoutes,
+      "POST /tabs/tab-1/wait-for-url": () =>
+        Response.json({ ok: true, tab: slots, url: "https://example.test/slots", navigation: 3, committed: [], popups: [popup] }),
+    });
+    const popped = await navigationPage(opened);
+    await expect(popped.waitForURL(/\/done$/, { timeout: 1000 })).rejects.toMatchObject({
+      code: "url_opened_in_popup",
+      entry: "page.waitForURL",
+      lastUrl: "https://example.test/slots",
+      popup,
+      message:
+        "tab-1 stayed at https://example.test/slots, but popup p3 opened from it at https://example.test/done. The action already happened, so do not repeat it. Continue in p3.",
+    });
+    // The client raises the timeout itself, naming what it waited for.
+    const stalled = fakeApi({
+      ...navigationRoutes,
+      "POST /tabs/tab-1/wait-for-url": () =>
+        Response.json(
+          {
+            error: {
+              code: "wait_timeout",
+              message: "The page did not commit another URL within 200 ms. It is at https://example.test/slots.",
+              awaited: "url",
+              timeoutMs: 200,
+              lastUrl: "https://example.test/slots",
+            },
+          },
+          { status: 504 },
+        ),
+    });
+    const waiting = await navigationPage(stalled);
+    await expect(waiting.waitForURL(/\/done$/, { timeout: 200 })).rejects.toMatchObject({
+      code: "wait_timeout",
+      entry: "page.waitForURL",
+      awaited: "url",
+      expected: "\\/done$",
+      lastUrl: "https://example.test/slots",
+      timeoutMs: 200,
+      message: "The page did not reach a URL matching \\/done$ within 200 ms. It is at https://example.test/slots.",
+    });
+    await expect(waiting.waitForURL((address) => address.pathname === "/done", { timeout: 200 })).rejects.toMatchObject({
+      code: "wait_timeout",
+      expected: "a URL predicate",
+    });
+  });
+
+  it("misplaced waitForFunction options throw before sending", async () => {
+    const api = fakeApi(navigationRoutes);
+    const page = await navigationPage(api);
+    const sent = api.requests.length;
+    for (const options of [{ timeout: 5000 }, { interval: 250 }, { timeout: 5000, interval: 250 }])
+      await expect(page.waitForFunction(() => true, options), JSON.stringify(options)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.waitForFunction",
+        expected: "page.waitForFunction(pageFunction, arg?, { timeout?, interval? })",
+      });
+    expect(api.requests).toHaveLength(sent);
+    // An argument of its own still reaches the page, options and all.
+    await page.waitForFunction((rows) => rows > 0, 3, { interval: 250 });
+    expect(api.requests.at(-1).body).toEqual({ function: "(rows) => rows > 0", arg: 3, intervalMs: 250, timeoutMs: 10000 });
+    await page.waitForFunction((data) => data.rows > 0, { rows: 3 });
+    expect(api.requests.at(-1).body).toEqual({ function: "(data) => data.rows > 0", arg: { rows: 3 }, intervalMs: 100, timeoutMs: 10000 });
+  });
+
+  it("waitForTimeout validates and sends nothing", async () => {
+    const api = fakeApi(navigationRoutes);
+    const page = await navigationPage(api);
+    const sent = api.requests.length;
+    expect(await page.waitForTimeout(0)).toBeUndefined();
+    const started = Date.now();
+    await page.waitForTimeout(20);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+    expect(schema.checkCall(schema.findEntry("Page.waitForTimeout"), [600000])).toBeNull();
+    for (const ms of [-1, 600001, 1.5, "1000", null])
+      await expect(page.waitForTimeout(ms), String(ms)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.waitForTimeout",
+      });
+    expect(api.requests).toHaveLength(sent);
+  });
+
+  it("each new command sends one request", async () => {
+    const cases = [
+      [["navigate", "tab-1", "https://example.test/slots"], { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } }],
+      [["reload", "tab-1", "--wait-until", "domcontentloaded", "--timeout", "9000"], { method: "POST", path: "/tabs/tab-1/reload", body: { waitUntil: "domcontentloaded", timeoutMs: 9000 } }],
+      [["info", "tab-1"], { method: "GET", path: "/tabs/tab-1/info", body: undefined }],
+      [["wait-for-url", "tab-1", "https://example.test/**/done", "--wait-until", "commit", "--timeout", "8000"], { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { url: "https://example.test/**/done", waitUntil: "commit", timeoutMs: 8000 } }],
+      [["wait-for-load-state", "tab-1", "networkidle", "--idle", "750"], { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "networkidle", idleMs: 750 } }],
+      [["wait-for-load-state", "tab-1", "--timeout", "0"], { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { timeoutMs: 0 } }],
+      [["wait-for-selector", "tab-1", "#slots", "--state", "attached"], { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { selector: "#slots", state: "attached" } }],
+      [["wait-for-selector", "tab-1", "@e2"], { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { ref: "@e2" } }],
+      [["wait-for-function", "tab-1", "--stdin", "--interval", "250", "--timeout", "8000"], { method: "POST", path: "/tabs/tab-1/wait-for-function", body: { expression: "window.slots > 0", intervalMs: 250, timeoutMs: 8000 } }, "window.slots > 0\n"],
+    ];
+    for (const [args, expected, stdin] of cases) {
+      const api = fakeApi(navigationRoutes);
+      expect(
+        await runCli(args, {
+          env,
+          fetch: api.fetch,
+          health: level4,
+          stdin: stdin === undefined ? undefined : Readable.from([stdin]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).toBe(0);
+      expect(api.requests, args.join(" ")).toEqual([expected]);
+    }
+    const unused = vi.fn();
+    await expect(runCli(["wait-for-function", "tab-1"], { env, fetch: unused, health: level4, stdout: sink() })).rejects.toThrow(/--stdin/);
+    // Each new command is refused by name against a Kamapathy that predates it.
+    for (const args of [
+      ["reload", "tab-1"],
+      ["info", "tab-1"],
+      ["wait-for-url", "tab-1", "https://example.test/**"],
+      ["wait-for-load-state", "tab-1"],
+      ["wait-for-selector", "tab-1", "#slots"],
+    ])
+      await expect(runCli(args, { env, fetch: unused, health: level3, stdout: sink() }), args.join(" ")).rejects.toMatchObject({
+        code: "app_outdated",
+        required: 4,
+        available: 3,
+      });
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("the new output lines read as the spec says", async () => {
+    const cases = [
+      [
+        ["navigate", "tab-1", "https://example.test/slots"],
+        { ok: true, tab: slots, httpStatus: 200, waitUntil: "commit", dialog: { type: "beforeunload", message: "", answer: "accepted" } },
+        ["tab tab-1 https://example.test/slots 200", "dialog beforeunload accepted"],
+      ],
+      [["reload", "tab-1"], { ok: true, tab: slots, waitUntil: "load" }, ["tab tab-1 https://example.test/slots"]],
+      [["info", "tab-1"], infoAnswer, ["tab tab-1 https://example.test/slots", "viewport 1200x800 scroll 0,640 document 1200x5400 complete"]],
+      [["wait-for-url", "tab-1", "https://example.test/**/done"], { ok: true, tab: slots, url: "https://example.test/done" }, ["ok: url https://example.test/done"]],
+      [["wait-for-load-state", "tab-1", "networkidle"], { ok: true, tab: slots, state: "networkidle" }, ["ok: networkidle https://example.test/slots"]],
+      [["wait-for-selector", "tab-1", "#slots"], { ok: true, tab: slots, state: "visible", matched: 1 }, ["ok: visible 1 match"]],
+      [["wait-for-selector", "tab-1", "#slots", "--state", "hidden"], { ok: true, tab: slots, state: "hidden", matched: 3 }, ["ok: hidden 3 matches"]],
+      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots, value: { slots: 3 } }, ['ok: value {"slots":3}']],
+      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots }, ["ok: value undefined"]],
+      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots, unserializable: "Infinity" }, ["ok: value Infinity"]],
+    ];
+    for (const [args, answer, lines] of cases) {
+      const stdout = sink();
+      expect(
+        await runCli(args, {
+          env,
+          fetch: vi.fn(async () => Response.json(answer)),
+          health: level4,
+          stdin: Readable.from(["window.slots"]),
+          stdout,
+        }),
+        args.join(" "),
+      ).toBe(0);
+      expect(stdout.text(), args.join(" ")).toBe(`${lines.join("\n")}\n`);
+    }
+    // A long value is cut, and --json keeps printing the answer itself.
+    const cutoff = sink();
+    await runCli(["wait-for-function", "tab-1", "--stdin"], {
+      env,
+      fetch: vi.fn(async () => Response.json({ ok: true, tab: slots, value: "x".repeat(400) })),
+      health: level4,
+      stdin: Readable.from(["window.slots"]),
+      stdout: cutoff,
+    });
+    expect(cutoff.text()).toBe(`ok: value ${`"${"x".repeat(400)}"`.slice(0, 200)}\n`);
+    const json = sink();
+    await runCli(["info", "tab-1", "--json"], { env, fetch: vi.fn(async () => Response.json(infoAnswer)), health: level4, stdout: json });
+    expect(JSON.parse(json.text())).toEqual(infoAnswer);
+  });
+
+  it("a batch with navigation steps is checked before its first action", async () => {
+    const api = fakeApi(navigationRoutes);
+    const page = await navigationPage(api);
+    const sent = api.requests.length;
+    await expect(
+      page.batch([
+        { type: "navigate", url: "https://example.test/slots" },
+        { type: "wait-for-selector", selector: "#slots", state: "gone" },
+      ]),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.batch",
+      index: 1,
+      field: "state",
+      message: expect.stringContaining("state must be attached, visible, hidden, or detached."),
+    });
+    // A URL step watches nothing: the after field belongs to the route only.
+    await expect(page.batch([{ type: "wait-for-url", after: 3 }])).rejects.toMatchObject({
+      code: "invalid_argument",
+      field: "after",
+      message: expect.stringContaining('Batch step 1 (wait-for-url) has no field "after"'),
+    });
+    expect(api.requests).toHaveLength(sent);
+    // A plan the schema accepts reaches the route as one request.
+    expect(
+      await page.batch([
+        { type: "navigate", url: "https://example.test/slots", waitUntil: "commit" },
+        { type: "wait-for-load-state", state: "networkidle", idleMs: 750 },
+        { type: "wait-for-selector", ref: "@e2", state: "visible" },
+        { type: "reload", ignoreCache: true },
+        { type: "wait-for-function", expression: "window.slots > 0", intervalMs: 250 },
+      ]),
+    ).toMatchObject({ ok: true });
+    expect(api.requests.at(-1)).toMatchObject({ method: "POST", path: "/tabs/tab-1/actions" });
+  });
+
+  it("page.url and page.title follow every answer", async () => {
+    const done = { ...tab, url: "https://example.test/done", title: "Done" };
+    const api = fakeApi({
+      ...navigationRoutes,
+      "POST /tabs/tab-1/reload": { ok: true, tab: { ...slots, title: "Slots again" }, waitUntil: "load" },
+      "POST /tabs/tab-1/wait-for-selector": { ok: true, tab: done, state: "visible", matched: 2 },
+      "GET /tabs/tab-1/info": { ...infoAnswer, tab: { ...done, title: "Done page" } },
+    });
+    const page = await navigationPage(api);
+    expect([page.url, page.title]).toEqual(["https://example.test/reserve", "Reserve"]);
+    await page.goto("https://example.test/slots");
+    expect([page.url, page.title]).toEqual(["https://example.test/slots", "Slots"]);
+    await page.reload();
+    expect([page.url, page.title]).toEqual(["https://example.test/slots", "Slots again"]);
+    expect(await page.waitForSelector("#slots")).toEqual({ ok: true, tab: done, state: "visible", matched: 2 });
+    expect([page.url, page.title]).toEqual(["https://example.test/done", "Done"]);
+    await page.info();
+    expect(page.title).toBe("Done page");
   });
 });
 

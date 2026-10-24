@@ -275,6 +275,23 @@ function argumentFits(value, arg) {
       return arg.values.includes(value);
     case "integer":
       return Number.isInteger(value);
+    // Milliseconds in the range the argument declares, as a field's are.
+    case "ms":
+      return fits(value, arg);
+    // A URL glob the main process matches, or a RegExp or predicate the
+    // client tests itself.
+    case "matcher":
+      return (
+        value instanceof RegExp ||
+        typeof value === "function" ||
+        (typeof value === "string" && value.trim() !== "")
+      );
+    // A function to call in the page, or the source of one.
+    case "pageFunction":
+      return (
+        typeof value === "function" ||
+        (typeof value === "string" && value.trim() !== "")
+      );
     case "array":
       return (
         Array.isArray(value) && value.every((item) => typeof item === "string")

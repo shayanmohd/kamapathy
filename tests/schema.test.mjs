@@ -925,6 +925,117 @@ describe("API schema", () => {
       expect(reference, text).toContain(text);
   });
 
+  it("the navigation members and commands are declared at level 4", () => {
+    // The millisecond, matcher and page function argument kinds.
+    const timeout = entry("Page.waitForTimeout");
+    for (const ms of [0, 1000, 600000])
+      expect(checkCall(timeout, [ms]), String(ms)).toBeNull();
+    for (const ms of [-1, 600001, 1.5, "1000", null])
+      expect(checkCall(timeout, [ms])?.code, String(ms)).toBe(
+        "invalid_argument",
+      );
+    expect(checkCall(timeout, [])?.message).toBe(
+      "page.waitForTimeout got no ms. Expected page.waitForTimeout(ms).",
+    );
+    const url = entry("Page.waitForURL");
+    for (const matcher of [
+      "https://example.test/**/done",
+      /done$/,
+      (address) => address.pathname === "/done",
+    ])
+      expect(checkCall(url, [matcher]), String(matcher)).toBeNull();
+    for (const matcher of ["", "  ", 5, null, {}])
+      expect(checkCall(url, [matcher])?.code, String(matcher)).toBe(
+        "invalid_argument",
+      );
+    const fn = entry("Page.waitForFunction");
+    expect(checkCall(fn, ["window.slots > 0"])).toBeNull();
+    expect(checkCall(fn, [() => true, { rows: 3 }, { timeout: 1000 }])).toBeNull();
+    for (const source of ["", 5, {}, null])
+      expect(checkCall(fn, [source])?.code, String(source)).toBe(
+        "invalid_argument",
+      );
+    // Options still map by name, with the client's own spelling.
+    expect(checkCall(fn, [() => true, undefined, { timeoutMs: 1000 }])).toMatchObject({
+      code: "invalid_option",
+      fields: { option: "timeoutMs", suggestion: "timeout" },
+    });
+    expect(
+      checkCall(entry("Page.goto"), ["https://example.test/", { waitUntil: "soon" }])
+        ?.code,
+    ).toBe("invalid_option");
+    expect(
+      checkCall(entry("Page.waitForSelector"), ["@e2", { state: "gone" }])?.code,
+    ).toBe("invalid_option");
+    expect(
+      checkCall(entry("Page.waitForLoadState"), ["networkidle", { idleMs: 20000 }])
+        ?.code,
+    ).toBe("invalid_option");
+    // The level and signature every new member declares.
+    const members = [
+      ["Page.goto", "page.goto(url, options?)"],
+      ["Page.reload", "page.reload(options?)"],
+      ["Page.info", "page.info()"],
+      ["Page.waitForURL", "page.waitForURL(url, options?)"],
+      ["Page.waitForLoadState", "page.waitForLoadState(state?, options?)"],
+      ["Page.waitForSelector", "page.waitForSelector(selector, options?)"],
+      [
+        "Page.waitForFunction",
+        "page.waitForFunction(pageFunction, arg?, options?)",
+      ],
+      ["Page.waitForTimeout", "page.waitForTimeout(ms)"],
+    ];
+    for (const [name, signature] of members)
+      expect(entry(name), name).toMatchObject({
+        kind: "method",
+        since: 4,
+        signature,
+      });
+    expect(entry("Page.waitForTimeout").route).toBeUndefined();
+    for (const name of [
+      "reload",
+      "info",
+      "wait-for-url",
+      "wait-for-load-state",
+      "wait-for-selector",
+      "wait-for-function",
+    ]) {
+      const command = findCommand(name);
+      expect(command, name).toMatchObject({ since: 4 });
+      expect(route(command.route), name).toBeDefined();
+      expect(Object.hasOwn(PARSERS, name), name).toBe(true);
+    }
+    expect(findCommand("navigate").flags.map((flag) => flag.name)).toEqual([
+      "--wait-until",
+      "--timeout",
+      "--referer",
+    ]);
+    for (const flag of findCommand("navigate").flags)
+      expect(flag.since, flag.name).toBe(4);
+    expect(findCommand("navigate").usage).toBe(
+      "navigate <tab-id> <url> [--wait-until <state>] [--timeout <ms>] [--referer <url>]",
+    );
+    // The URL rule of this level, in the entry and in the two commands.
+    for (const text of [
+      entry("Page.navigate").summary,
+      findCommand("navigate").arguments[1].description,
+      findCommand("open").arguments[1].description,
+    ])
+      expect(text).toContain("about:blank");
+    // The generated reference carries the members and the commands.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`page.goto(url, options?)`",
+      "`page.info()`",
+      "`page.waitForURL(url, options?)`",
+      "`page.waitForTimeout(ms)`",
+      "`reload <tab-id> [--wait-until <state>] [--timeout <ms>] [--ignore-cache]`",
+      "`info <tab-id>`",
+      "`wait-for-selector <tab-id> <ref-or-selector> [--state <state>] [--timeout <ms>]`",
+    ])
+      expect(reference, text).toContain(text);
+  });
+
   it("resolves help names in every accepted form", () => {
     const names = (query) => resolveNames(query).map((entry) => entry.name);
     expect(names("Page.wait")).toEqual(["Page.wait"]);

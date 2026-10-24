@@ -4,6 +4,26 @@ import { ROUTES, routeKey } from "./routes.mjs";
 const body = (key) => ROUTES.find((route) => routeKey(route) === key).body;
 // pdfText's client options are the route's fields, with timeout for timeoutMs.
 const pdfText = body("POST /tabs/:id/pdf/text");
+// Navigation and the waits: each client option is its route's field, under
+// the Playwright name, so a method and its route cannot drift.
+const GO = body("POST /tabs/:id/navigate");
+const RELOAD = body("POST /tabs/:id/reload");
+const URL_WAIT = body("POST /tabs/:id/wait-for-url");
+const LOAD_WAIT = body("POST /tabs/:id/wait-for-load-state");
+const SELECTOR_WAIT = body("POST /tabs/:id/wait-for-selector");
+const FUNCTION_WAIT = body("POST /tabs/:id/wait-for-function");
+const timeout = (field) => ({ ...field, field: "timeoutMs" });
+// What a navigation or a wait can answer beyond the page codes.
+const NAVIGATION = [
+  "navigation_failed",
+  "navigation_download",
+  "navigation_interrupted",
+  "navigation_timeout",
+  "navigation_blocked",
+  "invalid_field",
+  "busy",
+];
+const WAIT = ["wait_timeout", "invalid_field", "busy"];
 // Every input method takes the label its route declares, in an options
 // object after its own arguments.
 const labelOption = (type) => ({
@@ -116,12 +136,12 @@ export const PAGE_ENTRIES = [
   property(
     "Page.url",
     "page.url",
-    "The last known URL. navigate and snapshot refresh it.",
+    "The last known URL. Every navigation, wait and snapshot refreshes it.",
   ),
   property(
     "Page.title",
     "page.title",
-    "The last known title. navigate and snapshot refresh it.",
+    "The last known title. Every navigation, wait and snapshot refreshes it.",
   ),
   field(
     "Page.label",
@@ -150,11 +170,55 @@ export const PAGE_ENTRIES = [
   method(
     "Page.navigate",
     "page.navigate(url)",
-    "Loads a complete http or https URL. Refs from before become stale.",
+    "Loads a complete http or https URL, or about:blank, and returns once the new document commits. Refs from before become stale.",
     [{ name: "url", kind: "url" }],
     "Promise<Page>",
     "POST /tabs/:id/navigate",
-    ["invalid_url"],
+    ["invalid_url", ...NAVIGATION],
+  ),
+  method(
+    "Page.goto",
+    "page.goto(url, options?)",
+    "Loads a URL and waits for the new document to reach a state, load by default.",
+    [{ name: "url", kind: "url" }, OPTIONS],
+    "Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>",
+    "POST /tabs/:id/navigate",
+    ["invalid_url", ...NAVIGATION],
+    {
+      since: 4,
+      options: {
+        waitUntil: GO.waitUntil,
+        timeout: timeout(GO.timeoutMs),
+        referer: GO.referer,
+      },
+    },
+  ),
+  method(
+    "Page.reload",
+    "page.reload(options?)",
+    "Reloads the page and waits for the new document to reach a state. The tab keeps its ID and label.",
+    [OPTIONS],
+    "Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>",
+    "POST /tabs/:id/reload",
+    ["reload_would_resubmit", ...NAVIGATION],
+    {
+      since: 4,
+      options: {
+        waitUntil: RELOAD.waitUntil,
+        timeout: timeout(RELOAD.timeoutMs),
+        ignoreCache: RELOAD.ignoreCache,
+      },
+    },
+  ),
+  method(
+    "Page.info",
+    "page.info()",
+    "Reads the viewport, scroll offsets, document size and ready state, or the dialog holding the page.",
+    [],
+    "Promise<PageInfo>",
+    "GET /tabs/:id/info",
+    [],
+    { since: 4 },
   ),
   method(
     "Page.snapshot",
@@ -280,6 +344,106 @@ export const PAGE_ENTRIES = [
     ],
     { options: body("POST /tabs/:id/wait") },
   ),
+  method(
+    "Page.waitForURL",
+    "page.waitForURL(url, options?)",
+    "Waits for this page's URL to match a glob, a RegExp or a predicate, then for the state asked for.",
+    [{ name: "url", kind: "matcher" }, OPTIONS],
+    "Promise<{ ok: true, tab, url }>",
+    "POST /tabs/:id/wait-for-url",
+    [...WAIT, "url_opened_in_popup"],
+    {
+      since: 4,
+      options: {
+        timeout: timeout(URL_WAIT.timeoutMs),
+        waitUntil: URL_WAIT.waitUntil,
+      },
+    },
+  ),
+  method(
+    "Page.waitForLoadState",
+    "page.waitForLoadState(state?, options?)",
+    "Waits for the document the page shows to reach a state, following a navigation already in flight.",
+    [
+      {
+        name: "state",
+        kind: "enum",
+        values: LOAD_WAIT.state.values,
+        optional: true,
+      },
+      OPTIONS,
+    ],
+    "Promise<{ ok: true, tab, state }>",
+    "POST /tabs/:id/wait-for-load-state",
+    [...WAIT, "navigation_failed"],
+    {
+      since: 4,
+      options: {
+        timeout: timeout(LOAD_WAIT.timeoutMs),
+        idleMs: LOAD_WAIT.idleMs,
+      },
+    },
+  ),
+  method(
+    "Page.waitForSelector",
+    "page.waitForSelector(selector, options?)",
+    "Waits for an element to be attached, visible, hidden or detached.",
+    [target("selector"), OPTIONS],
+    "Promise<{ ok: true, tab, state, matched }>",
+    "POST /tabs/:id/wait-for-selector",
+    [
+      ...WAIT,
+      "invalid_target",
+      "invalid_ref",
+      "invalid_selector",
+      "unknown_ref",
+      "stale_ref",
+      "no_match",
+      "ambiguous_match",
+    ],
+    {
+      since: 4,
+      options: {
+        state: SELECTOR_WAIT.state,
+        timeout: timeout(SELECTOR_WAIT.timeoutMs),
+      },
+    },
+  ),
+  method(
+    "Page.waitForFunction",
+    "page.waitForFunction(pageFunction, arg?, options?)",
+    "Waits for a function in the page to return a truthy value, and returns that value.",
+    [
+      { name: "pageFunction", kind: "pageFunction" },
+      { name: "arg", kind: "json", optional: true },
+      OPTIONS,
+    ],
+    "Promise<{ ok: true, tab, value?, unserializable? }>",
+    "POST /tabs/:id/wait-for-function",
+    [...WAIT, "agent_scripts_off", "script_error"],
+    {
+      since: 4,
+      expected:
+        "page.waitForFunction(pageFunction, arg?, { timeout?, interval? })",
+      options: {
+        timeout: timeout(FUNCTION_WAIT.timeoutMs),
+        interval: { ...FUNCTION_WAIT.intervalMs, field: "intervalMs" },
+      },
+    },
+  ),
+  // The one method that sends nothing, so no route and none of the page
+  // codes can reach it.
+  {
+    name: "Page.waitForTimeout",
+    kind: "method",
+    signature: "page.waitForTimeout(ms)",
+    summary:
+      "Sleeps in the script and sends nothing. Prefer a wait on what the page does.",
+    args: [{ name: "ms", kind: "ms", min: 0, max: 600000 }],
+    returns: "Promise<void>",
+    errors: [],
+    since: 4,
+  },
   method(
     "Page.batch",
     "page.batch(actions)",

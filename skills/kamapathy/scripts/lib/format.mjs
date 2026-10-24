@@ -194,6 +194,40 @@ const boundaryLines = (data) => [
   ...(data.closed ?? []).map((label) => `closed ${line(label)}`),
 ];
 
+// A dialog an operation answered, or the one holding the page.
+const dialogLine = (dialog) =>
+  [
+    "dialog",
+    line(dialog.type),
+    ...(dialog.answer ? [line(dialog.answer)] : []),
+    ...(dialog.message ? [JSON.stringify(line(dialog.message))] : []),
+  ].join(" ");
+
+// What info read in the page, under its tab line.
+const infoLines = (data) =>
+  data.viewport
+    ? [
+        `viewport ${Number(data.viewport.width)}x${Number(data.viewport.height)} scroll ${Number(data.scroll?.x)},${Number(data.scroll?.y)} document ${Number(data.document?.width)}x${Number(data.document?.height)} ${line(data.readyState)}`,
+      ]
+    : [];
+
+// How much of a page function's value a line carries.
+const VALUE_CHARS = 200;
+// One line per wait command, since each answer reads differently.
+const WAITS = {
+  "wait-for-url": (data) => `ok: url ${line(data.url)}`,
+  "wait-for-load-state": (data) =>
+    `ok: ${line(data.state)} ${line(data.tab?.url)}`,
+  "wait-for-selector": (data) =>
+    `ok: ${line(data.state)} ${Number(data.matched)} ${data.matched === 1 ? "match" : "matches"}`,
+  "wait-for-function": (data) =>
+    data.unserializable !== undefined
+      ? `ok: value ${line(data.unserializable)}`
+      : data.value === undefined
+        ? "ok: value undefined"
+        : `ok: value ${printable(JSON.stringify(data.value)).slice(0, VALUE_CHARS)}`,
+};
+
 // A PDF's pages, each under its own [page N] line.
 const pdfPages = (data) =>
   (data.pages ?? []).flatMap((page) => {
@@ -210,6 +244,7 @@ export function formatResult(data, command) {
       ? "ok: status cleared"
       : `ok: status ${JSON.stringify(line(data.status))}`;
   if (command === "fail") return "ok: failure reported, the person has control";
+  if (Object.hasOwn(WAITS, command ?? "")) return WAITS[command](data);
   if (command === "space finish")
     return [
       `ok: space ${line(data.spaceId)} finished${data.closedSpace ? " and closed" : ""}`,
@@ -234,7 +269,14 @@ export function formatResult(data, command) {
         : []),
       ...(data.active ? [activeLine(data.active)] : []),
     ].join("\n");
-  if (data?.tab) return `tab ${data.tab.id} ${line(data.tab.url)}`;
+  if (data?.tab)
+    return [
+      `tab ${data.tab.id} ${line(data.tab.url)}${
+        data.httpStatus === undefined ? "" : ` ${Number(data.httpStatus)}`
+      }`,
+      ...(data.dialog ? [dialogLine(data.dialog)] : []),
+      ...infoLines(data),
+    ].join("\n");
   if (data?.spaces)
     return data.spaces.length
       ? data.spaces

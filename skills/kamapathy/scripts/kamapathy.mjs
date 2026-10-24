@@ -107,6 +107,14 @@ function flags(args, names) {
   }
   return values;
 }
+// A millisecond flag as the body field it sets, left out when unused.
+const msField = (values, flag, name, minimum, maximum) =>
+  values[flag] === undefined
+    ? {}
+    : { [name]: bounded(values[flag], flag, minimum, maximum) };
+// A flag whose value the route checks, such as an enum or a URL.
+const asField = (values, flag, name) =>
+  values[flag] === undefined ? {} : { [name]: values[flag] };
 // A clip written x,y,width,height, as --clip takes it and the
 // X-Kamapathy-Clip header reports it, or undefined.
 function clipOf(value) {
@@ -383,11 +391,99 @@ export const PARSERS = {
     method: "POST",
     body: { url: required(args[1], "URL") },
   }),
-  navigate: (args) => ({
-    path: `/tabs/${tab(args[0])}/navigate`,
-    method: "POST",
-    body: { url: required(args[1], "URL") },
-  }),
+  navigate: (args) => {
+    const values = flags(args.slice(2), [
+      "--wait-until",
+      "--timeout",
+      "--referer",
+    ]);
+    return {
+      path: `/tabs/${tab(args[0])}/navigate`,
+      method: "POST",
+      body: {
+        url: required(args[1], "URL"),
+        // The command returns at commit, as page.navigate does.
+        waitUntil: values["--wait-until"] ?? "commit",
+        ...msField(values, "--timeout", "timeoutMs", 1, 60000),
+        ...asField(values, "--referer", "referer"),
+      },
+    };
+  },
+  reload: (args) => {
+    const rest = args.filter((argument) => argument !== "--ignore-cache");
+    const ignoreCache = rest.length < args.length;
+    const values = flags(rest.slice(1), ["--wait-until", "--timeout"]);
+    return {
+      path: `/tabs/${tab(rest[0])}/reload`,
+      method: "POST",
+      body: {
+        ...asField(values, "--wait-until", "waitUntil"),
+        ...msField(values, "--timeout", "timeoutMs", 1, 60000),
+        ...(ignoreCache ? { ignoreCache: true } : {}),
+      },
+    };
+  },
+  info: (args) => ({ path: `/tabs/${tab(args[0])}/info` }),
+  "wait-for-url": (args) => {
+    const values = flags(args.slice(2), ["--wait-until", "--timeout"]);
+    return {
+      path: `/tabs/${tab(args[0])}/wait-for-url`,
+      method: "POST",
+      body: {
+        url: required(args[1], "URL glob"),
+        ...asField(values, "--wait-until", "waitUntil"),
+        ...msField(values, "--timeout", "timeoutMs", 0, 60000),
+      },
+    };
+  },
+  // The state is an optional first argument, so the flags start after it.
+  "wait-for-load-state": (args) => {
+    const state = args[1]?.startsWith("--") ? undefined : args[1];
+    const values = flags(args.slice(state === undefined ? 1 : 2), [
+      "--idle",
+      "--timeout",
+    ]);
+    return {
+      path: `/tabs/${tab(args[0])}/wait-for-load-state`,
+      method: "POST",
+      body: {
+        ...(state === undefined ? {} : { state }),
+        ...msField(values, "--idle", "idleMs", 0, 10000),
+        ...msField(values, "--timeout", "timeoutMs", 0, 60000),
+      },
+    };
+  },
+  "wait-for-selector": (args) => {
+    const values = flags(args.slice(2), ["--state", "--timeout"]);
+    return {
+      path: `/tabs/${tab(args[0])}/wait-for-selector`,
+      method: "POST",
+      body: {
+        ...target(args[1]),
+        ...asField(values, "--state", "state"),
+        ...msField(values, "--timeout", "timeoutMs", 0, 60000),
+      },
+    };
+  },
+  "wait-for-function": async (args, { stdin, stdinTimeoutMs }) => {
+    if (args[1] !== "--stdin")
+      throw new Error(
+        "Use wait-for-function <tab-id> --stdin and pipe the expression.",
+      );
+    const values = flags(args.slice(2), ["--interval", "--timeout"]);
+    const expression = (
+      await readInput(stdin || process.stdin, { timeoutMs: stdinTimeoutMs })
+    ).trim();
+    return {
+      path: `/tabs/${tab(args[0])}/wait-for-function`,
+      method: "POST",
+      body: {
+        expression: required(expression, "expression"),
+        ...msField(values, "--interval", "intervalMs", 10, 10000),
+        ...msField(values, "--timeout", "timeoutMs", 0, 60000),
+      },
+    };
+  },
   close: (args) => ({ path: `/tabs/${tab(args[0])}`, method: "DELETE" }),
   snapshot: (args) => {
     const body = { mode: "compact" };
@@ -679,9 +775,9 @@ export async function runCli(argv, options = {}) {
     const problem = outdated(name, since, session.app);
     throw new KamapathyError(problem.code, problem.message, problem.fields);
   }
-  // Snapshot and screenshot flags reach routes and fields older apps do not
-  // have, so each is refused by name before it is sent.
-  if (["snapshot", "screenshot"].includes(name) && session.app) {
+  // Snapshot, screenshot and navigate flags reach routes and fields older
+  // apps do not have, so each is refused by name before it is sent.
+  if (["snapshot", "screenshot", "navigate"].includes(name) && session.app) {
     const route = matchRoute(method, path);
     const refuse = (required, field) => {
       const problem = outdated(name, required, session.app, field);
