@@ -1,6 +1,10 @@
 import { dialog } from "electron";
 import type { BrowserWindow } from "electron";
-import { extensionInstallCopy, extensionRemoveCopy } from "../../src/copy";
+import {
+  extensionImportCopy,
+  extensionInstallCopy,
+  extensionRemoveCopy,
+} from "../../src/copy";
 
 export interface ConsentDetails {
   name: string;
@@ -45,6 +49,28 @@ export function confirmRemove(
       message: extensionRemoveCopy.title(name),
       detail: extensionRemoveCopy.detail,
       buttons: [extensionRemoveCopy.cancel, extensionRemoveCopy.remove],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const parent = window();
+    const { response } = await (parent
+      ? dialog.showMessageBox(parent, options)
+      : dialog.showMessageBox(options));
+    return response === 1;
+  };
+}
+
+// The one native dialog an import opens, before anything is added.
+export function confirmImport(
+  window: () => BrowserWindow | null,
+): (browser: string, count: number) => Promise<boolean> {
+  return async (browser, count) => {
+    const options: Electron.MessageBoxOptions = {
+      type: "question",
+      message: extensionImportCopy.dialogTitle(count, browser),
+      detail: extensionImportCopy.dialogDetail(browser),
+      buttons: [extensionImportCopy.cancel, extensionImportCopy.confirm(count)],
       defaultId: 0,
       cancelId: 0,
       noLink: true,

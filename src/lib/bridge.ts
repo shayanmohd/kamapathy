@@ -436,6 +436,16 @@ export function createPreviewBridge(): KamapathyBridge {
     extensionCommand: async () => {
       throw new Error(extensionsCopy.desktopOnly);
     },
+    extensionImportCandidates: async (selection) => ({
+      source: selection.source,
+      profile: selection.profile ?? "",
+      browser: "",
+      profileName: "",
+      candidates: [],
+    }),
+    importExtensions: async () => {
+      throw new Error(extensionsCopy.desktopOnly);
+    },
     importSafariArchive: async () => {
       throw new Error("Install the desktop app to import from another browser.");
     },

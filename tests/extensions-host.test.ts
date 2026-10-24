@@ -1964,6 +1964,9 @@ describe("the Extensions view and commands", () => {
         openOptionsPage: calls.openOptionsPage,
       } as unknown as ExtensionBridge,
       confirmRemove: calls.confirmRemove,
+      confirmImport: async () => false,
+      locale: "en-US",
+      chromeVersion: CHROME,
     });
     const call = (channel: string, value?: unknown) =>
       handlers.get(channel)!({} as IpcMainInvokeEvent, value);

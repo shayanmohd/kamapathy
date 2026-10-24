@@ -18,7 +18,12 @@ import {
 } from "./default-browser";
 import { ExtensionBridge } from "./extensions/bridge";
 import { ExtensionChannel } from "./extensions/channel";
-import { chooseFolder, confirmAdd, confirmRemove } from "./extensions/dialogs";
+import {
+  chooseFolder,
+  confirmAdd,
+  confirmImport,
+  confirmRemove,
+} from "./extensions/dialogs";
 import { ExtensionHost } from "./extensions/host";
 import { ExtensionInstaller } from "./extensions/install";
 import { registerExtensionIpc, type ExtensionIpc } from "./extensions/ipc";
@@ -1107,6 +1112,9 @@ else {
       updates,
       bridge,
       confirmRemove: confirmRemove(() => window),
+      confirmImport: confirmImport(() => window),
+      locale: app.getLocale(),
+      chromeVersion: process.versions.chrome,
     });
     const pushExtensions = () => extensionIpc?.push();
     extensions.onEvent(pushExtensions);
