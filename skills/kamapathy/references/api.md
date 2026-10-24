@@ -419,7 +419,7 @@ Replaces the value of a field, select or editable region.
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `not_editable`, `ambiguous_field`, `fill_not_accepted`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.press(key, target?, options?)`
 
@@ -791,6 +791,11 @@ Show the commands, or help on one
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
+| `not_editable` | 422 | not retryable | `reason` | Nothing at, around or inside the target can take typing or a value. |
+| `not_selectable` | 422 | not retryable |  | No select at, for or inside the target. |
+| `not_focusable` | 422 | not retryable |  | Nothing focusable at, around or inside the target. |
+| `ambiguous_field` | 422 | not retryable | `candidates` | Retargeting found several candidates. |
+| `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |

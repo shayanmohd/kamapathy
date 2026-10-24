@@ -371,6 +371,409 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     });
   }, 30000);
 
+  // The field operations the fill, select and focus routes drive.
+  const prepare = (selector: string, extra: Record<string, unknown> = {}) =>
+    operate("fillPrepare", aim(selector, { value: "Ada", ...extra }));
+  const choose = (selector: string, values: unknown[]) =>
+    operate("selectChoose", aim(selector, { values }));
+  const setValue = (selector: string, value: string) =>
+    operate("setDirectValue", aim(selector, { value }));
+  const activeId = () => page.evaluate(() => document.activeElement?.id);
+  // One composed input and one bubbling change, counted at the document.
+  const watchEvents = () =>
+    page.evaluate(() => {
+      const counts = { input: 0, change: 0, composed: 0 };
+      (window as unknown as { counts: typeof counts }).counts = counts;
+      document.addEventListener("input", (event) => {
+        counts.input++;
+        if (event.composed) counts.composed++;
+      });
+      document.addEventListener("change", () => counts.change++);
+    });
+  // What was counted since the last reading, which the listeners keep
+  // writing into.
+  const counted = () =>
+    page.evaluate(() => {
+      const held = (window as unknown as { counts: Record<string, number> })
+        .counts;
+      const seen = { ...held };
+      held.input = 0;
+      held.change = 0;
+      held.composed = 0;
+      return seen;
+    });
+  // What a trusted insertion at the prepared caret would leave behind.
+  const insertInto = (selector: string, text: string) =>
+    page.evaluate(
+      ([selector, text]) => {
+        document.execCommand("insertText", false, text);
+        return (document.querySelector(selector) as HTMLInputElement).value;
+      },
+      [selector, text] as const,
+    );
+  const selectionOf = (id: string) =>
+    page.evaluate((id) => {
+      const field = document.getElementById(id) as HTMLInputElement;
+      return {
+        start: field.selectionStart,
+        end: field.selectionEnd,
+        value: field.value,
+      };
+    }, id);
+
+  it("retargets fills, selects and focus", async () => {
+    await open("/input/fields");
+    // A label around an input, and a wrapper holding one field.
+    expect(await prepare("#wrap")).toMatchObject({
+      ok: true,
+      mode: "insert",
+      previous: "",
+    });
+    expect(await activeId()).toBe("nick");
+    expect(await prepare("#one-area")).toMatchObject({ ok: true });
+    expect(await activeId()).toBe("area");
+    // A hidden decoy leaves one field to fill.
+    expect(await prepare("#decoy")).toMatchObject({ ok: true });
+    expect(await activeId()).toBe("real");
+    // Several fillable descendants name themselves instead.
+    const two = await prepare("#two-fields");
+    expect(two).toMatchObject({ ok: false, code: "ambiguous_field" });
+    expect(two.fields.candidates).toEqual([
+      {
+        tag: "input",
+        role: "textbox",
+        name: "First",
+        context: expect.any(String),
+      },
+      {
+        tag: "input",
+        role: "textbox",
+        name: "Second",
+        context: expect.any(String),
+      },
+    ]);
+    // Three at most, the ones an action can take first.
+    const many = await prepare("#many-fields");
+    expect(
+      many.fields.candidates.map((item: { name: string }) => item.name),
+    ).toEqual(["One", "Two", "Three"]);
+    // A child of an editing host fills the host.
+    expect(await prepare("#note-word")).toMatchObject({
+      ok: true,
+      previous: "Written here",
+    });
+    expect(await activeId()).toBe("notes");
+    expect(await prepare("#notes")).toMatchObject({ ok: true });
+    // Nothing to type into, and a kind fill never takes.
+    expect(await prepare("#plain")).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "none" },
+    });
+    expect(await prepare("#pick")).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "kind" },
+    });
+    // A field inside a frame from another origin is named by the frame.
+    await page.evaluate(
+      async (src) => {
+        const wrapper = document.createElement("div");
+        wrapper.id = "foreign-wrap";
+        const frame = document.createElement("iframe");
+        frame.src = src;
+        const loaded = new Promise((done) =>
+          frame.addEventListener("load", done),
+        );
+        wrapper.append(frame);
+        document.body.append(wrapper);
+        await loaded;
+      },
+      `${origin.replace("127.0.0.1", "localhost")}/input/fields`,
+    );
+    expect(await prepare("#foreign-wrap")).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "frame" },
+    });
+    await open("/input/selects");
+    // A label's select, a wrapper's only select, and nothing to choose in.
+    expect(await choose("#city-label", ["ams"])).toMatchObject({
+      ok: true,
+      values: ["ams"],
+    });
+    expect(await choose("#one-select", ["b"])).toMatchObject({
+      ok: true,
+      values: ["b"],
+    });
+    expect(await choose("#nothing-here", ["a"])).toMatchObject({
+      ok: false,
+      code: "not_selectable",
+    });
+    // Focus takes the single editable descendant, or nothing.
+    await open("/input/fields");
+    expect(await operate("focusTarget", aim("#one-area"))).toMatchObject({
+      ok: true,
+    });
+    expect(await activeId()).toBe("area");
+    expect(await operate("focusTarget", aim("#plain"))).toMatchObject({
+      ok: false,
+      code: "not_focusable",
+    });
+    const crowded = await operate("focusTarget", aim("#two-fields"));
+    expect(crowded).toMatchObject({ ok: false, code: "ambiguous_field" });
+  }, 30000);
+
+  it("matches options by value, label, index and object", async () => {
+    await open("/input/selects");
+    await watchEvents();
+    // A string matches a value first, then a label.
+    expect(await choose("#city", ["ams"])).toMatchObject({ values: ["ams"] });
+    expect(await counted()).toEqual({ input: 1, change: 1, composed: 1 });
+    expect(
+      await page.evaluate(
+        () => (document.getElementById("city") as HTMLSelectElement).value,
+      ),
+    ).toBe("ams");
+    expect(await choose("#city", ["Bengaluru"])).toMatchObject({
+      values: ["blr"],
+    });
+    expect(await choose("#city", [{ label: "Amsterdam" }])).toMatchObject({
+      values: ["ams"],
+    });
+    // A value beats another option's label.
+    expect(await choose("#tricky", ["two"])).toMatchObject({
+      values: ["two"],
+    });
+    // Every field of an object has to match.
+    expect(await choose("#city", [{ value: "blr", index: 2 }])).toMatchObject({
+      values: ["blr"],
+    });
+    expect(await choose("#city", [{ value: "blr", index: 1 }])).toMatchObject({
+      blocked: { blocker: "option_missing" },
+    });
+    expect(await choose("#city", [{}])).toMatchObject({
+      ok: false,
+      code: "invalid_field",
+    });
+    // A disabled option stays selectable.
+    expect(await choose("#roles", ["w"])).toMatchObject({ values: ["w"] });
+    // A missing option names what was asked for and the first 20 options.
+    await counted();
+    const missing = await choose("#many", ["nope"]);
+    expect(missing.blocked).toEqual({
+      blocker: "option_missing",
+      detail: "nope",
+    });
+    expect(missing.options).toHaveLength(20);
+    expect(missing.options[0]).toBe("Option 1");
+    expect(await counted()).toEqual({ input: 0, change: 0, composed: 0 });
+    // A multiple select takes several, and an empty list clears it.
+    expect(await choose("#several", ["a", "Gamma"])).toMatchObject({
+      values: ["a", "c"],
+    });
+    expect(await choose("#several", [])).toMatchObject({ values: [] });
+    // A single select cannot hold nothing, so clearing reports what it keeps.
+    expect(await choose("#city", [])).toMatchObject({ values: [""] });
+    expect(
+      await page.evaluate(
+        () =>
+          Array.from(
+            document.querySelectorAll<HTMLOptionElement>("#several option"),
+          ).filter((option) => option.selected).length,
+      ),
+    ).toBe(0);
+    // A single select takes one choice.
+    expect(await choose("#city", ["ams", "blr"])).toMatchObject({
+      ok: false,
+      code: "invalid_field",
+    });
+  }, 30000);
+
+  it("sets range and color directly and refuses what fill cannot take", async () => {
+    await open("/input/fields");
+    await watchEvents();
+    expect(await setValue("#volume", "7")).toMatchObject({
+      ok: true,
+      value: "7",
+    });
+    expect(await counted()).toEqual({ input: 1, change: 1, composed: 1 });
+    // A colour ignores case, and a range must equal its sanitized value.
+    expect(await setValue("#tint", "#ABCDEF")).toMatchObject({
+      ok: true,
+      value: "#abcdef",
+    });
+    expect(await counted()).toEqual({ input: 1, change: 1, composed: 1 });
+    expect(await setValue("#volume", "15")).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
+    expect(
+      await page.evaluate(
+        () => (document.getElementById("volume") as HTMLInputElement).value,
+      ),
+    ).toBe("7");
+    expect(await setValue("#day", "not-a-day")).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
+    expect(await setValue("#week", "2026-W01")).toMatchObject({ ok: true });
+    // Nothing fired for a value the field refused.
+    expect(await counted()).toEqual({ input: 1, change: 1, composed: 1 });
+    for (const id of ["pick", "choice", "upload", "token", "picture", "go"])
+      expect(await setValue(`#${id}`, "x")).toMatchObject({
+        ok: false,
+        code: "not_editable",
+        fields: { reason: "kind" },
+      });
+    await open("/input/selects");
+    expect(await setValue("#several", "a")).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "kind" },
+    });
+    expect(await setValue("#empty", "a")).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "readonly_select" },
+    });
+    // A single select keeps its exact value match.
+    expect(await setValue("#city", "ams")).toMatchObject({
+      ok: true,
+      value: "ams",
+    });
+    expect(await setValue("#city", "Amsterdam")).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
+    expect(await setValue("#roles", "w")).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
+  }, 30000);
+
+  it("prepares a field with preventScroll and reports not_focused", async () => {
+    await open("/input/fields");
+    // A field whose own handler moves focus away is not prepared.
+    expect(await prepare("#jumpy")).toMatchObject({
+      blocked: { blocker: "not_focused" },
+    });
+    expect(await prepare("#code")).toMatchObject({
+      blocked: { blocker: "read_only" },
+    });
+    // Replacing selects everything the field holds.
+    await page.fill("#name", "Grace");
+    expect(await prepare("#name")).toMatchObject({
+      ok: true,
+      mode: "insert",
+      previous: "Grace",
+    });
+    expect(await selectionOf("name")).toEqual({
+      start: 0,
+      end: 5,
+      value: "Grace",
+    });
+    // Appending leaves the value and puts the caret at its end.
+    expect(await prepare("#name", { append: true })).toMatchObject({
+      previous: "Grace",
+    });
+    expect(await selectionOf("name")).toEqual({
+      start: 5,
+      end: 5,
+      value: "Grace",
+    });
+    // An empty value is deleted instead of typed.
+    expect(await prepare("#name", { value: "" })).toMatchObject({
+      mode: "delete",
+    });
+    expect(await prepare("#name", { value: "", append: true })).toMatchObject({
+      mode: "insert",
+    });
+    // Email and number inputs have no selection to set; their previous value
+    // is still read, and the caret of a field just focused rests at its end,
+    // so appending fills the old value and the new one.
+    await page.fill("#email", "ada@example.com");
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    expect(await prepare("#email", { append: true })).toMatchObject({
+      ok: true,
+      mode: "insert",
+      previous: "ada@example.com",
+    });
+    expect(await insertInto("#email", "X")).toBe("ada@example.comX");
+    expect(await prepare("#email", { value: "new@example.com" })).toMatchObject(
+      { previous: "ada@example.comX" },
+    );
+    expect(await insertInto("#email", "new@example.com")).toBe(
+      "new@example.com",
+    );
+    await page.fill("#count", "12");
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    expect(await prepare("#count", { value: "3", append: true })).toMatchObject(
+      { previous: "12" },
+    );
+    expect(await insertInto("#count", "3")).toBe("123");
+    // A value the field would normalize never reaches it.
+    expect(await prepare("#count", { value: "12x" })).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
+    // An editing host has its contents selected.
+    expect(await prepare("#notes")).toMatchObject({ ok: true });
+    expect(await page.evaluate(() => String(getSelection()))).toBe(
+      "Written here",
+    );
+    // A secret field answers valueHidden instead of a value, and reports the
+    // point a retry click would land on.
+    await page.fill("#secret", "hunter2");
+    const secret = await prepare("#secret");
+    expect(secret).toMatchObject({ ok: true, valueHidden: true, previous: "" });
+    expect(secret.point).toMatchObject({
+      x: expect.any(Number),
+      y: expect.any(Number),
+    });
+    // Preparation never scrolls, wherever the field stands.
+    const resting = await page.evaluate(() => scrollY);
+    expect(await prepare("#three")).toMatchObject({ ok: true });
+    expect(await page.evaluate(() => scrollY)).toBe(resting);
+  }, 30000);
+
+  it("reads a field until two reads agree", async () => {
+    await open("/input/fields");
+    const read = (selector: string, extra: Record<string, unknown> = {}) =>
+      operate(
+        "fillRead",
+        aim(selector, { value: "Ada", previous: "", ...extra }),
+      );
+    await page.fill("#name", "Ada");
+    expect(await read("#name")).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    expect(await read("#name", { value: "Grace" })).toMatchObject({
+      match: "transformed",
+    });
+    // A field a component rewrites after it changes settles before the read
+    // answers.
+    await page.evaluate(() => {
+      const slow = document.getElementById("slow") as HTMLInputElement;
+      slow.value = "Ada";
+      slow.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(await read("#slow")).toMatchObject({
+      match: "transformed",
+      value: "Ada-one-two",
+    });
+    // A wrapper reads the field it would fill, and a secret field reports no
+    // value at all.
+    expect(await read("#one-area", { value: "" })).toMatchObject({
+      match: "exact",
+    });
+    await page.fill("#secret", "hunter2");
+    const secret = await read("#secret", { value: "hunter2" });
+    expect(secret).toEqual({ ok: true, match: "exact", valueHidden: true });
+  }, 30000);
+
   it("measures stability across two frames", async () => {
     await open("/input/moving");
     const still = await operate("stableBox", aim("#still"));

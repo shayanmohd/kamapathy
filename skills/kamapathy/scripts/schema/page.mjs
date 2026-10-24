@@ -193,7 +193,14 @@ export const PAGE_ENTRIES = [
     [target(), { name: "value", kind: "string" }, OPTIONS],
     "Promise<{ ok: true, rebound? }>",
     "POST /tabs/:id/fill",
-    [...TARGET, "invalid_value", "invalid_field"],
+    [
+      ...TARGET,
+      "invalid_value",
+      "invalid_field",
+      "not_editable",
+      "ambiguous_field",
+      "fill_not_accepted",
+    ],
     labelOption("fill"),
   ),
   method(

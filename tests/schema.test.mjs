@@ -220,10 +220,16 @@ describe("API schema", () => {
       ))
         raised.add(match[1]);
     }
-    for (const args of calls(read("electron/automation-dom.ts"), "failure")) {
-      const codes = [...args.matchAll(/"([a-z][a-z_]*)"/g)].map((m) => m[1]);
-      if (codes.length) raised.add(codes.at(-1));
-    }
+    // The page operations raise through their host, with the code as the last
+    // string literal of the call.
+    for (const page of [
+      "electron/automation-dom.ts",
+      "electron/agent/dom/actions.ts",
+    ])
+      for (const args of calls(read(page), "failure")) {
+        const codes = [...args.matchAll(/"([a-z][a-z_]*)"/g)].map((m) => m[1]);
+        if (codes.length) raised.add(codes.at(-1));
+      }
     const client = read("skills/kamapathy/scripts/api.mjs");
     for (const match of client.matchAll(/new KamapathyError\(\s*"([a-z_]+)"/g))
       raised.add(match[1]);
@@ -297,6 +303,22 @@ describe("API schema", () => {
       transient: false,
       since: 4,
     });
+    // The codes retargeting and verifying a field raise.
+    for (const code of [
+      "not_editable",
+      "not_selectable",
+      "not_focusable",
+      "ambiguous_field",
+      "fill_not_accepted",
+    ])
+      expect(ERRORS[code], code).toMatchObject({
+        status: 422,
+        transient: false,
+        since: 4,
+      });
+    expect(ERRORS.not_editable.fields).toEqual(["reason"]);
+    expect(ERRORS.ambiguous_field.fields).toEqual(["candidates"]);
+    expect(ERRORS.fill_not_accepted.fields).toEqual(["match"]);
     expect(ERRORS.invalid_selector.status).toBe(400);
     for (const code of [
       "not_connected",

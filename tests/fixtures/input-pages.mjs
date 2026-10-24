@@ -1,8 +1,9 @@
 // Pages the element actions are measured against: controls whose hit a
 // banner, a modal, a bare box or their own interactive ancestors take, the
 // disabled states a chain can carry, fields and selects of every kind, a
-// panel inside a frame below the fold, drawn graphics, and boxes that move
-// or whose frames stall.
+// panel inside a frame below the fold, drawn graphics, boxes that move or
+// whose frames stall, and the wrappers fill, select and focus retarget
+// through.
 export const inputPages = {
   "/input/buttons": `<!doctype html><meta charset="utf-8"><title>Buttons</title>
 <style>
@@ -77,9 +78,16 @@ dialog#confirm{position:fixed;left:0;top:500px;margin:0;width:360px;height:120px
 <p><label for="code">Code</label> <input id="code" type="text" value="Fixed" readonly></p>
 <p><label for="jumpy">Jumpy</label> <input id="jumpy" type="text"></p>
 <p><label for="currency">Currency</label> <input id="currency" type="text" value="0.00"></p>
-<p><label for="notes">Notes</label> <div id="notes" contenteditable="true">Written here</div></p>
-<p id="one-area"><textarea id="area" aria-label="Only area"></textarea></p>
-<p id="two-fields"><input id="first" type="text" aria-label="First"> <input id="second" type="text" aria-label="Second"></p>
+<p><label for="slow">Slow</label> <input id="slow" type="text"></p>
+<p><label for="notes">Notes</label> <div id="notes" contenteditable="true">Written <span id="note-word">here</span></div></p>
+<p><label id="wrap">Nickname <input id="nick" type="text"></label></p>
+<p><label for="secret">Password</label> <input id="secret" type="password"></p>
+<div id="one-area"><textarea id="area" aria-label="Only area"></textarea></div>
+<div id="two-fields"><input id="first" type="text" aria-label="First"> <input id="second" type="text" aria-label="Second"></div>
+<div id="many-fields"><input id="shut" type="text" aria-label="Shut" disabled> <input id="one" type="text" aria-label="One"> <input id="two" type="text" aria-label="Two"> <input id="three" type="text" aria-label="Three"></div>
+<div id="decoy"><input id="honey" type="text" aria-label="Honey" hidden> <input id="real" type="text" aria-label="Real"></div>
+<div id="plain">Nothing to focus here</div>
+<p id="kinds"><input id="pick" type="checkbox"> <input id="choice" type="radio" name="one-of"> <input id="upload" type="file"> <input id="token" type="hidden" value="kept"> <input id="picture" type="image" alt="Go" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"> <input id="go" type="button" value="Go"></p>
 <script>
 document.getElementById("jumpy").addEventListener("focus", () => {
   document.getElementById("name").focus();
@@ -90,14 +98,25 @@ currency.addEventListener("input", () => {
   const digits = currency.value.replace(/[^0-9]/g, "");
   currency.value = digits ? (Number(digits) / 100).toFixed(2) : "0.00";
 });
+// A field a component rewrites twice after it changes, as a debounced
+// formatter does, so a single read is not the value it settles on.
+const slow = document.getElementById("slow");
+slow.addEventListener("input", () => {
+  setTimeout(() => (slow.value += "-one"), 20);
+  setTimeout(() => (slow.value += "-two"), 60);
+});
 </script>`,
   "/input/selects": `<!doctype html><meta charset="utf-8"><title>Selects</title>
 <style>body{font:14px sans-serif;margin:16px}p{margin:6px 0}</style>
-<p><label for="city">City</label> <select id="city"><option value="">Choose</option><option value="ams">Amsterdam</option><option value="blr">Bengaluru</option></select></p>
+<p><label id="city-label" for="city">City</label> <select id="city"><option value="">Choose</option><option value="ams">Amsterdam</option><option value="blr">Bengaluru</option></select></p>
 <p><select id="many" aria-label="Many options"></select></p>
 <p><select id="several" multiple aria-label="Several"><option value="a">Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select></p>
 <p><select id="sized" size="3" aria-label="Sized"><option value="a">Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select></p>
 <p id="one-select"><select id="only" aria-label="Only select"><option value="a">Alpha</option><option value="b">Beta</option></select></p>
+<p><select id="roles" aria-label="Roles"><option value="r">Reader</option><option value="w" disabled>Writer</option></select></p>
+<p><select id="empty" aria-label="Empty"></select></p>
+<p><select id="tricky" aria-label="Tricky"><option value="one">two</option><option value="two">three</option></select></p>
+<div id="nothing-here">Nothing to choose here</div>
 <script>
 const many = document.getElementById("many");
 for (let index = 1; index <= 30; index++) {

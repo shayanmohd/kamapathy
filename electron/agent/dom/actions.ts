@@ -45,6 +45,16 @@ export interface ScrollRequest {
   deltaY: number;
   frame?: string;
 }
+export type FillMatch =
+  "exact" | "equivalent" | "transformed" | "unchanged" | "appended";
+export type FillMode = "insert" | "direct" | "delete";
+export interface FieldCandidate {
+  ref?: string;
+  tag: string;
+  role: string;
+  name: string;
+  context: string;
+}
 export interface ActionHost {
   select(spec: unknown): Element | Record<string, unknown>;
   isElement(value: unknown): value is Element;
@@ -63,7 +73,10 @@ export interface ActionHost {
   framesOf(element: Element): Element[] | undefined;
   frameDocument(element: Element): Document | null;
   opaqueFrame(element: Element): boolean;
+  editingHost(element: Element): boolean;
   live(element: Element): boolean;
+  secret(element: Element): boolean;
+  candidates(found: Element[]): FieldCandidate[];
   normalizeText(text: string): string;
   failure(
     error: string,
@@ -73,11 +86,60 @@ export interface ActionHost {
   reboundResult(): Record<string, unknown>;
 }
 
-export function actionOperations(host: ActionHost) {
+// How a field's value is compared with what was asked for. It is a factory so
+// the same code runs in the page, where it travels as an argument, and in
+// Node through the exports below.
+export function fillClassifier() {
+  const normalizeValue = (text: string) =>
+    text.replace(/\r\n?/g, "\n").replace(/[​﻿]/g, "");
+  const numberOf = (text: string) => {
+    const bare = text.replace(/,/g, "").trim();
+    return bare === "" ? NaN : Number(bare);
+  };
+  const sameNumber = (asked: string, read: string) => {
+    const left = numberOf(asked);
+    return isFinite(left) && left === numberOf(read);
+  };
+  const classifyFill = (
+    previous: string,
+    value: string,
+    read: string,
+    options: { append: boolean },
+  ): FillMatch => {
+    const was = normalizeValue(previous);
+    const asked = normalizeValue(value);
+    const now = normalizeValue(read);
+    const wanted = options.append ? was + asked : asked;
+    if (now === wanted) return "exact";
+    if (sameNumber(wanted, now)) return "equivalent";
+    // An all-digit value reaches a masked field as digits in any layout.
+    if (/^[0-9]+$/.test(wanted) && now.replace(/[^0-9]/g, "") === wanted)
+      return "equivalent";
+    if (now === was) return "unchanged";
+    if (!options.append && now === was + asked) return "appended";
+    return "transformed";
+  };
+  return { normalizeValue, classifyFill };
+}
+export const { classifyFill, normalizeValue } = fillClassifier();
+
+export function actionOperations(
+  host: ActionHost,
+  classifier: typeof fillClassifier,
+) {
+  const { classifyFill } = classifier();
+  const { failure } = host;
   // Control and bidirectional formatting characters, which never reach an
   // agent's terminal.
   const MARKS = /[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/g;
   const MAX_NAME = 120;
+  // What a field read gives back: enough to check a fill, never a page's
+  // whole contents.
+  const MAX_VALUE = 200;
+  const MAX_CANDIDATES = 3;
+  const MAX_OPTIONS = 20;
+  const READS = 5;
+  const READ_GAP_MS = 50;
   const MAX_POSITION = 10000;
   const STABLE_PX = 0.5;
   const STALL_MS = 100;
@@ -603,7 +665,12 @@ export function actionOperations(host: ActionHost) {
   // The scroller the last request named, so a gesture that moved nothing is
   // told from one that worked.
   type Mark = { node: Element; left: number; top: number };
-  const slot = globalThis as unknown as { __kamapathyScroll?: Mark };
+  // A secret field's own value stays in this world: the main process hands
+  // the previous value back to the read, and a secret one never leaves.
+  const slot = globalThis as unknown as {
+    __kamapathyScroll?: Mark;
+    __kamapathySecret?: string;
+  };
   const mark = (ask: Ask) => {
     slot.__kamapathyScroll = {
       node: ask.node,
@@ -748,7 +815,9 @@ export function actionOperations(host: ActionHost) {
     zoom: devicePixelRatio,
   });
 
-  const focusedKind = (_payload?: Record<string, unknown>) => {
+  // What holds the caret, through shadow roots and the frames this page can
+  // read.
+  const deepActive = () => {
     let active = document.activeElement;
     for (let depth = 0; active && depth < 32; depth++) {
       const inner =
@@ -758,6 +827,11 @@ export function actionOperations(host: ActionHost) {
       if (!inner) break;
       active = inner;
     }
+    return active;
+  };
+
+  const focusedKind = (_payload?: Record<string, unknown>) => {
+    const active = deepActive();
     const doc = active && host.docOf(active);
     if (
       !active ||
@@ -778,5 +852,485 @@ export function actionOperations(host: ActionHost) {
       : { ok: true as const, kind: controlKind(active), ...place };
   };
 
-  return { actionPoint, stableBox, scrollRequest, viewport, focusedKind };
+  // What fill can put a value into, and the way it gets there. "host" names
+  // an element inside an editing host, which fill retargets to.
+  type FillKind =
+    "text" | "direct" | "host" | "kind" | "readonly_select" | "none";
+  const fillKindOf = (element: Element): FillKind => {
+    const tag = tagOf(element);
+    if (tag === "input") {
+      const type = (element as HTMLInputElement).type;
+      if (type === "range" || type === "color" || DATE_TYPES.includes(type))
+        return "direct";
+      return TEXT_TYPES.includes(type) ? "text" : "kind";
+    }
+    if (tag === "textarea") return "text";
+    if (tag === "select") {
+      const list = element as HTMLSelectElement;
+      if (list.multiple) return "kind";
+      return list.options.length ? "direct" : "readonly_select";
+    }
+    if ((element as HTMLElement).isContentEditable !== true) return "none";
+    return host.editingHost(element) ? "text" : "host";
+  };
+  const editingAround = (element: Element) => {
+    for (let node: Element | null = element; node; node = host.parentOf(node))
+      if (host.editingHost(node)) return node;
+    return null;
+  };
+  const fieldValue = (field: Element) => {
+    const tag = tagOf(field);
+    if (tag === "input" || tag === "textarea" || tag === "select")
+      return (field as HTMLInputElement).value;
+    return (field as HTMLElement).innerText ?? "";
+  };
+  // The value setter the element's own realm defines, which a framework's own
+  // property on the element does not hide.
+  const valueSetter = (field: Element) => {
+    for (
+      let proto = Object.getPrototypeOf(field);
+      proto;
+      proto = Object.getPrototypeOf(proto)
+    ) {
+      const found = Object.getOwnPropertyDescriptor(proto, "value");
+      if (found?.set) return found.set;
+    }
+    return undefined;
+  };
+  // What a person's own edit leaves behind: an input event a framework sees
+  // through its root listener, then a change event.
+  const fireEdit = (field: Element) => {
+    field.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const invalidValue = () =>
+    failure("The value is not valid for this input type.", "invalid_value");
+  const notEditable = (reason: string) => {
+    const fields = { reason };
+    return failure(
+      "Nothing at, around or inside the target can take typing or a value.",
+      "not_editable",
+      fields,
+    );
+  };
+  const ambiguousField = (found: Element[]) => {
+    const fields = {
+      candidates: host
+        .candidates(found.slice(0, MAX_CANDIDATES))
+        .map((item) => ({
+          ...(item.ref === undefined ? {} : { ref: item.ref }),
+          tag: item.tag,
+          role: item.role,
+          name: item.name,
+          context: item.context,
+        })),
+    };
+    return failure(
+      "Retargeting found several fields. Name the one to use.",
+      "ambiguous_field",
+      fields,
+    );
+  };
+
+  // Where a retarget ends: one element, the ones to choose between, or why
+  // there is nothing to act on.
+  type Aim =
+    | { field: Element }
+    | { many: Element[] }
+    | { stop: "kind" | "readonly_select" | "frame" | "none" };
+  // The one candidate the action can take, else the candidates to choose
+  // between, the ones it can take first and in page order.
+  const pickOne = (found: Element[], frame: boolean, kind: ActionKind): Aim => {
+    const open = found.filter((node) => !firstBlocker(node, kind));
+    if (open.length === 1) return { field: open[0] };
+    if (open.length > 1)
+      return {
+        many: [...open, ...found.filter((node) => !open.includes(node))],
+      };
+    if (found.length === 1) return { field: found[0] };
+    if (found.length > 1) return { many: found };
+    return { stop: frame ? "frame" : "none" };
+  };
+  const insideTarget = (
+    element: Element,
+    takes: (node: Element) => boolean,
+  ) => {
+    const found: Element[] = [];
+    let frame = false;
+    host.walk(element, (node) => {
+      if (!host.isElement(node)) return undefined;
+      if (host.opaqueFrame(node)) {
+        frame = true;
+        return false;
+      }
+      if (!takes(node)) return undefined;
+      found.push(node);
+      return false;
+    });
+    return { found, frame };
+  };
+  const fillable = (node: Element) => {
+    const kind = fillKindOf(node);
+    return kind === "text" || kind === "direct";
+  };
+  const fillTarget = (element: Element): Aim => {
+    const kind = fillKindOf(element);
+    if (kind === "text" || kind === "direct") return { field: element };
+    if (kind === "kind" || kind === "readonly_select") return { stop: kind };
+    if (kind === "host") {
+      const around = editingAround(element);
+      if (around) return { field: around };
+    }
+    const { found, frame } = insideTarget(element, fillable);
+    return pickOne(found, frame, "fill");
+  };
+  const selectTarget = (element: Element): Aim => {
+    if (tagOf(element) === "select") return { field: element };
+    if (tagOf(element) === "label") {
+      const control = (element as HTMLLabelElement).control;
+      if (control && tagOf(control) === "select") return { field: control };
+    }
+    const { found, frame } = insideTarget(
+      element,
+      (node) => tagOf(node) === "select",
+    );
+    return pickOne(found, frame, "select");
+  };
+  const FOCUSABLE = ["button", "input", "select", "textarea", "summary"];
+  const focusable = (node: Element) => {
+    const tag = tagOf(node);
+    if (FOCUSABLE.includes(tag)) return true;
+    if (tag === "a" || tag === "area") return node.hasAttribute("href");
+    if (tag === "iframe" || tag === "frame") return true;
+    if (tag === "audio" || tag === "video")
+      return node.hasAttribute("controls");
+    if (node.hasAttribute("tabindex")) return true;
+    if ((node as HTMLElement).isContentEditable === true) return true;
+    return WIDGETS.includes(host.roleOf(node));
+  };
+  // The nearest focusable ancestor in the target's own document, else the one
+  // editable element inside it.
+  const focusAround = (element: Element): Aim => {
+    const doc = host.docOf(element);
+    for (
+      let node = host.parentOf(element);
+      node && host.docOf(node) === doc;
+      node = host.parentOf(node)
+    )
+      if (focusable(node)) return { field: node };
+    const { found, frame } = insideTarget(element, fillable);
+    return pickOne(found, frame, "focus");
+  };
+  const tryFocus = (element: Element) => {
+    (element as HTMLElement).focus({ preventScroll: true });
+    return host.within(element, deepActive());
+  };
+
+  // What Chromium would make of the value before it is typed: a field that
+  // would rewrite it never gets it.
+  const typeProblem = (field: Element, value: string) => {
+    if (tagOf(field) !== "input") return undefined;
+    const probe = host.docOf(field).createElement("input");
+    probe.type = (field as HTMLInputElement).type;
+    probe.value = value;
+    return probe.value === value ? undefined : invalidValue();
+  };
+  // Today's rule for a select filled by value: one option, and not a
+  // disabled one.
+  const optionProblem = (list: HTMLSelectElement, value: string) => {
+    const found = Array.from(list.options).filter(
+      (option) => option.value === value,
+    );
+    if (found.length !== 1)
+      return failure(
+        "The value must match exactly one option.",
+        "invalid_value",
+      );
+    return found[0].disabled || found[0].closest("optgroup")?.disabled
+      ? failure("The requested option is disabled.", "invalid_value")
+      : undefined;
+  };
+  // Where a retry click would land: the field's own point, when nothing else
+  // would take it. Fill never fails on the viewport, so a field out of view
+  // simply has no point to retry at.
+  const retryPoint = (field: Element) => {
+    if (host.emptyBox(field)) return undefined;
+    const clip = clipOf(field);
+    const spot = visiblePoint(field, clip);
+    if (!spot) return undefined;
+    return accepts(field, host.hitAt(field, spot.x, spot.y)) ? spot : undefined;
+  };
+  // A trusted insertion needs the caret where a person's would be: the whole
+  // value selected, or the end of it when the agent appends.
+  const prepareField = (
+    field: Element,
+    append: boolean,
+  ): Blocked | undefined => {
+    (field as HTMLElement).focus({ preventScroll: true });
+    if (!host.within(field, deepActive())) return { blocker: "not_focused" };
+    const tag = tagOf(field);
+    if (tag === "input" || tag === "textarea") {
+      const entry = field as HTMLInputElement;
+      const end = entry.value.length;
+      try {
+        entry.setSelectionRange(append ? end : 0, end);
+      } catch {
+        // Email and number inputs have no selection to set. Selecting the
+        // field covers a replacement, and a focused one holds its caret at
+        // the end of the value, which is where an append belongs.
+        if (!append) entry.select();
+      }
+      return undefined;
+    }
+    const doc = host.docOf(field);
+    const selection = doc.defaultView?.getSelection();
+    if (!selection) return undefined;
+    const range = doc.createRange();
+    range.selectNodeContents(field);
+    if (append) range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return undefined;
+  };
+
+  const fillPrepare = (payload: Record<string, unknown>) => {
+    const found = host.select(payload);
+    if (!host.isElement(found)) return found;
+    const aim = fillTarget(found);
+    if ("stop" in aim) return notEditable(aim.stop);
+    if ("many" in aim) return ambiguousField(aim.many);
+    const field = aim.field;
+    const stop = firstBlocker(field, "fill");
+    if (stop) return blockedResult(stop);
+    const value = String(payload.value ?? "");
+    const direct = fillKindOf(field) === "direct";
+    if (!direct) {
+      const refused = typeProblem(field, value);
+      if (refused) return refused;
+    }
+    const append = payload.append === true;
+    const hidden = host.secret(field);
+    const previous = fieldValue(field);
+    if (hidden) slot.__kamapathySecret = previous;
+    else delete slot.__kamapathySecret;
+    const spot = retryPoint(field);
+    const base = {
+      ok: true as const,
+      mode: (direct
+        ? "direct"
+        : !append && value === ""
+          ? "delete"
+          : "insert") as FillMode,
+      previous: hidden ? "" : previous,
+      ...(hidden ? { valueHidden: true as const } : {}),
+      ...(spot ? { point: spot } : {}),
+      ...host.reboundResult(),
+    };
+    if (direct) return base;
+    const waiting = prepareField(field, append);
+    return waiting ? { ...base, blocked: waiting } : base;
+  };
+
+  const fillRead = async (payload: Record<string, unknown>) => {
+    const found = host.select(payload);
+    if (!host.isElement(found)) return found;
+    const aim = fillTarget(found);
+    if ("stop" in aim) return notEditable(aim.stop);
+    if ("many" in aim) return ambiguousField(aim.many);
+    const field = aim.field;
+    if (!host.live(field)) return blockedResult({ blocker: "detached" });
+    // Five reads, until two in a row agree: a field a component rewrites
+    // after its input event settles before the read answers.
+    let read = fieldValue(field);
+    for (let again = 1; again < READS; again++) {
+      await new Promise((done) => setTimeout(done, READ_GAP_MS));
+      if (!host.live(field)) return blockedResult({ blocker: "detached" });
+      const next = fieldValue(field);
+      if (next === read) break;
+      read = next;
+    }
+    const hidden = host.secret(field);
+    const previous = hidden
+      ? (slot.__kamapathySecret ?? "")
+      : String(payload.previous ?? "");
+    const match = classifyFill(previous, String(payload.value ?? ""), read, {
+      append: payload.append === true,
+    });
+    return {
+      ok: true as const,
+      match,
+      ...(hidden
+        ? { valueHidden: true as const }
+        : { value: read.slice(0, MAX_VALUE) }),
+      ...host.reboundResult(),
+    };
+  };
+
+  const setDirectValue = (payload: Record<string, unknown>) => {
+    const found = host.select(payload);
+    if (!host.isElement(found)) return found;
+    const aim = fillTarget(found);
+    if ("stop" in aim) return notEditable(aim.stop);
+    if ("many" in aim) return ambiguousField(aim.many);
+    const field = aim.field;
+    const setter = fillKindOf(field) === "direct" && valueSetter(field);
+    if (!setter) return notEditable("kind");
+    const stop = firstBlocker(field, "fill");
+    if (stop) return blockedResult(stop);
+    const value = String(payload.value ?? "");
+    if (tagOf(field) === "select") {
+      const refused = optionProblem(field as HTMLSelectElement, value);
+      if (refused) return refused;
+    }
+    const previous = fieldValue(field);
+    (field as HTMLElement).focus({ preventScroll: true });
+    setter.call(field, value);
+    const now = fieldValue(field);
+    // The field's own sanitizer decides: a range must land on the value it
+    // was given, and a colour may answer in its own case.
+    const kept =
+      now === value ||
+      (tagOf(field) === "input" &&
+        (field as HTMLInputElement).type === "color" &&
+        now.toLowerCase() === value.toLowerCase());
+    if (!kept) {
+      setter.call(field, previous);
+      return invalidValue();
+    }
+    fireEdit(field);
+    return {
+      ok: true as const,
+      ...(host.secret(field)
+        ? { valueHidden: true as const }
+        : { value: now.slice(0, MAX_VALUE) }),
+      ...host.reboundResult(),
+    };
+  };
+
+  type Choice = { value?: string; label?: string; index?: number };
+  const optionName = (option: HTMLOptionElement) =>
+    cut(clean(option.label || option.text || option.value));
+  const sameLabel = (option: HTMLOptionElement, label: string) =>
+    (option.label || option.text).trim() === label.trim();
+  // A string matches a value first, then a label; an object matches on every
+  // field it carries.
+  const matchOption = (options: HTMLOptionElement[], want: string | Choice) => {
+    if (typeof want === "string")
+      return (
+        options.find((option) => option.value === want) ||
+        options.find((option) => sameLabel(option, want))
+      );
+    return options.find((option, index) => {
+      if (typeof want.value === "string" && option.value !== want.value)
+        return false;
+      if (typeof want.label === "string" && !sameLabel(option, want.label))
+        return false;
+      return !(typeof want.index === "number" && index !== want.index);
+    });
+  };
+  const usable = (want: unknown) =>
+    typeof want === "string" ||
+    (!!want &&
+      typeof want === "object" &&
+      (typeof (want as Choice).value === "string" ||
+        typeof (want as Choice).label === "string" ||
+        typeof (want as Choice).index === "number"));
+  const askedFor = (want: string | Choice) => {
+    if (typeof want === "string") return cut(clean(want));
+    if (typeof want.label === "string") return cut(clean(want.label));
+    if (typeof want.value === "string") return cut(clean(want.value));
+    return typeof want.index === "number" ? `#${want.index}` : "";
+  };
+
+  const selectChoose = (payload: Record<string, unknown>) => {
+    const found = host.select(payload);
+    if (!host.isElement(found)) return found;
+    const aim = selectTarget(found);
+    if ("stop" in aim)
+      return failure(
+        "No select at, for or inside the target.",
+        "not_selectable",
+      );
+    if ("many" in aim) return ambiguousField(aim.many);
+    const list = aim.field as HTMLSelectElement;
+    const stop = firstBlocker(list, "select");
+    if (stop) return blockedResult(stop);
+    const wants = (payload.values as (string | Choice)[]) || [];
+    if (!wants.every(usable)) {
+      const fields = { field: "values" };
+      return failure(
+        "Each choice needs a value, a label or an index.",
+        "invalid_field",
+        fields,
+      );
+    }
+    if (!list.multiple && wants.length > 1) {
+      const fields = { field: "values" };
+      return failure(
+        "A single select takes one choice.",
+        "invalid_field",
+        fields,
+      );
+    }
+    const options = Array.from(list.options);
+    const chosen: HTMLOptionElement[] = [];
+    for (const want of wants) {
+      const option = matchOption(options, want);
+      if (!option)
+        return {
+          ok: true as const,
+          blocked: {
+            blocker: "option_missing" as const,
+            detail: askedFor(want),
+          },
+          options: options.slice(0, MAX_OPTIONS).map(optionName),
+          ...host.reboundResult(),
+        };
+      chosen.push(option);
+    }
+    for (const option of options) option.selected = chosen.includes(option);
+    // What the select holds afterwards: clearing a single select leaves the
+    // option the page falls back to, which an agent needs to see.
+    const values = Array.from(list.selectedOptions).map(
+      (option) => option.value,
+    );
+    fireEdit(list);
+    return { ok: true as const, values, ...host.reboundResult() };
+  };
+
+  const focusTarget = (payload: Record<string, unknown>) => {
+    const found = host.select(payload);
+    if (!host.isElement(found)) return found;
+    const stop = firstBlocker(found, "focus");
+    if (stop) return blockedResult(stop);
+    const settled = { ok: true as const, ...host.reboundResult() };
+    if (tryFocus(found)) return settled;
+    const aim = focusAround(found);
+    if ("stop" in aim)
+      return failure(
+        "Nothing focusable at, around or inside the target.",
+        "not_focusable",
+      );
+    if ("many" in aim) return ambiguousField(aim.many);
+    const inner = aim.field;
+    const second = firstBlocker(inner, "focus");
+    if (second) return blockedResult(second);
+    return tryFocus(inner)
+      ? settled
+      : blockedResult({ blocker: "not_focused" });
+  };
+
+  return {
+    actionPoint,
+    stableBox,
+    scrollRequest,
+    viewport,
+    focusedKind,
+    fillPrepare,
+    fillRead,
+    setDirectValue,
+    selectChoose,
+    focusTarget,
+  };
 }

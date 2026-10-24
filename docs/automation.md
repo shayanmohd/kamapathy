@@ -568,6 +568,11 @@ Every code, its status, whether it can be retried, and its fields:
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
+| `not_editable` | 422 | not retryable | `reason` | Nothing at, around or inside the target can take typing or a value. |
+| `not_selectable` | 422 | not retryable |  | No select at, for or inside the target. |
+| `not_focusable` | 422 | not retryable |  | Nothing focusable at, around or inside the target. |
+| `ambiguous_field` | 422 | not retryable | `candidates` | Retargeting found several candidates. |
+| `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |

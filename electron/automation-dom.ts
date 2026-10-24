@@ -38,7 +38,12 @@ export type PageOperation =
   | "stableBox"
   | "scrollRequest"
   | "viewport"
-  | "focusedKind";
+  | "focusedKind"
+  | "fillPrepare"
+  | "fillRead"
+  | "setDirectValue"
+  | "selectChoose"
+  | "focusTarget";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
@@ -52,6 +57,7 @@ export function pageOperation(
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
   outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
   actionOperations?: typeof import("./agent/dom/actions").actionOperations,
+  fillClassifier?: typeof import("./agent/dom/actions").fillClassifier,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -2166,31 +2172,42 @@ export function pageOperation(
     operation === "stableBox" ||
     operation === "scrollRequest" ||
     operation === "viewport" ||
-    operation === "focusedKind"
+    operation === "focusedKind" ||
+    operation === "fillPrepare" ||
+    operation === "fillRead" ||
+    operation === "setDirectValue" ||
+    operation === "selectChoose" ||
+    operation === "focusTarget"
   ) {
-    const actions = actionOperations!({
-      select: (spec: unknown) => target(spec as ElementTarget),
-      isElement,
-      visible,
-      placed,
-      hitAt,
-      within,
-      emptyBox,
-      walk,
-      labelOf,
-      roleOf,
-      styleOf,
-      docOf,
-      parentOf,
-      framePath,
-      framesOf,
-      frameDocument,
-      opaqueFrame,
-      live,
-      normalizeText: clean,
-      failure,
-      reboundResult,
-    });
+    const actions = actionOperations!(
+      {
+        select: (spec: unknown) => target(spec as ElementTarget),
+        isElement,
+        visible,
+        placed,
+        hitAt,
+        within,
+        emptyBox,
+        walk,
+        labelOf,
+        roleOf,
+        styleOf,
+        docOf,
+        parentOf,
+        framePath,
+        framesOf,
+        frameDocument,
+        opaqueFrame,
+        editingHost,
+        live,
+        secret,
+        candidates: (found: Element[]) => candidatesOf(found, undefined),
+        normalizeText: clean,
+        failure,
+        reboundResult,
+      },
+      fillClassifier!,
+    );
     return actions[operation](payload);
   }
   // The listed controls themselves, for the main process to read their

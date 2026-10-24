@@ -1313,8 +1313,12 @@ describe("evaluateInFrame", () => {
     expect(marked.sort()).toEqual([
       "click",
       "fill",
+      "fillPrepare",
       "focus",
+      "focusTarget",
       "scroll",
+      "selectChoose",
+      "setDirectValue",
       "upload",
     ]);
   });
