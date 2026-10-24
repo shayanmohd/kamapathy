@@ -74,6 +74,8 @@ const GROUPS = [
     (entry) =>
       entry.name.startsWith("Page.") && entry.name.split(".").length > 2,
   ],
+  ["Download", (entry) => entry.name.startsWith("Download.")],
+  ["File chooser", (entry) => entry.name.startsWith("FileChooser.")],
 ];
 
 export function formatIndex() {

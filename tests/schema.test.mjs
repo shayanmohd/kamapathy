@@ -16,6 +16,8 @@ import { updateRoutes } from "../electron/agent/routes/update.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
 import {
   Client,
+  Download,
+  FileChooser,
   Page,
   Space,
   schema,
@@ -98,6 +100,23 @@ describe("API schema", () => {
       Client: new Client(send),
       Space: new Space(send, { id: "s", name: "n", owner: "agent" }),
       Page: new Page(send, { id: "t", spaceId: "s", url: "", title: "" }),
+      Download: new Download(send, {
+        id: "d",
+        tabId: "t",
+        url: "",
+        suggestedFilename: "f",
+        mimeType: "",
+        state: "completed",
+        receivedBytes: 0,
+        totalBytes: 0,
+        failure: null,
+      }),
+      FileChooser: new FileChooser(send, {
+        id: "c",
+        tabId: "t",
+        multiple: false,
+        accept: [],
+      }),
     };
     for (const [type, instance] of Object.entries(instances)) {
       const prototype = Object.getPrototypeOf(instance);

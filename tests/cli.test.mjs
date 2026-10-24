@@ -21,7 +21,7 @@ import {
   runCli,
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
-import { KamapathyError, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
+import { Download, FileChooser, KamapathyError, Page, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
 import { httpTimeout, queueNotice, takeNotices } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
@@ -1458,6 +1458,400 @@ describe("scripted sessions", () => {
       suggestion: "timeout",
       entry: "page.pdfText",
     });
+  });
+
+  // Section 7's waits: the arm is sent when waitForEvent is called, later
+  // calls on the page wait for it, and the long poll answers with the event.
+  const dialogRecord = {
+    type: "confirm",
+    message: "Delete this file?",
+    answer: "dismissed",
+    url: "https://example.test/reserve",
+    at: 1700,
+  };
+
+  it("waitForEvent refuses timeout 0 with invalid_option before anything is sent", async () => {
+    const api = fakeApi(sectionTwo);
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    const sent = api.requests.length;
+    await expect(page.waitForEvent("popup", { timeout: 0 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.waitForEvent",
+      option: "timeout",
+      message:
+        "page.waitForEvent got an invalid option: timeout must be an integer from 1 to 60000. Expected page.waitForEvent(event, { timeout? }).",
+    });
+    await expect(page.waitForEvent("popup", { timeoutMs: 1000 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "timeoutMs",
+      suggestion: "timeout",
+    });
+    await expect(page.waitForEvent("pop")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.waitForEvent",
+    });
+    expect(api.requests.length).toBe(sent);
+  });
+
+  it("waitForEvent arms first and holds later calls on that page until the arm is acknowledged, then long-polls and resolves with a Page for a popup and the record for a dialog", async () => {
+    let acknowledge;
+    const held = new Promise((done) => {
+      acknowledge = done;
+    });
+    let arms = 0;
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": async (body) => {
+        arms += 1;
+        if (arms === 1) await held;
+        return Response.json(
+          {
+            expectation: {
+              id: body.event === "popup" ? "x1" : "x2",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 2000,
+            },
+          },
+          { status: 201 },
+        );
+      },
+      "POST /expectations/x1/wait": { popup: labeled[1] },
+      "POST /expectations/x2/wait": { dialog: dialogRecord },
+      "GET /tabs/tab-1/popups": {
+        popups: [{ id: "tab-2", label: "p2", url: "https://example.test/slots", openedAt: 10, unseen: true }],
+      },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    await page.snapshot();
+    const sent = api.requests.length;
+    // The arm leaves with the call itself; a second arm and the click queue
+    // behind it.
+    const next = page.waitForEvent("popup");
+    const alsoWaiting = page.waitForEvent("dialog");
+    const clicked = page.click("@e2");
+    await new Promise((done) => setImmediate(done));
+    expect(paths(api).slice(sent)).toEqual(["POST /tabs/tab-1/expectations"]);
+    acknowledge();
+    const popup = await next;
+    expect(await alsoWaiting).toEqual(dialogRecord);
+    expect(await clicked).toMatchObject({ ok: true });
+    // The first arm goes out alone; the rest follow once it is acknowledged.
+    const after = paths(api).slice(sent);
+    expect(after[0]).toBe("POST /tabs/tab-1/expectations");
+    expect([...after.slice(1)].sort()).toEqual([
+      "POST /expectations/x1/wait",
+      "POST /expectations/x2/wait",
+      "POST /tabs/tab-1/click",
+      "POST /tabs/tab-1/expectations",
+    ]);
+    expect(api.requests[sent].body).toEqual({ event: "popup" });
+    expect(api.requests.find((item) => item.path === "/expectations/x1/wait").body).toEqual({});
+    expect(popup).toBeInstanceOf(Page);
+    expect(popup).toMatchObject({
+      id: "tab-2",
+      label: "p2",
+      spaceId: "space-1",
+      openerId: "tab-1",
+      url: "https://example.test/slots",
+    });
+    // A dialog wait answers with the record as it was sent, and the client's
+    // timeout travels as the route's timeoutMs.
+    expect(await page.waitForEvent("dialog", { timeout: 5000 })).toEqual(dialogRecord);
+    expect(api.requests.at(-2).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    // With no arm live a call goes straight out, and popups lists the pages
+    // this page opened without clearing them.
+    const idle = api.requests.length;
+    await page.click("@e2");
+    const opened = await page.popups();
+    expect(paths(api).slice(idle)).toEqual(["POST /tabs/tab-1/click", "GET /tabs/tab-1/popups"]);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toBeInstanceOf(Page);
+    expect(opened[0]).toMatchObject({ id: "tab-2", label: "p2", spaceId: "space-1", openerId: "tab-1" });
+  });
+
+  it("a wait that times out throws expectation_timeout with awaited, event and timeoutMs, and a second wait for the same event throws expectation_pending", async () => {
+    let arm = (body) =>
+      Response.json(
+        { expectation: { id: "x9", event: body.event, tabId: "tab-1", expiresAt: 2000 } },
+        { status: 201 },
+      );
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) => arm(body),
+      "POST /expectations/x9/wait": () =>
+        Response.json(
+          {
+            error: {
+              code: "expectation_timeout",
+              message: "No popup arrived within 5000 ms. Arm another wait before the action that causes it.",
+              awaited: "event",
+              event: "popup",
+              timeoutMs: 5000,
+            },
+          },
+          { status: 504 },
+        ),
+    });
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const client = await connect({ env, fetch: api.fetch, health: level2 });
+      const page = (await client.space("space-1")).page("p1");
+      await expect(page.waitForEvent("popup", { timeout: 5000 })).rejects.toMatchObject({
+        code: "expectation_timeout",
+        entry: "page.waitForEvent",
+        awaited: "event",
+        event: "popup",
+        timeoutMs: 5000,
+        status: 504,
+      });
+      // The poll keeps the route's own budget whatever the caller's timeout,
+      // so the server answers the timeout instead of the transport.
+      expect(timeouts).toHaveBeenLastCalledWith(65000);
+      // A second arm for the same event is refused, and the call queued
+      // behind the failed arm fails with it instead of running unarmed.
+      arm = () =>
+        Response.json(
+          {
+            error: {
+              code: "expectation_pending",
+              message: "This page is already waiting for a popup. Wait for it, or cancel that wait before arming another.",
+              event: "popup",
+              expectationId: "x9",
+            },
+          },
+          { status: 409 },
+        );
+      const clicks = paths(api).filter((item) => item === "POST /tabs/tab-1/click").length;
+      const failing = page.waitForEvent("popup");
+      const queued = page.click("@e2");
+      await expect(failing).rejects.toMatchObject({
+        code: "expectation_pending",
+        event: "popup",
+        expectationId: "x9",
+      });
+      await expect(queued).rejects.toMatchObject({ code: "expectation_pending" });
+      expect(paths(api).filter((item) => item === "POST /tabs/tab-1/click").length).toBe(clicks);
+      // The failed arm is cleared, so the next call sends as usual.
+      expect(await page.click("@e2")).toMatchObject({ ok: true });
+    } finally {
+      timeouts.mockRestore();
+    }
+  });
+
+  it("setDialogPolicy sends accept, promptText, times and lifetimeMs, setDialogPolicy(null) sends DELETE, and dialogs() returns the policy and records", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/dialog-policy": (body) =>
+        Response.json({
+          policy: {
+            accept: body.accept,
+            ...(body.promptText === undefined ? {} : { promptText: body.promptText }),
+            remaining: body.times ?? 1,
+            expiresAt: 5000,
+          },
+        }),
+      "DELETE /tabs/tab-1/dialog-policy": { policy: null },
+      "GET /tabs/tab-1/dialogs": { policy: { accept: true, remaining: 2, expiresAt: 5000 }, dialogs: [dialogRecord] },
+    });
+    const client = await connect({ env, fetch: api.fetch, health: level2 });
+    const page = (await client.space("space-1")).page("p1");
+    expect(
+      await page.setDialogPolicy({ accept: true, promptText: "Avery Quinn", times: 2, lifetime: 120000 }),
+    ).toEqual({ policy: { accept: true, promptText: "Avery Quinn", remaining: 2, expiresAt: 5000 } });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/dialog-policy",
+      body: { accept: true, promptText: "Avery Quinn", times: 2, lifetimeMs: 120000 },
+    });
+    await page.setDialogPolicy({ accept: false });
+    expect(api.requests.at(-1).body).toEqual({ accept: false });
+    expect(await page.setDialogPolicy(null)).toEqual({ policy: null });
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    expect(await page.dialogs()).toEqual({
+      policy: { accept: true, remaining: 2, expiresAt: 5000 },
+      dialogs: [dialogRecord],
+    });
+    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/tabs/tab-1/dialogs", body: undefined });
+    // A policy that is neither a plain object with an accept nor null, and a
+    // field outside its range, are refused before anything is sent.
+    const sent = api.requests.length;
+    for (const policy of ["accept", 1, {}, { accept: "yes" }, [], undefined])
+      await expect(page.setDialogPolicy(policy), String(policy)).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.setDialogPolicy",
+        expected: "page.setDialogPolicy({ accept, promptText?, times?, lifetime? }) or page.setDialogPolicy(null)",
+      });
+    await expect(page.setDialogPolicy({ accept: true, lifetime: 999 })).rejects.toMatchObject({
+      code: "invalid_field",
+      field: "lifetimeMs",
+      entry: "page.setDialogPolicy",
+    });
+    await expect(page.setDialogPolicy({ accept: true, times: 21 })).rejects.toMatchObject({
+      code: "invalid_field",
+      field: "times",
+    });
+    await expect(page.setDialogPolicy({ accept: true, promtText: "Avery" })).rejects.toMatchObject({
+      code: "unknown_field",
+      field: "promtText",
+      suggestion: "promptText",
+    });
+    expect(api.requests.length).toBe(sent);
+  });
+
+  it("expect, wait-expectation, dialog-policy and dialogs print their lines, and an action prints its receipt lines in order", async () => {
+    const receipt = {
+      ok: true,
+      url: "https://example.test/reserve",
+      popups: [{ id: "tab-3", label: "p3", url: "https://example.test/share" }],
+      dialog: dialogRecord,
+      moreDialogs: 2,
+      download: { id: "d1", suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" },
+      deniedRequests: [{ origin: "https://maps.example", permission: "location" }],
+    };
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/expectations": (body) =>
+        Response.json({ expectation: { id: "x1", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+      "POST /expectations/x1/wait": { popup: labeled[1] },
+      "POST /expectations/x2/wait": { dialog: dialogRecord },
+      "POST /expectations/x3/wait": {
+        download: {
+          id: "d1",
+          tabId: "tab-1",
+          url: "https://example.test/report.pdf",
+          suggestedFilename: "report.pdf",
+          mimeType: "application/pdf",
+          state: "progressing",
+          receivedBytes: 0,
+          totalBytes: 10,
+          failure: null,
+        },
+      },
+      "POST /expectations/x4/wait": { fileChooser: { id: "c1", tabId: "tab-1", multiple: true, accept: [".pdf"] } },
+      "POST /tabs/tab-1/dialog-policy": (body) =>
+        Response.json({ policy: { accept: body.accept, remaining: body.times ?? 1, expiresAt: 9 } }),
+      "DELETE /tabs/tab-1/dialog-policy": { policy: null },
+      "GET /tabs/tab-1/dialogs": {
+        policy: { accept: false, remaining: 1, expiresAt: 9 },
+        dialogs: [
+          dialogRecord,
+          {
+            type: "prompt",
+            message: "Your name?",
+            defaultValue: "",
+            answer: "accepted",
+            promptText: "Avery",
+            url: "https://example.test/reserve",
+            at: 1800,
+          },
+        ],
+      },
+      "POST /tabs/tab-1/click": () => Response.json(receipt),
+    });
+    const options = { env, fetch: api.fetch, health: level2 };
+    const armed = sink();
+    expect(await runCli(["expect", "tab-1", "popup"], { ...options, stdout: armed })).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ event: "popup", timeoutMs: 60000 });
+    expect(armed.text()).toBe("expectation x1 popup tab-1\n");
+    const timed = sink();
+    await runCli(["expect", "tab-1", "dialog", "--timeout", "5000"], { ...options, stdout: timed });
+    expect(api.requests.at(-1).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    expect(timed.text()).toBe("expectation x1 dialog tab-1\n");
+    for (const [id, printed] of [
+      ["x1", "popup p2 tab-2 https://example.test/slots\n"],
+      ["x2", 'dialog confirm "Delete this file?" dismissed\n'],
+      ["x3", "download d1 report.pdf\n"],
+      ["x4", "file-chooser c1 multiple\n"],
+    ]) {
+      const stdout = sink();
+      expect(await runCli(["wait-expectation", id], { ...options, stdout }), id).toBe(0);
+      expect(api.requests.at(-1), id).toEqual({ method: "POST", path: `/expectations/${id}/wait`, body: {} });
+      expect(stdout.text(), id).toBe(printed);
+    }
+    const policy = sink();
+    expect(
+      await runCli(["dialog-policy", "tab-1", "accept", "--times", "2", "--lifetime", "120000", "--prompt-stdin"], {
+        ...options,
+        stdin: Readable.from(["Avery Quinn"]),
+        stdout: policy,
+      }),
+    ).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({ accept: true, times: 2, lifetimeMs: 120000, promptText: "Avery Quinn" });
+    expect(policy.text()).toBe("policy accept 2 left\n");
+    const dismissed = sink();
+    await runCli(["dialog-policy", "tab-1", "dismiss"], { ...options, stdout: dismissed });
+    expect(api.requests.at(-1).body).toEqual({ accept: false });
+    expect(dismissed.text()).toBe("policy dismiss 1 left\n");
+    const cleared = sink();
+    await runCli(["dialog-policy", "tab-1", "reset"], { ...options, stdout: cleared });
+    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    expect(cleared.text()).toBe("policy none\n");
+    const logged = sink();
+    expect(await runCli(["dialogs", "tab-1"], { ...options, stdout: logged })).toBe(0);
+    expect(logged.text()).toBe(
+      ['policy dismiss 1 left', 'confirm "Delete this file?" dismissed', 'prompt "Your name?" accepted', ""].join("\n"),
+    );
+    const asJson = sink();
+    await runCli(["dialogs", "tab-1", "--json"], { ...options, stdout: asJson });
+    expect(JSON.parse(asJson.text()).dialogs).toHaveLength(2);
+    // An action prints its own line, then what it caused, in one order.
+    const clicked = sink();
+    expect(await runCli(["click", "tab-1", "@e2"], { ...options, stdout: clicked })).toBe(0);
+    expect(clicked.text()).toBe(
+      [
+        "ok",
+        "opened p3 tab-3 https://example.test/share",
+        'confirm "Delete this file?" dismissed',
+        "and 2 more dialogs",
+        "download d1 report.pdf",
+        "refused location for https://maps.example",
+        "",
+      ].join("\n"),
+    );
+    // A blocked download says so, and one further dialog reads as one.
+    const blocked = sink();
+    receipt.download = { blocked: true, suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" };
+    receipt.moreDialogs = 1;
+    receipt.popups = [{ id: "tab-3", url: "https://example.test/share" }];
+    await runCli(["click", "tab-1", "@e2"], { ...options, stdout: blocked });
+    expect(blocked.text()).toBe(
+      [
+        "ok",
+        "opened tab-3 tab-3 https://example.test/share",
+        'confirm "Delete this file?" dismissed',
+        "and 1 more dialog",
+        "download blocked report.pdf",
+        "refused location for https://maps.example",
+        "",
+      ].join("\n"),
+    );
+    // Bad arguments never reach the socket.
+    const sent = api.requests.length;
+    for (const [args, message] of [
+      [["expect", "tab-1", "popup", "--timeout", "0"], "--timeout must be an integer from 1 to 60000."],
+      [["expect", "tab-1", "pop"], "Use expect <tab-id> popup|download|filechooser|dialog."],
+      [["dialog-policy", "tab-1", "maybe"], "Use dialog-policy <tab-id> accept|dismiss|reset."],
+      [["dialog-policy", "tab-1", "reset", "--times", "2"], "dialog-policy reset takes no other options."],
+      [["dialog-policy", "tab-1", "accept", "--times", "21"], "--times must be an integer from 1 to 20."],
+      [["dialog-policy", "tab-1", "accept", "--lifetime", "999"], "--lifetime must be an integer from 1000 to 600000."],
+    ])
+      await expect(runCli(args, { ...options, stdout: sink() }), args.join(" ")).rejects.toThrow(message);
+    expect(api.requests.length).toBe(sent);
+    const help = sink();
+    expect(await runCli(["help", "expect"], { env, stdout: help })).toBe(0);
+    expect(help.text()).toContain("expect <tab-id> <event> [--timeout <ms>]");
+    expect(help.text()).toContain("Route: POST /tabs/:id/expectations");
+    const commands = sink();
+    await runCli(["help"], { env, stdout: commands });
+    for (const usage of [
+      "wait-expectation <id>",
+      "dialog-policy <tab-id> accept|dismiss|reset",
+      "dialogs <tab-id>",
+    ])
+      expect(commands.text()).toContain(usage);
   });
 
   it("asks for an isolated space only when told to", async () => {

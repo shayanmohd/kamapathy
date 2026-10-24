@@ -279,6 +279,12 @@ function argumentFits(value, arg) {
       return (
         Array.isArray(value) && value.every((item) => typeof item === "string")
       );
+    // A dialog policy, or null to clear it. Its fields travel as a body, so
+    // the route's own check names them before the request goes out.
+    case "dialogPolicy":
+      return (
+        value === null || (plain(value) && typeof value.accept === "boolean")
+      );
     // A Page, a tab id or a label.
     case "page":
       return typeof value === "string"

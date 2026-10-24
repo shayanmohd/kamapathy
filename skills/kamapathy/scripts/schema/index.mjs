@@ -3,6 +3,7 @@
 // functions only, so the skill and the app both import it.
 import { COMMANDS } from "./cli.mjs";
 import { CLIENT, GLOBALS } from "./globals.mjs";
+import { OBJECTS } from "./objects.mjs";
 import { PAGE_ENTRIES } from "./page.mjs";
 import { SPACE } from "./space.mjs";
 
@@ -23,12 +24,19 @@ export {
   requestBudget,
   routeKey,
 } from "./routes.mjs";
+export { OBJECTS } from "./objects.mjs";
 export { SELECTOR_FORMS } from "./selectors.mjs";
 
 export const CLIENT_VERSION = "0.2.0";
 export const API_LEVEL = 4;
 
-export const ENTRIES = [...GLOBALS, ...CLIENT, ...SPACE, ...PAGE_ENTRIES];
+export const ENTRIES = [
+  ...GLOBALS,
+  ...CLIENT,
+  ...SPACE,
+  ...PAGE_ENTRIES,
+  ...OBJECTS,
+];
 
 // An entry by its schema name (Page.wait) or the name it is called by
 // (page.wait).

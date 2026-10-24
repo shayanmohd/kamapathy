@@ -47,6 +47,7 @@ import {
   findCommand,
   matchRoute,
   outdated,
+  requestBudget,
 } from "./schema/index.mjs";
 
 export { formatResult, formatSnapshot } from "./lib/format.mjs";
@@ -77,6 +78,10 @@ function integer(value, label, minimum = 0) {
   return parsed;
 }
 const UPLOAD_LIMIT = 24 * 1024 * 1024;
+const EVENTS = matchRoute("POST", "/tabs/:id/expectations").body.event.values;
+const POLICY = matchRoute("POST", "/tabs/:id/dialog-policy").body;
+// A route's own time budget, for a long poll the transport must outlast.
+const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
 
 // A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
@@ -567,6 +572,79 @@ export const PARSERS = {
       },
     };
   },
+  // The CLI arms for a minute by default, to cover the agent's pause
+  // between commands.
+  expect: (args) => {
+    const path = `/tabs/${tab(args[0])}/expectations`;
+    const event = required(args[1], "event");
+    if (!EVENTS.includes(event))
+      throw new Error(`Use expect <tab-id> ${EVENTS.join("|")}.`);
+    const { "--timeout": timeout } = flags(args.slice(2), ["--timeout"]);
+    return {
+      path,
+      method: "POST",
+      body: {
+        event,
+        timeoutMs:
+          timeout === undefined
+            ? 60000
+            : bounded(timeout, "--timeout", 1, 60000),
+      },
+    };
+  },
+  "wait-expectation": (args) => {
+    if (args.length > 1) throw new Error("Use wait-expectation <id>.");
+    const path = `/expectations/${identifier(args[0])}/wait`;
+    return { path, method: "POST", body: {}, budgetMs: budgetOf("POST", path) };
+  },
+  "dialog-policy": async (args, { stdin, stdinTimeoutMs }) => {
+    const [id, answer, ...rest] = args;
+    if (!["accept", "dismiss", "reset"].includes(answer))
+      throw new Error("Use dialog-policy <tab-id> accept|dismiss|reset.");
+    const path = `/tabs/${tab(id)}/dialog-policy`;
+    const fromStdin = rest.includes("--prompt-stdin");
+    const values = flags(
+      rest.filter((argument) => argument !== "--prompt-stdin"),
+      ["--times", "--lifetime"],
+    );
+    if (answer === "reset") {
+      if (fromStdin || Object.keys(values).length)
+        throw new Error("dialog-policy reset takes no other options.");
+      return { path, method: "DELETE" };
+    }
+    let promptText;
+    if (fromStdin) {
+      promptText = await readInput(stdin || process.stdin, {
+        timeoutMs: stdinTimeoutMs,
+      });
+      if (promptText.length > POLICY.promptText.max)
+        throw new Error(
+          `The prompt text must be at most ${POLICY.promptText.max} characters.`,
+        );
+    }
+    return {
+      path,
+      method: "POST",
+      body: {
+        accept: answer === "accept",
+        ...(values["--times"] === undefined
+          ? {}
+          : { times: bounded(values["--times"], "--times", 1, 20) }),
+        ...(values["--lifetime"] === undefined
+          ? {}
+          : {
+              lifetimeMs: bounded(
+                values["--lifetime"],
+                "--lifetime",
+                1000,
+                600000,
+              ),
+            }),
+        ...(promptText === undefined ? {} : { promptText }),
+      },
+    };
+  },
+  dialogs: (args) => ({ path: `/tabs/${tab(args[0])}/dialogs` }),
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {
     const input = options.stdin || process.stdin;
@@ -654,7 +732,7 @@ export async function runCli(argv, options = {}) {
     json,
   });
   if (typeof parsed === "number") return parsed;
-  const { path, method = "GET", body, output, limit } = parsed;
+  const { path, method = "GET", body, output, limit, budgetMs } = parsed;
   // Piped wait options and batches are checked before anything connects.
   if (name === "wait" || name === "batch") {
     const problem = checkBody(matchRoute(method, path), body);
@@ -716,7 +794,12 @@ export async function runCli(argv, options = {}) {
       ),
     };
   }
-  const response = await session.send(target, { method, body: sent, limit });
+  const response = await session.send(target, {
+    method,
+    body: sent,
+    limit,
+    budgetMs,
+  });
   if (output && response.ok) {
     if (!response.headers.get("content-type")?.startsWith("image/png"))
       throw new Error("The API did not return a PNG screenshot.");

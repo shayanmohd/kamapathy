@@ -4,6 +4,8 @@ import { ROUTES, routeKey } from "./routes.mjs";
 const body = (key) => ROUTES.find((route) => routeKey(route) === key).body;
 // pdfText's client options are the route's fields, with timeout for timeoutMs.
 const pdfText = body("POST /tabs/:id/pdf/text");
+// waitForEvent's event names and its timeout come from the arming route.
+const expectation = body("POST /tabs/:id/expectations");
 // Every input method takes the label its route declares, in an options
 // object after its own arguments.
 const labelOption = (type) => ({
@@ -371,6 +373,73 @@ export const PAGE_ENTRIES = [
       },
       since: 3,
     },
+  ),
+  method(
+    "Page.waitForEvent",
+    "page.waitForEvent(event, options?)",
+    "Arms a wait for the tab's next popup, download, file chooser or dialog. The arm is sent as the method is called, and later calls on the page wait for it, so the action that causes the event cannot outrun it.",
+    [
+      {
+        name: "event",
+        kind: "enum",
+        values: expectation.event.values,
+      },
+      OPTIONS,
+    ],
+    "Promise<Page | Download | FileChooser | DialogRecord>",
+    "POST /tabs/:id/expectations",
+    [
+      "expectation_pending",
+      "expectation_not_found",
+      "expectation_timeout",
+      "invalid_field",
+      "space_ended",
+      "busy",
+    ],
+    {
+      options: {
+        timeout: {
+          ...expectation.timeoutMs,
+          field: "timeoutMs",
+          description: "How long to wait for the event, counted from arming.",
+        },
+      },
+      since: 2,
+    },
+  ),
+  method(
+    "Page.popups",
+    "page.popups()",
+    "The open tabs this tab opened, in the order Kamapathy lists them. Listing them leaves them marked new.",
+    [],
+    "Promise<Page[]>",
+    "GET /tabs/:id/popups",
+    [],
+    { since: 2 },
+  ),
+  method(
+    "Page.setDialogPolicy",
+    "page.setDialogPolicy(policy)",
+    "Arms how the tab answers its next confirms and prompts, before the action that opens one: { accept, promptText?, times = 1, lifetime = 60000 }, or null to clear it. Without a policy, confirms are dismissed and prompts return nothing.",
+    [{ name: "policy", kind: "dialogPolicy" }],
+    "Promise<{ policy: DialogPolicy | null }>",
+    "POST /tabs/:id/dialog-policy",
+    ["invalid_field", "unknown_field"],
+    {
+      expected:
+        "page.setDialogPolicy({ accept, promptText?, times?, lifetime? }) or page.setDialogPolicy(null)",
+      since: 2,
+    },
+  ),
+  method(
+    "Page.dialogs",
+    "page.dialogs()",
+    "The tab's dialog policy and the last 20 dialogs Kamapathy answered in it, oldest first.",
+    [],
+    "Promise<{ policy: DialogPolicy | null, dialogs: DialogRecord[] }>",
+    "GET /tabs/:id/dialogs",
+    [],
+    { since: 2 },
   ),
   method(
     "Page.opener",

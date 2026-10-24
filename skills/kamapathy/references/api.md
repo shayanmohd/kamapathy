@@ -502,6 +502,34 @@ Reads a PDF's text by page. Continue from nextPage.
 
 Returns `Promise<PdfText>`. Route `POST /tabs/:id/pdf/text`. Errors: `not_pdf`, `pdf_not_refetchable`, `pdf_too_large`, `pdf_locked`, `pdf_unreadable`, `pdf_fetch_failed`, `page_out_of_range`, `pdf_timeout`, `busy`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 3.
 
+### `page.waitForEvent(event, options?)`
+
+Arms a wait for the tab's next popup, download, file chooser or dialog. The arm is sent as the method is called, and later calls on the page wait for it, so the action that causes the event cannot outrun it.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 1 to 60000 | `10000` | How long to wait for the event, counted from arming. |
+
+Returns `Promise<Page | Download | FileChooser | DialogRecord>`. Route `POST /tabs/:id/expectations`. Errors: `expectation_pending`, `expectation_not_found`, `expectation_timeout`, `invalid_field`, `space_ended`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.popups()`
+
+The open tabs this tab opened, in the order Kamapathy lists them. Listing them leaves them marked new.
+
+Returns `Promise<Page[]>`. Route `GET /tabs/:id/popups`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.setDialogPolicy(policy)`
+
+Arms how the tab answers its next confirms and prompts, before the action that opens one: { accept, promptText?, times = 1, lifetime = 60000 }, or null to clear it. Without a policy, confirms are dismissed and prompts return nothing.
+
+Returns `Promise<{ policy: DialogPolicy | null }>`. Route `POST /tabs/:id/dialog-policy`. Errors: `invalid_field`, `unknown_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
+### `page.dialogs()`
+
+The tab's dialog policy and the last 20 dialogs Kamapathy answered in it, oldest first.
+
+Returns `Promise<{ policy: DialogPolicy | null, dialogs: DialogRecord[] }>`. Route `GET /tabs/:id/dialogs`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+
 ### `page.opener()`
 
 The open page that opened this popup, or null.
@@ -513,6 +541,40 @@ Returns `Promise<Page | null>`. Route `GET /spaces/:id/tabs`. Errors: `human_con
 Closes the tab.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+## Download
+
+### `download.url()`
+
+The address the download came from.
+
+Returns `string`. Since API level 2.
+
+### `download.suggestedFilename()`
+
+The file name the site suggested.
+
+Returns `string`. Since API level 2.
+
+### `download.page()`
+
+The page the download started in, which may since have closed.
+
+Returns `Page`. Since API level 2.
+
+## File chooser
+
+### `fileChooser.page()`
+
+The page whose file chooser this is.
+
+Returns `Page`. Since API level 2.
+
+### `fileChooser.isMultiple()`
+
+Whether the input takes more than one file.
+
+Returns `boolean`. Since API level 2.
 
 ## CLI commands
 
@@ -639,6 +701,22 @@ Save a PNG of the viewport, the whole page or a clip, without overwriting
 ### `pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]`
 
 Read a PDF's text by page
+
+### `expect <tab-id> <event> [--timeout <ms>]`
+
+Arm a wait for the tab's next popup, download, file chooser or dialog, before the action that causes it
+
+### `wait-expectation <id>`
+
+Wait for an armed event and print the popup, download, file chooser or dialog that arrived
+
+### `dialog-policy <tab-id> accept|dismiss|reset [--times <n>] [--lifetime <ms>] [--prompt-stdin]`
+
+Arm how the tab answers its next confirms and prompts, or clear the policy with reset
+
+### `dialogs <tab-id>`
+
+Print the tab's dialog policy and the dialogs Kamapathy answered in it
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 

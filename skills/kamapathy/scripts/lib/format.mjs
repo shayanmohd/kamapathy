@@ -117,6 +117,84 @@ export function formatSnapshot(snapshot) {
   return lines.join("\n");
 }
 
+// Page or agent text on one line: whitespace collapsed and cut to 80
+// characters, so one record stays one line.
+const short = (value) => {
+  const text = line(value);
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+};
+
+// One answered dialog: its kind, its message and how it was answered.
+const dialogLine = (dialog) =>
+  `${line(dialog.type)} ${JSON.stringify(short(dialog.message))} ${line(
+    dialog.answer,
+  )}`;
+
+/**
+ * What an action caused, printed under its own line: the pages it opened,
+ * the dialogs Kamapathy answered, a download and the requests it refused.
+ */
+export function receiptLines(result) {
+  const download = result?.download;
+  const more = Number(result?.moreDialogs ?? 0);
+  return [
+    ...(result?.popups ?? []).map(
+      (tab) => `opened ${tabName(tab)} ${line(tab.id)} ${line(tab.url)}`,
+    ),
+    ...(result?.dialog ? [dialogLine(result.dialog)] : []),
+    ...(more > 0
+      ? [`and ${more} more ${more === 1 ? "dialog" : "dialogs"}`]
+      : []),
+    ...(download
+      ? [
+          `download ${download.blocked ? "blocked" : line(download.id)} ${line(
+            download.suggestedFilename,
+          )}`,
+        ]
+      : []),
+    ...(result?.deniedRequests ?? []).map(
+      (request) =>
+        `refused ${line(request.permission)} for ${line(request.origin)}`,
+    ),
+  ];
+}
+
+/** The line an armed wait prints. */
+export const expectationLine = (expectation) =>
+  `expectation ${line(expectation.id)} ${line(expectation.event)} ${line(
+    expectation.tabId,
+  )}`;
+
+/** The line a wait prints once its event arrives. */
+export function eventLine(result) {
+  const popup = result?.popup;
+  const download = result?.download;
+  const chooser = result?.fileChooser;
+  if (popup)
+    return `popup ${tabName(popup)} ${line(popup.id)} ${line(popup.url)}`;
+  if (download)
+    return `download ${line(download.id)} ${line(download.suggestedFilename)}`;
+  if (chooser)
+    return `file-chooser ${line(chooser.id)} ${
+      chooser.multiple ? "multiple" : "single"
+    }`;
+  if (result?.dialog) return `dialog ${dialogLine(result.dialog)}`;
+  return JSON.stringify(result);
+}
+
+/** A tab's dialog policy, then one line per dialog it answered. */
+export function dialogLines(body) {
+  const policy = body?.policy;
+  return [
+    policy
+      ? `policy ${policy.accept ? "accept" : "dismiss"} ${Number(
+          policy.remaining,
+        )} left`
+      : "policy none",
+    ...(body?.dialogs ?? []).map(dialogLine),
+  ];
+}
+
 // What an action did beyond succeeding, such as which panel scrolled.
 export function actionSummary(data) {
   const notes = [];
@@ -226,6 +304,10 @@ export function formatResult(data, command) {
         : []),
       ...(data.noText ? ["No text on these pages; they may be scans."] : []),
     ].join("\n");
+  if (command === "wait-expectation") return eventLine(data);
+  if (data?.expectation) return expectationLine(data.expectation);
+  if (data && typeof data === "object" && "policy" in data)
+    return dialogLines(data).join("\n");
   if (data?.space)
     return [
       `space ${data.space.id} ${JSON.stringify(line(data.space.name))} ${line(data.space.owner)}${signIns(data.space)}`,
@@ -234,7 +316,11 @@ export function formatResult(data, command) {
         : []),
       ...(data.active ? [activeLine(data.active)] : []),
     ].join("\n");
-  if (data?.tab) return `tab ${data.tab.id} ${line(data.tab.url)}`;
+  if (data?.tab)
+    return [
+      `tab ${data.tab.id} ${line(data.tab.url)}`,
+      ...receiptLines(data),
+    ].join("\n");
   if (data?.spaces)
     return data.spaces.length
       ? data.spaces
@@ -258,7 +344,10 @@ export function formatResult(data, command) {
           : result.ok === false || payload?.ok === false
             ? ` ${line(result.error?.message || result.error || payload.error?.message || payload.error || "failed")}`
             : ` ${actionSummary(payload || {})}`;
-      return `${index + 1}. ${line(name)}${detail}`;
+      return [
+        `${index + 1}. ${line(name)}${detail}`,
+        ...receiptLines(payload || {}),
+      ].join("\n");
     });
     if (data.ok === false)
       output.push(
@@ -278,6 +367,6 @@ export function formatResult(data, command) {
               : "ok: agent control resumed",
             ...boundaryLines(data),
           ].join("\n")
-        : actionSummary(data);
+        : [actionSummary(data), ...receiptLines(data)].join("\n");
   return JSON.stringify(data);
 }

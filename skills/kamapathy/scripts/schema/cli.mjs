@@ -557,6 +557,102 @@ export const COMMANDS = [
     },
   ),
   command(
+    "expect",
+    "Events and dialogs",
+    "expect <tab-id> <event> [--timeout <ms>]",
+    "Arm a wait for the tab's next popup, download, file chooser or dialog, before the action that causes it",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "event",
+          description: "popup, download, filechooser or dialog.",
+        },
+      ],
+      flags: [
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description: "How long the arm lasts, 1 to 60000, 60000 by default.",
+          since: 2,
+        },
+      ],
+      route: "POST /tabs/:id/expectations",
+      script: "page.waitForEvent",
+      examples: ["expect 8c1f2e04:p2 popup"],
+      since: 2,
+    },
+  ),
+  command(
+    "wait-expectation",
+    "Events and dialogs",
+    "wait-expectation <id>",
+    "Wait for an armed event and print the popup, download, file chooser or dialog that arrived",
+    {
+      arguments: [
+        { name: "id", description: "An expectation ID from expect." },
+      ],
+      route: "POST /expectations/:id/wait",
+      examples: ["wait-expectation 4f2a9c71b3d05e68"],
+      since: 2,
+    },
+  ),
+  command(
+    "dialog-policy",
+    "Events and dialogs",
+    "dialog-policy <tab-id> accept|dismiss|reset [--times <n>] [--lifetime <ms>] [--prompt-stdin]",
+    "Arm how the tab answers its next confirms and prompts, or clear the policy with reset",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "answer",
+          description:
+            "accept answers yes, dismiss answers no, reset clears the policy.",
+        },
+      ],
+      flags: [
+        {
+          name: "--times",
+          value: "<n>",
+          description:
+            "How many confirms or prompts to answer, 1 to 20, 1 by default.",
+          since: 2,
+        },
+        {
+          name: "--lifetime",
+          value: "<ms>",
+          description:
+            "How long the policy lasts, 1000 to 600000, 60000 by default.",
+          since: 2,
+        },
+        {
+          name: "--prompt-stdin",
+          description:
+            "Read what an accepted prompt returns from standard input.",
+          since: 2,
+        },
+      ],
+      stdin: "What an accepted prompt returns, with --prompt-stdin.",
+      route: "POST /tabs/:id/dialog-policy",
+      script: "page.setDialogPolicy",
+      examples: ["dialog-policy 8c1f2e04:p2 accept --times 2"],
+      since: 2,
+    },
+  ),
+  command(
+    "dialogs",
+    "Events and dialogs",
+    "dialogs <tab-id>",
+    "Print the tab's dialog policy and the dialogs Kamapathy answered in it",
+    {
+      arguments: [TAB_ID],
+      route: "GET /tabs/:id/dialogs",
+      script: "page.dialogs",
+      since: 2,
+    },
+  ),
+  command(
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",
