@@ -8,6 +8,8 @@ import type { Park, Run } from "./http";
 import {
   createInputActions,
   type DragAction,
+  type FieldAction,
+  type InputActions,
   type PointerAction,
   type PointerKind,
 } from "./input/actions";
@@ -101,6 +103,8 @@ export interface Actions {
   ): Promise<Record<string, unknown>>;
   /** The tab's one input dispatcher; every route sends input through it. */
   dispatcher(id: string, session: TabSession): InputDispatcher;
+  /** Section 5's element actions, which the input routes also run. */
+  input: InputActions;
 }
 
 export function createActions(deps: {
@@ -384,8 +388,10 @@ export function createActions(deps: {
         payload as unknown as PointerAction,
         run,
       );
-    } else if (action.type === "fill") {
-      result = await evaluatePage(id, session, "fill", payload, deadline, step);
+    } else if (action.type === "fill" || action.type === "select") {
+      // Fill and select wait for a field that can take the value, then
+      // type or choose on the loop in input/actions.ts.
+      result = await input.field(id, payload as unknown as FieldAction, run);
     } else if (action.type === "drag") {
       // Both ends wait for a layout that can take the drag, then today's
       // engine runs in input/actions.ts.
@@ -502,6 +508,7 @@ export function createActions(deps: {
       dblclick: "Agent double-clicked an element",
       hover: "Agent hovered an element",
       fill: "Agent filled a field",
+      select: "Agent chose an option",
       press: "Agent pressed a key",
       scroll: "Agent scrolled a page",
       drag: "Agent dragged an element",
@@ -516,5 +523,6 @@ export function createActions(deps: {
     evaluatePage,
     executeToolAction,
     dispatcher: dispatcherFor,
+    input,
   };
 }

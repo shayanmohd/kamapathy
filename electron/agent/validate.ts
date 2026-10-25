@@ -15,7 +15,14 @@ import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
-import type { DragAction, PointerAction, PointerKind } from "./input/actions";
+import type {
+  DragAction,
+  FieldAction,
+  FieldKind,
+  PointerAction,
+  PointerKind,
+  SelectChoice,
+} from "./input/actions";
 import type { Button } from "./input/state";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
@@ -56,6 +63,7 @@ export type ToolAction = {
     | "dblclick"
     | "hover"
     | "fill"
+    | "select"
     | "press"
     | "scroll"
     | "drag"
@@ -307,6 +315,59 @@ export function pointerFields(
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
 }
+// The most choices one select route takes.
+const MAX_CHOICES = 100;
+// The options a select route chooses: strings, or objects naming a value, a
+// label or an index. Every field an object carries has to match, so an empty
+// object names nothing and is refused here, before any page work.
+export function selectValues(body: Record<string, unknown>): SelectChoice[] {
+  const expected = `an array of at most ${MAX_CHOICES} choices, each a string or an object with value, label or index`;
+  const refuse = (): never =>
+    fail("invalid_field", `values must be ${expected}.`, {
+      field: "values",
+      expected,
+    });
+  const list = body.values;
+  if (!Array.isArray(list) || list.length > MAX_CHOICES) return refuse();
+  return list.map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return refuse();
+    const given = entry as Record<string, unknown>;
+    const choice: { value?: string; label?: string; index?: number } = {};
+    for (const [key, value] of Object.entries(given)) {
+      if (value === undefined) continue;
+      if (key === "value" || key === "label") {
+        if (typeof value !== "string") return refuse();
+        choice[key] = value;
+      } else if (key === "index") {
+        if (!Number.isInteger(value) || (value as number) < 0) return refuse();
+        choice.index = value as number;
+      } else return refuse();
+    }
+    if (Object.keys(choice).length === 0) return refuse();
+    return choice;
+  });
+}
+// The fields fill, select and focus share. Each kind reads only the ones its
+// route declares, so the schema and this never disagree.
+export function fieldFields(
+  body: Record<string, unknown>,
+  kind: FieldKind,
+): FieldAction {
+  return {
+    kind,
+    target: targetFields(body) as TargetPayload,
+    ...(kind === "fill"
+      ? {
+          value: stringField(body, "value", 16384, true),
+          append: booleanField(body, "append", false),
+        }
+      : {}),
+    ...(kind === "select" ? { values: selectValues(body) } : {}),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
 // A drag's two ends and the options the gesture takes. Both ends resolve
 // like any other target, each with its own position.
 export function dragFields(body: Record<string, unknown>): DragAction {
@@ -433,13 +494,10 @@ function parseAction(
       type,
       payload: pointerFields(body, type) as unknown as Record<string, unknown>,
     };
-  if (type === "fill")
+  if (type === "fill" || type === "select")
     return {
       type,
-      payload: {
-        ...targetFields(body),
-        value: stringField(body, "value", 16384, true),
-      },
+      payload: fieldFields(body, type) as unknown as Record<string, unknown>,
     };
   if (type === "press") {
     const key = stringField(body, "key", 20);

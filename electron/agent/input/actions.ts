@@ -20,7 +20,12 @@ import type { Authority } from "../authority";
 import { ApiError, fail } from "../errors";
 import type { Run } from "../http";
 import type { Level } from "../dom/select";
-import type { Point, ScrollRequest } from "../dom/actions";
+import {
+  classifyFill,
+  type FillMatch,
+  type Point,
+  type ScrollRequest,
+} from "../dom/actions";
 import type { AutomationController } from "../server";
 import type { TabSession } from "../session/tab-session";
 import type { Step } from "../session/types";
@@ -28,7 +33,7 @@ import type { TargetPayload } from "../validate";
 import type { InputDispatcher, InputDispatchers } from "./dispatch";
 import { checkPointerTarget } from "./guards";
 import { inputMarker } from "./marker";
-import type { InputCommand } from "./keys";
+import { KEYS, keyParams, keyType, type InputCommand } from "./keys";
 import { BUTTON_BITS, type Button } from "./state";
 import {
   ACTION_LEVELS,
@@ -364,6 +369,19 @@ export interface DragAction {
   force: boolean;
   timeoutMs: number;
 }
+export type FieldKind = "fill" | "select" | "focus";
+/** One option a select route asks for. */
+export type SelectChoice =
+  string | { value?: string; label?: string; index?: number };
+/** One field action as its route parsed it. */
+export interface FieldAction {
+  kind: FieldKind;
+  target: TargetPayload;
+  value?: string;
+  append?: boolean;
+  values?: SelectChoice[];
+  timeoutMs: number;
+}
 export interface InputActions {
   pointer(
     id: string,
@@ -373,6 +391,11 @@ export interface InputActions {
   drag(
     id: string,
     action: DragAction,
+    run: Run,
+  ): Promise<Record<string, unknown>>;
+  field(
+    id: string,
+    action: FieldAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
 }
@@ -392,6 +415,22 @@ type PointerOutcome = {
 };
 // What one drag ended with: the way the page took it, and the refs it moved.
 type DragOutcome = { mode: "html5" | "mouse"; rebound?: string[] };
+// The page operations a field action runs.
+type FieldOperation =
+  | "fillPrepare"
+  | "fillRead"
+  | "setDirectValue"
+  | "selectChoose"
+  | "focusTarget";
+// The matches that mean the field took what was asked for; the other two
+// get one real click and one more round.
+const FILL_KEPT: readonly FillMatch[] = ["unchanged", "appended"];
+// The first characters of the value an answer carries, and of the options a
+// select names when none matched.
+const MAX_FILL_VALUE = 200;
+const MAX_DETAIL = 200;
+// What one field action ended with: the fields of its own answer.
+type FieldOutcome = Record<string, unknown>;
 
 export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
@@ -892,5 +931,298 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       ...(outcome.rebound ? { rebound: outcome.rebound } : {}),
     };
   };
-  return { pointer, drag };
+  // The field actions: fill, select and focus. None of them scrolls, none
+  // takes force, and the insertion that reaches the field is the commit
+  // point, so nothing after it is sent twice.
+  const field = async (id: string, action: FieldAction, run: Run) => {
+    const { kind } = action;
+    const guard = () => {
+      authorizeTab(id);
+    };
+    const step: Step = {
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    };
+    // Everything from the commit point on runs to its end even if the
+    // client goes away.
+    const gesture: Step = {
+      deadline: run.deadline,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const { session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      false,
+      run.park,
+    );
+    const dispatcher = actions.dispatcher(id, session);
+    // The target as the page receives it, counted at this action's level.
+    const payload: Record<string, unknown> = { ...action.target };
+    const query = (payload as { query?: { level?: Level } }).query;
+    if (query) query.level = ACTION_LEVELS[kind];
+    const selector = (action.target as { selector?: string }).selector;
+    const value = action.value ?? "";
+    const append = action.append === true;
+    const asked = { value, append };
+
+    const evaluate = (
+      operation: FieldOperation,
+      extra: Record<string, unknown> = {},
+      at: Step = step,
+    ) =>
+      actions.evaluatePage(
+        id,
+        session,
+        operation,
+        { ...payload, ...extra },
+        run.deadline,
+        at,
+      );
+    // A selector that matched nothing is folded into the blocker the loop
+    // waits out, so a field the page draws late still gets its action.
+    const look = async (
+      operation: FieldOperation,
+      extra: Record<string, unknown> = {},
+    ): Promise<Record<string, unknown>> => {
+      try {
+        return await evaluate(operation, extra);
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.code !== "no_match")
+          throw error;
+        return {
+          ok: true,
+          blocked: {
+            blocker: "no_match",
+            ...(selector === undefined ? {} : { selector }),
+          },
+        };
+      }
+    };
+    const stop = (blocked: unknown): AttemptResult<FieldOutcome> => ({
+      done: false,
+      blocked: blocked as LoopBlocker,
+    });
+    // The page the field was prepared on must still be the page the text
+    // lands on.
+    const onSamePage = (epoch: number) => {
+      if (session.epoch === epoch) return;
+      fail(
+        "page_changed",
+        "The page navigated before input completed. Inspect the new page before continuing.",
+      );
+    };
+    const previousOf = (found: Record<string, unknown>) =>
+      typeof found.previous === "string" ? found.previous : "";
+    // What the field holds afterwards, cut to its first characters, or
+    // nothing at all when the field is secret.
+    const valueOf = (found: Record<string, unknown>) =>
+      found.valueHidden === true
+        ? { valueHidden: true as const }
+        : typeof found.value === "string"
+          ? { value: found.value.slice(0, MAX_FILL_VALUE) }
+          : {};
+    // One trusted insertion at the prepared caret, or the Delete key for an
+    // empty value. The key carries no modifier of its own, so a held Shift
+    // can never turn it into a clipboard chord.
+    const insert = async (mode: unknown) => {
+      if (mode !== "delete") {
+        await dispatcher.send(
+          [{ method: "Input.insertText", params: { text: value } }],
+          gesture,
+        );
+        return;
+      }
+      const key = KEYS.delete;
+      await dispatcher.key(
+        [
+          {
+            method: "Input.dispatchKeyEvent",
+            params: keyParams(key, keyType(key, 0), 0),
+          },
+          {
+            method: "Input.dispatchKeyEvent",
+            params: keyParams(key, "keyUp", 0),
+          },
+        ],
+        gesture,
+      );
+    };
+    // The one retry click, at the point the page reported for the field and
+    // through the same guards a click route runs.
+    const clickField = async (context: AttemptContext, point: Point) => {
+      await checkPointerTarget(session, point, gesture, {
+        button: "left",
+        press: true,
+        ...platform,
+      });
+      const bit = BUTTON_BITS.left;
+      const buttons = dispatcher.state.buttons;
+      const modifiers = dispatcher.state.modifiers;
+      context.gesture.press();
+      await dispatcher.pointer(
+        pointerCommands({
+          type: "moved",
+          point,
+          button: buttons ? "left" : "none",
+          buttons,
+          modifiers,
+        }),
+        gesture,
+      );
+      await dispatcher.pointer(
+        pointerCommands({
+          type: "pressed",
+          point,
+          button: "left",
+          buttons: buttons | bit,
+          clickCount: 1,
+          modifiers,
+        }),
+        gesture,
+      );
+      await dispatcher.pointer(
+        pointerCommands({
+          type: "released",
+          point,
+          button: "left",
+          buttons: buttons & ~bit,
+          clickCount: 1,
+          modifiers,
+        }),
+        gesture,
+      );
+    };
+    const refuse = (match: FillMatch | undefined, clicked: boolean): never =>
+      fail(
+        "fill_not_accepted",
+        clicked
+          ? "The field kept its old value after Kamapathy typed into it and clicked it once. Inspect the page before retrying."
+          : "The field kept its old value, and a click on it would land on another control or out of view. Inspect the page before retrying.",
+        match === undefined ? {} : { match },
+      );
+    // One round of a fill: the insertion, then the verified read of what the
+    // field kept. A read the page could not classify carries its blocker,
+    // which ends the action, since the text has already gone out.
+    const round = async (
+      context: AttemptContext,
+      prepared: Record<string, unknown>,
+      epoch: number,
+    ) => {
+      onSamePage(epoch);
+      context.gesture.press();
+      await insert(prepared.mode);
+      onSamePage(epoch);
+      const read = await evaluate(
+        "fillRead",
+        { ...asked, previous: previousOf(prepared) },
+        gesture,
+      );
+      const match =
+        typeof read.match === "string" ? (read.match as FillMatch) : undefined;
+      return {
+        blocked: read.blocked,
+        match,
+        kept: match !== undefined && FILL_KEPT.includes(match),
+        value: {
+          ...(match === undefined ? {} : { match }),
+          ...valueOf(read),
+          ...reboundOf(prepared),
+          ...reboundOf(read),
+        } as FieldOutcome,
+      };
+    };
+
+    const fillAttempt = async (
+      context: AttemptContext,
+    ): Promise<AttemptResult<FieldOutcome>> => {
+      const epoch = session.epoch;
+      const prepared = await look("fillPrepare", asked);
+      if (prepared.blocked) return stop(prepared.blocked);
+      // A date, time, range or colour field takes its value from its own
+      // setter instead of typing, and a single select keeps today's fill.
+      if (prepared.mode === "direct") {
+        const set = await evaluate("setDirectValue", { value });
+        if (set.blocked) return stop(set.blocked);
+        const now = typeof set.value === "string" ? set.value : value;
+        return {
+          done: true,
+          value: {
+            match: classifyFill(previousOf(prepared), value, now, {
+              append: false,
+            }),
+            ...valueOf(set),
+            ...reboundOf(prepared),
+            ...reboundOf(set),
+          },
+        };
+      }
+      const first = await round(context, prepared, epoch);
+      if (first.blocked) return stop(first.blocked);
+      if (!first.kept) return { done: true, value: first.value };
+      // The field kept its old value: one real click at it, then one more
+      // round. A field the page reported no point for would take the click
+      // on another control, so there is nothing left to try.
+      const point = prepared.point;
+      if (!finitePoint(point)) return refuse(first.match, false);
+      await clickField(context, point);
+      const again = await evaluate("fillPrepare", asked, gesture);
+      if (again.blocked) return refuse(first.match, true);
+      const second = await round(context, again, epoch);
+      if (second.blocked) return stop(second.blocked);
+      if (!second.kept) return { done: true, value: second.value };
+      return refuse(second.match, true);
+    };
+    // A select with no matching option names the options it has instead of
+    // the one that was asked for.
+    const withOptions = (chosen: Record<string, unknown>) => {
+      const blocked = chosen.blocked as LoopBlocker;
+      const options = Array.isArray(chosen.options)
+        ? chosen.options.filter(
+            (name): name is string => typeof name === "string",
+          )
+        : [];
+      if (blocked.blocker !== "option_missing" || options.length === 0)
+        return blocked;
+      return { ...blocked, detail: options.join(", ").slice(0, MAX_DETAIL) };
+    };
+    const selectAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const chosen = await look("selectChoose", {
+        values: action.values ?? [],
+      });
+      if (chosen.blocked) return stop(withOptions(chosen));
+      return {
+        done: true,
+        value: {
+          values: Array.isArray(chosen.values) ? chosen.values : [],
+          ...reboundOf(chosen),
+        },
+      };
+    };
+    const focusAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const focused = await look("focusTarget");
+      if (focused.blocked) return stop(focused.blocked);
+      return { done: true, value: { ...reboundOf(focused) } };
+    };
+
+    const outcome = await runAttempts<FieldOutcome>(
+      {
+        timeoutMs: action.timeoutMs,
+        deadline: run.deadline,
+        park: run.park,
+        signal: run.signal,
+        action: kind,
+        ...(selector === undefined ? {} : { selector }),
+      },
+      kind === "fill"
+        ? fillAttempt
+        : kind === "select"
+          ? selectAttempt
+          : focusAttempt,
+    );
+    return { ok: true, ...outcome };
+  };
+  return { pointer, drag, field };
 }

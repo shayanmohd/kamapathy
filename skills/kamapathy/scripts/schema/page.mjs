@@ -200,7 +200,7 @@ export const PAGE_ENTRIES = [
     "page.fill(target, value, options?)",
     "Replaces the value of a field, select or editable region.",
     [target(), { name: "value", kind: "string" }, OPTIONS],
-    "Promise<{ ok: true, rebound? }>",
+    "Promise<{ ok: true, match, value?, valueHidden?, rebound? }>",
     "POST /tabs/:id/fill",
     [
       ...TARGET,
@@ -209,6 +209,8 @@ export const PAGE_ENTRIES = [
       "not_editable",
       "ambiguous_field",
       "fill_not_accepted",
+      "input_target_blocked",
+      "native_popup_blocked",
     ],
     labelOption("fill"),
   ),

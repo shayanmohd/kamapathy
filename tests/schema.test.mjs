@@ -228,7 +228,7 @@ describe("API schema", () => {
       [...union.matchAll(/"([\w-]+)"/g)].map((m) => m[1]).sort(),
     );
     expect(() => parseToolAction("nope", {})).toThrow(
-      "Batch actions support snapshot, click, dblclick, hover, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+      "Batch actions support snapshot, click, dblclick, hover, fill, select, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -559,6 +559,7 @@ describe("API schema", () => {
       "dblclick",
       "hover",
       "fill",
+      "select",
       "press",
       "scroll",
       "drag",
@@ -572,7 +573,7 @@ describe("API schema", () => {
     expect(checkBody(batch, { actions: [{ type: "nope" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, dblclick, hover, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+        "Batch actions support snapshot, click, dblclick, hover, fill, select, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])
@@ -867,6 +868,8 @@ describe("API schema", () => {
       "dblclick",
       "hover",
       "fill",
+      "select",
+      "focus",
       "press",
       "scroll",
       "drag",
@@ -883,8 +886,9 @@ describe("API schema", () => {
       });
       expect(item.body.label.required, key).toBeUndefined();
       expect(typeof item.body.label.description, key).toBe("string");
+      // Focus is the one input route with no batch step of its own.
       const step = ACTIONS.find((action) => action.type === type);
-      expect(step.fields.label, type).toBe(item.body.label);
+      if (step) expect(step.fields.label, type).toBe(item.body.label);
     }
     // Only the routes that take one declare the flag, and the flag and the
     // field never disagree.

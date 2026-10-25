@@ -816,15 +816,16 @@ describe("local automation socket", () => {
     const executed = controller.contents.scripts[0];
     expect(
       executed.code.includes(
-        `)("fill",${JSON.stringify({
+        `)("fillPrepare",${JSON.stringify({
           selector,
           query: {
             ast: { kind: "css", css: selector, raw: true },
             level: "enabled",
             mode: "strict",
-            firstRef: payloads("fill")[0].query.firstRef,
+            firstRef: payloads("fillPrepare")[0].query.firstRef,
           },
           value: 'quote " and newline\n',
+          append: false,
         })},`,
       ),
     ).toBe(true);
@@ -1371,7 +1372,7 @@ describe("local automation socket", () => {
     expect((await response.json()).error.code).toBe("stale_ref");
     expect(controller.contents.scripts).toHaveLength(1);
     expect(controller.contents.scripts[0].code).toContain(
-      ')("fill",{"ref":"@e1","value":"test"}',
+      ')("fillPrepare",{"ref":"@e1","value":"test","append":false}',
     );
   });
 
@@ -1471,7 +1472,7 @@ describe("local automation socket", () => {
     expect(queryOf("actionPoint")).toEqual(
       strict({ kind: "css", css: "#save", raw: true }, "pointer-enabled"),
     );
-    expect(queryOf("fill")).toEqual(
+    expect(queryOf("fillPrepare")).toEqual(
       strict({ kind: "text", value: "Save now", exact: false }, "enabled"),
     );
     // A role selector also carries the key its picked nodes wait under.
@@ -1499,7 +1500,14 @@ describe("local automation socket", () => {
     );
     // Every strict resolution reserves its own candidate refs.
     const reserved = [
-      ...["actionPoint", "fill", "focus", "scroll", "check", "snapshot"].map(
+      ...[
+        "actionPoint",
+        "fillPrepare",
+        "focus",
+        "scroll",
+        "check",
+        "snapshot",
+      ].map(
         (operation) => queryOf(operation).firstRef,
       ),
       drag.source.query.firstRef,
@@ -1822,8 +1830,10 @@ describe("local automation socket", () => {
 
   it("returns completed batch steps and stops at the first failed action without retrying", async () => {
     const { tab } = await createPage();
+    // The fill step prepares the field and reads it back; the click that
+    // follows finds a stale ref.
     controller.contents.result = (code: string) =>
-      code.includes(')("fill",')
+      code.includes(')("fill')
         ? { ok: true }
         : {
             ok: false,
@@ -1845,7 +1855,7 @@ describe("local automation socket", () => {
       error: { code: "stale_ref" },
       results: [{ index: 0, type: "fill", result: { ok: true } }],
     });
-    expect(controller.contents.scripts).toHaveLength(2);
+    expect(controller.contents.scripts).toHaveLength(3);
     expect(controller.contents.inputs).toEqual([]);
   });
 
@@ -4896,6 +4906,538 @@ describe("local automation socket", () => {
     );
   });
 
+  // Section 5's field actions over a fake page: each operation answers from
+  // `pageActions`, so a kept value, a missing option or a blocker is driven
+  // from the test.
+  const fieldPage = () => {
+    const page = controller.contents;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 12, y: 34 },
+    };
+    page.pageActions.fillRead = { ok: true, match: "exact", value: "Ada" };
+    page.pageActions.setDirectValue = { ok: true, value: "7" };
+    page.pageActions.selectChoose = { ok: true, values: ["ams"] };
+    page.pageActions.focusTarget = { ok: true };
+    return page;
+  };
+  // Every Input command the tab received, in order. Input.insertText is not
+  // page input, so it is read from the debugger rather than from `inputs`.
+  const commandsOf = (page: FakeContents) =>
+    page.debugger.sent
+      .filter((command) => command.method.startsWith("Input."))
+      .map((command) =>
+        command.method === "Input.insertText"
+          ? `insertText ${command.params.text}`
+          : String(command.params.type),
+      );
+
+  it("fills with trusted insertion and reports its match", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const filled = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "Ada",
+    });
+    expect(filled.status).toBe(200);
+    expect(await filled.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    // The field is prepared, the text is inserted at its caret, and the
+    // result is read back.
+    expect(payloads("fillPrepare")[0]).toEqual({
+      ref: "@e1",
+      value: "Ada",
+      append: false,
+    });
+    expect(payloads("fillRead")[0]).toEqual({
+      ref: "@e1",
+      value: "Ada",
+      append: false,
+      previous: "old",
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    // A secret field reports no value at all, and a long one is cut.
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "",
+      valueHidden: true,
+    };
+    page.pageActions.fillRead = {
+      ok: true,
+      match: "exact",
+      valueHidden: true,
+    };
+    const secret = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "hunter2",
+    });
+    expect(await secret.json()).toEqual({
+      ok: true,
+      match: "exact",
+      valueHidden: true,
+    });
+    page.pageActions.fillPrepare = { ok: true, mode: "insert", previous: "" };
+    page.pageActions.fillRead = {
+      ok: true,
+      match: "transformed",
+      value: "x".repeat(300),
+    };
+    const long = await (
+      await request(`/tabs/${tab.id}/fill`, "POST", { ref: "@e1", value: "x" })
+    ).json();
+    expect(long).toEqual({
+      ok: true,
+      match: "transformed",
+      value: "x".repeat(200),
+    });
+    // An empty value is deleted with a key that carries no modifier, so no
+    // clipboard chord can be formed from it.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "delete",
+      previous: "old",
+    };
+    page.pageActions.fillRead = { ok: true, match: "exact", value: "" };
+    const cleared = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "",
+    });
+    expect(await cleared.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "",
+    });
+    expect(
+      page.debugger.sent
+        .filter((command) => command.method.startsWith("Input."))
+        .map((command) => [
+          command.method,
+          command.params.type,
+          command.params.key,
+          command.params.modifiers,
+        ]),
+    ).toEqual([
+      ["Input.dispatchKeyEvent", "rawKeyDown", "Delete", 0],
+      ["Input.dispatchKeyEvent", "keyUp", "Delete", 0],
+    ]);
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent filled a field",
+    );
+    // A field that leaves the page before the read can classify it ends on
+    // its blocker rather than answering without a match, and the text that
+    // already went out is not sent again.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = { ok: true, mode: "insert", previous: "" };
+    page.pageActions.fillRead = { ok: true, blocked: { blocker: "detached" } };
+    const gone = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+        timeoutMs: 120,
+      }),
+    );
+    expect(gone.status).toBe(504);
+    expect(gone.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "detached",
+      dispatched: true,
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+  });
+
+  it("retries a field that kept its old value once, then gives up", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    page.pageActions.fillRead = { ok: true, match: "unchanged", value: "old" };
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+      }),
+    );
+    expect(status).toBe(422);
+    expect(error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+      dispatched: true,
+    });
+    expect(error.retryable).toBeUndefined();
+    // One insertion, then one real click at the field, then one more round.
+    expect(commandsOf(page)).toEqual([
+      "insertText Ada",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+      "insertText Ada",
+    ]);
+    expect(payloads("fillPrepare")).toHaveLength(2);
+    expect(payloads("fillRead")).toHaveLength(2);
+    // A point another control would take is not reported, so there is
+    // nothing to click and the fill ends after the first round.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+    };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    // A page that accepts the value on the second round answers its match.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 12, y: 34 },
+    };
+    let reads = 0;
+    page.pageActions.fillRead = () => {
+      reads += 1;
+      return reads === 1
+        ? { ok: true, match: "unchanged", value: "old" }
+        : { ok: true, match: "exact", value: "Ada" };
+    };
+    const second = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "Ada",
+    });
+    expect(await second.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    expect(commandsOf(page)).toEqual([
+      "insertText Ada",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+      "insertText Ada",
+    ]);
+  });
+
+  it("sets a date, range or color value directly instead of typing", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "direct",
+      previous: "#336699",
+    };
+    page.pageActions.setDirectValue = { ok: true, value: "#abcdef" };
+    const tinted = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "#ABCDEF",
+    });
+    expect(tinted.status).toBe(200);
+    // The field answered in its own case, which the match names.
+    expect(await tinted.json()).toEqual({
+      ok: true,
+      match: "transformed",
+      value: "#abcdef",
+    });
+    expect(payloads("setDirectValue")[0]).toEqual({
+      ref: "@e1",
+      value: "#ABCDEF",
+    });
+    // Nothing was typed, and the value was never read back.
+    expect(commandsOf(page)).toEqual([]);
+    expect(payloads("fillRead")).toEqual([]);
+    // A single select keeps today's exact value fill.
+    page.pageActions.fillPrepare = { ok: true, mode: "direct", previous: "" };
+    page.pageActions.setDirectValue = { ok: true, value: "ams" };
+    expect(
+      await (
+        await request(`/tabs/${tab.id}/fill`, "POST", {
+          ref: "@e1",
+          value: "ams",
+        })
+      ).json(),
+    ).toEqual({ ok: true, match: "exact", value: "ams" });
+    page.pageActions.setDirectValue = {
+      ok: false,
+      code: "invalid_value",
+      error: "The value is not valid for this input type.",
+    };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Amsterdam",
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error.code).toBe("invalid_value");
+  });
+
+  it("selects options and reports the values the page holds", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const chosen = await request(`/tabs/${tab.id}/select`, "POST", {
+      ref: "@e1",
+      values: ["ams"],
+    });
+    expect(chosen.status).toBe(200);
+    expect(await chosen.json()).toEqual({ ok: true, values: ["ams"] });
+    expect(payloads("selectChoose")[0]).toEqual({
+      ref: "@e1",
+      values: ["ams"],
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // Objects and an empty list reach the page as they were written.
+    page.pageActions.selectChoose = { ok: true, values: [] };
+    expect(
+      (
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          selector: "#city",
+          values: [{ label: "Amsterdam", index: 1 }],
+        })
+      ).status,
+    ).toBe(200);
+    expect(payloads("selectChoose")[1].values).toEqual([
+      { label: "Amsterdam", index: 1 },
+    ]);
+    expect(
+      await (
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          ref: "@e1",
+          values: [],
+        })
+      ).json(),
+    ).toEqual({ ok: true, values: [] });
+    // A missing option is waited out, then named with the page's options.
+    let looks = 0;
+    page.pageActions.selectChoose = () => {
+      looks += 1;
+      return {
+        ok: true,
+        blocked: { blocker: "option_missing", detail: "Blue" },
+        options: ["Red", "Green"],
+      };
+    };
+    const missing = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["Blue"],
+        timeoutMs: 120,
+      }),
+    );
+    expect(missing.status).toBe(504);
+    expect(missing.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "option_missing",
+      detail: "Red, Green",
+      timeoutMs: 120,
+    });
+    expect(looks).toBeGreaterThan(1);
+    // The twenty options the page reports are cut to 200 characters.
+    page.pageActions.selectChoose = {
+      ok: true,
+      blocked: { blocker: "option_missing", detail: "Blue" },
+      options: Array.from(
+        { length: 20 },
+        (_, index) => `Shade number ${index}`,
+      ),
+    };
+    const long = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["Blue"],
+        timeoutMs: 0,
+      }),
+    );
+    expect(long.status).toBe(504);
+    expect(long.error.detail).toHaveLength(200);
+    expect(long.error.detail).toMatch(/^Shade number 0, Shade number 1, /);
+    // A single select given two choices is the page's own refusal.
+    page.pageActions.selectChoose = {
+      ok: false,
+      code: "invalid_field",
+      error: "A single select takes one choice.",
+      fields: { field: "values" },
+    };
+    const two = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["a", "b"],
+      }),
+    );
+    expect(two.status).toBe(400);
+    expect(two.error).toMatchObject({ code: "invalid_field", field: "values" });
+    // A list too long, or a choice of the wrong shape, costs no page work.
+    const scripts = page.scripts.length;
+    for (const values of [
+      Array.from({ length: 101 }, (_, index) => `v${index}`),
+      "ams",
+      [1],
+      [{}],
+      [{ value: "a", nope: true }],
+      [{ index: -1 }],
+    ]) {
+      const bad = await failure(
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          ref: "@e1",
+          values,
+        }),
+      );
+      expect(bad.status, JSON.stringify(values)).toBe(400);
+      expect(bad.error, JSON.stringify(values)).toMatchObject({
+        code: "invalid_field",
+        field: "values",
+      });
+    }
+    expect(page.scripts).toHaveLength(scripts);
+    // values is required.
+    expect(
+      (await request(`/tabs/${tab.id}/select`, "POST", { ref: "@e1" })).status,
+    ).toBe(400);
+  });
+
+  it("focuses with retargeting and waits for the focus to stay", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const focused = await request(`/tabs/${tab.id}/focus`, "POST", {
+      ref: "@e1",
+    });
+    expect(focused.status).toBe(200);
+    expect(await focused.json()).toEqual({ ok: true });
+    expect(payloads("focusTarget")[0]).toEqual({ ref: "@e1" });
+    expect(commandsOf(page)).toEqual([]);
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent focused an element",
+    );
+    // A field whose own handler moves focus away is waited out.
+    page.pageActions.focusTarget = {
+      ok: true,
+      blocked: { blocker: "not_focused" },
+    };
+    const moved = await failure(
+      await request(`/tabs/${tab.id}/focus`, "POST", {
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(moved.status).toBe(504);
+    expect(moved.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "not_focused",
+      timeoutMs: 120,
+    });
+    // Several editable descendants are reported at once, with the
+    // candidates to choose between.
+    page.pageActions.focusTarget = {
+      ok: false,
+      code: "ambiguous_field",
+      error: "Retargeting found several fields. Name the one to use.",
+      fields: {
+        candidates: [
+          { ref: "@e2", tag: "input", role: "textbox", name: "One" },
+          { ref: "@e3", tag: "input", role: "textbox", name: "Two" },
+        ],
+      },
+    };
+    const many = await failure(
+      await request(`/tabs/${tab.id}/focus`, "POST", { ref: "@e1" }),
+    );
+    expect(many.status).toBe(422);
+    expect(many.error.code).toBe("ambiguous_field");
+    expect(many.error.candidates).toHaveLength(2);
+  });
+
+  it("never scrolls or forces a field, select or focus", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    for (const [route, body] of [
+      ["fill", { ref: "@e1", value: "Ada", force: true }],
+      ["select", { ref: "@e1", values: ["a"], force: true }],
+      ["focus", { ref: "@e1", force: true }],
+    ] as const) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/${route}`, "POST", body),
+      );
+      expect(status, route).toBe(400);
+      expect(error, route).toMatchObject({
+        code: "unknown_field",
+        field: "force",
+        route: `POST /tabs/:id/${route}`,
+      });
+    }
+    // The page is never asked for a point or a scroll gesture, so a field
+    // off screen is still filled and no wheel event is sent.
+    for (const [route, body] of [
+      ["fill", { ref: "@e1", value: "Ada" }],
+      ["select", { ref: "@e1", values: ["ams"] }],
+      ["focus", { ref: "@e1" }],
+    ] as const)
+      expect(
+        (await request(`/tabs/${tab.id}/${route}`, "POST", body)).status,
+        route,
+      ).toBe(200);
+    expect(payloads("actionPoint")).toEqual([]);
+    expect(payloads("scrollRequest")).toEqual([]);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mouseWheel"),
+    ).toEqual([]);
+  });
+
+  it("runs select and the fields' new options as batch steps", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const results = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "select", ref: "@e1", values: ["ams"], timeoutMs: 1000 },
+          { type: "fill", ref: "@e2", value: "Ada", append: true },
+        ],
+      })
+    ).json();
+    expect(results.ok).toBe(true);
+    expect(results.results.map((entry: any) => entry.type)).toEqual([
+      "select",
+      "fill",
+    ]);
+    expect(results.results[0].result).toEqual({ ok: true, values: ["ams"] });
+    expect(results.results[1].result).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    expect(payloads("fillPrepare")[0]).toEqual({
+      ref: "@e2",
+      value: "Ada",
+      append: true,
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    expect(controller.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining(["Agent chose an option"]),
+    );
+    // A step type nothing declares names select among the ones that work.
+    const { error } = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "nope" }],
+      }),
+    );
+    expect(error.message).toContain("fill, select, press");
+  });
+
   it("honors wait deadlines during loading and stalled page evaluation", async () => {
     const { tab } = await createPage();
     controller.contents.isLoadingMainFrame = () => true;
@@ -5952,6 +6494,8 @@ describe("local automation socket", () => {
       "POST /tabs/:id/dblclick": { ref: "@e1" },
       "POST /tabs/:id/hover": { ref: "@e1" },
       "POST /tabs/:id/fill": { ref: "@e1", value: "x" },
+      "POST /tabs/:id/select": { ref: "@e1", values: ["a"] },
+      "POST /tabs/:id/focus": { ref: "@e1" },
       "POST /tabs/:id/press": { key: "Enter" },
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },

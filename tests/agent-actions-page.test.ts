@@ -770,7 +770,8 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
       code: "not_editable",
       fields: { reason: "readonly_select" },
     });
-    // A single select keeps its exact value match.
+    // A single select keeps its exact value match, set and never typed into.
+    expect(await prepare("#city")).toMatchObject({ mode: "direct" });
     expect(await setValue("#city", "ams")).toMatchObject({
       ok: true,
       value: "ams",
@@ -822,6 +823,17 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     expect(await prepare("#name", { value: "", append: true })).toMatchObject({
       mode: "insert",
     });
+    // The kinds a fill sets through their own setter instead of typing.
+    for (const id of [
+      "day",
+      "moment",
+      "when",
+      "month",
+      "week",
+      "volume",
+      "tint",
+    ])
+      expect(await prepare(`#${id}`), id).toMatchObject({ mode: "direct" });
     // Email and number inputs have no selection to set; their previous value
     // is still read, and the caret of a field just focused rests at its end,
     // so appending fills the old value and the new one.
@@ -905,6 +917,57 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     await page.fill("#secret", "hunter2");
     const secret = await read("#secret", { value: "hunter2" });
     expect(secret).toEqual({ ok: true, match: "exact", valueHidden: true });
+  }, 30000);
+
+  it("fills a controlled field and appends to an email and a number input", async () => {
+    await open("/input/fields");
+    // The three steps a fill route runs, with Chromium's own insertion in
+    // the middle: prepare the caret, insert the text, read what was kept.
+    const fill = async (
+      selector: string,
+      value: string,
+      extra: Record<string, unknown> = {},
+    ) => {
+      const prepared = await operate(
+        "fillPrepare",
+        aim(selector, { value, ...extra }),
+      );
+      expect(prepared, selector).toMatchObject({ ok: true });
+      expect(prepared.blocked, selector).toBeUndefined();
+      await page.keyboard.insertText(value);
+      return operate(
+        "fillRead",
+        aim(selector, { value, previous: prepared.previous, ...extra }),
+      );
+    };
+    // A component that reformats what it is given keeps its own value: the
+    // same digits read as equivalent, a reformatted amount as transformed.
+    expect(await fill("#currency", "1250")).toEqual({
+      ok: true,
+      match: "equivalent",
+      value: "12.50",
+    });
+    expect(await fill("#currency", "7")).toEqual({
+      ok: true,
+      match: "transformed",
+      value: "0.07",
+    });
+    // Appending to an email or a number input, which have no selection to
+    // set, leaves the old value and types after it.
+    await page.fill("#email", "ada@");
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    expect(await fill("#email", "example.com", { append: true })).toEqual({
+      ok: true,
+      match: "exact",
+      value: "ada@example.com",
+    });
+    await page.fill("#count", "12");
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    expect(await fill("#count", "34", { append: true })).toEqual({
+      ok: true,
+      match: "exact",
+      value: "1234",
+    });
   }, 30000);
 
   it("measures stability across two frames", async () => {

@@ -121,6 +121,21 @@ const actionTimeout = {
   description:
     "How long to wait for a target that can take the input. 0 looks once.",
 };
+// Keeps a field's old value and types after it.
+const append = {
+  kind: "boolean",
+  default: false,
+  since: 4,
+  description: "Add to the field's value instead of replacing it.",
+};
+// The options selectOption chooses, as strings or objects.
+const choices = {
+  kind: "array",
+  required: true,
+  since: 4,
+  description:
+    "0 to 100 choices: a string matching an option's value, else its label, or an object with value, label or index. An empty list clears the select.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -220,8 +235,12 @@ const FIELDS = {
       required: true,
       description: "The field's new value, exactly.",
     },
+    append,
+    timeoutMs: actionTimeout,
     label,
   },
+  select: { ...target, values: choices, timeoutMs: actionTimeout, label },
+  focus: { ...target, timeoutMs: actionTimeout, label },
   press: {
     key: {
       kind: "string",
@@ -826,8 +845,21 @@ export const ROUTES = [
   ),
   action(
     "fill",
-    "Replaces the value of a field, select or editable region.",
+    "Replaces the value of a field, select or editable region, or adds to it.",
+    "{ ok: true, match, value?, valueHidden?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 } },
+  ),
+  action(
+    "select",
+    "Chooses a select's options by value, label or index.",
+    "{ ok: true, values, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
+  ),
+  action(
+    "focus",
+    "Focuses a control, retargeting to the nearest one that takes focus.",
     "{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
   ),
   action(
     "press",
@@ -1154,6 +1186,12 @@ export const ACTIONS = [
     summary: "Replaces a field's value.",
     fields: FIELDS.fill,
     since: 1,
+  },
+  {
+    type: "select",
+    summary: "Chooses a select's options.",
+    fields: FIELDS.select,
+    since: 4,
   },
   {
     type: "press",

@@ -20,6 +20,7 @@ const RECEIPT_ACTIONS = [
   "dblclick",
   "hover",
   "fill",
+  "select",
   "press",
   "scroll",
   "drag",

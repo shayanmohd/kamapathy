@@ -71,6 +71,7 @@ dialog#confirm{position:fixed;left:0;top:500px;margin:0;width:360px;height:120px
 <p><label for="count">Count</label> <input id="count" type="number"></p>
 <p><label for="day">Day</label> <input id="day" type="date"></p>
 <p><label for="moment">Moment</label> <input id="moment" type="time"></p>
+<p><label for="when">When</label> <input id="when" type="datetime-local"></p>
 <p><label for="month">Month</label> <input id="month" type="month"></p>
 <p><label for="week">Week</label> <input id="week" type="week"></p>
 <p><label for="volume">Volume</label> <input id="volume" type="range" min="0" max="10"></p>
