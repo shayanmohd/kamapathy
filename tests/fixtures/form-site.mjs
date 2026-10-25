@@ -12,6 +12,7 @@ import { snapshotPages } from './snapshot-pages.mjs';
 import { extensionPages } from './extension-pages.mjs';
 import { signInPages, SIGN_IN_PASSWORD } from './sign-in-pages.mjs';
 import { promptPages, ATTACHMENT, AUTH, BIG } from './prompt-pages.mjs';
+import { navigationPages, navigationRoute } from './navigation-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
@@ -100,7 +101,7 @@ export async function startFormSite() {
           return response.end(pixel);
         }
       }
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname]);
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname] ?? navigationPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         // A page asking for {{other}} gets this server through its other
@@ -167,6 +168,8 @@ export async function startFormSite() {
         const rows = Array.from({ length: 18 }, (_, index) => `<article><h2>Research note ${index + 1}</h2><p>Reliable browser automation observes the page, identifies the intended control, performs an authorized action, and checks the visible result. Separate sessions keep unrelated projects apart.</p><a id="note-${index + 1}" href="/lab#note-${index + 1}">Read note ${index + 1}</a></article>`).join('');
         return send('Browser research reference', `<h1>Browser research reference</h1><p>A shared document for comparing observation output. All research notes and links belong to this local fixture.</p><form><label for="research-search">Search research</label><input id="research-search" placeholder="Find a note"><button id="research-submit">Search</button></form>${rows}`);
       }
+      // The navigation fixture owns every dynamic answer it needs.
+      if (navigationRoute(request, url, (status, headers, body) => response.writeHead(status, headers).end(body))) return;
       return send('Page not found', '<h1>Page not found</h1>', '', 404);
     } catch { return send('Request failed', '<h1>Request failed</h1>', '', 400); }
   });

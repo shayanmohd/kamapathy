@@ -419,7 +419,7 @@ export function spaceRoutes({
         await presence.follow(tab.id, run);
         controller.addActivity(
           space!.id,
-          url
+          url && url !== "about:blank"
             ? `Agent opened ${new URL(url).hostname}`
             : "Agent opened a blank page",
           "info",

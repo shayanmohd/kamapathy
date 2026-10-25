@@ -113,6 +113,8 @@ function kindOf(field) {
       return `milliseconds${range}`;
     case "string":
       return `string${field.max !== undefined ? ` of at most ${field.max} characters` : ""}`;
+    case "url":
+      return `URL of at most ${field.max ?? 8192} characters`;
     case "boolean":
       return "true or false";
     case "enum":

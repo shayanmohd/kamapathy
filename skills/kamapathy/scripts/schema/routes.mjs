@@ -18,14 +18,14 @@ const target = { ref, selector };
 const url = {
   kind: "url",
   required: true,
-  description: "A complete http or https URL.",
+  description: "A complete http or https URL, or about:blank.",
 };
 // How far a navigation or a load-state wait waits.
 const waitUntil = {
   kind: "enum",
   values: ["commit", "domcontentloaded", "load", "networkidle"],
   default: "load",
-  since: 2,
+  since: 4,
   description:
     "commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window.",
 };
@@ -34,7 +34,7 @@ const waitUntil = {
 const urlGlob = {
   kind: "string",
   max: 2048,
-  since: 2,
+  since: 4,
   description:
     "A glob for the whole URL: * inside a path segment, ** across segments, {a,b} for one alternative, a backslash for a literal character.",
 };
@@ -43,7 +43,7 @@ const waitTimeout = {
   kind: "ms",
   max: 60000,
   default: 10000,
-  since: 2,
+  since: 4,
   description: "How long to wait. 0 checks once.",
 };
 // The state a load-state wait judges on the document the page shows, rather
@@ -55,7 +55,7 @@ const idleMs = {
   kind: "ms",
   max: 10000,
   default: 500,
-  since: 2,
+  since: 4,
   description: "How long nothing may be in flight before networkidle answers.",
 };
 // One file as it travels to a file input: its metadata and its bytes.
@@ -243,13 +243,13 @@ const FIELDS = {
       min: 1,
       max: 60000,
       default: 15000,
-      since: 2,
+      since: 4,
       description: "How long to wait for the state.",
     },
     referer: {
       kind: "url",
       max: 8192,
-      since: 2,
+      since: 4,
       description: "The Referer header to send, exactly as given.",
     },
   },
@@ -278,23 +278,40 @@ const FIELDS = {
     idleMs,
     timeoutMs: waitTimeout,
   },
+  "wait-for-selector": {
+    ...target,
+    selector: {
+      ...selector,
+      description:
+        "A ref or selector of any form. For attached and visible a locator or a ref must name one element; raw CSS and XPath take any match.",
+    },
+    state: {
+      kind: "enum",
+      values: ["attached", "visible", "hidden", "detached"],
+      default: "visible",
+      since: 4,
+      description:
+        "attached needs any match; visible a match the page draws; hidden no visible match; detached no match at all.",
+    },
+    timeoutMs: waitTimeout,
+  },
   "wait-for-function": {
     expression: {
       kind: "string",
       max: 16384,
-      since: 2,
+      since: 4,
       description:
         "An expression to evaluate in the page. Give this or function, not both.",
     },
     function: {
       kind: "string",
       max: 16384,
-      since: 2,
+      since: 4,
       description: "The source of a function to call in the page.",
     },
     arg: {
       kind: "json",
-      since: 2,
+      since: 4,
       description: "The one JSON argument the function is called with.",
     },
     intervalMs: {
@@ -302,7 +319,7 @@ const FIELDS = {
       min: 10,
       max: 10000,
       default: 100,
-      since: 2,
+      since: 4,
       description: "How long between checks.",
     },
     timeoutMs: waitTimeout,
@@ -580,7 +597,7 @@ export const ROUTES = [
       url: {
         kind: "url",
         description:
-          "The page to open. From API level 2 it may be left out for a blank page.",
+          "The page to open: a complete http or https URL, or about:blank. From API level 2 it may be left out for a blank page.",
       },
     },
     { follow: true },
@@ -651,7 +668,7 @@ export const ROUTES = [
     "Reloads the page and waits for the new document to reach a state.",
     "{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }",
     FIELDS.reload,
-    { follow: true, budget: { field: "timeoutMs" }, since: 2 },
+    { follow: true, budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "POST",
@@ -665,13 +682,13 @@ export const ROUTES = [
         kind: "integer",
         min: 0,
         max: 2147483647,
-        since: 2,
+        since: 4,
         description:
           "A navigation count from an earlier answer. Without a url, the wait ends once a later commit exists.",
       },
       timeoutMs: waitTimeout,
     },
-    { budget: { field: "timeoutMs" }, since: 2 },
+    { budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "POST",
@@ -679,7 +696,15 @@ export const ROUTES = [
     "Waits for the document this page shows to reach a state.",
     "{ ok: true, tab: TabView, state }",
     FIELDS["wait-for-load-state"],
-    { budget: { field: "timeoutMs" }, since: 2 },
+    { budget: { field: "timeoutMs" }, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/wait-for-selector",
+    "Waits for an element to be attached, visible, hidden or detached.",
+    "{ ok: true, tab: TabView, state, matched }",
+    FIELDS["wait-for-selector"],
+    { budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "POST",
@@ -687,7 +712,7 @@ export const ROUTES = [
     "Waits for a function the agent wrote to return a truthy value in the page.",
     "{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }",
     FIELDS["wait-for-function"],
-    { budget: { field: "timeoutMs" }, since: 2 },
+    { budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "GET",
@@ -695,7 +720,7 @@ export const ROUTES = [
     "Reads the viewport, scroll offsets, document size and ready state.",
     "{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }",
     null,
-    { budget: 10000, follow: false, since: 2 },
+    { budget: 10000, follow: false, since: 4 },
   ),
   route(
     "GET",
@@ -1120,32 +1145,38 @@ export const ACTIONS = [
     type: "navigate",
     summary: "Loads a URL and waits for the new document to reach a state.",
     fields: FIELDS.navigate,
-    since: 2,
+    since: 4,
   },
   {
     type: "reload",
     summary:
       "Reloads the page and waits for the new document to reach a state.",
     fields: FIELDS.reload,
-    since: 2,
+    since: 4,
   },
   {
     type: "wait-for-url",
     summary: "Waits for this page's URL to match a glob.",
     fields: FIELDS["wait-for-url"],
-    since: 2,
+    since: 4,
   },
   {
     type: "wait-for-load-state",
     summary: "Waits for the document this page shows to reach a state.",
     fields: FIELDS["wait-for-load-state"],
-    since: 2,
+    since: 4,
+  },
+  {
+    type: "wait-for-selector",
+    summary: "Waits for an element to reach a state.",
+    fields: FIELDS["wait-for-selector"],
+    since: 4,
   },
   {
     type: "wait-for-function",
     summary: "Waits for a page function to return a truthy value.",
     fields: FIELDS["wait-for-function"],
-    since: 2,
+    since: 4,
   },
 ];
 

@@ -379,13 +379,13 @@ Returns `string | undefined`. Since API level 1.
 
 ### `page.url`
 
-The last known URL. navigate and snapshot refresh it.
+The last known URL. Every navigation, wait and snapshot refreshes it.
 
 Returns `string`. Since API level 1.
 
 ### `page.title`
 
-The last known title. navigate and snapshot refresh it.
+The last known title. Every navigation, wait and snapshot refreshes it.
 
 Returns `string`. Since API level 1.
 
@@ -415,9 +415,39 @@ Returns `boolean | undefined`. Since API level 1.
 
 ### `page.navigate(url)`
 
-Loads a complete http or https URL. Refs from before become stale.
+Loads a complete http or https URL, or about:blank, and returns once the new document commits. Refs from before become stale.
 
-Returns `Promise<Page>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<Page>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.goto(url, options?)`
+
+Loads a URL and waits for the new document to reach a state, load by default.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `waitUntil` | one of commit, domcontentloaded, load, networkidle | `"load"` | commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window. |
+| `timeout` | milliseconds from 1 to 60000 | `15000` | How long to wait for the state. |
+| `referer` | URL of at most 8192 characters |  | The Referer header to send, exactly as given. |
+
+Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/navigate`. Errors: `invalid_url`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.reload(options?)`
+
+Reloads the page and waits for the new document to reach a state. The tab keeps its ID and label.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `waitUntil` | one of commit, domcontentloaded, load, networkidle | `"load"` | commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window. |
+| `timeout` | milliseconds from 1 to 60000 | `15000` | How long to wait for the state. |
+| `ignoreCache` | true or false | `false` | Fetch the page and its subresources past the cache. |
+
+Returns `Promise<{ ok: true, tab, httpStatus?, waitUntil, dialog? }>`. Route `POST /tabs/:id/reload`. Errors: `reload_would_resubmit`, `navigation_failed`, `navigation_download`, `navigation_interrupted`, `navigation_timeout`, `invalid_field`, `busy`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.info()`
+
+Reads the viewport, scroll offsets, document size and ready state, or the dialog holding the page.
+
+Returns `Promise<PageInfo>`. Route `GET /tabs/:id/info`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.snapshot(options?)`
 
@@ -518,6 +548,56 @@ Waits for a visible element, text, or both.
 | `timeoutMs` | milliseconds of at most 15000 | `5000` | How long to wait. |
 
 Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/wait`. Errors: `wait_timeout`, `invalid_field`, `invalid_selector`, `unknown_ref`, `stale_ref`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.waitForURL(url, options?)`
+
+Waits for this page's URL to match a glob, a RegExp or a predicate, then for the state asked for.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds of at most 60000 | `10000` | How long to wait. 0 checks once. |
+| `waitUntil` | one of commit, domcontentloaded, load, networkidle | `"load"` | commit returns once the new document commits; domcontentloaded and load wait for those events; networkidle adds a quiet network window. |
+
+Returns `Promise<{ ok: true, tab, url }>`. Route `POST /tabs/:id/wait-for-url`. Errors: `wait_timeout`, `invalid_field`, `busy`, `url_opened_in_popup`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.waitForLoadState(state?, options?)`
+
+Waits for the document the page shows to reach a state, following a navigation already in flight.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds of at most 60000 | `10000` | How long to wait. 0 checks once. |
+| `idleMs` | milliseconds of at most 10000 | `500` | How long nothing may be in flight before networkidle answers. |
+
+Returns `Promise<{ ok: true, tab, state }>`. Route `POST /tabs/:id/wait-for-load-state`. Errors: `wait_timeout`, `invalid_field`, `busy`, `navigation_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.waitForSelector(selector, options?)`
+
+Waits for an element to be attached, visible, hidden or detached.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `state` | one of attached, visible, hidden, detached | `"visible"` | attached needs any match; visible a match the page draws; hidden no visible match; detached no match at all. |
+| `timeout` | milliseconds of at most 60000 | `10000` | How long to wait. 0 checks once. |
+
+Returns `Promise<{ ok: true, tab, state, matched }>`. Route `POST /tabs/:id/wait-for-selector`. Errors: `wait_timeout`, `invalid_field`, `busy`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.waitForFunction(pageFunction, arg?, options?)`
+
+Waits for a function in the page to return a truthy value, and returns that value.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds of at most 60000 | `10000` | How long to wait. 0 checks once. |
+| `interval` | milliseconds from 10 to 10000 | `100` | How long between checks. |
+
+Returns `Promise<{ ok: true, tab, value?, unserializable? }>`. Route `POST /tabs/:id/wait-for-function`. Errors: `wait_timeout`, `invalid_field`, `busy`, `agent_scripts_off`, `script_error`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.waitForTimeout(ms)`
+
+Sleeps in the script and sends nothing. Prefer a wait on what the page does.
+
+Returns `Promise<void>`. Since API level 4.
 
 ### `page.batch(actions)`
 
@@ -756,9 +836,17 @@ Make a page the agent did not open its own
 
 Give a page back to the person, leaving it open
 
-### `navigate <tab-id> <url>`
+### `navigate <tab-id> <url> [--wait-until <state>] [--timeout <ms>] [--referer <url>]`
 
-Navigate a tab
+Navigate a tab and wait for the new document, at commit unless --wait-until says otherwise
+
+### `reload <tab-id> [--wait-until <state>] [--timeout <ms>] [--ignore-cache]`
+
+Reload the page and wait for the new document
+
+### `info <tab-id>`
+
+Read the viewport, scroll offsets, document size and ready state
 
 ### `close <tab-id>`
 
@@ -795,6 +883,22 @@ Scroll up, down, left or right: the page, the panel holding a control, or the pa
 ### `wait <tab-id> --stdin`
 
 Read wait options as JSON from stdin
+
+### `wait-for-url <tab-id> <glob> [--wait-until <state>] [--timeout <ms>]`
+
+Wait for this page's URL to match a glob, then for the state asked for
+
+### `wait-for-load-state <tab-id> [state] [--idle <ms>] [--timeout <ms>]`
+
+Wait for the document the page shows to reach a state
+
+### `wait-for-selector <tab-id> <ref-or-selector> [--state <state>] [--timeout <ms>]`
+
+Wait for an element to be attached, visible, hidden or detached
+
+### `wait-for-function <tab-id> --stdin [--interval <ms>] [--timeout <ms>]`
+
+Read an expression from stdin and wait for it to be truthy in the page
 
 ### `batch <tab-id>`
 
@@ -908,6 +1012,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/reload` | `waitUntil?`, `timeoutMs?`, `ignoreCache?` | Reloads the page and waits for the new document to reach a state. Returns `{ ok: true, tab: TabView, httpStatus?, waitUntil, dialog? }`. |
 | POST | `/tabs/:id/wait-for-url` | `url?`, `waitUntil?`, `after?`, `timeoutMs?` | Waits for this page's URL to match a glob, or reports its commits so a script can match them itself. Returns `{ ok: true, tab: TabView, url } or { ok: true, tab: TabView, url, navigation, committed, missed?, popups }`. |
 | POST | `/tabs/:id/wait-for-load-state` | `state?`, `idleMs?`, `timeoutMs?` | Waits for the document this page shows to reach a state. Returns `{ ok: true, tab: TabView, state }`. |
+| POST | `/tabs/:id/wait-for-selector` | `ref?`, `selector?`, `state?`, `timeoutMs?` | Waits for an element to be attached, visible, hidden or detached. Returns `{ ok: true, tab: TabView, state, matched }`. |
 | POST | `/tabs/:id/wait-for-function` | `expression?`, `function?`, `arg?`, `intervalMs?`, `timeoutMs?` | Waits for a function the agent wrote to return a truthy value in the page. Returns `{ ok: true, tab: TabView, value? } or { ok: true, tab: TabView, unserializable }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot`. |
@@ -956,7 +1061,7 @@ Show the commands, or help on one
 | `invalid_cursor` | 400 | not retryable |  | The cursor is malformed or was made for another scope. |
 | `invalid_action` | 400 | not retryable | `allowed`, `index` | A batch step is not an object with a supported type. |
 | `invalid_actions` | 400 | not retryable |  | A batch needs 1 to 20 actions. |
-| `invalid_url` | 400 | not retryable |  | The URL is not a complete HTTP or HTTPS URL without credentials. |
+| `invalid_url` | 400 | not retryable | `url`, `hint` | The URL is not a complete HTTP or HTTPS URL without credentials, or about:blank. |
 | `invalid_files` | 400 | not retryable |  | The upload has no files, too many, or a malformed one. |
 | `unknown_field` | 400 | not retryable | `field`, `allowed`, `route`, `index`, `action`, `suggestion`, `apiLevel` | A body or batch step has a field its route does not define. |
 | `local_clients_only` | 403 | not retryable |  | Only local programs may use the API, never web pages. |
@@ -991,7 +1096,6 @@ Show the commands, or help on one
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
 | `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
-| `navigation_blocked` | 409 | not retryable | `url`, `reason` | The page's leave guard kept it open. |
 | `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
 | `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
 | `not_pdf` | 409 | not retryable | `contentType` | The tab is not showing a PDF. |
@@ -1041,7 +1145,7 @@ Show the commands, or help on one
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `title`, `popups` | The condition was not met before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `selector`, `matched`, `visible`, `title`, `popups` | The condition was not met before the timeout. |
 | `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
 | `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |
 | `update_download_failed` | in GET /update | retryable when reason is network or stalled, or httpStatus is in range | `reason`, `httpStatus` | The installer download stopped. |

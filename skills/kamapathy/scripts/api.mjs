@@ -37,6 +37,10 @@ const POPUP_NOTICES = 20;
 // How long a download wait may take outside a run, which has its own
 // deadline: section 3's default run time.
 const DOWNLOAD_WAIT_MS = 300000;
+// How long a URL watch waits before asking for this page's commits again.
+const WATCH_TICK_MS = 100;
+// How much of a URL a message carries, as Kamapathy's own messages do.
+const URL_CHARS = 100;
 
 // The label an input method was given, for its body.
 const labelOf = (options) =>
@@ -94,6 +98,31 @@ function copyName({ id, suggestedFilename }) {
   const name = basename(String(suggestedFilename ?? "")).replace(/[/\\]/g, "");
   return name && name !== "." && name !== ".." ? name : id;
 }
+const cut = (url) => String(url ?? "").slice(0, URL_CHARS);
+// The URL the script waited for opened in a popup this page opened, so the
+// action already happened and must not be repeated.
+const openedInPopup = (page, lastUrl, popup) => {
+  const name = popup.label ?? popup.id;
+  return new KamapathyError(
+    "url_opened_in_popup",
+    `${page} stayed at ${cut(lastUrl)}, but popup ${name} opened from it at ${cut(popup.url)}. The action already happened, so do not repeat it. Continue in ${name}.`,
+    { lastUrl, popup },
+  );
+};
+// A URL wait the client ran out of time on, naming the matcher it held.
+const urlTimeout = (timeoutMs, lastUrl, expected) =>
+  new KamapathyError(
+    "wait_timeout",
+    `The page did not reach a URL matching ${cut(expected)} within ${timeoutMs} ms. It is at ${cut(lastUrl)}.`,
+    { awaited: "url", timeoutMs, expected, lastUrl },
+  );
+// An options object where a page function's own argument belongs.
+const misplacedOptions = (value) =>
+  value !== null &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.keys(value).length > 0 &&
+  Object.keys(value).every((key) => ["timeout", "interval"].includes(key));
 
 /**
  * @typedef {"@e1" | string} Target A ref such as "@e3" from a current
@@ -178,6 +207,35 @@ function copyName({ id, suggestedFilename }) {
  * @property {string} [selector]
  * @property {string} [text]
  * @property {number} [timeoutMs] 0 to 15000, default 5000.
+ */
+/**
+ * @typedef {"commit" | "domcontentloaded" | "load" | "networkidle"} WaitUntil
+ * How far a navigation or a load state wait waits.
+ */
+/**
+ * @typedef {object} NavigationResult
+ * @property {true} ok
+ * @property {object} tab The tab as Kamapathy sees it after the navigation.
+ * @property {number} [httpStatus] The new document's status, when it had one.
+ * @property {WaitUntil} waitUntil The state the navigation waited for.
+ * @property {{ type: "beforeunload", message: string, answer: "accepted" }} [dialog]
+ * The page's leave guard, overridden because the agent is in control.
+ */
+/**
+ * @typedef {object} PageInfo
+ * @property {object} tab
+ * @property {{ width: number, height: number }} [viewport] In CSS pixels.
+ * @property {{ x: number, y: number }} [scroll]
+ * @property {{ width: number, height: number }} [document]
+ * @property {"loading" | "interactive" | "complete"} [readyState]
+ * @property {boolean} [loading] Whether the main frame is still loading.
+ * @property {{ type: string, message: string }} [dialog] The dialog holding
+ * the page, instead of everything above.
+ */
+/**
+ * @typedef {string | RegExp | ((url: URL) => boolean)} UrlMatcher A glob
+ * Kamapathy matches, or a RegExp or predicate the client tests against every
+ * URL this page commits.
  */
 /**
  * @typedef {object} ActionOptions
@@ -463,16 +521,249 @@ export class Page {
       ...options,
     });
   }
+  // Every navigation and wait answers with the tab, so the page's url and
+  // title follow each one.
+  #refreshed(result) {
+    if (result.tab) this[REFRESH](result.tab);
+    return result;
+  }
   /**
-   * Loads a complete http or https URL. Refs from before become stale.
+   * Loads a complete http or https URL, or about:blank, and returns once the
+   * new document commits. Refs from before become stale.
    * @param {string} url
    * @returns {Promise<Page>} This page, with `url` and `title` updated.
    */
   navigate(url) {
     return this.#call("navigate", [url], async () => {
-      const { tab } = await this.#post("navigate", { url });
+      // commit is the point this method has always returned at.
+      const { tab } = await this.#post("navigate", {
+        url,
+        waitUntil: "commit",
+      });
       return this[REFRESH](tab);
     });
+  }
+  /**
+   * Loads a URL and waits for the new document to reach a state.
+   * @param {string} url A complete http or https URL, or about:blank.
+   * @param {{ waitUntil?: WaitUntil, timeout?: number, referer?: string }} [options]
+   * `timeout` is 1 to 60000 ms, 15000 by default.
+   * @returns {Promise<NavigationResult>}
+   */
+  goto(url, options = {}) {
+    return this.#call("goto", [url, options], async () => {
+      const { waitUntil = "load", timeout = 15000, referer } = options;
+      return this.#refreshed(
+        await this.#post("navigate", {
+          url,
+          waitUntil,
+          timeoutMs: timeout,
+          ...(referer === undefined ? {} : { referer }),
+        }),
+      );
+    });
+  }
+  /**
+   * Reloads the page and waits for the new document to reach a state. The
+   * tab keeps its ID and label.
+   * @param {{ waitUntil?: WaitUntil, timeout?: number, ignoreCache?: boolean }} [options]
+   * `ignoreCache` refetches the page and its subresources past the cache.
+   * @returns {Promise<NavigationResult>}
+   */
+  reload(options = {}) {
+    return this.#call("reload", [options], async () => {
+      const {
+        waitUntil = "load",
+        timeout = 15000,
+        ignoreCache = false,
+      } = options;
+      return this.#refreshed(
+        await this.#post("reload", {
+          waitUntil,
+          timeoutMs: timeout,
+          ignoreCache,
+        }),
+      );
+    });
+  }
+  /**
+   * Reads the viewport, scroll offsets, document size and ready state, fresh
+   * from the page.
+   * @returns {Promise<PageInfo>}
+   */
+  info() {
+    return this.#call("info", [], async () =>
+      this.#refreshed(await this.#session.request(`/tabs/${this.id}/info`)),
+    );
+  }
+  /**
+   * Waits for this page's URL to match, then for the state asked for.
+   * @param {UrlMatcher} url
+   * @param {{ timeout?: number, waitUntil?: WaitUntil }} [options]
+   * @returns {Promise<{ ok: true, tab: object, url: string }>}
+   */
+  waitForURL(url, options = {}) {
+    return this.#call("waitForURL", [url, options], async () => {
+      const { timeout = 10000, waitUntil = "load" } = options;
+      if (typeof url === "string")
+        return this.#refreshed(
+          await this.#post("wait-for-url", {
+            url,
+            waitUntil,
+            timeoutMs: timeout,
+          }),
+        );
+      return this.#watchUrl(url, waitUntil, timeout);
+    });
+  }
+  // A RegExp or a predicate runs in the agent's own Node, so Kamapathy
+  // reports this page's commits and the client tests them itself.
+  async #watchUrl(matcher, waitUntil, timeout) {
+    const deadline = Date.now() + timeout;
+    const left = () => Math.max(0, deadline - Date.now());
+    const expected =
+      typeof matcher === "function" ? "a URL predicate" : matcher.source;
+    const matches = (address) => {
+      if (typeof matcher !== "function") {
+        matcher.lastIndex = 0;
+        return matcher.test(address);
+      }
+      // A predicate never sees an address that does not parse.
+      try {
+        return !!matcher(new URL(address));
+      } catch {
+        return false;
+      }
+    };
+    // One watch request. The client holds the matcher, so it raises the
+    // timeout itself, naming what it waited for.
+    const watch = async (after) => {
+      try {
+        return await this.#post("wait-for-url", {
+          ...(after === undefined ? {} : { after }),
+          timeoutMs: left(),
+        });
+      } catch (error) {
+        if (error instanceof KamapathyError && error.code === "wait_timeout")
+          throw urlTimeout(timeout, error.lastUrl ?? this.url, expected);
+        throw error;
+      }
+    };
+    let after;
+    for (;;) {
+      const answer = this.#refreshed(await watch(after));
+      // The URL at entry or every commit since, oldest first, then the one
+      // the page shows now.
+      const found = [
+        ...(answer.committed ?? []).map((commit) => commit.url),
+        answer.url,
+      ].find(matches);
+      if (found !== undefined) {
+        // The state the script asked for, inside the same deadline.
+        const { tab } = this.#refreshed(
+          await this.#post("wait-for-load-state", {
+            state: waitUntil,
+            timeoutMs: left(),
+          }),
+        );
+        return { ok: true, tab, url: found };
+      }
+      const popup = (answer.popups ?? []).find((item) => matches(item.url));
+      if (popup) throw openedInPopup(this.label ?? this.id, answer.url, popup);
+      if (left() === 0) throw urlTimeout(timeout, answer.url, expected);
+      // A candidate popup makes the watch answer at once, so the client
+      // paces itself instead of asking again with nothing new to see.
+      if (after === answer.navigation)
+        await sleep(Math.min(WATCH_TICK_MS, left()), this.#session.signal);
+      after = answer.navigation;
+    }
+  }
+  /**
+   * Waits for the document the page shows to reach a state, following a
+   * navigation already in flight.
+   * @param {WaitUntil} [state] load by default.
+   * @param {{ timeout?: number, idleMs?: number }} [options] `idleMs` is the
+   * quiet window networkidle asks for, 500 by default.
+   * @returns {Promise<{ ok: true, tab: object, state: WaitUntil }>}
+   */
+  waitForLoadState(state = "load", options = {}) {
+    return this.#call("waitForLoadState", [state, options], async () => {
+      const { timeout = 10000, idleMs = 500 } = options;
+      return this.#refreshed(
+        await this.#post("wait-for-load-state", {
+          state,
+          idleMs,
+          timeoutMs: timeout,
+        }),
+      );
+    });
+  }
+  /**
+   * Waits for an element to be attached, visible, hidden or detached.
+   * @param {Target} selector
+   * @param {{ state?: "attached" | "visible" | "hidden" | "detached", timeout?: number }} [options]
+   * @returns {Promise<{ ok: true, tab: object, state: string, matched: number }>}
+   */
+  waitForSelector(selector, options = {}) {
+    return this.#call("waitForSelector", [selector, options], async () => {
+      const { state = "visible", timeout = 10000 } = options;
+      return this.#refreshed(
+        await this.#post("wait-for-selector", {
+          ...target(selector),
+          state,
+          timeoutMs: timeout,
+        }),
+      );
+    });
+  }
+  /**
+   * Waits for a function in the page to return a truthy value.
+   * @param {Function | string} pageFunction A function called with `arg`, or
+   * an expression.
+   * @param {unknown} [arg] The one JSON argument the function is called with.
+   * @param {{ timeout?: number, interval?: number }} [options]
+   * @returns {Promise<{ ok: true, tab: object, value?: unknown, unserializable?: string }>}
+   */
+  async waitForFunction(pageFunction, arg, options = {}) {
+    // Options in the argument's place would be sent to the page as the
+    // function's own argument, which is almost never what the script meant.
+    if (misplacedOptions(arg)) {
+      const { expected } = findEntry("Page.waitForFunction");
+      throw new KamapathyError(
+        "invalid_argument",
+        `page.waitForFunction got options in the argument's place. Expected ${expected}.`,
+        { entry: "page.waitForFunction", expected },
+      );
+    }
+    return this.#call(
+      "waitForFunction",
+      [pageFunction, arg, options],
+      async () => {
+        const { timeout = 10000, interval = 100 } = options;
+        const source =
+          typeof pageFunction === "function"
+            ? { function: String(pageFunction) }
+            : { expression: pageFunction };
+        return this.#refreshed(
+          await this.#post("wait-for-function", {
+            ...source,
+            ...(arg === undefined ? {} : { arg }),
+            intervalMs: interval,
+            timeoutMs: timeout,
+          }),
+        );
+      },
+    );
+  }
+  /**
+   * Sleeps in the script and sends nothing. Prefer a wait on what the page
+   * does.
+   * @param {number} ms 0 to 600000.
+   * @returns {Promise<void>}
+   */
+  async waitForTimeout(ms) {
+    checkNow(this.#session, "Page.waitForTimeout", [ms]);
+    await sleep(ms, this.#session.signal);
   }
   /**
    * Reads bounded visible text and controls with refs.

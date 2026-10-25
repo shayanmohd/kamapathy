@@ -192,6 +192,51 @@ export function isWebUrl(url: string): boolean {
   }
 }
 
+// How long a URL an agent may ask for.
+export const AGENT_URL_LIMIT = 8192;
+export type AgentUrlProblem =
+  | "local_file"
+  | "inline_data"
+  | "credentials"
+  | "scheme"
+  | "incomplete"
+  | "too_long";
+// What to do instead, for the refusals that have an answer.
+const AGENT_URL_HINTS: Partial<Record<AgentUrlProblem, string>> = {
+  local_file:
+    "Agents cannot open local files. Serve the folder over loopback HTTP, for example with python3 -m http.server, and open that address.",
+  inline_data:
+    "Agents cannot open data: or blob: URLs. Open about:blank and write the content with evaluate.",
+  credentials:
+    "Open the address without credentials. A sign-in prompt goes to the person.",
+};
+
+// Why an agent may not open this address, or nothing when it may. The value
+// is judged exactly as given, never trimmed, and about:blank passes only as
+// that exact string.
+export function agentUrlProblem(url: string): AgentUrlProblem | undefined {
+  if (url.length > AGENT_URL_LIMIT) return "too_long";
+  if (url === "about:blank") return undefined;
+  const parsed = parse(url);
+  if (!parsed) return "incomplete";
+  if (parsed.protocol === "http:" || parsed.protocol === "https:")
+    return parsed.username || parsed.password ? "credentials" : undefined;
+  if (parsed.protocol === "file:") return "local_file";
+  if (parsed.protocol === "data:" || parsed.protocol === "blob:")
+    return "inline_data";
+  return "scheme";
+}
+
+// The one rule for every address an agent asks Kamapathy to open.
+export function isAgentUrl(url: string): boolean {
+  return agentUrlProblem(url) === undefined;
+}
+
+export function agentUrlHint(url: string): string | undefined {
+  const problem = agentUrlProblem(url);
+  return problem === undefined ? undefined : AGENT_URL_HINTS[problem];
+}
+
 // A popup may show about:blank, a web page, or a blob: URL that a web page
 // made. Everything else, data: URLs included, is refused.
 export function isPopupUrl(url: string): boolean {

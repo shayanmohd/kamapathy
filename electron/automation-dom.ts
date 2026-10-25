@@ -1,4 +1,10 @@
-import type { Decision, Invalid, Picked, Query } from "./agent/dom/select";
+import type {
+  Decision,
+  Invalid,
+  Picked,
+  Query,
+  WaitState,
+} from "./agent/dom/select";
 import type { SearchAst } from "./agent/selectors";
 
 export interface SnapshotOptions {
@@ -17,6 +23,9 @@ export interface ElementTarget {
   ref?: string;
   selector?: string;
   query?: Query;
+  // A selector wait's state, which a ref carries beside itself because it
+  // has no query to hold it.
+  state?: WaitState;
 }
 export type PageOperation =
   | "snapshot"
@@ -2076,51 +2085,93 @@ export function pageOperation(
     const spec = payload as ElementTarget;
     const query = spec.query;
     const selector = typeof spec.selector === "string" ? spec.selector : "";
+    // The state a selector wait judges, which a ref carries beside itself.
+    const state = query?.state ?? spec.state;
+    // What this check saw, which the wait answers with and its timeout
+    // reports. Only a wait for a state asks for it.
+    let counts: { matched: number; visible: number } | undefined;
+    const seen = (matched: boolean) => ({
+      ok: true as const,
+      matched,
+      ...(counts === undefined ? {} : { counts }),
+    });
     let scope: Element = document.body || document.documentElement;
     if (typeof spec.ref === "string") {
       // A wait for `selector: "@eN"` waits for that element to be visible.
       const element = target(spec);
-      if (!isElement(element)) return element;
-      if (!visible(element, true)) return { ok: true, matched: false };
+      if (!isElement(element)) {
+        // An element the page lost is gone, which is what hidden and
+        // detached wait for; the other states call the ref stale.
+        if (
+          element.code !== "stale_ref" ||
+          (state !== "hidden" && state !== "detached")
+        )
+          return element;
+        counts = { matched: 0, visible: 0 };
+        return seen(true);
+      }
+      const shown = visible(element, true);
+      if (state !== undefined) {
+        counts = { matched: 1, visible: shown ? 1 : 0 };
+        return seen(
+          state === "attached" ||
+            (state === "visible"
+              ? shown
+              : state === "hidden"
+                ? !shown
+                : false),
+        );
+      }
+      if (!shown) return seen(false);
       scope = element;
     } else if (query) {
       const picked = pickedFor(query);
       if (picked === null) return failure(PAGE_CHANGED, "page_changed");
-      if (query.state === "hidden" || query.state === "detached") {
-        const counts = engineOf().tally(query, picked);
-        if ("kind" in counts) return invalidSelector(selector, counts);
+      if (state === "hidden" || state === "detached") {
+        // One count of every match, whatever the state: the level decides
+        // nothing a count reads, so this answer serves both.
+        const tally = engineOf().tally(
+          { ...query, mode: "count", level: "none" },
+          picked,
+        );
+        if ("kind" in tally) return invalidSelector(selector, tally);
+        counts = { matched: tally.count, visible: tally.visible };
         const met =
-          query.state === "hidden" ? counts.visible === 0 : counts.count === 0;
-        if (!met) return { ok: true, matched: false };
+          state === "hidden" ? tally.visible === 0 : tally.count === 0;
+        if (!met) return seen(false);
       } else {
         // Without a state this is today's wait route: one visible match.
         const decision = engineOf().decide(
-          query.state ? query : { ...query, mode: "strict", level: "visible" },
+          state ? query : { ...query, mode: "strict", level: "visible" },
           picked,
         );
         if (
           decision.kind === "invalid" ||
-          (decision.kind === "ambiguous" &&
-            query.state &&
-            query.mode === "strict")
+          (decision.kind === "ambiguous" && state && query.mode === "strict")
         )
           return selectFailure(selector, decision, query.firstRef);
-        if (decision.kind !== "match") return { ok: true, matched: false };
+        if (state !== undefined) {
+          const tally = engineOf().tally(
+            { ...query, mode: "count", level: "none" },
+            picked,
+          );
+          if (!("kind" in tally))
+            counts = { matched: tally.count, visible: tally.visible };
+        }
+        if (decision.kind !== "match") return seen(false);
         scope = decision.element;
       }
     } else if (spec.selector !== undefined) {
       return failure(NO_TARGET, "invalid_target");
     }
     const text = pageText(scope);
-    return {
-      ok: true,
-      matched:
-        typeof payload.text === "string"
-          ? text.includes(payload.text)
-          : query !== undefined ||
+    return seen(
+      typeof payload.text === "string"
+        ? text.includes(payload.text)
+        : query !== undefined ||
             typeof spec.ref === "string" ||
             document.readyState !== "loading",
-    };
+    );
   }
   if (operation === "input") {
     // Chromium drops native input that a page receives before it renders its

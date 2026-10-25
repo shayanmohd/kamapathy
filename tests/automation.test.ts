@@ -2324,6 +2324,67 @@ describe("local automation socket", () => {
     expect(controller.contents.loads).toEqual([]);
   });
 
+  it("navigate and open accept about:blank and refuse other schemes with a hint", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const { done } = await dispatched(tab.id, {
+      url: "about:blank",
+      waitUntil: "commit",
+    });
+    expect(page.loads.at(-1)).toEqual({ url: "about:blank" });
+    const blank = mainFrame(page, "loader-blank");
+    blank.start("about:blank");
+    blank.commit("about:blank");
+    const opened = await done;
+    expect(opened.status).toBe(200);
+    const answer = await opened.json();
+    expect(answer).toMatchObject({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, url: "about:blank" }),
+      waitUntil: "commit",
+    });
+    // A blank page has no document request, so it reports no status.
+    expect(answer.httpStatus).toBeUndefined();
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent opened a blank page",
+    });
+    const loads = page.loads.length;
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/navigate`, "POST", {
+        url: "file:///etc/hosts",
+      }),
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.error).toMatchObject({
+      code: "invalid_url",
+      url: "file:///etc/hosts",
+      hint: "Agents cannot open local files. Serve the folder over loopback HTTP, for example with python3 -m http.server, and open that address.",
+    });
+    expect(page.loads.length).toBe(loads);
+    // The same rule governs the route that opens a page.
+    const blankTab = await request(`/spaces/${space.id}/tabs`, "POST", {
+      url: "about:blank",
+    });
+    expect(blankTab.status).toBe(201);
+    expect((await blankTab.json()).tab).toMatchObject({ url: "about:blank" });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: space.id,
+      message: "Agent opened a blank page",
+    });
+    const deniedOpen = await failure(
+      await request(`/spaces/${space.id}/tabs`, "POST", {
+        url: "data:text/html,hello",
+      }),
+    );
+    expect(deniedOpen.status).toBe(400);
+    expect(deniedOpen.error).toMatchObject({
+      code: "invalid_url",
+      url: "data:text/html,hello",
+      hint: "Agents cannot open data: or blob: URLs. Open about:blank and write the content with evaluate.",
+    });
+  });
+
   it("navigate classifies an abort", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
@@ -2435,6 +2496,61 @@ describe("local automation socket", () => {
       url: "https://example.com/gone",
     });
     expect(never.error.readyState).toBeUndefined();
+  });
+
+  it("navigate and reload wait for the tab's session before loading anything", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    // A page whose session is still attaching reports nothing about the
+    // document it attaches to, so a load sent into that window leaves the
+    // navigation nothing to wait for.
+    const attaching = async () => {
+      expect(
+        (await request(`/spaces/${space.id}/handoff`, "POST", {})).status,
+      ).toBe(200);
+      await expect.poll(() => page.debugger.attached).toBe(false);
+      page.debugger.holdReplies = true;
+      expect(
+        (await request(`/spaces/${space.id}/resume`, "POST", {})).status,
+      ).toBe(200);
+      await expect.poll(() => page.debugger.attached).toBe(true);
+    };
+    const quiet = () => new Promise((resolve) => setTimeout(resolve, 30));
+    const ready = () => {
+      page.debugger.holdReplies = false;
+      page.debugger.flush();
+    };
+    await attaching();
+    const going = request(`/tabs/${tab.id}/navigate`, "POST", {
+      url: "https://example.com/next",
+      waitUntil: "commit",
+    });
+    void going.catch(() => {});
+    await quiet();
+    expect(page.loads).toEqual([]);
+    ready();
+    await expect.poll(() => page.loads.length).toBe(1);
+    const first = mainFrame(page, "loader-2");
+    first.start("https://example.com/next");
+    first.request("https://example.com/next");
+    first.response(200);
+    first.commit("https://example.com/next");
+    expect((await going).status).toBe(200);
+    await attaching();
+    const reloading = request(`/tabs/${tab.id}/reload`, "POST", {
+      waitUntil: "commit",
+    });
+    void reloading.catch(() => {});
+    await quiet();
+    expect(page.reloads).toEqual([]);
+    ready();
+    await expect.poll(() => page.reloads.length).toBe(1);
+    const again = mainFrame(page, "loader-3");
+    again.start("https://example.com/next");
+    again.request("https://example.com/next");
+    again.response(200);
+    again.commit("https://example.com/next");
+    expect((await reloading).status).toBe(200);
   });
 
   it("navigate still answers tab, and POST /tabs/:id/wait keeps its contract", async () => {
@@ -3456,6 +3572,224 @@ describe("local automation socket", () => {
       code: "invalid_field",
       field: "idleMs",
     });
+    expect(controller.contents.scripts).toEqual([]);
+  });
+
+  // A selector wait and its answer.
+  const waitForSelector = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/wait-for-selector`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+
+  it("wait-for-selector answers the state and the match count", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      matched: true,
+      counts: { matched: 2, visible: 1 },
+    };
+    const answered = await waitForSelector(tab.id, { selector: "#done" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id, managed: true }),
+      state: "visible",
+      matched: 2,
+    });
+    // Raw CSS takes the first match, judged at the visible level.
+    expect(payloads("check").at(-1)).toEqual({
+      selector: "#done",
+      query: {
+        ast: { kind: "css", css: "#done", raw: true },
+        state: "visible",
+        mode: "first",
+        level: "visible",
+      },
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent observed a page condition",
+    });
+    // A ref waits for the element it names, with the state beside it.
+    const byRef = await waitForSelector(tab.id, {
+      ref: "@e2",
+      state: "attached",
+    });
+    expect(byRef.status).toBe(200);
+    expect(await byRef.json()).toMatchObject({ state: "attached", matched: 2 });
+    expect(payloads("check").at(-1)).toEqual({ ref: "@e2", state: "attached" });
+    // The batch step takes the same fields.
+    const batch = await request(`/tabs/${tab.id}/actions`, "POST", {
+      actions: [
+        { type: "wait-for-selector", selector: "#done", state: "attached" },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    expect(await batch.json()).toMatchObject({
+      ok: true,
+      results: [
+        {
+          index: 0,
+          type: "wait-for-selector",
+          result: { ok: true, state: "attached", matched: 2 },
+        },
+      ],
+    });
+  });
+
+  it("a second match fails attached and visible at once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const ambiguous = {
+      ok: false,
+      code: "ambiguous_match",
+      error:
+        "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+      fields: {
+        selector: "text=Save",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates: [],
+      },
+    };
+    // Every match counts for hidden and detached, so only the strict states
+    // see a second match at all.
+    page.result = (code: string) =>
+      /"state":"(hidden|detached)"/.test(code)
+        ? { ok: true, matched: true, counts: { matched: 2, visible: 0 } }
+        : ambiguous;
+    const started = Date.now();
+    const refused = await failure(
+      await waitForSelector(tab.id, {
+        selector: "text=Save",
+        state: "attached",
+        timeoutMs: 20000,
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "ambiguous_match",
+      selector: "text=Save",
+      count: 2,
+    });
+    // It answered on the first check, not at the deadline.
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "attached",
+      mode: "strict",
+      level: "none",
+    });
+    const hidden = await waitForSelector(tab.id, {
+      selector: "text=Save",
+      state: "hidden",
+    });
+    expect(hidden.status).toBe(200);
+    expect(await hidden.json()).toMatchObject({
+      state: "hidden",
+      matched: 2,
+    });
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "hidden",
+      mode: "count",
+      level: "visible",
+    });
+    const detached = await waitForSelector(tab.id, {
+      selector: "text=Save",
+      state: "detached",
+    });
+    expect(detached.status).toBe(200);
+    expect(payloads("check").at(-1)?.query).toMatchObject({
+      state: "detached",
+      mode: "count",
+      level: "none",
+    });
+  });
+
+  it("a selector wait times out with its fields", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = {
+      ok: true,
+      matched: false,
+      counts: { matched: 3, visible: 0 },
+    };
+    const timedOut = await failure(
+      await waitForSelector(tab.id, {
+        selector: ".row",
+        state: "visible",
+        timeoutMs: 300,
+      }),
+    );
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "selector",
+      timeoutMs: 300,
+      selector: ".row",
+      state: "visible",
+      matched: 3,
+      visible: 0,
+    });
+    // It looked again while it waited.
+    expect(payloads("check").length).toBeGreaterThan(1);
+  });
+
+  it("a dialog ends a selector wait at once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.emitProtocol("Page.javascriptDialogOpening", {
+      url: "https://example.com/",
+      frameId: "main",
+      message: "Save first?",
+      type: "confirm",
+      hasBrowserHandler: true,
+      defaultPrompt: "",
+    });
+    const started = Date.now();
+    const refused = await failure(
+      await waitForSelector(tab.id, { selector: "#done", timeoutMs: 20000 }),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.error).toMatchObject({
+      code: "dialog_open",
+      dialog: { type: "confirm", message: "Save first?" },
+    });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(page.scripts).toEqual([]);
+  });
+
+  it("selector states enforce their fields", async () => {
+    const { tab } = await createPage();
+    for (const body of [
+      { state: "showing" },
+      { timeoutMs: 60001 },
+      { selector: "a".repeat(2049) },
+      { selector: "a >> b" },
+    ]) {
+      const { status, error } = await failure(
+        await waitForSelector(tab.id, body),
+      );
+      expect(status, JSON.stringify(body).slice(0, 60)).toBe(400);
+      expect(error.code, JSON.stringify(body).slice(0, 60)).toBe(
+        "selector" in body && body.selector === "a >> b"
+          ? "invalid_selector"
+          : "invalid_field",
+      );
+    }
+    // The step takes the same fields, and the plan is checked before it runs.
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "wait-for-selector", selector: "#done", state: "showing" },
+        ],
+      }),
+    );
+    expect(step.status).toBe(400);
+    expect(step.error).toMatchObject({ code: "invalid_field", field: "state" });
     expect(controller.contents.scripts).toEqual([]);
   });
 
@@ -5474,6 +5808,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/reload": {},
       "POST /tabs/:id/wait-for-url": { url: "https://example.com/*" },
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
+      "POST /tabs/:id/wait-for-selector": { ref: "@e1", state: "attached" },
       "POST /tabs/:id/wait-for-function": { expression: "true" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },

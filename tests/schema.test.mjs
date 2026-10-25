@@ -230,7 +230,7 @@ describe("API schema", () => {
       [...union.matchAll(/"([\w-]+)"/g)].map((m) => m[1]).sort(),
     );
     expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -550,12 +550,13 @@ describe("API schema", () => {
       "reload",
       "wait-for-url",
       "wait-for-load-state",
+      "wait-for-selector",
       "wait-for-function",
     ];
     expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, and wait-for-function.",
+        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])
@@ -1198,6 +1199,117 @@ describe("API schema", () => {
       expect(reference, text).toContain(text);
   });
 
+  it("the navigation members and commands are declared at level 4", () => {
+    // The millisecond, matcher and page function argument kinds.
+    const timeout = entry("Page.waitForTimeout");
+    for (const ms of [0, 1000, 600000])
+      expect(checkCall(timeout, [ms]), String(ms)).toBeNull();
+    for (const ms of [-1, 600001, 1.5, "1000", null])
+      expect(checkCall(timeout, [ms])?.code, String(ms)).toBe(
+        "invalid_argument",
+      );
+    expect(checkCall(timeout, [])?.message).toBe(
+      "page.waitForTimeout got no ms. Expected page.waitForTimeout(ms).",
+    );
+    const url = entry("Page.waitForURL");
+    for (const matcher of [
+      "https://example.test/**/done",
+      /done$/,
+      (address) => address.pathname === "/done",
+    ])
+      expect(checkCall(url, [matcher]), String(matcher)).toBeNull();
+    for (const matcher of ["", "  ", 5, null, {}])
+      expect(checkCall(url, [matcher])?.code, String(matcher)).toBe(
+        "invalid_argument",
+      );
+    const fn = entry("Page.waitForFunction");
+    expect(checkCall(fn, ["window.slots > 0"])).toBeNull();
+    expect(checkCall(fn, [() => true, { rows: 3 }, { timeout: 1000 }])).toBeNull();
+    for (const source of ["", 5, {}, null])
+      expect(checkCall(fn, [source])?.code, String(source)).toBe(
+        "invalid_argument",
+      );
+    // Options still map by name, with the client's own spelling.
+    expect(checkCall(fn, [() => true, undefined, { timeoutMs: 1000 }])).toMatchObject({
+      code: "invalid_option",
+      fields: { option: "timeoutMs", suggestion: "timeout" },
+    });
+    expect(
+      checkCall(entry("Page.goto"), ["https://example.test/", { waitUntil: "soon" }])
+        ?.code,
+    ).toBe("invalid_option");
+    expect(
+      checkCall(entry("Page.waitForSelector"), ["@e2", { state: "gone" }])?.code,
+    ).toBe("invalid_option");
+    expect(
+      checkCall(entry("Page.waitForLoadState"), ["networkidle", { idleMs: 20000 }])
+        ?.code,
+    ).toBe("invalid_option");
+    // The level and signature every new member declares.
+    const members = [
+      ["Page.goto", "page.goto(url, options?)"],
+      ["Page.reload", "page.reload(options?)"],
+      ["Page.info", "page.info()"],
+      ["Page.waitForURL", "page.waitForURL(url, options?)"],
+      ["Page.waitForLoadState", "page.waitForLoadState(state?, options?)"],
+      ["Page.waitForSelector", "page.waitForSelector(selector, options?)"],
+      [
+        "Page.waitForFunction",
+        "page.waitForFunction(pageFunction, arg?, options?)",
+      ],
+      ["Page.waitForTimeout", "page.waitForTimeout(ms)"],
+    ];
+    for (const [name, signature] of members)
+      expect(entry(name), name).toMatchObject({
+        kind: "method",
+        since: 4,
+        signature,
+      });
+    expect(entry("Page.waitForTimeout").route).toBeUndefined();
+    for (const name of [
+      "reload",
+      "info",
+      "wait-for-url",
+      "wait-for-load-state",
+      "wait-for-selector",
+      "wait-for-function",
+    ]) {
+      const command = findCommand(name);
+      expect(command, name).toMatchObject({ since: 4 });
+      expect(route(command.route), name).toBeDefined();
+      expect(Object.hasOwn(PARSERS, name), name).toBe(true);
+    }
+    expect(findCommand("navigate").flags.map((flag) => flag.name)).toEqual([
+      "--wait-until",
+      "--timeout",
+      "--referer",
+    ]);
+    for (const flag of findCommand("navigate").flags)
+      expect(flag.since, flag.name).toBe(4);
+    expect(findCommand("navigate").usage).toBe(
+      "navigate <tab-id> <url> [--wait-until <state>] [--timeout <ms>] [--referer <url>]",
+    );
+    // The URL rule of this level, in the entry and in the two commands.
+    for (const text of [
+      entry("Page.navigate").summary,
+      findCommand("navigate").arguments[1].description,
+      findCommand("open").arguments[1].description,
+    ])
+      expect(text).toContain("about:blank");
+    // The generated reference carries the members and the commands.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`page.goto(url, options?)`",
+      "`page.info()`",
+      "`page.waitForURL(url, options?)`",
+      "`page.waitForTimeout(ms)`",
+      "`reload <tab-id> [--wait-until <state>] [--timeout <ms>] [--ignore-cache]`",
+      "`info <tab-id>`",
+      "`wait-for-selector <tab-id> <ref-or-selector> [--state <state>] [--timeout <ms>]`",
+    ])
+      expect(reference, text).toContain(text);
+  });
+
   it("resolves help names in every accepted form", () => {
     const names = (query) => resolveNames(query).map((entry) => entry.name);
     expect(names("Page.wait")).toEqual(["Page.wait"]);
@@ -1285,6 +1397,100 @@ describe("hand written docs", () => {
       ["skills/kamapathy/references/scripting.md", "screenshot_unavailable"],
     ];
     for (const [path, sentence] of retired)
+      expect(read(path), `${path} still says ${sentence}`).not.toContain(
+        sentence,
+      );
+  });
+  it("documents the navigation and wait surface", () => {
+    const promised = [
+      // The agent URL rule, in the three places a reader looks.
+      ["docs/automation.md", "Agents open HTTP, HTTPS and `about:blank` only"],
+      ["docs/SECURITY.md", "Agents open HTTP, HTTPS and `about:blank` only"],
+      ["docs/architecture.md", "its one extra destination"],
+      ["docs/architecture.md", "`electron/agent/navigation/`"],
+      // The section, the states, the commands and the methods.
+      ["docs/automation.md", "## Navigate and wait"],
+      [
+        "docs/automation.md",
+        "`commit`, `domcontentloaded`, `load` or `networkidle`",
+      ],
+      ["docs/automation.md", "wait-for-selector"],
+      ["docs/automation.md", "waitForFunction"],
+      ["docs/automation.md", "four navigations and waits"],
+      ["docs/automation.md", "`ignoreCache` runs no page script"],
+      ["docs/automation.md", "refreshes the page's `url` and `title`"],
+      // The guard policy and the waits SECURITY.md names.
+      [
+        "docs/SECURITY.md",
+        "waits for a URL, a load state, an element state or a page function",
+      ],
+      ["docs/SECURITY.md", "overridden only under agent control"],
+      ["docs/SECURITY.md", "The person in control is always asked"],
+      // What a reader of README learns.
+      ["README.md", "`goto`, `reload`, `info`"],
+      [
+        "README.md",
+        "wait for a URL, a load state, an element or a page condition",
+      ],
+      [
+        "README.md",
+        "wait for the new document instead of returning as soon as the load",
+      ],
+      ["README.md", "url_opened_in_popup"],
+      // The skill's own rules.
+      ["skills/kamapathy/SKILL.md", "returns once the new document commits"],
+      ["skills/kamapathy/SKILL.md", "waits for the page's load event"],
+      ["skills/kamapathy/SKILL.md", "never on a sleep"],
+      ["skills/kamapathy/SKILL.md", "`url_opened_in_popup`"],
+      ["skills/kamapathy/SKILL.md", "waitForSelector"],
+      // The six batch steps.
+      ["skills/kamapathy/references/actions.md", "| `navigate` |"],
+      ["skills/kamapathy/references/actions.md", "| `reload` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-url` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-load-state` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-selector` |"],
+      ["skills/kamapathy/references/actions.md", "| `wait-for-function` |"],
+      // The methods, with ignoreCache and the commit rule.
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`goto(url, { waitUntil?, timeout?, referer? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`reload({ waitUntil?, timeout?, ignoreCache? })`",
+      ],
+      ["skills/kamapathy/references/scripting.md", "`info()`"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForURL(url, { timeout?, waitUntil? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForLoadState(state?, { timeout?, idleMs? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForSelector(selector, { state?, timeout? })`",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`waitForFunction(pageFunction, arg?, { timeout?, interval? })`",
+      ],
+      ["skills/kamapathy/references/scripting.md", "`waitForTimeout(ms)`"],
+      ["skills/kamapathy/references/scripting.md", "`ignoreCache`"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "returns once the new document commits",
+      ],
+    ];
+    for (const [path, sentence] of promised)
+      expect(read(path), `${path} is missing ${sentence}`).toContain(sentence);
+    // The sentences this section made wrong.
+    for (const [path, sentence] of [
+      ["docs/automation.md", "Navigation accepts only complete HTTP or HTTPS"],
+      ["docs/SECURITY.md", "conditional waits"],
+      ["README.md", "wait for changes"],
+    ])
       expect(read(path), `${path} still says ${sentence}`).not.toContain(
         sentence,
       );

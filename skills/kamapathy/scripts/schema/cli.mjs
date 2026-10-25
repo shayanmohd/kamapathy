@@ -33,6 +33,24 @@ const DOWNLOAD_ID = {
   name: "id",
   description: "A download ID from downloads or an armed download wait.",
 };
+const AGENT_URL = {
+  name: "url",
+  description: "A complete http or https URL, or about:blank.",
+};
+// The flags navigation and the waits share, each the route field it sets.
+const WAIT_UNTIL = {
+  name: "--wait-until",
+  value: "<state>",
+  description:
+    "commit, domcontentloaded, load or networkidle. load by default.",
+  since: 4,
+};
+const timeoutFlag = (range) => ({
+  name: "--timeout",
+  value: "<ms>",
+  description: `How long to wait, ${range}.`,
+  since: 4,
+});
 // The action commands take a label anywhere in their arguments.
 const LABEL = {
   name: "--label",
@@ -255,10 +273,7 @@ export const COMMANDS = [
     script: "space.tabs",
   }),
   command("open", "Pages", "open <space-id> <url>", "Open a background tab", {
-    arguments: [
-      SPACE_ID,
-      { name: "url", description: "A complete http or https URL." },
-    ],
+    arguments: [SPACE_ID, AGENT_URL],
     route: "POST /spaces/:id/tabs",
     script: "space.open",
   }),
@@ -298,14 +313,60 @@ export const COMMANDS = [
       since: 2,
     },
   ),
-  command("navigate", "Pages", "navigate <tab-id> <url>", "Navigate a tab", {
-    arguments: [
-      TAB_ID,
-      { name: "url", description: "A complete http or https URL." },
-    ],
-    route: "POST /tabs/:id/navigate",
-    script: "page.navigate",
-  }),
+  command(
+    "navigate",
+    "Pages",
+    "navigate <tab-id> <url> [--wait-until <state>] [--timeout <ms>] [--referer <url>]",
+    "Navigate a tab and wait for the new document, at commit unless --wait-until says otherwise",
+    {
+      arguments: [TAB_ID, AGENT_URL],
+      flags: [
+        WAIT_UNTIL,
+        timeoutFlag("1 to 60000, default 15000"),
+        {
+          name: "--referer",
+          value: "<url>",
+          description: "The Referer header to send, exactly as given.",
+          since: 4,
+        },
+      ],
+      route: "POST /tabs/:id/navigate",
+      script: "page.navigate",
+    },
+  ),
+  command(
+    "reload",
+    "Pages",
+    "reload <tab-id> [--wait-until <state>] [--timeout <ms>] [--ignore-cache]",
+    "Reload the page and wait for the new document",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        WAIT_UNTIL,
+        timeoutFlag("1 to 60000, default 15000"),
+        {
+          name: "--ignore-cache",
+          description: "Fetch the page and its subresources past the cache",
+          since: 4,
+        },
+      ],
+      route: "POST /tabs/:id/reload",
+      script: "page.reload",
+      since: 4,
+    },
+  ),
+  command(
+    "info",
+    "Pages",
+    "info <tab-id>",
+    "Read the viewport, scroll offsets, document size and ready state",
+    {
+      arguments: [TAB_ID],
+      route: "GET /tabs/:id/info",
+      script: "page.info",
+      since: 4,
+    },
+  ),
   command("close", "Pages", "close <tab-id>", "Close a tab", {
     arguments: [TAB_ID],
     route: "DELETE /tabs/:id",
@@ -482,6 +543,109 @@ export const COMMANDS = [
       stdin: "A JSON object with selector, text and timeoutMs.",
       route: "POST /tabs/:id/wait",
       script: "page.wait",
+    },
+  ),
+  command(
+    "wait-for-url",
+    "Page actions",
+    "wait-for-url <tab-id> <glob> [--wait-until <state>] [--timeout <ms>]",
+    "Wait for this page's URL to match a glob, then for the state asked for",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "glob",
+          description:
+            "A glob for the whole URL: * inside a path segment, ** across segments, {a,b} for one alternative.",
+        },
+      ],
+      flags: [
+        WAIT_UNTIL,
+        timeoutFlag("0 to 60000, default 10000; 0 checks once"),
+      ],
+      route: "POST /tabs/:id/wait-for-url",
+      script: "page.waitForURL",
+      examples: ['wait-for-url 8c1f2e04:p2 "https://example.com/**/done"'],
+      since: 4,
+    },
+  ),
+  command(
+    "wait-for-load-state",
+    "Page actions",
+    "wait-for-load-state <tab-id> [state] [--idle <ms>] [--timeout <ms>]",
+    "Wait for the document the page shows to reach a state",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "state",
+          description:
+            "commit, domcontentloaded, load or networkidle. load by default.",
+        },
+      ],
+      flags: [
+        {
+          name: "--idle",
+          value: "<ms>",
+          description:
+            "How long nothing may be in flight before networkidle answers, 0 to 10000, default 500.",
+          since: 4,
+        },
+        timeoutFlag("0 to 60000, default 10000; 0 checks once"),
+      ],
+      route: "POST /tabs/:id/wait-for-load-state",
+      script: "page.waitForLoadState",
+      since: 4,
+    },
+  ),
+  command(
+    "wait-for-selector",
+    "Page actions",
+    "wait-for-selector <tab-id> <ref-or-selector> [--state <state>] [--timeout <ms>]",
+    "Wait for an element to be attached, visible, hidden or detached",
+    {
+      arguments: [TAB_ID, TARGET],
+      flags: [
+        {
+          name: "--state",
+          value: "<state>",
+          description:
+            "attached, visible, hidden or detached. visible by default.",
+          since: 4,
+        },
+        timeoutFlag("0 to 60000, default 10000; 0 checks once"),
+      ],
+      route: "POST /tabs/:id/wait-for-selector",
+      script: "page.waitForSelector",
+      examples: ["wait-for-selector 8c1f2e04:p2 text=Confirmed"],
+      since: 4,
+    },
+  ),
+  command(
+    "wait-for-function",
+    "Page actions",
+    "wait-for-function <tab-id> --stdin [--interval <ms>] [--timeout <ms>]",
+    "Read an expression from stdin and wait for it to be truthy in the page",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--stdin",
+          description: "Read the expression from stdin",
+          since: 4,
+        },
+        {
+          name: "--interval",
+          value: "<ms>",
+          description: "How long between checks, 10 to 10000, default 100.",
+          since: 4,
+        },
+        timeoutFlag("0 to 60000, default 10000; 0 checks once"),
+      ],
+      stdin: "An expression to evaluate in the page.",
+      route: "POST /tabs/:id/wait-for-function",
+      script: "page.waitForFunction",
+      since: 4,
     },
   ),
   command(
