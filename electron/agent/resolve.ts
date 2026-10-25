@@ -57,6 +57,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   guard?: () => void;
   dispatch?: { dispatched: boolean };
+  /** The frame whose world runs the operation, instead of the main frame. */
+  frameId?: string;
 }
 export interface Resolver {
   run(
@@ -164,7 +166,9 @@ export function createResolver(deps: { refs: RefBook }): Resolver {
       // The sessions whose accessibility state this call woke, if any.
       let queried: (string | undefined)[] | undefined;
       try {
-        const frameId = await session.mainFrameId(step);
+        // A frame group's own read runs in that group's world, which keeps
+        // its own refs, so each call reserves its own block of numbers.
+        const frameId = options.frameId ?? (await session.mainFrameId(step));
         if (roles.length) {
           // Every role node of the call belongs to the world that owns the
           // top document and the frames it reads.

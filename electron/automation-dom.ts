@@ -185,6 +185,20 @@ export function pageOperation(
     const box = element.getBoundingClientRect();
     return box.width >= TINY_FRAME && box.height >= TINY_FRAME;
   };
+  // Frames agents never enter: an extension, the PDF viewer, an internal
+  // page, a local file or Kamapathy's own interface. A page can only tell
+  // them apart by the address the frame was given, which is why the main
+  // process checks its own frame registry as well.
+  const WEB_FRAME = /^(https?|about|data|blob):$/;
+  const blockedFrame = (frame: Element) => {
+    const src = frame.getAttribute("src");
+    if (!src) return false;
+    try {
+      return !WEB_FRAME.test(new URL(src, docOf(frame).baseURI).protocol);
+    } catch {
+      return false;
+    }
+  };
   // The frame elements around a document, outermost first, or undefined once
   // it is no longer shown in this page.
   const framesOfDoc = (doc: Document) => {
@@ -508,12 +522,17 @@ export function pageOperation(
     scope: Element,
     maximum = Infinity,
     onlyOnScreen = false,
+    // A caller that composes several documents is told where in the text
+    // each element of the walk begins, so it can split the text at the
+    // frame owners it cannot read.
+    at?: (element: Element, length: number) => void,
   ) => {
     let text = "",
       previousBlock: Element | null = null;
     let previousRect: DOMRect | undefined;
     walk(scope, (node) => {
       if (text.length > maximum) return false;
+      if (node.nodeType === 1) return void at?.(node as Element, text.length);
       if (node.nodeType !== 3) return;
       const parent = node.parentElement;
       if (
@@ -1414,6 +1433,11 @@ export function pageOperation(
     const options = payload as unknown as SnapshotOptions;
     const viewport = options.scope === "viewport";
     const outline = options.format === "outline";
+    // A read of one frame group reports this document's own text parts,
+    // ranked controls and outline lines, which the main process places
+    // around the reads of the frames inside it. A page read without a frame
+    // context answers the whole listing itself.
+    const grouped = frameContext !== undefined;
     // Where this part starts: a character of the text, a ranked control.
     const offsets = {
       text: options.offsets?.text || 0,
@@ -1429,17 +1453,17 @@ export function pageOperation(
         : options.selector !== undefined
           ? (payload as ElementTarget)
           : undefined;
+    // Whether the scope is a frame from another origin, whose own group the
+    // main process reads instead: the scope stops at the owner, and its
+    // placeholder names the frame to read.
+    let frameScope = false;
     if (scoped) {
       const selected = target(scoped);
       if (!isElement(selected)) return selected;
       // A frame of this origin is read as its own document. One from another
       // origin has a world of its own, which the main process reads with this
       // frame as its root.
-      if (opaqueFrame(selected))
-        return failure(
-          "This control is inside a frame from another origin, which Kamapathy cannot read. Ask the person to continue there.",
-          "cross_origin_frame",
-        );
+      frameScope = opaqueFrame(selected);
       const inner = frameDocument(selected);
       scope = inner
         ? inner.body || inner.documentElement || selected
@@ -1677,6 +1701,7 @@ export function pageOperation(
       const tiers = new Map(ranks.map((item) => [item.element, item.rank]));
       return all.filter(listedFrame).map((element) => {
         const box = placed(element);
+        const placement = ownerPlacement(element);
         const key = keyOfFrame(element);
         return {
           ...(key === undefined ? {} : { key }),
@@ -1689,7 +1714,20 @@ export function pageOperation(
             right: box.right,
             bottom: box.bottom,
           },
+          // Where the frame shows its document and how much of it the
+          // owners around it can show, for the main process to map the
+          // read of that frame into.
+          content: {
+            x: placement.x,
+            y: placement.y,
+            scaleX: placement.scaleX,
+            scaleY: placement.scaleY,
+            width: placement.width,
+            height: placement.height,
+          },
+          area: placement.area,
           readable: false,
+          ...(blockedFrame(element) ? { blocked: true as const } : {}),
         };
       });
     };
@@ -1701,6 +1739,7 @@ export function pageOperation(
         : {
             group: frameContext.group,
             placeholders: framePlaceholders(ranks),
+            ...(frameScope ? { frameScope: true as const } : {}),
           };
     const limit = options.mode === "compact" ? 80 : 200;
     let nextRef = options.firstRef;
@@ -1776,9 +1815,15 @@ export function pageOperation(
               : { value }),
         ...(group ? { group: group.slice(0, limit) } : {}),
         ...(frame ? { frame } : {}),
-        ...(opaqueFrame(element) ? { crossOrigin: true } : {}),
-        ...(opaqueFrame(element) && keyOfFrame(element) !== undefined
-          ? { key: keyOfFrame(element) }
+        ...(opaqueFrame(element)
+          ? {
+              crossOrigin: true,
+              contentFrame: contentPath(element),
+              ...(keyOfFrame(element) === undefined
+                ? {}
+                : { key: keyOfFrame(element) }),
+              ...(blockedFrame(element) ? { blocked: true as const } : {}),
+            }
           : {}),
         ...(inputElement(element) && element.type === "file"
           ? { accept: element.accept.slice(0, 256), multiple: element.multiple, hidden: !visible(element) }
@@ -2035,7 +2080,9 @@ export function pageOperation(
                 : ""
             }${visible(element) ? "" : "; hidden input in visible form"}`,
           );
-        if (opaqueFrame(element)) words.push("(not read)");
+        // A composed snapshot nests the frame's own lines under this one;
+        // a page read on its own reads nothing inside it.
+        if (opaqueFrame(element) && !grouped) words.push("(not read)");
         let cut = false;
         if (selectElement(element)) {
           const shown = kids[line.item].filter(
@@ -2051,12 +2098,30 @@ export function pageOperation(
           cut,
         };
       };
-      const start = Math.min(offsets.line, plan.length);
-      const lines: string[] = [];
+      // A composed part is cut in the main process, so a group read starts
+      // at the first line and reports the lines a part at this cursor can
+      // reach: the lines before its offset, then its own budget.
+      const start = grouped ? 0 : Math.min(offsets.line, plan.length);
+      const budgetFrom = grouped
+        ? Math.min(offsets.line, plan.length)
+        : start;
+      const kept: { depth: number; text: string; order: number }[] = [];
       const printed: Element[] = [];
       let used = 0;
       let taken = 0;
       let cutOptions = false;
+      // Where a line sits in the walk: its own element's position, or just
+      // after the last frame owner, so a frame's own lines nest between the
+      // lines around it.
+      let afterOwner = 0;
+      const orderOfLine = (line: Planned) => {
+        const element =
+          line.chunk === undefined ? items[line.item].element : undefined;
+        if (!element) return afterOwner;
+        const own = order.get(element) ?? afterOwner;
+        afterOwner = own + (listedFrame(element) ? 1 : 0);
+        return own;
+      };
       const keepLine = (
         line: Planned,
         made: {
@@ -2067,7 +2132,11 @@ export function pageOperation(
         },
       ) => {
         made.keep();
-        lines.push("  ".repeat(line.depth) + made.text);
+        kept.push({
+          depth: line.depth,
+          text: made.text,
+          order: orderOfLine(line),
+        });
         used += line.depth * 2 + made.text.length + 1;
         if (made.cut) cutOptions = true;
         if (made.element && !printed.includes(made.element))
@@ -2088,20 +2157,30 @@ export function pageOperation(
           keepLine(line, render(line));
         }
       }
-      // Lines are added while they fit, and a part always adds one.
+      // Lines are added while they fit, and a part always adds one. A
+      // composed part is cut in the main process, so a group read keeps one
+      // line past its own budget: the composition then sees what is left.
       let at = start;
       for (; at < plan.length; at += 1) {
         const line = plan[at];
-        const first = at === start;
-        if (!first && counts(line) && taken >= options.maxControls) break;
+        // The lines before this part's own offset cost it nothing.
+        if (grouped && at === budgetFrom) {
+          used = 0;
+          taken = 0;
+        }
+        const first = at === budgetFrom;
         const made = render(line);
-        if (
+        const full =
           !first &&
-          used + line.depth * 2 + made.text.length + 1 > options.maxChars
-        )
-          break;
+          ((counts(line) && taken >= options.maxControls) ||
+            used + line.depth * 2 + made.text.length + 1 > options.maxChars);
+        if (full && !grouped) break;
         keepLine(line, made);
         if (counts(line)) taken += 1;
+        if (full) {
+          at += 1;
+          break;
+        }
       }
       const left = at < plan.length;
       let past = 0;
@@ -2111,12 +2190,42 @@ export function pageOperation(
         entryFor(element, index),
       );
       keepFingerprints(printed);
+      const ranks = rankControls();
+      const tiers = new Map(ranks.map((item) => [item.element, item.rank]));
+      if (grouped)
+        return {
+          url: location.href,
+          title: document.title,
+          ...frameRead(ranks),
+          text: [],
+          controls: printed.map((element, index) => ({
+            order: order.get(element) ?? 0,
+            tier: tiers.get(element) ?? 0,
+            local: framePath(element),
+            entry: interactables[index],
+          })),
+          outline: kept.map((line) => ({
+            order: line.order,
+            depth: line.depth,
+            line: line.text,
+          })),
+          chars: 0,
+          ...locatorSources(printed, interactables),
+          ...reboundResult(),
+          ...(issued.length ? { issued } : {}),
+          ...(past ? { omittedControls: past } : {}),
+          ...(left || optionsTruncated || cutOptions
+            ? { truncated: true as const }
+            : {}),
+        };
       return {
         url: location.href,
         title: document.title,
-        outline: lines.join("\n"),
+        outline: kept
+          .map((line) => "  ".repeat(line.depth) + line.text)
+          .join("\n"),
         interactables,
-        ...frameRead(rankControls()),
+        ...frameRead(ranks),
         ...locatorSources(printed, interactables),
         ...reboundResult(),
         ...(issued.length ? { issued } : {}),
@@ -2125,17 +2234,24 @@ export function pageOperation(
         truncated: left || optionsTruncated || cutOptions,
       };
     }
-    // This part's controls, back in the order a person sees them.
+    // This part's controls, back in the order a person sees them. A
+    // composed part ranks the controls of every group together, so a group
+    // read reports the ranks a part at this cursor can reach and the main
+    // process takes its slice of them.
     const ranked = rankControls();
-    const chosen = ranked
-      .slice(offsets.control, offsets.control + options.maxControls)
-      .sort((first, second) => first.index - second.index)
-      .map((item) => item.element);
+    const from = grouped ? 0 : offsets.control;
+    const room = grouped
+      ? offsets.control + options.maxControls
+      : options.maxControls;
+    const picked = ranked
+      .slice(from, from + room)
+      .sort((first, second) => first.index - second.index);
+    const chosen = picked.map((item) => item.element);
     const interactables = chosen.map((element, index) =>
       entryFor(element, index),
     );
     keepFingerprints(chosen);
-    const omitted = Math.max(0, all.length - offsets.control - chosen.length);
+    const omitted = Math.max(0, all.length - from - chosen.length);
     const compact = (value: string) =>
       options.mode === "compact"
         ? value
@@ -2148,15 +2264,66 @@ export function pageOperation(
     // all whitespace, it reads further, up to the whole scope.
     const wanted = offsets.text + options.maxChars;
     let readLimit = wanted + 256;
-    let raw = pageText(scope, readLimit, viewport);
+    // Where the text of a frame this world cannot read belongs, so the main
+    // process can place that frame's own text between the parts around it.
+    const splits: { order: number; at: number }[] = [];
+    let raw = pageText(
+      scope,
+      readLimit,
+      viewport,
+      grouped
+        ? (element, length) => {
+            if (listedFrame(element))
+              splits.push({
+                order: (order.get(element) ?? 0) + 1,
+                at: length,
+              });
+          }
+        : undefined,
+    );
     let normalized = compact(raw);
-    while (raw.length > readLimit && normalized.length < wanted + 1) {
+    while (!grouped && raw.length > readLimit && normalized.length < wanted + 1) {
       readLimit *= 2;
       raw = pageText(scope, readLimit, viewport);
       normalized = compact(raw);
     }
     const text = normalized.slice(offsets.text, wanted);
     const textLeft = normalized.length > wanted;
+    // The text in the parts the frame owners split it into, each normalized
+    // on its own, as one document's text is.
+    const parts: { order: number; value: string }[] = [];
+    if (grouped) {
+      let cut = 0;
+      let at = 0;
+      for (const split of [...splits, { order: 0, at: raw.length }]) {
+        const value = compact(raw.slice(cut, split.at));
+        if (value) parts.push({ order: at, value });
+        cut = split.at;
+        at = split.order;
+      }
+    }
+    if (grouped)
+      return {
+        url: location.href,
+        title: document.title,
+        ...frameRead(ranked),
+        text: parts,
+        controls: picked.map((item, index) => ({
+          order: order.get(item.element) ?? 0,
+          tier: item.rank,
+          local: framePath(item.element),
+          entry: interactables[index],
+        })),
+        outline: [],
+        chars: parts.reduce((total, part) => total + part.value.length, 0),
+        ...locatorSources(chosen, interactables),
+        ...reboundResult(),
+        ...(issued.length ? { issued } : {}),
+        ...(omitted ? { omittedControls: omitted } : {}),
+        ...(raw.length > readLimit || optionsTruncated
+          ? { truncated: true as const }
+          : {}),
+      };
     // A bound of 0 cannot print its half of the page, so it never asks for
     // it again; truncated still reports what was left out.
     const more =
@@ -2321,19 +2488,6 @@ export function pageOperation(
   // The document holding the focus, or the owner of the frame that holds it,
   // which the main process follows on that frame's own session.
   if (operation === "activeFrame") {
-    // Frames agents never enter: an extension, the PDF viewer, an internal
-    // page, a local file or Kamapathy's own interface. A page can only tell
-    // them apart by the address the frame was given.
-    const WEB_FRAME = /^(https?|about|data|blob):$/;
-    const blockedFrame = (frame: Element) => {
-      const src = frame.getAttribute("src");
-      if (!src) return false;
-      try {
-        return !WEB_FRAME.test(new URL(src, docOf(frame).baseURI).protocol);
-      } catch {
-        return false;
-      }
-    };
     const deepActive = (root: Document | ShadowRoot) => {
       let active = root.activeElement;
       while (active?.shadowRoot?.activeElement)

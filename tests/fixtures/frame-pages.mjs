@@ -8,7 +8,11 @@
 // the same selector as one outside it, and hide frames with CSS visibility.
 // Section 9's pages put a payment form from the other name beside a 1 by 1
 // tracking frame, on a page that takes focus, under an overlay, far below the
-// fold, added after a wait and loading another document on demand.
+// fold, added after a wait and loading another document on demand. The
+// checkout page holds a frame from the other name beside one of this host on
+// another port, and the later pages hold twelve frames from another site and
+// a frame that blocks its own thread. {{other}} is this server under its
+// other loopback name, {{otherPort}} this name on its second port.
 export const framePages = {
   "/frames/shadow": `<!doctype html><meta charset="utf-8"><title>Shadow controls</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
@@ -129,6 +133,60 @@ let loaded = 0;
 const next = () => (loaded++ % 2 ? otherOrigin + "/frames/checkout" : otherOrigin + "/frames/other");
 document.getElementById("moving").src = next();
 </script>`,
+  "/frames/pay": `<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:420px;height:220px;border:4px solid #666;padding:6px;margin:0 0 10px}</style>
+<h1>Checkout</h1>
+<p>Text above the frames</p>
+<iframe id="card" title="Card details" src="{{other}}/frames/checkout"></iframe>
+<p>Text between the frames</p>
+<iframe id="billing" title="Billing details" src="{{otherPort}}/frames/billing"></iframe>
+<p id="pay-result" role="status">Nothing paid</p>`,
+  "/frames/billing": `<!doctype html><meta charset="utf-8"><title>Billing</title>
+<style>body{font:14px sans-serif;margin:8px}</style>
+<p>Billing address</p>
+<label for="postcode">Postcode</label><input id="postcode" name="postcode">
+<button type="button" id="save-billing" onclick="this.textContent='Billing saved'">Save billing</button>`,
+  "/frames/many": `<!doctype html><meta charset="utf-8"><title>Many frames</title>
+<style>body{font:14px sans-serif;margin:0}iframe{display:block;width:200px;height:60px;border:0}</style>
+<p>Twelve frames from another site</p>
+<script>
+for (let index = 0; index < 9; index += 1) {
+  const frame = document.createElement("iframe");
+  frame.title = index === 8 ? "Three widgets" : "Widget " + (index + 1);
+  frame.src = "{{other}}" + (index === 8 ? "/frames/triple" : "/frames/widget?n=" + (index + 1));
+  document.body.append(frame);
+}
+</script>`,
+  // The frames inside this one come from its own name on the other port, so
+  // each is a frame from another origin that Chromium keeps in this page's
+  // process. A grandchild from the top page's own site would lose its
+  // session instead, which no read can reach.
+  "/frames/triple": `<!doctype html><meta charset="utf-8"><title>Three widgets</title>
+<style>body{font:14px sans-serif;margin:0}iframe{display:block;width:180px;height:40px;border:0}</style>
+<p>Three widgets inside</p>
+<script>
+for (let index = 0; index < 3; index += 1) {
+  const frame = document.createElement("iframe");
+  frame.title = "Inner widget " + (index + 1);
+  frame.src = "{{otherPort}}/frames/widget?inner=" + (index + 1);
+  document.body.append(frame);
+}
+</script>`,
+  "/frames/widget": `<!doctype html><meta charset="utf-8"><title>Widget</title>
+<style>body{font:14px sans-serif;margin:0}</style>
+<p>Widget text</p><button type="button">Widget action</button>`,
+  // One frame from another site blocks its own thread shortly after it has
+  // loaded, so a read of it never answers; the frame beside it, of this
+  // page's own site on another port, answers as usual.
+  "/frames/stuck": `<!doctype html><meta charset="utf-8"><title>Busy frames</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:300px;height:80px;border:0}</style>
+<p>One frame is busy</p>
+<iframe id="busy" title="Busy widget" src="{{other}}/frames/busy"></iframe>
+<iframe id="calm" title="Calm widget" src="{{otherPort}}/frames/widget?calm=1"></iframe>`,
+  "/frames/busy": `<!doctype html><meta charset="utf-8"><title>Busy widget</title>
+<style>body{font:14px sans-serif;margin:0}</style>
+<p>Busy text</p>
+<script>setTimeout(() => { const end = Date.now() + 20000; while (Date.now() < end); }, 300);</script>`,
   "/frames/shadow-frame": `<!doctype html><meta charset="utf-8"><title>Shadow frame</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
 <h1>Widget host</h1>

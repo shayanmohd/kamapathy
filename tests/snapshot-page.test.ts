@@ -18,6 +18,7 @@ import {
   LOCATOR_GROUP,
   type LocatorSource,
 } from "../electron/agent/locators";
+import { createFrameGroups } from "../electron/agent/frames/groups";
 import { RefBook } from "../electron/agent/refs";
 import { createResolver, type Resolver } from "../electron/agent/resolve";
 import { parseSelector } from "../electron/agent/selectors";
@@ -274,9 +275,18 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       "Frame button",
       "Frame far button",
     ]);
+    // A frame from another origin is read by its own group, so the scope
+    // stops at the owner and the main process reads that frame.
     expect(await snapshot(scopeTo("#outer"))).toMatchObject({
-      ok: false,
-      code: "cross_origin_frame",
+      text: "",
+      interactables: [
+        {
+          role: "iframe",
+          label: "Other origin",
+          crossOrigin: true,
+          contentFrame: "0",
+        },
+      ],
     });
     // A scope selector matches at level none, where hidden copies count.
     expect(await snapshot(scopeTo(".twin"))).toMatchObject({
@@ -670,17 +680,30 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
 
     // The snapshot path puts each locator on its control, in both formats,
     // and keeps the page's sources to itself.
+    // The snapshot reads each frame group of the page, so it is given the
+    // tab's frame map as the server gives it.
+    const groups = createFrameGroups(opened, { refs, tabId: "tab-1" });
     const snapshots = createSnapshots({
-      controller: {} as AutomationController,
-      evaluatePage: (tabId, tabSession, operation, payload, deadline, inner) =>
+      controller: { state: { tabs: [] } } as unknown as AutomationController,
+      evaluatePage: (
+        tabId,
+        tabSession,
+        operation,
+        payload,
+        deadline,
+        inner,
+        frameId,
+      ) =>
         resolver.run(tabId, tabSession, operation, payload, {
           deadline,
           namespace: "snapshots",
           signal: inner?.signal,
           guard: inner?.guard,
+          ...(frameId === undefined ? {} : { frameId }),
         }),
       resolver,
       namespace: () => "snapshots",
+      frames: { for: () => groups, dispose: () => {} },
     });
     const take = (request: Partial<SnapshotRequest> = {}) =>
       snapshots.take(

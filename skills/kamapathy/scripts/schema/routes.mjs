@@ -494,6 +494,12 @@ const FIELDS = {
   },
 };
 
+// A snapshot reads every web frame of the page, so an iframe entry says
+// which frame it opens and whether that frame was read, and the snapshot
+// counts the frames it left out.
+const SNAPSHOT_RESPONSE =
+  "snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread";
+
 const route = (method, path, summary, response, body, options = {}) => ({
   method,
   path,
@@ -860,7 +866,7 @@ export const ROUTES = [
     "GET",
     "/tabs/:id/snapshot",
     "Reads a compact snapshot.",
-    "snapshot",
+    SNAPSHOT_RESPONSE,
     null,
     { budget: 30000, follow: true },
   ),
@@ -868,7 +874,7 @@ export const ROUTES = [
     "POST",
     "/tabs/:id/snapshot",
     "Reads bounded page text and controls with refs.",
-    "snapshot",
+    SNAPSHOT_RESPONSE,
     FIELDS.snapshot,
     {
       budget: 30000,

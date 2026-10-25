@@ -126,6 +126,14 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     );
   const byLabel = (listing: any, label: string) =>
     listing.interactables.find((control: any) => control.label === label);
+  // A read given a frame context reports this document's own parts, which
+  // the main process composes with the frames inside it.
+  const entries = (listing: any) =>
+    listing.controls.map((control: any) => control.entry);
+  const partText = (listing: any) =>
+    listing.text.map((part: any) => part.value).join("");
+  const partOutline = (listing: any) =>
+    listing.outline.map((item: any) => item.line).join("\n");
   const frameAt = (path: string) =>
     page.frames().find((frame) => frame.url().endsWith(path))!;
 
@@ -338,20 +346,21 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     ).toEqual({ local: "1", readable: false });
     const listing = await snapshot({ frameContext: { group: "", tier: 0 } });
     expect(listing.group).toBe("");
-    const entry = byLabel(listing, "Card details");
+    const entry = entries(listing).find(
+      (control: any) => control.label === "Card details",
+    );
     expect(entry).toMatchObject({
       role: "iframe",
       crossOrigin: true,
       key: "f-other",
+      contentFrame: "1",
     });
     // The entry sits in the top document, so it carries no frame path.
     expect(entry.frame).toBeUndefined();
     // Nothing of the frame's own document is read in this world.
-    expect(listing.text).not.toContain("Card number");
+    expect(partText(listing)).not.toContain("Card number");
     expect(
-      listing.interactables.some(
-        (control: any) => control.label === "Card number",
-      ),
+      entries(listing).some((control: any) => control.label === "Card number"),
     ).toBe(false);
     // One placeholder, where the walk met the owner, with the frame's own path.
     expect(listing.placeholders).toHaveLength(1);
@@ -435,13 +444,15 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     await open("/frames/tracker");
     const context = { frameContext: { group: "", tier: 0 } };
     const listing = await snapshot(context);
-    expect(byLabel(listing, "Tracker")).toBeUndefined();
-    expect(listing.text).not.toContain("Tracker");
+    expect(
+      entries(listing).find((control: any) => control.label === "Tracker"),
+    ).toBeUndefined();
+    expect(partText(listing)).not.toContain("Tracker");
     // The placeholders are what carries a frame's content into the page's
     // text, and a tracking pixel leaves none.
     expect(listing.placeholders.map((item: any) => item.local)).toEqual(["0"]);
     expect(
-      (await snapshot({ ...context, format: "outline" })).outline,
+      partOutline(await snapshot({ ...context, format: "outline" })),
     ).not.toContain("Tracker");
     // The same frame at 8 by 8 is listed.
     await page.evaluate(() => {
@@ -450,7 +461,9 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
       pixel.style.height = "8px";
     });
     const grown = await snapshot(context);
-    expect(byLabel(grown, "Tracker")).toMatchObject({
+    expect(
+      entries(grown).find((control: any) => control.label === "Tracker"),
+    ).toMatchObject({
       role: "iframe",
       crossOrigin: true,
     });
@@ -459,7 +472,7 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
       "1",
     ]);
     expect(
-      (await snapshot({ ...context, format: "outline" })).outline,
+      partOutline(await snapshot({ ...context, format: "outline" })),
     ).toContain("Tracker");
   }, 20000);
 

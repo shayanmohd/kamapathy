@@ -136,8 +136,12 @@ class SocketHost extends EventEmitter {
 }
 
 // Starts Playwright's Chromium with a debugging port and a throwaway
-// profile. Pages are opened and closed through its HTTP endpoints.
-export async function launchChromium(): Promise<ChromiumBrowser> {
+// profile. Pages are opened and closed through its HTTP endpoints. `args`
+// adds switches, such as the ones that keep cross-site frames in the page's
+// own process.
+export async function launchChromium(options?: {
+  args?: readonly string[];
+}): Promise<ChromiumBrowser> {
   const profile = mkdtempSync(join(tmpdir(), "kamapathy-cdp-"));
   const browser = spawn(
     executable,
@@ -146,6 +150,7 @@ export async function launchChromium(): Promise<ChromiumBrowser> {
       "--remote-debugging-port=0",
       `--user-data-dir=${profile}`,
       "--no-first-run",
+      ...(options?.args ?? []),
       "about:blank",
     ],
     { stdio: "ignore" },

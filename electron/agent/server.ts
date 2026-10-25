@@ -295,6 +295,7 @@ export async function startAutomation(
     referenceSession,
     dispatchers,
     refs,
+    frames,
   });
   const tabLog = createTabLog();
   const receipts = createReceipts({

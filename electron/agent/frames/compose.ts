@@ -1,4 +1,4 @@
-import type { Area } from "./geometry";
+import type { Area, OwnerBox } from "./geometry";
 
 // Section 9's composition, in the main process: several frame group reads of
 // one page become one snapshot. A frame's content goes where its owner sits,
@@ -17,8 +17,14 @@ export interface OwnerPlaceholder {
   /** The rank the read gave the owner, as controls carry it. */
   tier: number;
   box: Area;
+  /** The owner's content box, folded through the frames of its own group. */
+  content?: OwnerBox;
+  /** The part of the top viewport the owner shows, in its group's pixels. */
+  area?: Area;
   origin?: string;
   readable: boolean;
+  /** An extension, PDF viewer, internal or file frame, never read. */
+  blocked?: true;
 }
 /** What one frame group's read reports, in that group's own paths. */
 export interface GroupRead {

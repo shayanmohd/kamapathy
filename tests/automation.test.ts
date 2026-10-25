@@ -47,6 +47,7 @@ import {
   socketFetch,
   testSocket,
 } from "./fake-automation";
+import { attachedTarget, frameOwners } from "./fake-cdp";
 
 // The size a PNG's header reports.
 const pngSize = (image: ArrayBuffer): number[] => {
@@ -1197,6 +1198,392 @@ describe("local automation socket", () => {
       expect(refused.status, JSON.stringify(body)).toBe(400);
       expect(refused.body.error.code, JSON.stringify(body)).toBe(code);
     }
+  });
+
+  // A page with frames: each child reported on the page session, the ones
+  // Chromium moved to their own process announced as their own target, and
+  // the owner binding each frame's world answers.
+  type FrameSpec = {
+    frameId: string;
+    parent?: string;
+    url: string;
+    local: string;
+    readable?: boolean;
+    sessionId?: string;
+  };
+  const addFrames = async (specs: FrameSpec[]) => {
+    const page = controller.contents;
+    frameOwners(
+      page.debugger,
+      Object.fromEntries(
+        specs.map(({ frameId, local, readable }) => [
+          frameId,
+          { local, readable: readable === true },
+        ]),
+      ),
+    );
+    for (const spec of specs) {
+      page.emitProtocol("Page.frameAttached", {
+        frameId: spec.frameId,
+        parentFrameId: spec.parent ?? "main",
+      });
+      if (spec.sessionId === undefined) {
+        page.emitProtocol("Page.frameNavigated", {
+          frame: {
+            id: spec.frameId,
+            parentId: spec.parent ?? "main",
+            loaderId: `loader-${spec.frameId}`,
+            url: spec.url,
+            securityOrigin: new URL(spec.url).origin,
+            mimeType: "text/html",
+          },
+        });
+        continue;
+      }
+      attachedTarget(page.debugger, {
+        sessionId: spec.sessionId,
+        targetId: spec.frameId,
+        url: spec.url,
+      });
+      // A frame in its own process is read through that session, which the
+      // tab sets up before a snapshot can reach it.
+      await expect
+        .poll(() =>
+          page.debugger.sent.some(
+            (command) => command.sessionId === spec.sessionId,
+          ),
+        )
+        .toBe(true);
+    }
+  };
+  // The frame group a read ran in, as its payload carries it.
+  const groupOf = (code: string) =>
+    /"frameContext":\{"group":"([^"]*)"/.exec(code)?.[1];
+  // What one group's read answers: its text in parts, its ranked controls
+  // and the frame owners its world could not read.
+  const groupRead = (
+    group: string,
+    read: {
+      text?: { order: number; value: string }[];
+      controls?: {
+        order: number;
+        tier: number;
+        local?: string;
+        entry: Record<string, unknown>;
+      }[];
+      owners?: Record<string, unknown>[];
+    },
+  ) => {
+    const text = read.text ?? [];
+    return {
+      url: "https://example.com/",
+      title: "Example",
+      group,
+      text,
+      controls: (read.controls ?? []).map((control) => ({
+        local: "",
+        ...control,
+      })),
+      outline: [],
+      placeholders: read.owners ?? [],
+      chars: text.reduce((total, part) => total + part.value.length, 0),
+    };
+  };
+  const owner = (local: string, order: number, key?: string, tier = 6) => ({
+    ...(key === undefined ? {} : { key }),
+    local,
+    order,
+    tier,
+    box: { left: 0, top: order * 60, right: 300, bottom: order * 60 + 50 },
+    readable: false,
+  });
+  const frameEntry = (
+    label: string,
+    ref: string,
+    contentFrame: string,
+    key?: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    index: 0,
+    ref,
+    tag: "iframe",
+    role: "iframe",
+    label,
+    selector: "iframe",
+    disabled: false,
+    crossOrigin: true,
+    contentFrame,
+    ...(key === undefined ? {} : { key }),
+    ...extra,
+  });
+  const control = (
+    label: string,
+    ref: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    index: 0,
+    ref,
+    tag: "button",
+    role: "button",
+    label,
+    selector: "button",
+    disabled: false,
+    ...extra,
+  });
+
+  it("a snapshot counts unread frames", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Nine frames one inside another, a frame whose read fails, and a frame
+    // whose own session ended.
+    const chain = Array.from({ length: 9 }, (_unused, depth) => ({
+      frameId: `deep-${depth}`,
+      ...(depth === 0 ? {} : { parent: `deep-${depth - 1}` }),
+      url: `https://deep${depth}.example/`,
+      local: "0",
+    }));
+    await addFrames([
+      ...chain,
+      { frameId: "card", url: "https://pay.example/", local: "1" },
+      {
+        frameId: "gone",
+        url: "https://map.example/",
+        local: "2",
+        sessionId: "gone-session",
+      },
+    ]);
+    page.emitProtocol("Target.detachedFromTarget", {
+      sessionId: "gone-session",
+      targetId: "gone",
+    });
+    page.result = (code: string) => {
+      const group = groupOf(code);
+      if (group === "")
+        return groupRead("", {
+          text: [{ order: 0, value: "Checkout" }],
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Deep form", "@e11", "0", "deep-0"),
+            },
+            {
+              order: 2,
+              tier: 6,
+              entry: frameEntry("Card details", "@e12", "1", "card"),
+            },
+            { order: 3, tier: 6, entry: frameEntry("Map", "@e13", "2", "gone") },
+          ],
+          owners: [
+            owner("0", 1, "deep-0"),
+            owner("1", 2, "card"),
+            owner("2", 3, "gone"),
+          ],
+        });
+      // The frame that loaded another document while it was read.
+      if (group === "1")
+        return {
+          ok: false,
+          code: "page_changed",
+          error: "The page changed during this operation. Take a new snapshot.",
+        };
+      const depth = (group ?? "").split("/").length;
+      return groupRead(group ?? "", {
+        owners: depth < 9 ? [owner("0", 1, `deep-${depth}`)] : [],
+      });
+    };
+    const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      maxControls: 2,
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // The card frame is pending, the map frame unavailable and the ninth
+    // nested frame past the levels one read reaches, listed or not.
+    expect(body.unreadFrames).toBe(3);
+    expect(
+      body.interactables.map(
+        (entry: Record<string, unknown>) => [
+          entry.label,
+          entry.content,
+          entry.origin,
+          entry.contentFrame,
+        ],
+      ),
+    ).toEqual([
+      ["Deep form", "read", "https://deep0.example", "0"],
+      ["Card details", "pending", "https://pay.example", "1"],
+    ]);
+    expect(body.interactables[0].key).toBeUndefined();
+    // Nothing left unread, nothing reported.
+    page.result = groupRead("", { text: [{ order: 0, value: "Checkout" }] });
+    const again = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(again.status).toBe(200);
+    expect((await again.json()).unreadFrames).toBeUndefined();
+  });
+
+  it("the control budget ranks frame controls at the owner's tier", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "near", url: "https://near.example/", local: "0" },
+      { frameId: "far", url: "https://far.example/", local: "1" },
+    ]);
+    page.result = (code: string) => {
+      const group = groupOf(code);
+      if (group === "")
+        return groupRead("", {
+          text: [{ order: 0, value: "Pay" }],
+          controls: [
+            { order: 1, tier: 6, entry: control("Save", "@e21") },
+            {
+              order: 2,
+              tier: 6,
+              entry: frameEntry("Card details", "@e22", "0", "near"),
+            },
+            {
+              order: 4,
+              tier: 10,
+              entry: frameEntry("Old offer", "@e23", "1", "far"),
+            },
+          ],
+          // The second owner is off screen, which its rank says.
+          owners: [owner("0", 2, "near"), owner("1", 4, "far", 10)],
+        });
+      if (group === "0")
+        return groupRead("0", {
+          controls: [
+            { order: 1, tier: 0, entry: control("Card number", "@e24") },
+            { order: 2, tier: 6, entry: control("Pay now", "@e25") },
+          ],
+        });
+      return groupRead("1", {
+        controls: [{ order: 1, tier: 0, entry: control("Claim offer", "@e26") }],
+      });
+    };
+    const take = async (maxControls: number) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+        maxControls,
+        header: false,
+      });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    // Every control, each carrying the path of its own document.
+    const whole = await take(6);
+    expect(
+      whole.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Save", undefined],
+      ["Card details", undefined],
+      ["Card number", "0"],
+      ["Pay now", "0"],
+      ["Old offer", undefined],
+      ["Claim offer", "1"],
+    ]);
+    // Past the budget a frame control keeps the more urgent of its own rank
+    // and its owner's, and an off-screen owner's controls go last.
+    const part = await take(3);
+    expect(
+      part.interactables.map((entry: Record<string, unknown>) => entry.label),
+    ).toEqual(["Save", "Card details", "Card number"]);
+    expect(part.omittedControls).toBe(3);
+  });
+
+  it("a frame that loads another document mid-read is listed as pending, and a main-frame navigation is still page_changed", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    const top = () =>
+      groupRead("", {
+        text: [{ order: 0, value: "Checkout" }],
+        controls: [
+          {
+            order: 1,
+            tier: 6,
+            entry: frameEntry("Card details", "@e31", "0", "card"),
+          },
+        ],
+        owners: [owner("0", 1, "card")],
+      });
+    page.result = (code: string) =>
+      groupOf(code) === ""
+        ? top()
+        : {
+            ok: false,
+            code: "page_changed",
+            error:
+              "The page changed during this operation. Take a new snapshot.",
+          };
+    const first = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(first.status).toBe(200);
+    const body = await first.json();
+    expect(body.interactables[0].content).toBe("pending");
+    expect(body.unreadFrames).toBe(1);
+    // The page itself loading another document still ends the snapshot.
+    page.result = (code: string) => {
+      if (groupOf(code) === "")
+        page.emit("did-start-navigation", {
+          url: "https://example.com/next",
+          isSameDocument: false,
+          isMainFrame: true,
+        });
+      return top();
+    };
+    const changed = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(changed.status).toBe(409);
+    expect((await changed.json()).error.code).toBe("page_changed");
+  });
+
+  it("a blocked frame is listed without an origin", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // An extension frame: the registry blocks it, and the page sees an
+    // address agents never reach.
+    await addFrames([
+      {
+        frameId: "panel",
+        url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+        local: "0",
+      },
+    ]);
+    page.result = groupRead("", {
+      text: [{ order: 0, value: "Shop" }],
+      controls: [
+        {
+          order: 1,
+          tier: 6,
+          entry: frameEntry("Extension panel", "@e41", "0", undefined, {
+            blocked: true,
+          }),
+        },
+      ],
+      owners: [{ ...owner("0", 1), blocked: true }],
+    });
+    const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.interactables[0]).toMatchObject({
+      label: "Extension panel",
+      crossOrigin: true,
+      content: "blocked",
+    });
+    expect(body.interactables[0].origin).toBeUndefined();
+    expect(body.interactables[0].contentFrame).toBeUndefined();
+    expect(body.unreadFrames).toBeUndefined();
   });
 
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {

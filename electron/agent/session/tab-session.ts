@@ -773,12 +773,31 @@ export class TabSession {
       });
       world = made;
     }
-    const { contextId } = await world;
+    // A world another call is still making is waited for no longer than
+    // this step allows, so a frame that stopped answering cannot hold up
+    // the next read of it.
+    const { contextId } = await this.within(world, step);
     // The frame moved on to its next document while the world was made.
     if (this.registry.worldFor(frameId, this.epoch) !== world)
       throw new ContextLostError(false);
     this.handles.set(`${sessionId ?? ""}|${contextId}`, { frameId, world });
     return sessionId === undefined ? { contextId } : { sessionId, contextId };
+  }
+
+  // A promise of another call's, bounded by this step's own deadline.
+  private async within<T>(work: Promise<T>, step: Step): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const left = Math.max(0, step.deadline - Date.now());
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new CdpTimeoutError("page", left)), left);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // A frame's path: its owner element, found on the session hosting its

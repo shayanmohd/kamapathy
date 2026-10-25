@@ -26,9 +26,13 @@ export async function startFormSite() {
   const events = [];
   const requests = [];
   const csrf = randomUUID();
-  const server = createServer(async (request, response) => {
+  // The ports this fixture answers on, in the order it opened them. The same
+  // pages are served on both, so a page can hold a frame of its own name on
+  // the other port beside one from the other loopback name.
+  const ports = [];
+  const handle = async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
-    requests.push({ at: Date.now(), method: request.method, path: url.pathname });
+    requests.push({ at: Date.now(), method: request.method, path: url.pathname, port: request.socket.localPort });
     const send = (title, body, script = '', status = 200) => {
       response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(document(title, body, script));
@@ -68,9 +72,14 @@ export async function startFormSite() {
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...scriptPageHeaders[url.pathname] });
         // A page asking for {{other}} gets this server through its other
-        // loopback name, which makes a frame of it cross origin.
-        const other = `http://${request.headers.host?.startsWith('localhost') ? '127.0.0.1' : 'localhost'}:${server.address().port}`;
-        return response.end(page.replaceAll('{{other}}', other));
+        // loopback name, which makes a frame of it cross origin. {{otherPort}}
+        // keeps the name and changes the port, which Chromium runs in this
+        // page's own process.
+        const here = request.socket.localPort;
+        const name = request.headers.host?.split(':')[0] ?? '127.0.0.1';
+        const other = `http://${name === 'localhost' ? '127.0.0.1' : 'localhost'}:${here}`;
+        const otherPort = `http://${name}:${here === ports[0] ? ports[1] : ports[0]}`;
+        return response.end(page.replaceAll('{{other}}', other).replaceAll('{{otherPort}}', otherPort));
       }
       if (request.method === 'GET' && url.pathname === '/uploads') return send('File upload lab', `<h1>Upload test files</h1><form action="/upload-receipt" method="post" enctype="multipart/form-data"><label for="bundle">App bundle</label><input id="bundle" type="file" name="bundle" accept=".aab" required><section><label for="artwork">Artwork files</label><input id="artwork" style="display:none" type="file" name="artwork" accept="image/png" multiple></section><section hidden><input type="file" id="closed-upload" aria-label="Closed upload"></section><label for="disabled-upload">Disabled upload</label><input type="file" id="disabled-upload" disabled><button type="button" id="replace-upload">Replace bundle input</button><button type="submit">Submit files</button><p id="selected-status" role="status"></p></form>`, `document.querySelector('#replace-upload').onclick=()=>{const input=document.querySelector('#bundle');input.replaceWith(input.cloneNode());};document.querySelector('form').addEventListener('change',()=>{document.querySelector('#selected-status').textContent='Selected '+Array.from(document.querySelectorAll('input[type=file]')).reduce((n,input)=>n+input.files.length,0)+' files';});`);
       if (request.method === 'POST' && url.pathname === '/upload-receipt') {
@@ -133,7 +142,11 @@ export async function startFormSite() {
       }
       return send('Page not found', '<h1>Page not found</h1>', '', 404);
     } catch { return send('Request failed', '<h1>Request failed</h1>', '', 400); }
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { origin: `http://127.0.0.1:${server.address().port}`, forms, submissions, events, requests, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
+  };
+  const servers = [createServer(handle), createServer(handle)];
+  for (const listener of servers) {
+    await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+    ports.push(listener.address().port);
+  }
+  return { origin: `http://127.0.0.1:${ports[0]}`, ports: [...ports], forms, submissions, events, requests, close: () => Promise.all(servers.map(listener => new Promise(resolve => { listener.close(resolve); listener.closeAllConnections(); }))) };
 }
