@@ -13,6 +13,7 @@ export type FieldKind =
   | "ms"
   | "target"
   | "url"
+  | "point"
   | "object";
 export interface Field {
   kind: FieldKind;
@@ -145,6 +146,7 @@ export function outdated(
   option?: string,
 ): Problem;
 export function suggest(name: string, candidates: readonly string[]): string | undefined;
+export function pointFrom(text: unknown): { x: number; y: number } | undefined;
 export function editDistance(a: string, b: string): number;
 export const GLOBAL_FLAGS: readonly { name: string; description: string }[];
 export const ENVIRONMENT: readonly { name: string; description: string }[];

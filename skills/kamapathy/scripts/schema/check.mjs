@@ -55,9 +55,21 @@ function expectation(field) {
       return "an array";
     case "json":
       return "JSON";
+    case "point":
+      return '{ x, y } or "x,y" in pixels';
     default:
       return "an object";
   }
+}
+
+// A point written "x,y", as --position takes it and an option may give it.
+export function pointFrom(text) {
+  const parts = String(text).split(",");
+  if (parts.length !== 2) return undefined;
+  const [x, y] = parts.map((part) =>
+    part.trim() === "" ? Number.NaN : Number(part),
+  );
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined;
 }
 
 function fits(value, field) {
@@ -99,6 +111,16 @@ function fits(value, field) {
       return Array.isArray(value);
     case "json":
       return true;
+    // A point in either spelling, each axis within the bounds it declares.
+    case "point": {
+      const point = typeof value === "string" ? pointFrom(value) : value;
+      return (
+        plain(point) &&
+        Object.entries(field.fields ?? {}).every(([axis, spec]) =>
+          fits(point[axis], spec),
+        )
+      );
+    }
     default:
       return plain(value);
   }
@@ -275,6 +297,24 @@ function argumentFits(value, arg) {
       return arg.values.includes(value);
     case "integer":
       return Number.isInteger(value);
+    // A coordinate or a delta, within the bounds it declares.
+    case "number":
+      return (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        (arg.min === undefined || value >= arg.min) &&
+        (arg.max === undefined || value <= arg.max)
+      );
+    // selectOption's choices: a value, a label, an object naming either, or
+    // an array of those. null and [] clear the select.
+    case "choices": {
+      const one = (item) => typeof item === "string" || plain(item);
+      return (
+        value === null ||
+        one(value) ||
+        (Array.isArray(value) && value.every(one))
+      );
+    }
     case "array":
       return (
         Array.isArray(value) && value.every((item) => typeof item === "string")

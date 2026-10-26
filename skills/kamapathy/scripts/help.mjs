@@ -69,10 +69,11 @@ const GROUPS = [
     (entry) =>
       entry.name.startsWith("Page.") && entry.name.split(".").length === 2,
   ],
+  // page.mouse and page.keyboard, declared under the classes they are.
   [
     "Page controllers",
     (entry) =>
-      entry.name.startsWith("Page.") && entry.name.split(".").length > 2,
+      ["Mouse.", "Keyboard."].some((prefix) => entry.name.startsWith(prefix)),
   ],
 ];
 

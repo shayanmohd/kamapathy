@@ -2499,7 +2499,7 @@ describe("scripted sessions", () => {
     expect(run.stdout).toContain(`Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`);
     expect(run.stdout).toContain('help("page.click") shows one entry; help("errors") lists error codes.');
     expect(run.stdout).toContain("page.click(target, options?)\n");
-    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click.');
+    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click, page.mouse.click.');
     expect(run.stdout).toContain("space.close()\n");
     expect(run.stdout).toContain("page.close()\n");
   }, 20000);
@@ -3097,12 +3097,241 @@ describe("scripted sessions", () => {
     expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { label: "x".repeat(61) }])).toMatchObject({
       code: "invalid_option",
       message:
-        "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { label? }).",
+        "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     });
     expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { labl: "Add to cart" }])).toMatchObject({
       message:
-        'page.click got unknown option "labl". Expected page.click(target, { label? }). Did you mean "label"?',
+        'page.click got unknown option "labl". Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }). Did you mean "label"?',
     });
+  });
+
+  // Section 5's client surface: the element options, both press orders, the
+  // mouse and keyboard controllers, and the release at the end of a run.
+  const current = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL };
+  const pointer = { x: 40, y: 60, buttons: 0, keys: [], modifiers: 0 };
+  const inputAnswers = {
+    ...level3Routes,
+    "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/dblclick": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/hover": { ok: true, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/fill": { ok: true, match: "equivalent", value: "12.50" },
+    "POST /tabs/tab-1/select": { ok: true, values: ["pro", "team"] },
+    "POST /tabs/tab-1/focus": { ok: true },
+    "POST /tabs/tab-1/press": { ok: true, url: tab.url },
+    "POST /tabs/tab-1/mouse/move": { ok: true, input: pointer },
+    "POST /tabs/tab-1/mouse/down": { ok: true, input: { ...pointer, buttons: 1 } },
+    "POST /tabs/tab-1/mouse/up": { ok: true, input: pointer },
+    "POST /tabs/tab-1/mouse/click": { ok: true, url: tab.url, input: pointer },
+    "POST /tabs/tab-1/mouse/wheel": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/down": { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } },
+    "POST /tabs/tab-1/keyboard/up": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/type": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/insert-text": { ok: true },
+    "POST /tabs/tab-1/keyboard/paste": { ok: true, handled: "page" },
+    "POST /tabs/tab-1/input/release": { ok: true, released: ["Shift", "left"] },
+  };
+  // One page of an agent space, against an app of this client's own level.
+  const inputPage = async (api, health = current) => {
+    const client = await connect({ env, fetch: api.fetch, health });
+    return (await client.space("space-1")).open("https://example.test/reserve");
+  };
+  const routeOf = (key) => schema.ROUTES.find((item) => schema.routeKey(item) === key);
+
+  it("takes press in both argument orders", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const body = () => api.requests.at(-1).body;
+    await page.press("Enter");
+    expect(body()).toEqual({ key: "Enter" });
+    await page.press("Enter", "@e3");
+    expect(body()).toEqual({ key: "Enter", ref: "@e3" });
+    await page.press("@e3", "Enter");
+    expect(body()).toEqual({ key: "Enter", ref: "@e3" });
+    await page.press("#search", "Shift+KeyA");
+    expect(body()).toEqual({ key: "Shift+KeyA", selector: "#search" });
+    await page.press("ControlOrMeta+KeyS", "@e3", { delay: 50, timeout: 1000 });
+    expect(body()).toEqual({ key: "ControlOrMeta+KeyS", ref: "@e3", delayMs: 50, timeoutMs: 1000 });
+    // A lone argument that is no chord is not guessed at.
+    const sent = api.requests.length;
+    await expect(page.press("@e3")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
+    await expect(page.press("#search")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
+    expect(api.requests).toHaveLength(sent);
+    // keyboard.press is the same route with no target.
+    await page.keyboard.press("Shift+Tab", { delay: 20 });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/press",
+      body: { key: "Shift+Tab", delayMs: 20 },
+    });
+  });
+
+  it("checks the new options before sending", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const sent = api.requests.length;
+    await expect(page.click("@e1", { clickCount: 4 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.click",
+      option: "clickCount",
+    });
+    await expect(page.click("@e1", { button: "back" })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.click",
+      option: "button",
+    });
+    await expect(page.click("@e1", { delayMs: 10 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "delayMs",
+      suggestion: "delay",
+    });
+    await expect(page.dblclick("@e1", { clickCount: 2 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.dblclick",
+      option: "clickCount",
+    });
+    await expect(page.hover("@e1", { position: "10" })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "position",
+    });
+    await expect(page.keyboard.type("x".repeat(2001))).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.keyboard.type",
+    });
+    await expect(page.mouse.move(0, "40")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.mouse.move",
+    });
+    await expect(page.mouse.wheel(0, 20000)).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(api.requests).toHaveLength(sent);
+    // A lone choice, an object and null all reach the route as its array.
+    for (const [values, chosen] of [
+      ["pro", ["pro"]],
+      [{ label: "Pro" }, [{ label: "Pro" }]],
+      [null, []],
+      [[], []],
+      [["pro", "team"], ["pro", "team"]],
+    ]) {
+      await page.selectOption("@e1", values);
+      expect(api.requests.at(-1).body, JSON.stringify(values)).toEqual({ ref: "@e1", values: chosen });
+    }
+    // Both position spellings reach the route as { x, y }.
+    await page.click("@e1", { position: "10,20" });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", position: { x: 10, y: 20 } });
+    await page.dragAndDrop("@e1", "#zone", {
+      sourcePosition: { x: 1, y: 2 },
+      targetPosition: "3,4",
+      force: true,
+      timeout: 2000,
+    });
+    expect(api.requests.at(-1).body).toEqual({
+      source: { ref: "@e1" },
+      target: { selector: "#zone" },
+      sourcePosition: { x: 1, y: 2 },
+      targetPosition: { x: 3, y: 4 },
+      force: true,
+      timeoutMs: 2000,
+    });
+    // page.drag keeps its own signature, and fill, focus and the raw routes
+    // send what their options name.
+    await page.drag("@e1", "#zone");
+    expect(api.requests.at(-1).body).toEqual({ source: { ref: "@e1" }, target: { selector: "#zone" } });
+    await page.fill("@e1", "Avery", { append: true, timeout: 1000 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", value: "Avery", append: true, timeoutMs: 1000 });
+    await page.focus("@e1", { timeout: 0 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", timeoutMs: 0 });
+    await page.mouse.move(40, 60, { steps: 10 });
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/move", body: { x: 40, y: 60, steps: 10 } });
+    await page.mouse.down({ button: "right" });
+    expect(api.requests.at(-1).body).toEqual({ button: "right" });
+    await page.mouse.up();
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/up", body: {} });
+    await page.mouse.click(5, 6, { clickCount: 2, delay: 30 });
+    expect(api.requests.at(-1).body).toEqual({ x: 5, y: 6, clickCount: 2, delayMs: 30 });
+    await page.mouse.dblclick(5, 6, { delay: 30 });
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/click", body: { x: 5, y: 6, clickCount: 2, delayMs: 30 } });
+    await page.mouse.wheel(0, 120);
+    expect(api.requests.at(-1).body).toEqual({ deltaX: 0, deltaY: 120 });
+    await page.keyboard.down("Shift");
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/down", body: { key: "Shift" } });
+    await page.keyboard.up("Shift");
+    expect(api.requests.at(-1).body).toEqual({ key: "Shift" });
+    await page.keyboard.type("hello", { delay: 10 });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello", delayMs: 10 });
+    await page.keyboard.insertText("hello");
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/insert-text", body: { text: "hello" } });
+    expect(await page.keyboard.paste("hello")).toEqual({ ok: true, handled: "page" });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello" });
+    await page.keyboard.paste({ text: "hello", html: "<b>hello</b>" });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello", html: "<b>hello</b>" });
+    // The paste body may hold the whole text and HTML the route takes.
+    await page.keyboard.paste({ text: "é".repeat(16384), html: "é".repeat(32768) });
+    expect(api.requests.at(-1).body.text).toHaveLength(16384);
+    await expect(page.keyboard.paste({ text: 5 })).rejects.toMatchObject({ code: "invalid_option", option: "text" });
+  });
+
+  it("sends the HTTP timeouts the spec lists", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const timeoutOf = (key, body) => httpTimeout(schema.requestBudget(routeOf(key), body), routeOf(key));
+    // A delayed triple click: the wait for an actionable target, one delay
+    // per gap, the settle and load wait, and the client's own 5000 ms.
+    await page.click("@e1", { clickCount: 3, delay: 500, timeout: 3000 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", clickCount: 3, delayMs: 500, timeoutMs: 3000 });
+    expect(timeoutOf("POST /tabs/:id/click", api.requests.at(-1).body)).toBe(3000 + 2500 + 15100 + 5000);
+    for (const name of ["hover", "fill", "select", "focus"])
+      expect(timeoutOf(`POST /tabs/:id/${name}`, { timeoutMs: 4000 }), name).toBe(4000 + 15000);
+    for (const name of [
+      "mouse/move",
+      "mouse/down",
+      "mouse/up",
+      "mouse/wheel",
+      "keyboard/down",
+      "keyboard/up",
+      "keyboard/insert-text",
+      "keyboard/paste",
+    ])
+      expect(timeoutOf(`POST /tabs/:id/${name}`, {}), name).toBe(15000);
+    expect(timeoutOf("POST /tabs/:id/keyboard/type", { text: "hello", delayMs: 100 })).toBe(10000 + 500 + 5000);
+    // input/release declares a plain budget, which the client passes itself.
+    const release = routeOf("POST /tabs/:id/input/release");
+    expect(httpTimeout(schema.requestBudget(release), release)).toBe(15000);
+    await page.releaseInput();
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/input/release", body: {} });
+  });
+
+  it("releases input at the end of a run", async () => {
+    const released = [];
+    const table = {
+      ...sectionTwo,
+      "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
+      "POST /tabs/tab-2/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
+      "POST /tabs/tab-1/input/release": () => {
+        released.push("tab-1");
+        return Response.json({ ok: true, released: ["Shift"] });
+      },
+      // A failed release is not the script's business.
+      "POST /tabs/tab-2/input/release": () => {
+        released.push("tab-2");
+        return Response.json({ error: { code: "tab_not_found", message: "Gone." } }, { status: 404 });
+      },
+    };
+    const clicked = await runIn(
+      'const [first, second] = await (await space("space-1")).tabs(); await first.click("@e2"); await second.click("@e2"); process.stdout.write("done\\n");',
+      table,
+      { options: { health: current } },
+    );
+    expect(clicked).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
+    expect(released).toEqual(["tab-1", "tab-2"]);
+    expect(clicked.api.requests.filter((item) => item.path.endsWith("/input/release"))).toHaveLength(2);
+    // A page the run only listed holds nothing to let go of.
+    released.length = 0;
+    const listed = await runIn(
+      'await (await space("space-1")).tabs(); process.stdout.write("listed\\n");',
+      table,
+      { options: { health: current } },
+    );
+    expect(listed).toMatchObject({ status: 0, stdout: "listed\n", stderr: "" });
+    expect(released).toEqual([]);
   });
 });
 

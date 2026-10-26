@@ -15,6 +15,8 @@ import { updateRoutes } from "../electron/agent/routes/update.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
 import {
   Client,
+  Keyboard,
+  Mouse,
   Page,
   Space,
   schema,
@@ -98,6 +100,9 @@ describe("API schema", () => {
       Client: new Client(send),
       Space: new Space(send, { id: "s", name: "n", owner: "agent" }),
       Page: new Page(send, { id: "t", spaceId: "s", url: "", title: "" }),
+      // A page's own controllers, which it builds in its constructor.
+      Mouse: new Mouse(send),
+      Keyboard: new Keyboard(send),
     };
     for (const [type, instance] of Object.entries(instances)) {
       const prototype = Object.getPrototypeOf(instance);
@@ -638,17 +643,17 @@ describe("API schema", () => {
     expect(checkCall(click, [])).toEqual({
       code: "invalid_argument",
       message:
-        "page.click got no target. Expected page.click(target, { label? }).",
+        "page.click got no target. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
       fields: {
         entry: "page.click",
-        expected: "page.click(target, { label? })",
+        expected: "page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? })",
       },
     });
     expect(checkCall(click, ["#a", "#b"])?.message).toBe(
-      "page.click got a string instead of an options object. Expected page.click(target, { label? }).",
+      "page.click got a string instead of an options object. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     );
     expect(checkCall(click, [42])?.message).toBe(
-      "page.click got a number for target. Expected page.click(target, { label? }).",
+      "page.click got a number for target. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     );
     expect(checkCall(click, ["@e1", undefined])).toBeNull();
     expect(checkCall(click, ["@e1", { label: "Add to cart" }])).toBeNull();

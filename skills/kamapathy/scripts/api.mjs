@@ -7,20 +7,39 @@ import { resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { KamapathyError } from "./lib/errors.mjs";
 import { formatSnapshot } from "./lib/format.mjs";
-import { readUploadFiles, target, uploadRef } from "./lib/input.mjs";
+import {
+  choices,
+  pointerOptions,
+  pressArguments,
+  readUploadFiles,
+  target,
+  uploadRef,
+} from "./lib/input.mjs";
 import {
   isLabel,
   pageBudgetFrom,
   resolveLabels,
   Session,
 } from "./lib/request.mjs";
-import { checkCall, findEntry } from "./schema/index.mjs";
+import {
+  checkCall,
+  findEntry,
+  matchRoute,
+  requestBudget,
+} from "./schema/index.mjs";
 
 export { help } from "./help.mjs";
 export { KamapathyError } from "./lib/errors.mjs";
 export * as schema from "./schema/index.mjs";
 
 const UPLOAD_BODY_LIMIT = 24 * 1024 * 1024;
+const PASTE_BODY_LIMIT = 192 * 1024;
+// input/release declares a plain budget, which a request does not read from
+// its route, so the release passes the route's own. The route arrived with
+// this API level, and an older app is never asked for it.
+const RELEASE_ROUTE = matchRoute("POST", "/tabs/:id/input/release");
+const RELEASE_BUDGET_MS = requestBudget(RELEASE_ROUTE);
+const RELEASE_LEVEL = RELEASE_ROUTE.since;
 
 // The label an input method was given, for its body.
 const labelOf = (options) =>
@@ -114,6 +133,32 @@ const labelOf = (options) =>
  * @typedef {object} ActionOptions
  * @property {string} [label] A few words naming this step, at most 60
  * characters, shown by the agent's cursor and in the agent bar.
+ */
+/**
+ * @typedef {{ x: number, y: number }} Point A point in viewport CSS pixels.
+ */
+/**
+ * @typedef {object} PointerOptions What a click or dblclick takes.
+ * @property {"left" | "middle" | "right"} [button]
+ * @property {number} [clickCount] 1 to 3; not on dblclick.
+ * @property {number} [delay] How long each press is held, 0 to 5000 ms.
+ * @property {Point | string} [position] Where in the element to act,
+ * as { x, y } or "x,y" from its top left corner.
+ * @property {boolean} [force] Act even when something covers the target.
+ * @property {number} [timeout] How long to wait for a target that can take
+ * the input, 0 to 60000 ms, 3000 by default.
+ * @property {string} [label]
+ */
+/**
+ * @typedef {{ value?: string, label?: string, index?: number }} SelectChoice
+ */
+/**
+ * @typedef {object} InputState What a page's mouse and keyboard hold.
+ * @property {number} x
+ * @property {number} y
+ * @property {number} buttons Left 1, right 2, middle 4.
+ * @property {string[]} keys
+ * @property {number} modifiers Alt 1, Control 2, Meta 4, Shift 8.
  */
 /**
  * @typedef {object} Action One batch step, as documented in actions.md.
@@ -248,6 +293,174 @@ async function call(session, name, args, send) {
   }
 }
 
+/**
+ * One page's mouse, kept in the main process: it moves, presses and scrolls
+ * where it stands, without resolving a target. Coordinates are viewport CSS
+ * pixels of the top frame, as snapshots and screenshots give them.
+ */
+export class Mouse {
+  #send;
+  /**
+   * @param {(name: string, args: unknown[], route: string, body: object, options?: object) => Promise<any>} send
+   */
+  constructor(send) {
+    this.#send = send;
+  }
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @param {{ steps?: number }} [options] 1 to 100 events, 1 by default.
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  move(x, y, options = {}) {
+    return this.#send("Mouse.move", [x, y, options], "mouse/move", {
+      x,
+      y,
+      ...pointerOptions(options, "page.mouse.move"),
+    });
+  }
+  /**
+   * @param {{ button?: "left" | "middle" | "right", clickCount?: number }} [options]
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  down(options = {}) {
+    return this.#send(
+      "Mouse.down",
+      [options],
+      "mouse/down",
+      pointerOptions(options, "page.mouse.down"),
+    );
+  }
+  /**
+   * @param {{ button?: "left" | "middle" | "right", clickCount?: number }} [options]
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  up(options = {}) {
+    return this.#send(
+      "Mouse.up",
+      [options],
+      "mouse/up",
+      pointerOptions(options, "page.mouse.up"),
+    );
+  }
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @param {{ button?: "left" | "middle" | "right", clickCount?: number, delay?: number }} [options]
+   * @returns {Promise<{ ok: true, url: string, input: InputState, loading?: true }>}
+   */
+  click(x, y, options = {}) {
+    return this.#send("Mouse.click", [x, y, options], "mouse/click", {
+      x,
+      y,
+      ...pointerOptions(options, "page.mouse.click"),
+    });
+  }
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @param {{ button?: "left" | "middle" | "right", delay?: number }} [options]
+   * @returns {Promise<{ ok: true, url: string, input: InputState, loading?: true }>}
+   */
+  dblclick(x, y, options = {}) {
+    return this.#send("Mouse.dblclick", [x, y, options], "mouse/click", {
+      x,
+      y,
+      clickCount: 2,
+      ...pointerOptions(options, "page.mouse.dblclick"),
+    });
+  }
+  /**
+   * @param {number} deltaX
+   * @param {number} deltaY
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  wheel(deltaX, deltaY) {
+    return this.#send("Mouse.wheel", [deltaX, deltaY], "mouse/wheel", {
+      deltaX,
+      deltaY,
+    });
+  }
+}
+
+/**
+ * One page's keyboard: it holds keys, presses chords, types text and pastes
+ * without ever using the system clipboard.
+ */
+export class Keyboard {
+  #send;
+  /**
+   * @param {(name: string, args: unknown[], route: string, body: object, options?: object) => Promise<any>} send
+   */
+  constructor(send) {
+    this.#send = send;
+  }
+  /**
+   * @param {string} key One key name or printable character, not a chord.
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  down(key) {
+    return this.#send("Keyboard.down", [key], "keyboard/down", { key });
+  }
+  /**
+   * @param {string} key A key this page holds.
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  up(key) {
+    return this.#send("Keyboard.up", [key], "keyboard/up", { key });
+  }
+  /**
+   * @param {string} chord A key name, a printable character or a chord.
+   * @param {{ delay?: number }} [options]
+   * @returns {Promise<{ ok: true, url: string, loading?: true }>}
+   */
+  press(chord, options = {}) {
+    return this.#send("Keyboard.press", [chord, options], "press", {
+      key: chord,
+      ...pointerOptions(options, "page.keyboard.press"),
+    });
+  }
+  /**
+   * @param {string} text At most 2000 characters.
+   * @param {{ delay?: number }} [options]
+   * @returns {Promise<{ ok: true, input: InputState }>}
+   */
+  type(text, options = {}) {
+    return this.#send("Keyboard.type", [text, options], "keyboard/type", {
+      text,
+      ...pointerOptions(options, "page.keyboard.type"),
+    });
+  }
+  /**
+   * @param {string} text At most 16384 characters.
+   * @returns {Promise<{ ok: true }>}
+   */
+  insertText(text) {
+    return this.#send("Keyboard.insertText", [text], "keyboard/insert-text", {
+      text,
+    });
+  }
+  /**
+   * Offers the page a paste in a DataTransfer of its own, and inserts the
+   * plain text when the page does not take it.
+   * @param {string | { text: string, html?: string }} input
+   * @returns {Promise<{ ok: true, handled: "page" | "text" }>}
+   */
+  paste(input) {
+    const given = typeof input === "string" ? { text: input } : input;
+    return this.#send(
+      "Keyboard.paste",
+      [input],
+      "keyboard/paste",
+      {
+        text: given?.text,
+        ...(given?.html === undefined ? {} : { html: given.html }),
+      },
+      { limit: PASTE_BODY_LIMIT },
+    );
+  }
+}
+
 /** One tab in an agent space. */
 export class Page {
   #session;
@@ -273,21 +486,33 @@ export class Page {
     this.url = tab.url;
     /** @type {string} Last known title; navigate and snapshot refresh it. */
     this.title = tab.title;
+    // The controllers send on this page's tab, under their own entries.
+    const input = (name, args, route, body, options) =>
+      call(this.#session, name, args, async () => {
+        await this.#found();
+        return this.#post(route, body, options);
+      });
+    /** @type {Mouse} This page's mouse. */
+    this.mouse = new Mouse(input);
+    /** @type {Keyboard} This page's keyboard. */
+    this.keyboard = new Keyboard(input);
   }
   [REFRESH](tab) {
     for (const key of PAGE_FIELDS)
       if (tab[key] !== undefined) this[key] = tab[key];
     return this;
   }
+  // A page from space.page(label) finds its tab on first use, once.
+  async #found() {
+    if (this.id !== undefined) return;
+    const [tab] = await resolveLabels(this.#session, this.spaceId, [
+      this.label,
+    ]);
+    this[REFRESH](tab);
+  }
   #call(name, args, send) {
     return call(this.#session, `Page.${name}`, args, async () => {
-      // A page from space.page(label) finds its tab on first use, once.
-      if (this.id === undefined) {
-        const [tab] = await resolveLabels(this.#session, this.spaceId, [
-          this.label,
-        ]);
-        this[REFRESH](tab);
-      }
+      await this.#found();
       return send();
     });
   }
@@ -333,41 +558,112 @@ export class Page {
     );
   }
   /**
+   * Clicks a control, waiting until it can take the press.
    * @param {Target} control
-   * @param {ActionOptions} [options]
-   * @returns {Promise<{ ok: true, url: string, fallback?: "dom_click", rebound?: string[] }>}
+   * @param {PointerOptions} [options]
+   * @returns {Promise<{ ok: true, url: string, point: Point, loading?: true, fallback?: "dom_click", rebound?: string[] }>}
    */
   click(control, options) {
     return this.#call("click", [control, options], () =>
-      this.#post("click", { ...target(control), ...labelOf(options) }),
+      this.#post("click", {
+        ...target(control),
+        ...pointerOptions(options, "page.click"),
+      }),
     );
   }
   /**
-   * Replaces the value of a field, select or editable region.
+   * Double-clicks a control with one gesture of two presses.
+   * @param {Target} control
+   * @param {PointerOptions} [options] Without clickCount.
+   * @returns {Promise<{ ok: true, url: string, point: Point, loading?: true, fallback?: "dom_click", rebound?: string[] }>}
+   */
+  dblclick(control, options) {
+    return this.#call("dblclick", [control, options], () =>
+      this.#post("dblclick", {
+        ...target(control),
+        ...pointerOptions(options, "page.dblclick"),
+      }),
+    );
+  }
+  /**
+   * Moves the mouse onto a control and leaves it there.
+   * @param {Target} control
+   * @param {{ position?: Point | string, force?: boolean, timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, point: Point, rebound?: string[] }>}
+   */
+  hover(control, options) {
+    return this.#call("hover", [control, options], () =>
+      this.#post("hover", {
+        ...target(control),
+        ...pointerOptions(options, "page.hover"),
+      }),
+    );
+  }
+  /**
+   * Replaces the value of a field, select or editable region, or adds to it.
    * @param {Target} control
    * @param {string} value
-   * @param {ActionOptions} [options]
-   * @returns {Promise<{ ok: true, rebound?: string[] }>}
+   * @param {{ append?: boolean, timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, match: string, value?: string, valueHidden?: true, rebound?: string[] }>}
    */
   fill(control, value, options) {
     return this.#call("fill", [control, value, options], () =>
-      this.#post("fill", { ...target(control), value, ...labelOf(options) }),
+      this.#post("fill", {
+        ...target(control),
+        value,
+        ...pointerOptions(options, "page.fill"),
+      }),
     );
   }
   /**
-   * @param {"Enter" | "Tab" | "Escape" | "Backspace" | "Delete" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp" | "PageDown" | "Space"} key
-   * @param {Target} [control] Focus this control first.
-   * @param {ActionOptions} [options]
-   * @returns {Promise<{ ok: true, rebound?: string[] }>}
+   * Chooses a select's options by value, label or index. A lone choice is
+   * wrapped; null and [] clear the select.
+   * @param {Target} control
+   * @param {string | SelectChoice | null | (string | SelectChoice)[]} values
+   * @param {{ timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, values: string[], rebound?: string[] }>}
    */
-  press(key, control, options) {
-    return this.#call("press", [key, control, options], () =>
-      this.#post("press", {
-        key,
-        ...(control ? target(control) : {}),
-        ...labelOf(options),
+  selectOption(control, values, options) {
+    return this.#call("selectOption", [control, values, options], () =>
+      this.#post("select", {
+        ...target(control),
+        values: choices(values),
+        ...pointerOptions(options, "page.selectOption"),
       }),
     );
+  }
+  /**
+   * Focuses a control, retargeting to the nearest one that takes focus.
+   * @param {Target} control
+   * @param {{ timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, rebound?: string[] }>}
+   */
+  focus(control, options) {
+    return this.#call("focus", [control, options], () =>
+      this.#post("focus", {
+        ...target(control),
+        ...pointerOptions(options, "page.focus"),
+      }),
+    );
+  }
+  /**
+   * Presses a key name, a printable character or a chord, focusing a
+   * control first when given. The key may come first or second: a chord is
+   * the key and anything else is the target.
+   * @param {string} key
+   * @param {Target} [control] Focus this control first.
+   * @param {{ delay?: number, timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, url: string, loading?: true, rebound?: string[] }>}
+   */
+  press(key, control, options) {
+    return this.#call("press", [key, control, options], () => {
+      const pressed = pressArguments(key, control);
+      return this.#post("press", {
+        key: pressed.key,
+        ...(pressed.target ? target(pressed.target) : {}),
+        ...pointerOptions(options, "page.press"),
+      });
+    });
   }
   /**
    * Scrolls the page, the panel holding a control, or the panel in the
@@ -404,6 +700,22 @@ export class Page {
         source: target(source),
         target: target(destination),
         ...labelOf(options),
+      }),
+    );
+  }
+  /**
+   * Drags one element onto another, with its own positions and a button.
+   * @param {Target} source
+   * @param {Target} destination
+   * @param {{ sourcePosition?: Point | string, targetPosition?: Point | string, button?: "left" | "middle" | "right", force?: boolean, timeout?: number, label?: string }} [options]
+   * @returns {Promise<{ ok: true, url: string, drag: "html5" | "mouse", loading?: true, rebound?: string[] }>}
+   */
+  dragAndDrop(source, destination, options) {
+    return this.#call("dragAndDrop", [source, destination, options], () =>
+      this.#post("drag", {
+        source: target(source),
+        target: target(destination),
+        ...pointerOptions(options, "page.dragAndDrop"),
       }),
     );
   }
@@ -499,6 +811,16 @@ export class Page {
       const opener = tabs.find((tab) => tab.id === this.openerId);
       return opener ? new Page(this.#session, opener) : null;
     });
+  }
+  /**
+   * Lets go of every key and mouse button this page holds. A run sends it
+   * for each page it touched.
+   * @returns {Promise<{ ok: true, released: string[] }>}
+   */
+  releaseInput() {
+    return this.#call("releaseInput", [], () =>
+      this.#post("input/release", {}, { budgetMs: RELEASE_BUDGET_MS }),
+    );
   }
   /** @returns {Promise<{ ok: true }>} */
   close() {
@@ -969,6 +1291,20 @@ export async function connect({ env, lazy = false, connect, fetch, health, sessi
     new Session({ env: env || process.env, fetch, connect, health, lazy });
   // run and the REPL pass their session in, and they announce an update.
   if (session) session.announceUpdate = true;
+  // A run lets go of the input of every page it touched, whatever happened
+  // to the script, so a held key never outlives it. Failures are not the
+  // script's business, and an app without the route is left alone.
+  current.onRunEnd(async ({ touched }) => {
+    if ((current.app?.apiLevel ?? 0) < RELEASE_LEVEL) return;
+    for (const id of touched)
+      try {
+        await current.request(`/tabs/${id}/input/release`, {
+          method: "POST",
+          body: {},
+          budgetMs: RELEASE_BUDGET_MS,
+        });
+      } catch {}
+  });
   if (!lazy) await current.ready();
   return new Client(current);
 }
