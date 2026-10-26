@@ -19,7 +19,13 @@ import {
 } from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
-import { createResolver, type FrameTarget } from "./resolve";
+import { hitNodeAt } from "./input/guards";
+import {
+  createResolver,
+  frameTargetOf,
+  pointInFrame,
+  type FrameTarget,
+} from "./resolve";
 import type { AutomationController } from "./server";
 import { createSnapshots, type SnapshotRequest } from "./snapshot";
 import {
@@ -311,6 +317,42 @@ export function createActions(deps: {
     namespace: namespaceOf,
     frames: deps.frames,
   });
+  // Section 9's scroll with no target: the frame the middle of the viewport
+  // lies over scrolls instead, from the point of its own document that lies
+  // there. Nothing is read when the point is not over a frame group.
+  const scrollIntoFrame = async (
+    id: string,
+    session: TabSession,
+    payload: Record<string, unknown>,
+    deadline: number,
+    step: Step,
+  ): Promise<Record<string, unknown> | undefined> => {
+    const frames = deps.frames.for(id);
+    if (!frames) return undefined;
+    const view = await evaluatePage(id, session, "viewport", {}, deadline, step);
+    const width = typeof view.width === "number" ? view.width : 0;
+    const height = typeof view.height === "number" ? view.height : 0;
+    if (!width || !height) return undefined;
+    const centre = { x: width / 2, y: height / 2 };
+    const hit = await hitNodeAt(session, centre, step);
+    if (hit?.frameId === undefined) return undefined;
+    await frames.bind(step);
+    const group = frames.groupOf(hit.frameId);
+    if (!group?.owner) return undefined;
+    const target = frameTargetOf(frames, group.root);
+    if (!target.owners.length) return undefined;
+    const point = await pointInFrame(session, target, centre, step);
+    if (!point) return undefined;
+    return evaluatePage(
+      id,
+      session,
+      "scroll",
+      { ...payload, point },
+      deadline,
+      step,
+      group.root,
+    );
+  };
   const dispatcherFor = (_id: string, session: TabSession) =>
     dispatchers.for(session);
   // Section 5's element actions, which drive the attempt loop themselves.
@@ -382,6 +424,16 @@ export function createActions(deps: {
       result = await input.press(id, payload as unknown as PressAction, run);
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, session, "scroll", payload, deadline, step);
+      // Section 9: a page that cannot scroll this way continues into the
+      // frame under the middle of the viewport, which names its own panel.
+      if (
+        result.moved === false &&
+        payload.ref === undefined &&
+        payload.selector === undefined
+      )
+        result =
+          (await scrollIntoFrame(id, session, payload, deadline, step)) ??
+          result;
     } else {
       // The frames the last check was left without, which its timeout names.
       let unread = 0;

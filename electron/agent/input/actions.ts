@@ -602,6 +602,28 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       .heldKeys()
       .map((key) => key.modifier)
       .filter((modifier): modifier is Modifier => modifier !== undefined);
+  // Section 9: the frame the keys reach, found by following the active
+  // element from the top document through each owner. A frame agents never
+  // reach refuses the keys before anything is sent.
+  const focusedFrame = async (
+    id: string,
+    session: TabSession,
+    step: Step,
+  ): Promise<{ frameId: string; path: string } | undefined> => {
+    const frames = deps.frames?.for(id);
+    if (!frames) return undefined;
+    // A page with no frame group of its own holds the focus itself, so
+    // nothing is read for it.
+    if ((await frames.groups(step)).length < 2) return undefined;
+    const found = await frames.focusedFrame(step);
+    if (found.blocked)
+      fail(
+        "input_target_blocked",
+        "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.",
+        found.path ? { frame: found.path } : {},
+      );
+    return found.path === "" ? undefined : found;
+  };
   // The focused control as the page reports it, which the key guards read:
   // a key that would open a native picker, or one aimed at a frame agents
   // never reach, is refused before anything is sent.
@@ -610,6 +632,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     session: TabSession,
     deadline: number,
     step: Step,
+    frameId?: string,
   ): Promise<{ kind: string; blockedFrame?: true }> => {
     const found = await actions.evaluatePage(
       id,
@@ -618,6 +641,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       {},
       deadline,
       step,
+      frameId,
     );
     return {
       kind: typeof found.kind === "string" ? found.kind : "none",
@@ -633,6 +657,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     action: KeyboardAction,
     deadline: number,
     step: Step,
+    frameId?: string,
   ) => {
     try {
       return await actions.evaluatePage(
@@ -645,6 +670,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         },
         deadline,
         step,
+        frameId,
       );
     } catch (error) {
       if (
@@ -1730,7 +1756,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     );
     const dispatcher = actions.dispatcher(id, session);
     const state = dispatcher.state;
-    const look = () => focusedControl(id, session, run.deadline, step);
+    // Keys and inserted text act in the frame that holds the focus, so that
+    // frame's own world answers for the control and takes the paste.
+    const focus = await focusedFrame(id, session, step);
+    const look = () =>
+      focusedControl(id, session, run.deadline, step, focus?.frameId);
     const withState = () => ({ ok: true, input: state.view() });
     if (action.kind === "down" || action.kind === "up") {
       const chord = parseChord(action.key ?? "", platformName);
@@ -1791,6 +1821,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         action,
         run.deadline,
         step,
+        focus?.frameId,
       );
       if (offered.handled === "page") return { ok: true, handled: "page" };
       // The page ignored the event, so Kamapathy inserts the plain text, and

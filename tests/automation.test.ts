@@ -2098,6 +2098,16 @@ describe("local automation socket", () => {
           `)(${JSON.stringify(operation)},`,
         ),
     );
+  // The frame whose world ran each call of one operation, from the worlds
+  // the page handed out in order.
+  const ranIn = (page: FakeContents, operation: string) => {
+    const made = page.debugger.sent
+      .filter((command) => command.method === "Page.createIsolatedWorld")
+      .map((command) => command.params.frameId as string);
+    return callsOf(page, operation).map(
+      (command) => made[Number(command.params.contextId) - 1],
+    );
+  };
   const mouseEvents = (page: FakeContents) =>
     page.inputs
       .filter((input) => input.method === "Input.dispatchMouseEvent")
@@ -2346,6 +2356,99 @@ describe("local automation socket", () => {
       expect(Date.now() - started, state.detail).toBeGreaterThan(150);
       expect(page.inputs, state.detail).toEqual([]);
     }
+  });
+
+  it("keyboard without a target and paste act in the focused frame", async () => {
+    const { tab } = await createPage();
+    const page = await nestedFramedPage(tab.id);
+    // The walk follows the active element from the top document through each
+    // owner, so the focus is two frames in.
+    let hops = 0;
+    const walked = (code: string) => {
+      if (!code.includes(')("activeFrame",')) return undefined;
+      hops += 1;
+      if (hops === 1) return { ok: true, path: "0", key: "card" };
+      if (hops === 2) return { ok: true, path: "0", key: "deep" };
+      return { ok: true, path: "", editable: true };
+    };
+    page.pageActions.focusedKind = () => ({ ok: true, kind: "editable" });
+    page.result = (code: string) =>
+      walked(code) ??
+      (code.includes(')("pasteDispatch",')
+        ? { ok: true, handled: "page" }
+        : { ok: true });
+    const typed = await request(`/tabs/${tab.id}/keyboard/insert-text`, "POST", {
+      text: "4111",
+    });
+    expect(typed.status).toBe(200);
+    expect(ranIn(page, "focusedKind")).toEqual(["deep"]);
+    // The content is offered to the frame that holds the focus, not the page.
+    hops = 0;
+    const pasted = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", {
+      text: "4111 1111 1111 1111",
+    });
+    expect(pasted.status).toBe(200);
+    expect(await pasted.json()).toMatchObject({ handled: "page" });
+    expect(ranIn(page, "pasteDispatch")).toEqual(["deep"]);
+    // A frame agents never reach refuses the keys, and names itself.
+    hops = 0;
+    page.result = (code: string) =>
+      code.includes(')("activeFrame",')
+        ? { ok: true, path: "0", key: "panel", blocked: true }
+        : { ok: true };
+    const refused = await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+      text: "4111",
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "input_target_blocked",
+        message:
+          "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.",
+        frame: "0",
+      },
+    });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("scroll without a target continues into the frame under the viewport centre", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The middle of the viewport lies over the frame, which can scroll even
+    // though the page cannot.
+    page.hits = [{ x: 600, y: 400, nodeName: "iframe", holds: "card" }];
+    page.result = (code: string) => {
+      if (code.includes(')("frameBox",')) return { ok: true, ...OWNER_BOX };
+      if (!code.includes(')("scroll",')) return { ok: true };
+      return code.includes('"point"')
+        ? {
+            ok: true,
+            scrolled: "element",
+            selector: ".rates",
+            x: 0,
+            y: 220,
+            moved: true,
+          }
+        : { ok: true, scrolled: "page", x: 0, y: 0, moved: false };
+    };
+    const scrolled = await request(`/tabs/${tab.id}/scroll`, "POST", {
+      direction: "down",
+      pixels: 300,
+    });
+    expect(scrolled.status).toBe(200);
+    expect(await scrolled.json()).toMatchObject({
+      scrolled: "element",
+      selector: ".rates",
+    });
+    // The frame's own world scrolled, from the point of its own document
+    // the middle of the viewport sits over.
+    expect(payloads("scroll").map((item) => item.point)).toEqual([
+      undefined,
+      { x: 560, y: 340 },
+    ]);
+    expect(callsOf(page, "scroll").map((command) => command.sessionId)).toEqual(
+      [undefined, "card-session"],
+    );
   });
 
   it("a frame that loads another document after input started answers page_changed with frame", async () => {

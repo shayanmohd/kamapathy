@@ -432,6 +432,36 @@ export const inArea = (point: Point, area: Area): boolean =>
   point.y <= area.bottom;
 
 /**
+ * A top-level point in the target frame's own CSS pixels: the way back in
+ * through the owners, which a scroll that continues into a frame needs.
+ */
+export async function pointInFrame(
+  session: TabSession,
+  target: FrameTarget,
+  point: Point,
+  step: Step,
+): Promise<Point | undefined> {
+  let current = point;
+  for (const [index, owner] of target.owners.entries()) {
+    const around = await aroundOwner(session, target, index, step);
+    const reply = await readOwner(
+      session,
+      around,
+      { key: owner.key },
+      target,
+      step,
+    );
+    const box = reply.box as OwnerBox | undefined;
+    if (!box || !box.scaleX || !box.scaleY) return undefined;
+    current = {
+      x: (current.x - box.x) / box.scaleX,
+      y: (current.y - box.y) / box.scaleY,
+    };
+  }
+  return current;
+}
+
+/**
  * Scrolls each boundary into view, outermost owner first. The page scrolls
  * the owner itself, as section 5's own scroll does once its gestures are
  * spent; the element inside the frame is then brought into view by section
