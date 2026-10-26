@@ -703,7 +703,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
-| `input_target_blocked` | 403 | not retryable |  | The point, or the frame holding focus, belongs to an extension or an internal page. |
+| `input_target_blocked` | 403 | not retryable | `frame` | The point, or the frame holding focus, belongs to an extension or an internal page. |
 | `native_popup_blocked` | 403 | not retryable | `use` | The input would open a native select, color or date picker. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
@@ -730,7 +730,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `empty_screenshot` | 409 | retryable |  | The page has not rendered yet. |
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
-| `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `page_changed` | 409 | not retryable | `frame` | The page navigated during the operation, or the frame holding the target loaded another page after input started. |
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
 | `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
 | `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
@@ -782,7 +782,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
-| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor`, `unreadFrames` | The request did not start in time, or its target never became ready for input. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor`, `frame`, `unreadFrames` | The request did not start in time, or its target never became ready for input. |
 | `evaluation_timeout` | 504 | not retryable | `awaited`, `timeoutMs`, `executionStopped`, `mayHaveLateEffects`, `pageResponsive` | The page script did not finish within the timeout. |
 | `fetch_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The fetch did not answer within the timeout. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |

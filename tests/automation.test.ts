@@ -2213,6 +2213,176 @@ describe("local automation socket", () => {
     expect(controller.activity.at(-1)?.message).toBe("Agent filled a field");
   });
 
+  // A page whose frame holds another frame, so a ref can live two
+  // boundaries in: @e1 is the outer frame, @e2 the inner one and @e3 the
+  // control inside it.
+  const nestedFramedPage = async (tabId: string) => {
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      { frameId: "deep", parent: "card", url: "https://deep.example/", local: "0" },
+    ]);
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (group === "")
+        return groupRead("", {
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Card details", "@e1", "0", "card"),
+            },
+          ],
+          owners: [owner("0", 1, "card")],
+        });
+      if (group === "0")
+        return groupRead("0", {
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Card check", "@e2", "0/0", "deep"),
+            },
+          ],
+          owners: [owner("0", 1, "deep")],
+        });
+      return groupRead("0/0", {
+        controls: [{ order: 1, tier: 0, entry: control("Code", "@e3") }],
+      });
+    };
+    const response = await request(`/tabs/${tabId}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(
+      body.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Card details", undefined],
+      ["Card check", "0"],
+      ["Code", "0/0"],
+    ]);
+    page.scripts.length = 0;
+    return page;
+  };
+
+  it("a frame that is attaching, navigating or silent is a transient blocker", async () => {
+    // Each state is reached without touching the frame's own document, so
+    // the ref in it is not stale: the frame simply cannot take input yet.
+    const cases = [
+      {
+        detail: "attaching",
+        ref: "@e3",
+        frame: "0/0",
+        message: "The frame holding the target is still loading.",
+        // The frame around the inner one went silent, so Kamapathy has no
+        // bound way into the frame the ref lives in.
+        nested: true,
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Target.detachedFromTarget", {
+            sessionId: "card-session",
+            targetId: "card",
+          }),
+      },
+      {
+        detail: "navigating",
+        ref: "@e2",
+        frame: "0",
+        message: "The frame holding the target is loading another page.",
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Page.frameStartedNavigating", {
+            frameId: "card",
+            url: "https://pay.example/next",
+          }),
+      },
+      {
+        detail: "not_responding",
+        ref: "@e2",
+        frame: "0",
+        message: "The frame holding the target did not respond.",
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Target.detachedFromTarget", {
+            sessionId: "card-session",
+            targetId: "card",
+          }),
+      },
+    ] as const;
+    for (const state of cases) {
+      const { tab } = await createPage();
+      const page = await ("nested" in state && state.nested
+        ? nestedFramedPage(tab.id)
+        : framedPage(tab.id, { sessionId: "card-session" }));
+      page.result = framedPoint();
+      state.happen(page);
+      page.inputs.length = 0;
+      page.scripts.length = 0;
+      const started = Date.now();
+      const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+        ref: state.ref,
+        timeoutMs: 200,
+      });
+      expect(refused.status, state.detail).toBe(504);
+      expect(await refused.json(), state.detail).toEqual({
+        error: {
+          code: "action_timeout",
+          message: `click timed out after 200 ms: ${state.message}`,
+          awaited: "actionable",
+          blocker: "frame_not_ready",
+          detail: state.detail,
+          frame: state.frame,
+          timeoutMs: 200,
+          retryable: true,
+        },
+      });
+      // The attempt was retried until the timeout, and nothing was sent.
+      expect(Date.now() - started, state.detail).toBeGreaterThan(150);
+      expect(page.inputs, state.detail).toEqual([]);
+    }
+  });
+
+  it("a frame that loads another document after input started answers page_changed with frame", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    // The frame loads another page while the first click is in flight, so
+    // the second press is never sent.
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type !== "mousePressed") return;
+      page.afterInput = undefined;
+      frameNavigated(page.debugger, {
+        frameId: "card",
+        parentId: "main",
+        loaderId: "loader-card-2",
+        url: "https://pay.example/next",
+      });
+    };
+    const changed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+      clickCount: 2,
+    });
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toEqual({
+      error: {
+        code: "page_changed",
+        message:
+          "The frame holding the target loaded another page during this action. Inspect it before continuing.",
+        frame: "0",
+        dispatched: true,
+      },
+    });
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
     const { tab } = await createPage();
     await request(`/tabs/${tab.id}/snapshot`);

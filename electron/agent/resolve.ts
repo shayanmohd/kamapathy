@@ -710,7 +710,10 @@ export function createResolver(deps: {
           nth?: number,
         ) => {
           const body = bodyOf(group.path === "" ? undefined : context, nth);
-          if (options.ran) options.ran.frameId = group.root;
+          if (options.ran) {
+            options.ran.frameId = group.root;
+            options.ran.path = group.path;
+          }
           await pickRoles(group.root, body);
           const answer = await evaluate(group.root, operation, body);
           // The candidates a group named live in that group's own world, so
@@ -751,6 +754,9 @@ export function createResolver(deps: {
         // A ref never searches: it goes to the frame that issued it, which
         // answers stale once that frame has loaded another document.
         let home: string | undefined;
+        // The path of that frame, which an answer about it names. A frame
+        // the last pass could not place keeps the path its ref was given in.
+        let homePath: string | undefined;
         if (options.frameId === undefined && frames) {
           const homes = new Set<string>();
           let bound = false;
@@ -762,11 +768,15 @@ export function createResolver(deps: {
               bound = true;
             }
             const found = frames.homeFrame(ref);
-            if (found) homes.add(found.frameId);
+            if (found) {
+              homes.add(found.frameId);
+              homePath = found.path ?? found.group;
+            }
           }
           // Two ends in two frames keep today's one world; section 10 takes
           // them apart.
           if (homes.size === 1) home = [...homes][0];
+          else homePath = undefined;
         }
         let result: Record<string, unknown> | undefined;
         let unread = 0;
@@ -811,7 +821,11 @@ export function createResolver(deps: {
         if (!result) {
           const frameId =
             options.frameId ?? home ?? (await session.mainFrameId(step));
-          if (options.ran) options.ran.frameId = frameId;
+          if (options.ran) {
+            options.ran.frameId = frameId;
+            options.ran.path =
+              home === undefined ? frames?.pathOf(frameId) : homePath;
+          }
           const path = home === undefined ? undefined : frames?.pathOf(home);
           const body = bodyOf(
             path === undefined || path === ""

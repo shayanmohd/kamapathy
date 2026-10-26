@@ -116,8 +116,14 @@ export interface FrameGroups {
   ): { frameId: string; sessionId?: string; ownSession: boolean } | undefined;
   groupOf(frameId: string): GroupInfo | undefined;
   setHome(ref: string, frameId: string): void;
-  /** Throws stale_ref with the frame path once the home moved on. */
-  homeFrame(ref: string): { frameId: string; path?: string } | undefined;
+  /**
+   * The frame a ref was issued in, with the path it carries now and the one
+   * it was given in. Throws stale_ref with the frame path once the home
+   * moved on.
+   */
+  homeFrame(
+    ref: string,
+  ): { frameId: string; path?: string; group: string } | undefined;
   dispose(): void;
 }
 
@@ -616,7 +622,11 @@ export function createFrameGroups(
           { ref, ...(frame ? { frame } : {}) },
         );
       }
-      return { frameId: home.frameId, ...(path === undefined ? {} : { path }) };
+      return {
+        frameId: home.frameId,
+        ...(path === undefined ? {} : { path }),
+        group: home.group,
+      };
     },
     dispose() {
       stopFrames();

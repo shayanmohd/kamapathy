@@ -114,7 +114,7 @@ export const ERRORS = {
     403,
     false,
     "The point, or the frame holding focus, belongs to an extension or an internal page.",
-    [],
+    ["frame"],
     4,
   ),
   native_popup_blocked: code(
@@ -258,7 +258,12 @@ export const ERRORS = {
     "Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost.",
     ["reason"],
   ),
-  page_changed: code(409, false, "The page navigated during the operation."),
+  page_changed: code(
+    409,
+    false,
+    "The page navigated during the operation, or the frame holding the target loaded another page after input started.",
+    ["frame"],
+  ),
   navigation_interrupted: code(
     409,
     false,
@@ -552,6 +557,7 @@ export const ERRORS = {
       "blocker",
       "detail",
       "interceptor",
+      "frame",
       "unreadFrames",
     ],
   ),

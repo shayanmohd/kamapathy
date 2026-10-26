@@ -35,7 +35,7 @@ import type { ToolAction } from "./validate";
 export type Point = { x: number; y: number };
 
 /** The frame a page operation ran in, which the caller passes in empty. */
-export type RanIn = { frameId?: string };
+export type RanIn = { frameId?: string; path?: string };
 
 // The step types the pointer runner owns.
 const POINTER_KINDS: readonly PointerKind[] = ["click", "dblclick", "hover"];

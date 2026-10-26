@@ -526,6 +526,9 @@ const MAX_FILL_VALUE = 200;
 const MAX_DETAIL = 200;
 // What one field action ended with: the fields of its own answer.
 type FieldOutcome = Record<string, unknown>;
+// Where section 9 puts an action's target: the frame it sits in, or the
+// blocker that frame is not ready.
+type FramePlace = { target?: FrameTarget; blocked?: LoopBlocker };
 
 export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
@@ -540,13 +543,14 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     session: TabSession,
     ran: RanIn,
     step: Step,
-  ): Promise<{ target?: FrameTarget; blocked?: LoopBlocker }> => {
+  ): Promise<FramePlace> => {
     const frames = deps.frames?.for(id);
     if (!frames || ran.frameId === undefined) return {};
     if (ran.frameId === (await session.mainFrameId(step))) return {};
     const group = frames.groupOf(ran.frameId);
     const content = frames.contentOf(ran.frameId);
-    const path = frames.pathOf(ran.frameId) ?? group?.path;
+    // A frame the last pass could not place keeps the path its ref carried.
+    const path = frames.pathOf(ran.frameId) ?? group?.path ?? ran.path;
     const named = path ? { frame: path } : {};
     const known = (await session.knownFrames(step)).find(
       (frame) => frame.frameId === ran.frameId,
@@ -569,6 +573,28 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     if (known.navigating) return unready("navigating");
     const target = frameTargetOf(frames, ran.frameId);
     return target.owners.length ? { target } : {};
+  };
+  // The frame a ref lives in, before any page call: a frame that cannot
+  // take input is answered without touching it, since a page call into a
+  // frame whose session has gone fails as a lost connection instead.
+  const refPlace = async (
+    id: string,
+    session: TabSession,
+    target: TargetPayload | undefined,
+    step: Step,
+  ): Promise<FramePlace> => {
+    const frames = deps.frames?.for(id);
+    const ref = (target as { ref?: unknown } | undefined)?.ref;
+    if (!frames || typeof ref !== "string") return {};
+    await frames.bind(step);
+    const home = frames.homeFrame(ref);
+    if (!home) return {};
+    return framePlace(
+      id,
+      session,
+      { frameId: home.frameId, path: home.path ?? home.group },
+      step,
+    );
   };
   // The modifiers the tab is holding, which join a chord's own.
   const heldModifiers = (dispatcher: InputDispatcher): Modifier[] =>
@@ -774,10 +800,16 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     // with a delay in each gap. The held buttons and modifiers travel with
     // every event, so a click while the agent holds one behaves as a
     // person's would.
+    // The document a frame holds, so a new one after input started is told
+    // from the one the point was measured in.
+    const documentOf = async (frame: FrameTarget, at: Step) =>
+      (await session.knownFrames(at)).find(
+        (item) => item.frameId === frame.frameId,
+      )?.loaderId;
     const press = async (
       context: AttemptContext,
       point: Point,
-      inside?: { frame: FrameTarget; local: Point },
+      inside?: { frame: FrameTarget; local: Point; document?: string },
     ) => {
       const bit = BUTTON_BITS[button];
       const epoch = session.epoch;
@@ -785,6 +817,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       for (let click = 1; click <= action.clickCount; click += 1) {
         if (click > 1) {
           if (action.delayMs) await pause(action.delayMs);
+          // A new document in the target's frame after input started is
+          // section 9's page_changed, answered before the target is looked
+          // for again in a document it no longer belongs to.
+          if (
+            inside &&
+            (await documentOf(inside.frame, gesture)) !== inside.document
+          )
+            fail(
+              "page_changed",
+              "The frame holding the target loaded another page during this action. Inspect it before continuing.",
+              inside.frame.path ? { frame: inside.frame.path } : {},
+            );
           // The checks run again before a later press. Nothing already sent
           // is repeated, so a target that is now covered ends the action.
           const again = await look(gesture);
@@ -902,11 +946,17 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         done: false,
         blocked: blocked as LoopBlocker,
       });
+      // Section 9: a ref names its frame before any page call, so a frame
+      // that cannot take input is answered without being touched.
+      const early = await refPlace(id, session, action.target, step);
+      if (early.blocked) return stop(early.blocked);
       let found = await look();
       if (found.blocked) return stop(found.blocked);
-      // Section 9: the frame the target sits in, which the point travels out
-      // of and which must be ready to take the input.
-      const place = await framePlace(id, session, ran, step);
+      // The frame the target sits in, which the point travels out of and
+      // which must be ready to take the input.
+      const place = early.target
+        ? early
+        : await framePlace(id, session, ran, step);
       if (place.blocked) return stop(place.blocked);
       const frame = place.target;
       const named = frame?.path ? { frame: frame.path } : {};
@@ -985,8 +1035,14 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         await moveTo(point, session.epoch);
         return { done: true, value: { ...rest, pressed: false } };
       }
+      const document = frame ? await documentOf(frame, step) : undefined;
       await deliver(
-        () => press(context, point, frame ? { frame, local } : undefined),
+        () =>
+          press(
+            context,
+            point,
+            frame ? { frame, local, ...(document ? { document } : {}) } : undefined,
+          ),
         frame,
       );
       return { done: true, value: { ...rest, pressed: true } };

@@ -58,6 +58,12 @@ const REASONS: Readonly<Record<ActionBlocker | "no_match", string>> = {
   option_missing: "The select has no matching option.",
   frame_not_ready: "The frame holding the target is still loading.",
 };
+// What an unready frame reads as, by the detail section 9 gives it.
+const FRAME_REASONS: Readonly<Record<string, string>> = {
+  attaching: "The frame holding the target is still loading.",
+  navigating: "The frame holding the target is loading another page.",
+  not_responding: "The frame holding the target did not respond.",
+};
 // A blocker the page reports about its own surroundings rather than about
 // the target, kept only while the page has reported nothing else.
 const WEAK: readonly string[] = ["frame_not_ready"];
@@ -118,6 +124,8 @@ export interface LoopBlocker extends Omit<Blocked, "blocker"> {
   selector?: string;
   /** Section 9's count of the frames the attempt left out. */
   unreadFrames?: number;
+  /** The frame path of the frame the target sits in (section 9). */
+  frame?: string;
 }
 /** The frames a resolution left out of its attempt, as its error carries them. */
 export const unreadOf = (
@@ -207,7 +215,11 @@ export async function runAttempts<T>(
       },
     );
   }
-  const reason = stop ? REASONS[stop.blocker] : "The target was not ready.";
+  const reason = stop
+    ? ((stop.blocker === "frame_not_ready" && typeof stop.detail === "string"
+        ? FRAME_REASONS[stop.detail]
+        : undefined) ?? REASONS[stop.blocker])
+    : "The target was not ready.";
   return fail(
     "action_timeout",
     `${options.action} timed out after ${options.timeoutMs} ms: ${reason}`,
@@ -219,6 +231,7 @@ export async function runAttempts<T>(
         ? {}
         : { interceptor: stop.interceptor }),
       timeoutMs: options.timeoutMs,
+      ...(stop?.frame === undefined ? {} : { frame: stop.frame }),
       ...unread,
     },
   );

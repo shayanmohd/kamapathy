@@ -387,7 +387,12 @@ describe("frame groups", () => {
       loaderId: "loader-card",
       group: "",
     });
-    expect(frames.homeFrame("@e1")).toEqual({ frameId: "card", path: "0" });
+    // The path the ref carries now, and the group it was issued in.
+    expect(frames.homeFrame("@e1")).toEqual({
+      frameId: "card",
+      path: "0",
+      group: "",
+    });
     expect(frames.homeFrame("@e9")).toBeUndefined();
     // A navigation inside the same document keeps the frame's refs.
     cdp.event("Page.navigatedWithinDocument", {
@@ -395,7 +400,11 @@ describe("frame groups", () => {
       url: "https://shop.example/card#paid",
     });
     await settle();
-    expect(frames.homeFrame("@e1")).toEqual({ frameId: "card", path: "0" });
+    expect(frames.homeFrame("@e1")).toEqual({
+      frameId: "card",
+      path: "0",
+      group: "",
+    });
     cdp.event("Page.frameNavigated", {
       frame: {
         id: "card",
