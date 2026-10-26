@@ -22,6 +22,7 @@ import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
 import { createEventRecording } from "./events";
 import { createExpectations } from "./expectations";
+import { NO_EXTENSION_NAMES, type ExtensionNames } from "./extension-frames";
 import { createFileChoosers, watchTakeover } from "./file-choosers";
 import { createFrameGroupsByTab } from "./frames/groups";
 import {
@@ -248,6 +249,8 @@ export async function startAutomation(
     updates?: UpdateService;
     pdf?: { extractor?: Extractor };
     refs?: RefBook;
+    /** Section 17's loaded extensions, which name the frames agents may not reach. */
+    extensions?: ExtensionNames;
   },
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
@@ -301,6 +304,7 @@ export async function startAutomation(
     dispatchers,
     refs,
     frames,
+    extensions: options.extensions ?? NO_EXTENSION_NAMES,
   });
   const tabLog = createTabLog();
   const receipts = createReceipts({

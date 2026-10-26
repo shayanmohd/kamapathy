@@ -293,6 +293,9 @@ async function syncAutomation(): Promise<void> {
             socketPath,
             skillPath: bundledSkill ?? undefined,
             updates: updater ?? undefined,
+            // The host is made after the first window, and the person adds
+            // extensions later, so a frame is named when it is listed.
+            extensions: { nameOf: (id) => extensionHost?.nameOf(id) },
           });
           if (owner === controller) {
             publishEndpoint(agent, automation.endpoint, automation.instance);

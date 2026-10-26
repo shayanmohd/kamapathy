@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import { cleanAgentText } from "../../shared/agent-text";
+import { extensionLabel } from "../../shared/extensions";
 import { PAGE_BUDGET } from "../../shared/state";
 import type { OpenedBy } from "../../shared/types";
 import type { Actions } from "./actions";
 import { fail } from "./errors";
+import {
+  NO_EXTENSION_NAMES,
+  extensionFrame,
+  type ExtensionNames,
+} from "./extension-frames";
 import {
   boundGroup,
   countUnread,
@@ -418,6 +424,7 @@ function composeReads(
 function fillFrames(
   groups: FrameGroups,
   entries: readonly Record<string, unknown>[],
+  extensions: ReadonlyMap<string, string>,
 ): void {
   for (const entry of entries) {
     const frame = typeof entry.frame === "string" ? entry.frame : "";
@@ -441,6 +448,13 @@ function fillFrames(
         : groups.contentOf(frameId);
     entry.content = state;
     if (state === "blocked") {
+      // A frame of one of the person's extensions is named for them, as
+      // section 17 says. Every other blocked frame stays a plain entry.
+      const name = content === undefined ? undefined : extensions.get(content);
+      if (name !== undefined) {
+        entry.extension = name;
+        entry.label = extensionLabel(name);
+      }
       delete entry.contentFrame;
       continue;
     }
@@ -455,6 +469,8 @@ export function createSnapshots(deps: {
   resolver: Resolver;
   namespace: Actions["namespace"];
   frames: FrameGroupsByTab;
+  /** Section 17's loaded extensions, which name the frames agents may not read. */
+  extensions?: ExtensionNames;
 }): {
   take(
     tabId: string,
@@ -465,6 +481,7 @@ export function createSnapshots(deps: {
   ): Promise<Record<string, unknown>>;
 } {
   const { controller, evaluatePage, resolver, namespace, frames } = deps;
+  const extensions = deps.extensions ?? NO_EXTENSION_NAMES;
   return {
     async take(tabId, session, request, deadline, step) {
       const hash = optionsHash(request);
@@ -587,7 +604,12 @@ export function createSnapshots(deps: {
         const tab = controller.state.tabs.find((item) => item.id === tabId);
         result.url = top?.url ?? tab?.url ?? "";
         result.title = top?.title ?? tab?.title ?? "";
-        fillFrames(groups, result.interactables as Record<string, unknown>[]);
+        const listed = result.interactables as Record<string, unknown>[];
+        fillFrames(
+          groups,
+          listed,
+          await extensionsOf(session, listed, extensions, step),
+        );
         // Frames the reads left pending, unavailable or past a limit, their
         // entries listed or not.
         const blocked = new Set<string>();
@@ -666,6 +688,28 @@ export function createSnapshots(deps: {
       };
     },
   };
+}
+
+/**
+ * The extension each blocked frame of a listing belongs to, by frame path.
+ * Only the registry holds the URL a blocked frame committed, so the tab's
+ * frames are read once, and only for a listing that has such an entry.
+ */
+async function extensionsOf(
+  session: TabSession,
+  entries: readonly Record<string, unknown>[],
+  names: ExtensionNames,
+  step: Step,
+): Promise<ReadonlyMap<string, string>> {
+  const found = new Map<string, string>();
+  if (!entries.some((entry) => entry.blocked === true)) return found;
+  const frames = await session.frames(step).catch(() => []);
+  for (const frame of frames) {
+    if (frame.blocked !== true) continue;
+    const extension = extensionFrame(frame.url, names);
+    if (extension) found.set(frame.path, extension.name);
+  }
+  return found;
 }
 
 // The locator sources a read reported, taken out of its answer.

@@ -4,6 +4,7 @@ import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
+import type { ExtensionNames } from "./extension-frames";
 import type { FrameGroupsByTab } from "./frames/groups";
 import type { Park, Run } from "./http";
 import {
@@ -119,6 +120,8 @@ export function createActions(deps: {
   dispatchers: InputDispatchers;
   refs: RefBook;
   frames: FrameGroupsByTab;
+  /** Section 17's loaded extensions, which name the frames agents may not reach. */
+  extensions: ExtensionNames;
 }): Actions {
   const {
     controller,
@@ -272,6 +275,7 @@ export function createActions(deps: {
     resolver,
     namespace: namespaceOf,
     frames: deps.frames,
+    extensions: deps.extensions,
   });
   const dispatcherFor = (_id: string, session: TabSession) =>
     dispatchers.for(session);
