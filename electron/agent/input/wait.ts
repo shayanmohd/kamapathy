@@ -20,6 +20,11 @@ export const LOAD_WAIT_MS = 15000;
 // 55 ms, so 500 ms is room to spare.
 export const MAX_SCROLL_GESTURES = 6;
 export const SCROLL_SETTLE_MS = 500;
+// How long the page's own two frames after a gesture may take. A scroll the
+// compositor has made reaches the page at those frames, and a probe of a
+// window nobody is watching rendered about two a second, so two of them are
+// around 1100 ms apart there.
+export const SCROLL_FRAMES_MS = 2000;
 // The least budget a further wait or send is worth starting with.
 const SPARE_MS = 250;
 // How many times one gesture is sent in all.

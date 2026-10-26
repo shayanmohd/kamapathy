@@ -4133,6 +4133,44 @@ describe("local automation socket", () => {
     ]);
   });
 
+  it("measures the point again after the page's own frames, so a scroll the compositor has gone past cannot aim the press", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    let looks = 0;
+    // The page reports the target off screen, and only its frames carry the
+    // scroll the compositor already made, so the second look is the one the
+    // press may use.
+    page.pageActions.actionPoint = () => {
+      looks += 1;
+      return looks === 1
+        ? { ok: true, scroll: { x: 600, y: 400, deltaX: 0, deltaY: 80 } }
+        : { ok: true, point: { x: 25, y: 45 } };
+    };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    const ran = page.scripts
+      .map((script) =>
+        ["actionPoint", "scrollRequest", "stableBox", "frame"].find((name) =>
+          script.code.includes(`)(${JSON.stringify(name)},`),
+        ),
+      )
+      .filter((name) => name !== undefined);
+    expect(ran).toEqual([
+      "actionPoint",
+      "frame",
+      "stableBox",
+      "scrollRequest",
+      "actionPoint",
+    ]);
+    expect(gestureOf(page)).toEqual([
+      "mouseWheel",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+    ]);
+  });
+
   it("right clicks without opening a native menu and keeps the dom_click fallback", async () => {
     const { tab } = await createPage();
     const page = pointPage();

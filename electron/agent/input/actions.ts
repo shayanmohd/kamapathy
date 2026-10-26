@@ -27,6 +27,7 @@ import {
   type ScrollRequest,
 } from "../dom/actions";
 import type { AutomationController } from "../server";
+import { CdpTimeoutError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
 import type { Step } from "../session/types";
 import type { TargetPayload } from "../validate";
@@ -52,6 +53,7 @@ import { BUTTON_BITS, interpolate, type Button } from "./state";
 import {
   ACTION_LEVELS,
   MAX_SCROLL_GESTURES,
+  SCROLL_FRAMES_MS,
   SCROLL_SETTLE_MS,
   confirmDelivery,
   runAttempts,
@@ -648,9 +650,26 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         };
       }
     };
-    // After a wheel gesture the target may still be moving; it gets two
-    // frames at a time to come to rest.
+    // The scroll the compositor has already made reaches the page at its
+    // next frames, which in a window nobody is watching are about a second
+    // apart. A page that renders none in the window is read as it was.
+    const nextFrames = (until: number) =>
+      actions
+        .evaluatePage(
+          id,
+          session,
+          "frame",
+          {},
+          Math.min(step.deadline, until),
+          step,
+        )
+        .catch((error: unknown) => {
+          if (!(error instanceof CdpTimeoutError)) throw error;
+        });
+    // After a wheel gesture the target may still be moving: the page's own
+    // frames go by first, then the box gets its window to come to rest.
     const holdStill = async () => {
+      await nextFrames(Date.now() + SCROLL_FRAMES_MS);
       const until = Date.now() + SCROLL_SETTLE_MS;
       for (;;) {
         const box = await read("stableBox");
@@ -943,9 +962,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       }
       return undefined;
     };
-    // After a wheel gesture each end gets two frames at a time to come to
-    // rest before it is measured again.
+    // After a wheel gesture the page's own frames go by, since they carry
+    // the scroll the compositor has already made, and each end then gets the
+    // rest of the window to come to rest before it is measured again.
     const holdStill = async () => {
+      await evaluate(
+        "frame",
+        {},
+        step,
+        Math.min(run.deadline, Date.now() + SCROLL_FRAMES_MS),
+      ).catch((error: unknown) => {
+        if (!(error instanceof CdpTimeoutError)) throw error;
+      });
       const until = Date.now() + SCROLL_SETTLE_MS;
       for (const end of ends)
         for (;;) {
