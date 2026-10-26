@@ -31,6 +31,54 @@ const LABEL = {
   description: "A few words naming this step, in at most 60 characters.",
   since: 3,
 };
+// The flags the element actions share, named after the client's options.
+const BUTTON = {
+  name: "--button",
+  value: "left|middle|right",
+  description: "Which mouse button to press.",
+  since: 4,
+};
+const CLICK_COUNT = {
+  name: "--click-count",
+  value: "<n>",
+  description: "How many presses the one gesture sends, 1 to 3.",
+  since: 4,
+};
+const DELAY = {
+  name: "--delay",
+  value: "<ms>",
+  description: "How long to hold each press, and to wait between presses.",
+  since: 4,
+};
+const POSITION = {
+  name: "--position",
+  value: "x,y",
+  description: "Where in the element to act, instead of its centre.",
+  since: 4,
+};
+const FORCE = {
+  name: "--force",
+  description:
+    "Act even when something covers the target. A disabled target is never forced.",
+  since: 4,
+};
+const TIMEOUT = {
+  name: "--timeout",
+  value: "<ms>",
+  description:
+    "How long to wait for a target that can take the input, 0 to 60000. 0 looks once.",
+  since: 4,
+};
+const STDIN = (what) => ({ name: "--stdin", description: `Read ${what}` });
+const KEY = {
+  name: "key",
+  description:
+    "A key name such as Enter, KeyA or F12, a printable character, or a chord such as Shift+KeyA.",
+};
+const POINT = [
+  { name: "x", description: "The point's x, in the page's viewport pixels." },
+  { name: "y", description: "The point's y, in the page's viewport pixels." },
+];
 
 export const COMMANDS = [
   command("health", "Connection", "health", "Check the connection", {
@@ -367,29 +415,96 @@ export const COMMANDS = [
   command(
     "click",
     "Page actions",
-    "click <tab-id> <ref-or-selector> [--label <text>]",
-    "Click a control",
+    "click <tab-id> <ref-or-selector> [--button left|middle|right] [--click-count <n>] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]",
+    "Click a control, waiting until it can take the press",
     {
       arguments: [TAB_ID, TARGET],
-      flags: [LABEL],
+      flags: [BUTTON, CLICK_COUNT, DELAY, POSITION, FORCE, TIMEOUT, LABEL],
       route: "POST /tabs/:id/click",
       script: "page.click",
     },
   ),
   command(
+    "dblclick",
+    "Page actions",
+    "dblclick <tab-id> <ref-or-selector> [--button left|middle|right] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]",
+    "Double-click a control with one gesture of two presses",
+    {
+      arguments: [TAB_ID, TARGET],
+      flags: [BUTTON, DELAY, POSITION, FORCE, TIMEOUT, LABEL],
+      route: "POST /tabs/:id/dblclick",
+      script: "page.dblclick",
+      since: 4,
+    },
+  ),
+  command(
+    "hover",
+    "Page actions",
+    "hover <tab-id> <ref-or-selector> [--position x,y] [--force] [--timeout <ms>] [--label <text>]",
+    "Move the mouse onto a control and leave it there",
+    {
+      arguments: [TAB_ID, TARGET],
+      flags: [POSITION, FORCE, TIMEOUT, LABEL],
+      route: "POST /tabs/:id/hover",
+      script: "page.hover",
+      since: 4,
+    },
+  ),
+  command(
     "fill",
     "Page actions",
-    "fill <tab-id> <ref-or-selector> --stdin [--label <text>]",
+    "fill <tab-id> <ref-or-selector> --stdin [--append] [--timeout <ms>] [--label <text>]",
     "Read the exact field value from stdin",
     {
       arguments: [TAB_ID, TARGET],
       flags: [
-        { name: "--stdin", description: "Read the field value from stdin" },
+        STDIN("the field value from stdin"),
+        {
+          name: "--append",
+          description: "Add to the field's value instead of replacing it.",
+          since: 4,
+        },
+        TIMEOUT,
         LABEL,
       ],
       stdin: "The exact field value.",
       route: "POST /tabs/:id/fill",
       script: "page.fill",
+    },
+  ),
+  command(
+    "select",
+    "Page actions",
+    "select <tab-id> <ref-or-selector> [choice...] [--timeout <ms>] [--label <text>]",
+    "Choose a select's options by value or label; no choice clears it",
+    {
+      arguments: [
+        TAB_ID,
+        TARGET,
+        {
+          name: "choice",
+          description:
+            "An option's value, else its label. Up to 100, in any order.",
+        },
+      ],
+      flags: [TIMEOUT, LABEL],
+      route: "POST /tabs/:id/select",
+      script: "page.selectOption",
+      examples: ["select 8c1f2e04:p2 @e4 pro"],
+      since: 4,
+    },
+  ),
+  command(
+    "focus",
+    "Page actions",
+    "focus <tab-id> <ref-or-selector> [--timeout <ms>] [--label <text>]",
+    "Focus a control, retargeting to the nearest one that takes focus",
+    {
+      arguments: [TAB_ID, TARGET],
+      flags: [TIMEOUT, LABEL],
+      route: "POST /tabs/:id/focus",
+      script: "page.focus",
+      since: 4,
     },
   ),
   command(
@@ -413,26 +528,27 @@ export const COMMANDS = [
   command(
     "press",
     "Page actions",
-    "press <tab-id> <key> [ref-or-selector] [--label <text>]",
-    "Press a supported key",
+    "press <tab-id> <key> [ref-or-selector] [--delay <ms>] [--timeout <ms>] [--label <text>]",
+    "Press a key, a printable character or a chord",
     {
-      arguments: [
-        TAB_ID,
+      arguments: [TAB_ID, KEY, TARGET],
+      flags: [
         {
-          name: "key",
-          description: "Enter, Tab, Escape, an arrow key and others.",
+          ...DELAY,
+          description: "How long to hold the key before releasing it.",
         },
-        TARGET,
+        TIMEOUT,
+        LABEL,
       ],
-      flags: [LABEL],
       route: "POST /tabs/:id/press",
       script: "page.press",
+      examples: ["press 8c1f2e04:p2 ControlOrMeta+KeyS"],
     },
   ),
   command(
     "drag",
     "Page actions",
-    "drag <tab-id> <source> <target> [--label <text>]",
+    "drag <tab-id> <source> <target> [--source-position x,y] [--target-position x,y] [--button left|middle|right] [--force] [--timeout <ms>] [--label <text>]",
     "Drag one element onto another (refs or selectors)",
     {
       arguments: [
@@ -440,9 +556,24 @@ export const COMMANDS = [
         { name: "source", description: "The element to drag." },
         { name: "target", description: "The element to drop on." },
       ],
-      flags: [LABEL],
+      flags: [
+        {
+          ...POSITION,
+          name: "--source-position",
+          description: "Where in the source to press, instead of its centre.",
+        },
+        {
+          ...POSITION,
+          name: "--target-position",
+          description: "Where in the target to drop, instead of its centre.",
+        },
+        BUTTON,
+        FORCE,
+        TIMEOUT,
+        LABEL,
+      ],
       route: "POST /tabs/:id/drag",
-      script: "page.drag",
+      script: "page.dragAndDrop",
     },
   ),
   command(
@@ -554,6 +685,174 @@ export const COMMANDS = [
       script: "page.pdfText",
       examples: ["pdf-text 8c1f2e04:p2 --from 3"],
       since: 3,
+    },
+  ),
+  command(
+    "mouse-move",
+    "Mouse and keyboard",
+    "mouse-move <tab-id> <x> <y> [--steps <n>]",
+    "Move the pointer to a point, interpolating from where it stands",
+    {
+      arguments: [TAB_ID, ...POINT],
+      flags: [
+        {
+          name: "--steps",
+          value: "<n>",
+          description: "How many moves to send, 1 to 100.",
+          since: 4,
+        },
+      ],
+      route: "POST /tabs/:id/mouse/move",
+      script: "page.mouse.move",
+      since: 4,
+    },
+  ),
+  command(
+    "mouse-down",
+    "Mouse and keyboard",
+    "mouse-down <tab-id> [--button left|middle|right] [--click-count <n>]",
+    "Press a mouse button where the pointer stands",
+    {
+      arguments: [TAB_ID],
+      flags: [BUTTON, CLICK_COUNT],
+      route: "POST /tabs/:id/mouse/down",
+      script: "page.mouse.down",
+      since: 4,
+    },
+  ),
+  command(
+    "mouse-up",
+    "Mouse and keyboard",
+    "mouse-up <tab-id> [--button left|middle|right] [--click-count <n>]",
+    "Let a held mouse button go where the pointer stands",
+    {
+      arguments: [TAB_ID],
+      flags: [BUTTON, CLICK_COUNT],
+      route: "POST /tabs/:id/mouse/up",
+      script: "page.mouse.up",
+      since: 4,
+    },
+  ),
+  command(
+    "mouse-click",
+    "Mouse and keyboard",
+    "mouse-click <tab-id> <x> <y> [--button left|middle|right] [--click-count <n>] [--delay <ms>]",
+    "Click at a point, without resolving a target",
+    {
+      arguments: [TAB_ID, ...POINT],
+      flags: [BUTTON, CLICK_COUNT, DELAY],
+      route: "POST /tabs/:id/mouse/click",
+      script: "page.mouse.click",
+      since: 4,
+    },
+  ),
+  command(
+    "mouse-wheel",
+    "Mouse and keyboard",
+    "mouse-wheel <tab-id> <delta-x> <delta-y>",
+    "Scroll with the wheel where the pointer stands",
+    {
+      arguments: [
+        TAB_ID,
+        { name: "delta-x", description: "How far to scroll right." },
+        { name: "delta-y", description: "How far to scroll down." },
+      ],
+      route: "POST /tabs/:id/mouse/wheel",
+      script: "page.mouse.wheel",
+      examples: ["mouse-wheel 8c1f2e04:p2 0 240"],
+      since: 4,
+    },
+  ),
+  command(
+    "key-down",
+    "Mouse and keyboard",
+    "key-down <tab-id> <key>",
+    "Hold one key down, so later input carries it",
+    {
+      arguments: [TAB_ID, KEY],
+      route: "POST /tabs/:id/keyboard/down",
+      script: "page.keyboard.down",
+      since: 4,
+    },
+  ),
+  command(
+    "key-up",
+    "Mouse and keyboard",
+    "key-up <tab-id> <key>",
+    "Let one held key go",
+    {
+      arguments: [TAB_ID, KEY],
+      route: "POST /tabs/:id/keyboard/up",
+      script: "page.keyboard.up",
+      since: 4,
+    },
+  ),
+  command(
+    "type",
+    "Mouse and keyboard",
+    "type <tab-id> --stdin [--delay <ms>]",
+    "Type text from stdin where the focus is, character by character",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        STDIN("the text from stdin"),
+        {
+          ...DELAY,
+          description: "How long to wait between characters, 0 to 1000.",
+        },
+      ],
+      stdin: "The exact text to type, at most 2000 characters.",
+      route: "POST /tabs/:id/keyboard/type",
+      script: "page.keyboard.type",
+      since: 4,
+    },
+  ),
+  command(
+    "insert-text",
+    "Mouse and keyboard",
+    "insert-text <tab-id> --stdin",
+    "Insert text from stdin at the focused editable's caret",
+    {
+      arguments: [TAB_ID],
+      flags: [STDIN("the text from stdin")],
+      stdin: "The exact text to insert, at most 16384 characters.",
+      route: "POST /tabs/:id/keyboard/insert-text",
+      script: "page.keyboard.insertText",
+      since: 4,
+    },
+  ),
+  command(
+    "paste",
+    "Mouse and keyboard",
+    "paste <tab-id> --stdin [--html]",
+    "Offer the page a paste of stdin, without the system clipboard",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        STDIN("the text from stdin"),
+        {
+          name: "--html",
+          description: "Read a JSON object with text and html from stdin.",
+          since: 4,
+        },
+      ],
+      stdin:
+        "The text to paste, or with --html a JSON object with text and html.",
+      route: "POST /tabs/:id/keyboard/paste",
+      script: "page.keyboard.paste",
+      since: 4,
+    },
+  ),
+  command(
+    "release-input",
+    "Mouse and keyboard",
+    "release-input <tab-id>",
+    "Let go of every key and mouse button the page holds",
+    {
+      arguments: [TAB_ID],
+      route: "POST /tabs/:id/input/release",
+      script: "page.releaseInput",
+      since: 4,
     },
   ),
   command(

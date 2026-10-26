@@ -3299,6 +3299,165 @@ describe("scripted sessions", () => {
     expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/input/release", body: {} });
   });
 
+  it("runs every new command", async () => {
+    for (const [args, path, body, piped] of [
+      [
+        ["click", "tab-1", "@e2", "--button", "right", "--click-count", "2", "--delay", "100", "--position", "10,20", "--force", "--timeout", "5000", "--label", "Add"],
+        "/tabs/tab-1/click",
+        { ref: "@e2", button: "right", clickCount: 2, delayMs: 100, position: { x: 10, y: 20 }, force: true, timeoutMs: 5000, label: "Add" },
+      ],
+      [
+        ["dblclick", "tab-1", "#row", "--button", "left", "--delay", "0", "--position", "-5,2.5", "--timeout", "0"],
+        "/tabs/tab-1/dblclick",
+        { selector: "#row", button: "left", delayMs: 0, position: { x: -5, y: 2.5 }, timeoutMs: 0 },
+      ],
+      [["hover", "tab-1", "@e2", "--position", "4,5", "--force", "--timeout", "1000"], "/tabs/tab-1/hover", { ref: "@e2", position: { x: 4, y: 5 }, force: true, timeoutMs: 1000 }],
+      [
+        ["drag", "tab-1", "@e1", "#zone", "--source-position", "1,2", "--target-position", "3,4", "--button", "left", "--force", "--timeout", "9000"],
+        "/tabs/tab-1/drag",
+        { source: { ref: "@e1" }, target: { selector: "#zone" }, sourcePosition: { x: 1, y: 2 }, targetPosition: { x: 3, y: 4 }, button: "left", force: true, timeoutMs: 9000 },
+      ],
+      [["fill", "tab-1", "@e1", "--stdin", "--append", "--timeout", "2000"], "/tabs/tab-1/fill", { ref: "@e1", value: "Avery Quinn", append: true, timeoutMs: 2000 }, "Avery Quinn"],
+      [["select", "tab-1", "@e1", "pro", "team", "max", "--timeout", "3000"], "/tabs/tab-1/select", { ref: "@e1", values: ["pro", "team", "max"], timeoutMs: 3000 }],
+      [["select", "tab-1", "@e1"], "/tabs/tab-1/select", { ref: "@e1", values: [] }],
+      [["focus", "tab-1", "@e1", "--timeout", "1500"], "/tabs/tab-1/focus", { ref: "@e1", timeoutMs: 1500 }],
+      [["press", "tab-1", "Shift+KeyA", "@e1", "--delay", "40", "--timeout", "2500"], "/tabs/tab-1/press", { key: "Shift+KeyA", ref: "@e1", delayMs: 40, timeoutMs: 2500 }],
+      [["mouse-move", "tab-1", "40", "60", "--steps", "20"], "/tabs/tab-1/mouse/move", { x: 40, y: 60, steps: 20 }],
+      [["mouse-down", "tab-1", "--button", "middle", "--click-count", "2"], "/tabs/tab-1/mouse/down", { button: "middle", clickCount: 2 }],
+      [["mouse-up", "tab-1", "--button", "middle"], "/tabs/tab-1/mouse/up", { button: "middle" }],
+      [["mouse-click", "tab-1", "-1.5", "60", "--button", "right", "--click-count", "3", "--delay", "20"], "/tabs/tab-1/mouse/click", { x: -1.5, y: 60, button: "right", clickCount: 3, delayMs: 20 }],
+      [["mouse-wheel", "tab-1", "0", "-120"], "/tabs/tab-1/mouse/wheel", { deltaX: 0, deltaY: -120 }],
+      [["key-down", "tab-1", "Shift"], "/tabs/tab-1/keyboard/down", { key: "Shift" }],
+      [["key-up", "tab-1", "Shift"], "/tabs/tab-1/keyboard/up", { key: "Shift" }],
+      [["type", "tab-1", "--stdin", "--delay", "15"], "/tabs/tab-1/keyboard/type", { text: "Avery Quinn", delayMs: 15 }, "Avery Quinn"],
+      [["insert-text", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/insert-text", { text: "Avery Quinn" }, "Avery Quinn"],
+      [["paste", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/paste", { text: "Avery Quinn" }, "Avery Quinn"],
+      [["paste", "tab-1", "--stdin", "--html"], "/tabs/tab-1/keyboard/paste", { text: "Avery", html: "<b>Avery</b>" }, '{"text":"Avery","html":"<b>Avery</b>"}'],
+      [["release-input", "tab-1"], "/tabs/tab-1/input/release", {}],
+    ]) {
+      const fetch = vi.fn(async () => Response.json({ ok: true }));
+      expect(
+        await runCli(args, {
+          env,
+          fetch,
+          health: current,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).toBe(0);
+      const [url, options] = fetch.mock.calls[0];
+      expect(url.pathname, args.join(" ")).toBe(path);
+      expect(options.method, args.join(" ")).toBe("POST");
+      expect(JSON.parse(options.body), args.join(" ")).toEqual(body);
+    }
+    // An unknown flag, a bad value and a missing argument fail before
+    // anything connects.
+    const unused = vi.fn();
+    for (const args of [
+      ["click", "tab-1", "@e2", "--clicks", "2"],
+      ["click", "tab-1", "@e2", "--click-count", "4"],
+      ["click", "tab-1", "@e2", "--button", "back"],
+      ["click", "tab-1", "@e2", "--position", "10"],
+      ["click", "tab-1", "@e2", "--position", "a,b"],
+      ["click", "tab-1", "@e2", "--timeout"],
+      ["click", "tab-1", "@e2", "@e3"],
+      ["dblclick", "tab-1", "@e2", "--click-count", "2"],
+      ["hover", "tab-1"],
+      ["select", "tab-1"],
+      ["focus", "tab-1", "@e1", "--force"],
+      ["mouse-move", "tab-1", "40"],
+      ["mouse-move", "tab-1", "40", "60", "--steps", "0"],
+      ["mouse-move", "tab-1", "40", "99999"],
+      ["mouse-click", "tab-1", "40", "x"],
+      ["mouse-wheel", "tab-1", "0"],
+      ["key-down", "tab-1"],
+      ["type", "tab-1"],
+      ["type", "tab-1", "--stdin", "--delay", "2000"],
+      ["insert-text", "tab-1"],
+      ["paste", "tab-1", "--html"],
+      ["release-input"],
+      ["release-input", "tab-1", "tab-2"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdin: Readable.from(["x"]), stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("prints the new results", async () => {
+    const print = async (args, answer, piped) => {
+      const stdout = sink();
+      expect(
+        await runCli(args, {
+          env,
+          fetch: vi.fn(async () => Response.json(answer)),
+          health: current,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout,
+        }),
+        args.join(" "),
+      ).toBe(0);
+      return stdout.text();
+    };
+    const clicked = { ok: true, url: tab.url, point: { x: 40, y: 60 } };
+    expect(await print(["click", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
+    expect(await print(["click", "tab-1", "@e2"], { ...clicked, loading: true })).toBe("ok: clicked at 40,60 (page loading)\n");
+    expect(await print(["dblclick", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
+    expect(await print(["hover", "tab-1", "@e2"], { ok: true, point: { x: 12, y: 8 } })).toBe("ok: moved to 12,8\n");
+    expect(await print(["fill", "tab-1", "@e1", "--stdin"], { ok: true, match: "equivalent", value: "12.50" }, "12.5")).toBe("ok: filled (equivalent)\n");
+    expect(await print(["select", "tab-1", "@e1", "pro", "team"], { ok: true, values: ["pro", "team"] })).toBe("ok: selected pro, team\n");
+    expect(await print(["select", "tab-1", "@e1"], { ok: true, values: [] })).toBe("ok: selection cleared\n");
+    expect(await print(["mouse-move", "tab-1", "40", "60"], { ok: true, input: pointer })).toBe("ok: mouse at 40,60 buttons 0\n");
+    expect(await print(["mouse-down", "tab-1"], { ok: true, input: { ...pointer, buttons: 1 } })).toBe("ok: mouse at 40,60 buttons 1\n");
+    expect(await print(["key-down", "tab-1", "Shift"], { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } })).toBe("ok: keys Shift\n");
+    expect(await print(["key-up", "tab-1", "Shift"], { ok: true, input: pointer })).toBe("ok: no keys held\n");
+    expect(await print(["release-input", "tab-1"], { ok: true, released: ["Shift", "left"] })).toBe("ok: released Shift, left\n");
+    expect(await print(["release-input", "tab-1"], { ok: true, released: [] })).toBe("ok: nothing held\n");
+    expect(await print(["paste", "tab-1", "--stdin"], { ok: true, handled: "page" }, "hello")).toBe("ok\n");
+    // --json prints the body unchanged.
+    const json = sink();
+    await runCli(["mouse-wheel", "tab-1", "0", "120", "--json"], {
+      env,
+      fetch: vi.fn(async () => Response.json({ ok: true, input: pointer })),
+      health: current,
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({ ok: true, input: pointer });
+  });
+
+  it("refuses level 4 calls and flags against an older app", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api, level3);
+    const sent = api.requests.length;
+    for (const [call, fields] of [
+      [() => page.hover("@e1"), { entry: "page.hover" }],
+      [() => page.dblclick("@e1"), { entry: "page.dblclick" }],
+      [() => page.selectOption("@e1", "pro"), { entry: "page.selectOption" }],
+      [() => page.focus("@e1"), { entry: "page.focus" }],
+      [() => page.dragAndDrop("@e1", "#zone"), { entry: "page.dragAndDrop" }],
+      [() => page.releaseInput(), { entry: "page.releaseInput" }],
+      [() => page.mouse.move(10, 10), { entry: "page.mouse.move" }],
+      [() => page.keyboard.type("hi"), { entry: "page.keyboard.type" }],
+      [() => page.click("@e1", { force: true }), { entry: "page.click", option: "force" }],
+      [() => page.fill("@e1", "x", { append: true }), { entry: "page.fill", option: "append" }],
+      [() => page.press("Enter", "@e1", { delay: 10 }), { entry: "page.press", option: "delay" }],
+    ])
+      await expect(call()).rejects.toMatchObject({ code: "app_outdated", required: 4, available: 3, ...fields });
+    expect(api.requests).toHaveLength(sent);
+    // The CLI makes the same check after its health check and before the
+    // route, for a new command and for a level 4 flag on an old one.
+    const older = fakeApi(inputAnswers);
+    await expect(
+      runCli(["hover", "tab-1", "@e1"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "hover", required: 4, available: 3 });
+    await expect(
+      runCli(["click", "tab-1", "@e1", "--force"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "click", option: "force", required: 4 });
+    expect(older.requests).toEqual([]);
+  });
+
   it("releases input at the end of a run", async () => {
     const released = [];
     const table = {

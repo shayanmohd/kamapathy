@@ -805,23 +805,39 @@ Close a tab
 
 Read bounded page text and control refs
 
-### `click <tab-id> <ref-or-selector> [--label <text>]`
+### `click <tab-id> <ref-or-selector> [--button left|middle|right] [--click-count <n>] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
 
-Click a control
+Click a control, waiting until it can take the press
 
-### `fill <tab-id> <ref-or-selector> --stdin [--label <text>]`
+### `dblclick <tab-id> <ref-or-selector> [--button left|middle|right] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
+
+Double-click a control with one gesture of two presses
+
+### `hover <tab-id> <ref-or-selector> [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
+
+Move the mouse onto a control and leave it there
+
+### `fill <tab-id> <ref-or-selector> --stdin [--append] [--timeout <ms>] [--label <text>]`
 
 Read the exact field value from stdin
+
+### `select <tab-id> <ref-or-selector> [choice...] [--timeout <ms>] [--label <text>]`
+
+Choose a select's options by value or label; no choice clears it
+
+### `focus <tab-id> <ref-or-selector> [--timeout <ms>] [--label <text>]`
+
+Focus a control, retargeting to the nearest one that takes focus
 
 ### `upload <tab-id> <ref> <file> [files]`
 
 Select up to 8 files, 16 MiB total
 
-### `press <tab-id> <key> [ref-or-selector] [--label <text>]`
+### `press <tab-id> <key> [ref-or-selector] [--delay <ms>] [--timeout <ms>] [--label <text>]`
 
-Press a supported key
+Press a key, a printable character or a chord
 
-### `drag <tab-id> <source> <target> [--label <text>]`
+### `drag <tab-id> <source> <target> [--source-position x,y] [--target-position x,y] [--button left|middle|right] [--force] [--timeout <ms>] [--label <text>]`
 
 Drag one element onto another (refs or selectors)
 
@@ -844,6 +860,50 @@ Save a PNG of the viewport, the whole page or a clip, without overwriting
 ### `pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]`
 
 Read a PDF's text by page
+
+### `mouse-move <tab-id> <x> <y> [--steps <n>]`
+
+Move the pointer to a point, interpolating from where it stands
+
+### `mouse-down <tab-id> [--button left|middle|right] [--click-count <n>]`
+
+Press a mouse button where the pointer stands
+
+### `mouse-up <tab-id> [--button left|middle|right] [--click-count <n>]`
+
+Let a held mouse button go where the pointer stands
+
+### `mouse-click <tab-id> <x> <y> [--button left|middle|right] [--click-count <n>] [--delay <ms>]`
+
+Click at a point, without resolving a target
+
+### `mouse-wheel <tab-id> <delta-x> <delta-y>`
+
+Scroll with the wheel where the pointer stands
+
+### `key-down <tab-id> <key>`
+
+Hold one key down, so later input carries it
+
+### `key-up <tab-id> <key>`
+
+Let one held key go
+
+### `type <tab-id> --stdin [--delay <ms>]`
+
+Type text from stdin where the focus is, character by character
+
+### `insert-text <tab-id> --stdin`
+
+Insert text from stdin at the focused editable's caret
+
+### `paste <tab-id> --stdin [--html]`
+
+Offer the page a paste of stdin, without the system clipboard
+
+### `release-input <tab-id>`
+
+Let go of every key and mouse button the page holds
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
