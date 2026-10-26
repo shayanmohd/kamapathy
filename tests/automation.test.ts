@@ -6290,6 +6290,79 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+  it("checks every raw mouse point, and still lets a held button go", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    // A dropdown select under the point would open the browser's own list.
+    page.hits = [{ x: 25, y: 45, nodeName: "select" }];
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/move`, "POST", { x: 25, y: 45 })
+      ).status,
+    ).toBe(200);
+    for (const [path, body] of [
+      ["mouse/down", {}],
+      ["mouse/click", { x: 25, y: 45 }],
+    ] as const) {
+      const picker = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", body),
+      );
+      expect(picker.status, path).toBe(403);
+      expect(picker.error, path).toMatchObject({
+        code: "native_popup_blocked",
+        use: "selectOption",
+      });
+    }
+    // A move and a wheel open nothing, so both act over the same select.
+    page.inputs = [];
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/wheel`, "POST", {
+          deltaX: 0,
+          deltaY: 40,
+        })
+      ).status,
+    ).toBe(200);
+    expect(page.inputs).toHaveLength(1);
+    // A point inside an extension's own frame refuses every mouse route
+    // that aims at one.
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+    });
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    page.inputs = [];
+    for (const [path, body] of [
+      ["mouse/move", { x: 25, y: 45 }],
+      ["mouse/down", {}],
+      ["mouse/click", { x: 25, y: 45 }],
+      ["mouse/wheel", { deltaX: 0, deltaY: 40 }],
+    ] as const) {
+      const blocked = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", body),
+      );
+      expect(blocked.status, path).toBe(403);
+      expect(blocked.error.code, path).toBe("input_target_blocked");
+    }
+    expect(page.inputs).toEqual([]);
+    // A release is never refused: the press that put the button there
+    // passed the guard, and refusing it would leave it held.
+    page.hits = [];
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/down`, "POST", {})).status,
+    ).toBe(200);
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    page.inputs = [];
+    expect((await request(`/tabs/${tab.id}/mouse/up`, "POST", {})).status).toBe(
+      200,
+    );
+    expect(page.inputs.map((input) => input.parameters.type)).toEqual([
+      "mouseReleased",
+    ]);
+  });
+
   it("releases held input on request", async () => {
     const { tab } = await createPage();
     const page = mousePage();
