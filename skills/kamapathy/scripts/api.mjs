@@ -162,6 +162,7 @@ const misplacedOptions = (value) =>
  * @property {string} [href] A link's absolute address.
  * @property {string} [locator] A selector naming this control alone.
  * @property {{ value: string, label: string, disabled?: boolean, selected?: boolean }[]} [options]
+ * @property {string} [extension] The extension a blocked frame belongs to.
  */
 /**
  * @typedef {object} SnapshotTab

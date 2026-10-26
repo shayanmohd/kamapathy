@@ -18,6 +18,13 @@
 import { finitePoint, reboundOf, remaining, type Actions } from "../actions";
 import type { Authority } from "../authority";
 import { ApiError, fail } from "../errors";
+import {
+  NO_EXTENSION_NAMES,
+  blockedFrameUrls,
+  extensionFrame,
+  type ExtensionNames,
+} from "../extension-frames";
+import type { FrameGroupsByTab } from "../frames/groups";
 import type { Run } from "../http";
 import type { Level } from "../dom/select";
 import {
@@ -32,7 +39,11 @@ import type { TabSession } from "../session/tab-session";
 import type { Step } from "../session/types";
 import type { TargetPayload } from "../validate";
 import type { InputDispatcher, InputDispatchers } from "./dispatch";
-import { checkKeyTarget, checkPointerTarget } from "./guards";
+import {
+  checkKeyTarget,
+  checkPointerTarget,
+  type FocusedControl,
+} from "./guards";
 import { inputMarker } from "./marker";
 import {
   KEYS,
@@ -374,6 +385,10 @@ export interface InputActionDeps {
   actions: Pick<Actions, "readyContents" | "evaluatePage" | "dispatcher">;
   dispatchers: InputDispatchers;
   platform?: NodeJS.Platform;
+  /** Section 9's frame groups, which say which frame holds the focus. */
+  frames?: FrameGroupsByTab;
+  /** Section 17's loaded extensions, which name the frame a refusal is about. */
+  extensions?: ExtensionNames;
 }
 /** One drag as its route parsed it. */
 export interface DragAction {
@@ -510,7 +525,12 @@ type FieldOutcome = Record<string, unknown>;
 export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
   const { authorizeTab } = authority;
-  const platform = deps.platform ? { platform: deps.platform } : {};
+  // What every pointer guard is given beside the point: the platform under
+  // test, and section 17's loaded extensions, which name a refused frame.
+  const guards = {
+    ...(deps.platform ? { platform: deps.platform } : {}),
+    extensions: deps.extensions ?? NO_EXTENSION_NAMES,
+  };
   const platformName = deps.platform ?? process.platform;
   // The modifiers the tab is holding, which join a chord's own.
   const heldModifiers = (dispatcher: InputDispatcher): Modifier[] =>
@@ -526,7 +546,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     session: TabSession,
     deadline: number,
     step: Step,
-  ): Promise<{ kind: string; blockedFrame?: true }> => {
+  ): Promise<FocusedControl> => {
     const found = await actions.evaluatePage(
       id,
       session,
@@ -535,10 +555,35 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       deadline,
       step,
     );
+    const kind = typeof found.kind === "string" ? found.kind : "none";
+    if (found.blockedFrame !== true) return { kind };
     return {
-      kind: typeof found.kind === "string" ? found.kind : "none",
-      ...(found.blockedFrame === true ? { blockedFrame: true as const } : {}),
+      kind,
+      blockedFrame: true as const,
+      ...(await focusedExtension(id, session, step)),
     };
+  };
+  // The extension whose page holds the focus, as section 17 names it for a
+  // refusal: which frame that is comes from section 9, and the URL it
+  // committed from the registry. Anything the two cannot answer leaves the
+  // plain refusal.
+  const focusedExtension = async (
+    id: string,
+    session: TabSession,
+    step: Step,
+  ): Promise<{ frame?: string; extension?: string }> => {
+    const groups = deps.frames?.for(id);
+    if (!groups) return {};
+    try {
+      const focus = await groups.focusedFrame(step);
+      if (!focus.blocked) return {};
+      const url = (await blockedFrameUrls(session, step)).get(focus.path);
+      const extension =
+        url === undefined ? undefined : extensionFrame(url, guards.extensions);
+      return extension ? { frame: focus.path, extension: extension.name } : {};
+    } catch {
+      return {};
+    }
   };
   // The content the page is offered, as one mutating page call. A walk that
   // ended at a frame Kamapathy cannot read is the refusal the guards answer
@@ -569,7 +614,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         error.fields.reason === "frame"
       )
         checkKeyTarget(
-          { kind: "other", blockedFrame: true },
+          {
+            kind: "other",
+            blockedFrame: true,
+            ...(await focusedExtension(id, session, step)),
+          },
           undefined,
           platformName,
         );
@@ -703,7 +752,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       checkPointerTarget(session, point, at, {
         button,
         press: kind !== "hover",
-        ...platform,
+        ...guards,
       });
     // The whole gesture: one move, then a press and a release per click,
     // with a delay in each gap. The held buttons and modifiers travel with
@@ -982,7 +1031,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         }
     };
     const aim = (point: Point, press: boolean) =>
-      checkPointerTarget(session, point, step, { button, press, ...platform });
+      checkPointerTarget(session, point, step, { button, press, ...guards });
     // The end a blocker belongs to reads as its detail, so a timeout says
     // which of the two was not ready.
     const stop = (blocked: unknown): AttemptResult<DragOutcome> => {
@@ -1229,7 +1278,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       await checkPointerTarget(session, point, gesture, {
         button: "left",
         press: true,
-        ...platform,
+        ...guards,
       });
       const bit = BUTTON_BITS.left;
       const buttons = dispatcher.state.buttons;
@@ -1703,7 +1752,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       checkPointerTarget(session, point, step, {
         button: action.button,
         press,
-        ...platform,
+        ...guards,
       });
     if (action.kind === "move") {
       const to = { x: action.x ?? 0, y: action.y ?? 0 };

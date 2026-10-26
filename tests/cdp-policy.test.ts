@@ -535,6 +535,65 @@ describe("event redaction", () => {
     expect(redact(created, { delivered: () => false })).toBe(created);
   });
 
+  it("keeps an extension's own worlds out of the events and out of reach", () => {
+    const ID = "abcdefghijklmnopabcdefghijklmnop";
+    // A content script of one of the person's extensions runs in a world of
+    // its own, which agents are never given.
+    const created = (origin: string, auxData?: Record<string, unknown>) =>
+      event("Runtime.executionContextCreated", {
+        context: {
+          id: 4,
+          uniqueId: "ctx-4",
+          name: "Price watcher",
+          origin,
+          ...(auxData ? { auxData } : {}),
+        },
+      });
+    expect(redact(created(`chrome-extension://${ID}`))).toBeNull();
+    // An origin reported beside the frame counts the same.
+    expect(
+      redact(
+        created("", {
+          type: "isolated",
+          frameId: "frame-x",
+          origin: `chrome-extension://${ID}`,
+        }),
+      ),
+    ).toBeNull();
+    // Kamapathy's own PDF viewer is an extension like any other here.
+    expect(
+      redact(created("chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai")),
+    ).toBeNull();
+    // A web page's own world is recorded as before.
+    expect(redact(created("https://example.com"))).not.toBeNull();
+    // Nothing delivered that context, so its end is dropped as well, and
+    // every command naming it, or an object from it, is out of scope.
+    expect(
+      redact(
+        event("Runtime.executionContextDestroyed", {
+          executionContextId: 4,
+          executionContextUniqueId: "ctx-4",
+        }),
+        { delivered: () => false },
+      ),
+    ).toBeNull();
+    for (const [method, params, param] of [
+      ["Runtime.evaluate", { contextId: 4 }, "contextId"],
+      ["Runtime.evaluate", { uniqueContextId: "ctx-4" }, "uniqueContextId"],
+      ["DOM.resolveNode", { executionContextId: 4 }, "executionContextId"],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: "Price watcher" },
+        "executionContextName",
+      ],
+      ["Runtime.callFunctionOn", { objectId: "obj-ext" }, "objectId"],
+    ] as const)
+      expect(verdict(method, params), method).toMatchObject({
+        block: "scope",
+        param,
+      });
+  });
+
   it("drops Kamapathy's own copy once the agent owns the domain", () => {
     const network = event("Network.requestWillBeSent", { requestId: "1" });
     const page = event("Page.loadEventFired", { timestamp: 1 });

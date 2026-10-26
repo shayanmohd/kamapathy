@@ -703,7 +703,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
-| `input_target_blocked` | 403 | not retryable |  | The point, or the frame holding focus, belongs to an extension or an internal page. |
+| `input_target_blocked` | 403 | not retryable | `frame`, `extension` | The point, or the frame holding focus, belongs to an extension or an internal page. |
 | `native_popup_blocked` | 403 | not retryable | `use` | The input would open a native select, color or date picker. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |

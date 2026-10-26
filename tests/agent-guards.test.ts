@@ -16,6 +16,7 @@ import {
   pickerUse,
 } from "../electron/agent/input/guards";
 import { parseChord } from "../electron/agent/input/keys";
+import type { ExtensionNames } from "../electron/agent/extension-frames";
 import type { TabSession } from "../electron/agent/session/tab-session";
 import type { KnownFrame, Step } from "../electron/agent/session/types";
 
@@ -57,6 +58,7 @@ const tab = (
   options: {
     spots?: Spot[];
     frames?: KnownFrame[];
+    registry?: { frameId: string; url: string; path: string }[];
     broken?: unknown;
   } = {},
 ) => {
@@ -80,6 +82,18 @@ const tab = (
   }
   const session = {
     knownFrames: async () => options.frames ?? [known(MAIN)],
+    // What the registry answers for section 9's paths: a blocked frame's
+    // own path and the URL its document committed.
+    frames: async () =>
+      (options.registry ?? []).map((frame) => ({
+        ...frame,
+        origin: "",
+        loaderId: "loader-1",
+        crossOrigin: true,
+        ownSession: true,
+        lifecycle: "load" as const,
+        blocked: true as const,
+      })),
     send: async (
       method: string,
       params: Record<string, any> = {},
@@ -141,12 +155,14 @@ const press = (
   extra: {
     button?: "left" | "middle" | "right";
     platform?: NodeJS.Platform;
+    extensions?: ExtensionNames;
   } = {},
 ) =>
   checkPointerTarget(session, point, step(), {
     button: extra.button ?? "left",
     press: true,
     platform: extra.platform ?? "darwin",
+    ...(extra.extensions ? { extensions: extra.extensions } : {}),
   });
 
 // A page with one control of each kind the guards care about.
@@ -496,5 +512,98 @@ describe("the input guards", () => {
         editable: false,
       }),
     ).toBeUndefined();
+  });
+  it("names the extension a refused point or focus belongs to", async () => {
+    const ID = "abcdefghijklmnopabcdefghijklmnop";
+    const PDF = "mhjfbmdgcfjbbpaeojofohoefgiehjai";
+    const extensions = {
+      nameOf: (id: string) => (id === ID ? "Price watcher" : undefined),
+    };
+    const spots: Spot[] = [
+      {
+        x: 10,
+        y: 10,
+        frameId: "panel",
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+      // A frame inside the extension's own frame: the page shows the
+      // extension's frame, so that is the one named.
+      { x: 20, y: 10, frameId: "inner", author: { nodeName: "div" } },
+      {
+        x: 30,
+        y: 10,
+        frameId: "pdf",
+        author: { nodeName: "iframe", frameId: "pdf" },
+      },
+    ];
+    const frames = [
+      known(MAIN),
+      known("panel", { blocked: true }),
+      known("inner", { blocked: true, parentFrameId: "panel" }),
+      known("pdf", { blocked: true }),
+    ];
+    const registry = [
+      {
+        frameId: "panel",
+        path: "2",
+        url: `chrome-extension://${ID}/frame.html`,
+      },
+      {
+        frameId: "pdf",
+        path: "3",
+        url: `chrome-extension://${PDF}/index.html`,
+      },
+    ];
+    const message =
+      "This is part of the Price watcher extension. Agents can't use extensions; ask the person to continue there.";
+    for (const point of [
+      { x: 10, y: 10 },
+      { x: 20, y: 10 },
+    ]) {
+      const { session } = tab({ spots, frames, registry });
+      const error = await refusal(press(session, point, { extensions }));
+      expect([error.code, error.status]).toEqual(["input_target_blocked", 403]);
+      expect(error.message).toBe(message);
+      expect(error.fields).toEqual({ frame: "2", extension: "Price watcher" });
+    }
+    // Kamapathy's own PDF viewer, and a point in a frame no extension of the
+    // person's holds, keep section 5's own refusal.
+    const viewer = tab({ spots, frames, registry });
+    const plain = await refusal(
+      press(viewer.session, { x: 30, y: 10 }, { extensions }),
+    );
+    expect(plain.code).toBe("input_target_blocked");
+    expect(plain.message).toContain("an extension or an internal page");
+    expect(plain.fields).toEqual({});
+    const alone = tab({ spots, frames, registry });
+    expect(
+      (await refusal(press(alone.session, { x: 10, y: 10 }))).fields,
+    ).toEqual({});
+    // The same for the frame holding focus, which section 9 names for the
+    // key guards.
+    const key = refusalOf(() =>
+      checkKeyTarget(
+        {
+          kind: "other",
+          blockedFrame: true,
+          frame: "2",
+          extension: "Price watcher",
+        },
+        parseChord("KeyA", "linux"),
+        "linux",
+      ),
+    );
+    expect(key.code).toBe("input_target_blocked");
+    expect(key.message).toBe(message);
+    expect(key.fields).toEqual({ frame: "2", extension: "Price watcher" });
+    const other = refusalOf(() =>
+      checkKeyTarget(
+        { kind: "other", blockedFrame: true },
+        parseChord("KeyA", "linux"),
+        "linux",
+      ),
+    );
+    expect(other.message).toContain("an extension or an internal page");
+    expect(other.fields).toEqual({});
   });
 });

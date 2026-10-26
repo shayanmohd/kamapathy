@@ -114,7 +114,7 @@ export const ERRORS = {
     403,
     false,
     "The point, or the frame holding focus, belongs to an extension or an internal page.",
-    [],
+    ["frame", "extension"],
     4,
   ),
   native_popup_blocked: code(
