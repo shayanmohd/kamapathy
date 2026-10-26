@@ -33,11 +33,12 @@ import {
 } from "./http";
 import { registerCounters } from "./input/counters";
 import { createDispatchers } from "./input/dispatch";
+import type { InputCommand } from "./input/keys";
 import { createPageScripts } from "./page-scripts";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
 import { createPresence } from "./presence";
-import { createSpaceCdp } from "./space-cdp";
+import { createSpaceCdp, type InputDispatcherPort } from "./space-cdp";
 import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
 import { downloadRoutes } from "./routes/downloads";
@@ -303,6 +304,22 @@ export async function startAutomation(
     refs,
     frames,
   });
+  // An Input command an agent sends goes out through section 5's dispatcher
+  // on Kamapathy's own session, never on an agent session.
+  const inputPort: InputDispatcherPort = {
+    dispatch: (tabId, method, params, step) => {
+      const session = sessions.get(tabId);
+      if (!session)
+        return fail(
+          "debugger_busy",
+          "Kamapathy lost its connection to this tab. Try again shortly.",
+          { reason: "unavailable" },
+        );
+      return dispatchers
+        .for(session)
+        .key([{ method, params } as InputCommand], step);
+    },
+  };
   // The one path a protocol command takes, with a session per live tab.
   const cdp = createSpaceCdp({
     controller,
@@ -313,6 +330,7 @@ export async function startAutomation(
     refs,
     pageScripts,
     events,
+    input: inputPort,
   });
   // What the agent holds on each tab, which the event redactor reads.
   events.setAgentDomains({

@@ -78,6 +78,9 @@ export class FakeContents extends FakeHost {
   zoom = 1;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
+  // Each setIgnoreMenuShortcuts call, with the Input commands sent by then,
+  // so a test can see the flag span an operation.
+  menuShortcuts: { ignore: boolean; inputs: number }[] = [];
   // What the tab's own session was asked to fetch, as the PDF re-read does.
   fetches: { url: string; init?: RequestInit }[] = [];
   fetchPdf?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -194,6 +197,14 @@ export class FakeContents extends FakeHost {
         this.afterInput?.();
         return {};
       });
+  }
+  setIgnoreMenuShortcuts(ignore: boolean) {
+    this.menuShortcuts.push({
+      ignore,
+      inputs: this.debugger.sent.filter((command) =>
+        command.method.startsWith("Input."),
+      ).length,
+    });
   }
   async loadURL(url: string, options?: Electron.LoadURLOptions) {
     this.loads.push({ url, ...(options ? { options } : {}) });

@@ -7,6 +7,8 @@ import { recoverFromTimeout } from "./evaluate";
 import type { EventRecording } from "./events";
 import type { FrameGroupsByTab } from "./frames/groups";
 import type { Run } from "./http";
+import { checkPointerTarget } from "./input/guards";
+import type { Button } from "./input/state";
 import type { PageScripts } from "./page-scripts";
 import type { RefBook } from "./refs";
 import type { AutomationController } from "./server";
@@ -19,6 +21,15 @@ import type { Step } from "./session/types";
 // Every command goes through the same order here, so no route reaches a tab
 // session itself.
 
+/** The narrow port over section 5's dispatcher, so this phase needs only one adapter line. */
+export interface InputDispatcherPort {
+  dispatch(
+    tabId: string,
+    method: string,
+    params: Record<string, unknown>,
+    step: Step & { timeoutMs: number },
+  ): Promise<unknown>;
+}
 /** One command, as the route read it. */
 export interface CdpCall {
   tabId: string;
@@ -83,6 +94,8 @@ export function createSpaceCdp(deps: {
   refs: RefBook;
   pageScripts: PageScripts;
   events: Pick<EventRecording, "pause">;
+  /** Without it, an Input command is refused as one Kamapathy sends itself. */
+  input?: InputDispatcherPort;
 }): SpaceCdpFilter {
   const {
     controller,
@@ -93,6 +106,7 @@ export function createSpaceCdp(deps: {
     refs,
     pageScripts,
     events,
+    input,
   } = deps;
   // One AgentCdp per live tab session, made on the tab's first command.
   const held = new Map<string, { session: TabSession; cdp: AgentCdp }>();
@@ -184,6 +198,28 @@ export function createSpaceCdp(deps: {
       );
     return frameId;
   };
+  // Section 5's guards on a raw pointer command: the point may belong to a
+  // frame agent input never reaches, and a press on a select, a colour or a
+  // date field would open a native picker no agent can answer.
+  const guardPoint = async (
+    session: TabSession,
+    call: CdpCall,
+    step: Step,
+  ): Promise<void> => {
+    if (call.method !== "Input.dispatchMouseEvent") return;
+    const { x, y, type, button } = call.params as {
+      x?: unknown;
+      y?: unknown;
+      type?: unknown;
+      button?: unknown;
+    };
+    if (typeof x !== "number" || typeof y !== "number") return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    await checkPointerTarget(session, { x, y }, step, {
+      button: (typeof button === "string" ? button : "left") as Button,
+      press: type === "mousePressed",
+    });
+  };
   // What Chromium's refusal, or its silence, means to the agent.
   const mapped = async (
     error: unknown,
@@ -230,20 +266,28 @@ export function createSpaceCdp(deps: {
       pageScripts.require();
       const verdict = classify(call.method, call.params, context(call.tabId));
       if ("block" in verdict) return refuse(call.method, verdict);
-      // Input never goes out on an agent session; Kamapathy sends it.
-      if (verdict.dispatcher)
-        return refuse(call.method, {
-          block: "managed",
-          message:
-            "Kamapathy sends input itself: use the click, press, scroll and drag routes.",
-        });
+      // Input never goes out on an agent session: section 5's dispatcher
+      // sends it on Kamapathy's own, at the top page's coordinates.
+      if (verdict.dispatcher) {
+        if (call.frame !== undefined)
+          return fail(
+            "invalid_field",
+            "Input uses the top page's coordinates, which Kamapathy translates into the frame the point falls in. Leave frame out.",
+            { field: "frame" },
+          );
+        if (!input)
+          return refuse(call.method, {
+            block: "managed",
+            message:
+              "Kamapathy sends input itself: use the click, press, scroll and drag routes.",
+          });
+      }
       const { session } = await actions.readyContents(
         call.tabId,
         remaining(run.deadline),
         true,
         run.park,
       );
-      const cdp = cdpOf(call.tabId, session);
       const signal = AbortSignal.any([run.signal, pageScripts.signal()]);
       const aborted = untilAborted(signal);
       void aborted.catch(() => {});
@@ -261,16 +305,39 @@ export function createSpaceCdp(deps: {
         timeoutMs: call.timeoutMs,
       };
       try {
-        const frameId =
-          call.frame === undefined
-            ? undefined
-            : await frameTarget(call.tabId, call.frame, step);
-        const sending = cdp.send(call.method, call.params, {
-          ...step,
-          ...(frameId === undefined ? {} : { frameId }),
-        });
-        void sending.catch(() => {});
-        const { result, newSession } = await Promise.race([sending, aborted]);
+        let answered: { result: unknown; newSession?: true };
+        if (verdict.dispatcher) {
+          await guardPoint(session, call, step);
+          const dispatching = input!.dispatch(
+            call.tabId,
+            call.method,
+            call.params,
+            step,
+          );
+          void dispatching.catch(() => {});
+          await Promise.race([dispatching, aborted]);
+          // An Input command carries no result of its own.
+          answered = { result: {} };
+        } else {
+          const frameId =
+            call.frame === undefined
+              ? undefined
+              : await frameTarget(call.tabId, call.frame, step);
+          const sending = cdpOf(call.tabId, session).send(
+            call.method,
+            call.params,
+            {
+              ...step,
+              ...(frameId === undefined ? {} : { frameId }),
+            },
+          );
+          void sending.catch(() => {});
+          const { result, newSession } = await Promise.race([sending, aborted]);
+          answered = {
+            result,
+            ...(newSession ? { newSession: true as const } : {}),
+          };
+        }
         guard();
         const now = Date.now();
         if ((named.get(call.tabId) ?? 0) + ACTIVITY_MS <= now) {
@@ -281,7 +348,7 @@ export function createSpaceCdp(deps: {
             "info",
           );
         }
-        return { result, ...(newSession ? { newSession: true as const } : {}) };
+        return answered;
       } catch (error) {
         throw await mapped(error, session, call, step);
       } finally {

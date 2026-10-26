@@ -2,6 +2,7 @@ import { statSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { INPUT_METHODS } from "../electron/agent/cdp-policy";
 import { ApiError } from "../electron/agent/errors";
 import { takeWaitSlot } from "../electron/agent/expectations";
 import { WHEEL_GAP_MS } from "../electron/agent/input/actions";
@@ -7008,22 +7009,170 @@ describe("local automation socket", () => {
     ).toBe(true);
   });
 
-  it("an Input command never goes out on an agent session", async () => {
+  // Section 12's Input path: Kamapathy sends these itself, through section
+  // 5's dispatcher on its own session.
+  const REFUSED_INPUT = [
+    "Input.setIgnoreInputEvents",
+    "Input.setInterceptDrags",
+    "Input.dispatchDragEvent",
+  ];
+
+  it("Input commands reach the dispatcher and never an agent session", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Every Input command the policy passes, with the parameters Chromium
+    // takes for it.
+    const commands: [string, Record<string, unknown>][] = [
+      ["Input.dispatchKeyEvent", { type: "keyDown", key: "a", text: "a" }],
+      ["Input.insertText", { text: "hello" }],
+      [
+        "Input.imeSetComposition",
+        { text: "n", selectionStart: 0, selectionEnd: 1 },
+      ],
+      ["Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 }],
+      ["Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }],
+      [
+        "Input.emulateTouchFromMouseEvent",
+        { type: "mousePressed", x: 1, y: 2, button: "left", clickCount: 1 },
+      ],
+      ["Input.synthesizeScrollGesture", { x: 10, y: 10, yDistance: -100 }],
+      ["Input.synthesizeTapGesture", { x: 10, y: 10 }],
+      ["Input.synthesizePinchGesture", { x: 10, y: 10, scaleFactor: 2 }],
+      ["Input.cancelDragging", {}],
+    ];
+    // The list is the policy's own, so a method added to the table is
+    // checked here too.
+    expect(commands.map(([method]) => method).sort()).toEqual(
+      INPUT_METHODS.filter((method) => !REFUSED_INPUT.includes(method)).sort(),
+    );
+    for (const [method, params] of commands) {
+      const answered = await cdp(tab.id, { method, params });
+      expect(answered.status, method).toBe(200);
+      // Chromium answers an Input command with nothing of its own.
+      expect(await answered.json(), method).toEqual({ ok: true, result: {} });
+      // Kamapathy's own session carries it, with no session id at all.
+      expect(sentOn(page, method), method).toEqual([undefined]);
+    }
+    // No agent session was opened for any of them.
+    expect(attached(page)).toEqual([]);
+    // The dispatcher's marker and the menu flag spanned each command, so
+    // the shell reacts to none of them.
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+    expect(page.menuShortcuts).toEqual(
+      commands.flatMap((_command, index) => [
+        { ignore: true, inputs: index },
+        { ignore: false, inputs: index + 1 },
+      ]),
+    );
+    // The held modifiers travel with each command, as they do on the input
+    // routes: the state's own mask, not a mask the agent made up.
+    expect(
+      page.inputs
+        .filter((input) => input.method === "Input.dispatchMouseEvent")
+        .map((input) => [input.parameters.modifiers, input.parameters.buttons]),
+    ).toEqual([[0, 0]]);
+  });
+
+  it("Input with frame is refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
     const { status, error } = await failure(
       await cdp(tab.id, {
-        method: "Input.dispatchKeyEvent",
-        params: { type: "keyDown", key: "a" },
+        method: "Input.dispatchMouseEvent",
+        params: { type: "mouseMoved", x: 4, y: 4 },
+        frame: "0",
       }),
     );
-    expect(status).toBe(403);
+    expect(status).toBe(400);
     expect(error).toMatchObject({
-      code: "cdp_method_blocked",
-      method: "Input.dispatchKeyEvent",
-      reason: "managed",
+      code: "invalid_field",
+      field: "frame",
+      message: expect.stringContaining("top page"),
     });
-    expect(sentOn(page, "Input.dispatchKeyEvent")).toEqual([]);
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("refused Input commands stay refused", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const refused: [string, Record<string, unknown>, string, string?][] = [
+      ["Input.setIgnoreInputEvents", { ignore: true }, "person"],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "c", commands: ["copy"] },
+        "person",
+        "commands",
+      ],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "v", code: "KeyV", modifiers: 4 },
+        "person",
+        "key",
+      ],
+      ["Input.setInterceptDrags", { enabled: true }, "managed"],
+      [
+        "Input.dispatchDragEvent",
+        { type: "dragEnter", x: 1, y: 1, data: { items: [], dragOperationsMask: 1 } },
+        "managed",
+      ],
+    ];
+    for (const [method, params, reason, param] of refused) {
+      const { status, error } = await failure(await cdp(tab.id, { method, params }));
+      const where = `${method} ${param ?? ""}`;
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason,
+      });
+      expect(error.param, where).toBe(param);
+    }
+    // A middle press pastes the primary selection on Linux, and nowhere
+    // else, so only there is it the person's.
+    const middle = await cdp(tab.id, {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mousePressed", x: 5, y: 5, button: "middle", clickCount: 1 },
+    });
+    if (process.platform === "linux") {
+      const { status, error } = await failure(middle);
+      expect(status).toBe(403);
+      expect(error).toMatchObject({
+        code: "cdp_method_blocked",
+        reason: "person",
+        param: "button",
+      });
+    } else expect(middle.status).toBe(200);
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual(
+      process.platform === "linux" ? [] : [undefined],
+    );
+    expect(sentOn(page, "Input.dispatchDragEvent")).toEqual([]);
+    expect(sentOn(page, "Input.setInterceptDrags")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("a takeover during an Input command answers human_control", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Input.dispatchMouseEvent", () => new Promise(() => {}));
+    const sending = cdp(tab.id, {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseMoved", x: 7, y: 9 },
+    });
+    await expect
+      .poll(() => sentOn(page, "Input.dispatchMouseEvent").length)
+      .toBe(1);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const { status, error } = await failure(await sending);
+    expect(status).toBe(409);
+    expect(error).toMatchObject({ code: "human_control", reason: "manual" });
+    // The command that was in flight is the last one: the dispatcher's own
+    // ownership check sent nothing after it.
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([undefined]);
     expect(attached(page)).toEqual([]);
   });
 
