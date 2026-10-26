@@ -2294,7 +2294,7 @@ export const searchRepositories = (context, args) => args;
       expect(checked.source, id).toBe("bundled");
     }
     // The samples this worktree ships; each one arrives with its own task.
-    const samples = ["github", "google-search"];
+    const samples = ["github", "google-search", "x"];
     expect(ids).toEqual(expect.arrayContaining(samples));
     // The github sample's own tools: the names its manifest declares, and an
     // export runSiteTool can call for each Node tool.
@@ -2327,6 +2327,21 @@ export const searchRepositories = (context, args) => args;
         typeof (await importToolExport(google.pack, tool)),
         tool.name,
       ).toBe("function");
+    // The x sample's own tools and its two notes, read the same way.
+    const x = await readManifest(join(bundled.path, "x"), {
+      source: "bundled",
+      id: "x",
+    });
+    expect(x.pack.tools.map((tool) => tool.name)).toEqual([
+      "timeline_posts",
+      "search_people",
+    ]);
+    expect(x.pack.pageTools.map((tool) => tool.name)).toEqual(["focused_post"]);
+    expect(x.pack.notes).toEqual(["notes/overview.md", "notes/timeline.md"]);
+    for (const tool of x.pack.tools)
+      expect(typeof (await importToolExport(x.pack, tool)), tool.name).toBe(
+        "function",
+      );
   });
 
   it("checkPack reports every rule", async () => {
