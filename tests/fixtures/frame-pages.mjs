@@ -217,6 +217,39 @@ document.getElementById("word").onkeydown = (event) => { if (event.key === "Ente
 <button type="button" id="first">First item</button>
 <div style="height:3000px"></div>
 <button type="button" id="last">Last item</button>`,
+  // A frame from another site with a veil over its top part, and a grid
+  // inside it at known positions: a point under the veil is covered by the
+  // page around the frame, and the one below it is reached as usual.
+  "/frames/sealed": `<!doctype html><meta charset="utf-8"><title>Sealed frame</title>
+<style>body{margin:0}#grid{display:block;position:absolute;left:0;top:40px;width:400px;height:220px;border:0}#seal{position:absolute;left:0;top:0;width:900px;height:140px;background:rgba(0,0,0,0.2)}</style>
+<iframe id="grid" title="Sealed grid"></iframe>
+<div id="seal"></div>
+<script>
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+document.getElementById("grid").src = location.origin.replace(location.hostname, otherHost) + "/frames/inner-grid";
+</script>`,
+  // A frame from another site drawn at half size, holding a frame of this
+  // page's own name on another port: a press inside the innermost document
+  // crosses two boundaries and one scale.
+  "/frames/half": `<!doctype html><meta charset="utf-8"><title>Half size frames</title>
+<style>body{margin:0}#half{display:block;width:400px;height:300px;border:4px solid #666;padding:6px;transform:scale(0.5);transform-origin:0 0}</style>
+<p>Above the half size frame</p>
+<iframe id="half" title="Half size form" src="{{other}}/frames/holder"></iframe>`,
+  "/frames/holder": `<!doctype html><meta charset="utf-8"><title>Holder</title>
+<style>body{margin:0}iframe{display:block;width:380px;height:220px;border:0;margin:20px 0 0}</style>
+<p>Holder text</p>
+<iframe id="grid" title="Inner grid" src="{{otherPort}}/frames/inner-grid"></iframe>`,
+  // The grid page names no frameElement, which a frame from another origin
+  // may not read, so its own handlers run wherever it is embedded.
+  "/frames/inner-grid": `<!doctype html><meta charset="utf-8"><title>Inner grid</title>
+<style>body{margin:0}button{position:absolute;width:100px;height:40px;margin:0;padding:0}</style>
+<button type="button" id="target" style="left:100px;top:40px">Target</button>
+<button type="button" id="decoy" style="left:260px;top:110px">Decoy</button>
+<p id="grid-hit" role="status" style="position:absolute;left:0;top:160px;margin:0">Grid untouched</p>
+<script>
+for (const button of document.querySelectorAll("button"))
+  button.onclick = () => { document.getElementById("grid-hit").textContent = "Grid hit " + button.textContent; };
+</script>`,
   "/frames/scaled": `<!doctype html><meta charset="utf-8"><title>Scaled frames</title>
 <style>body{margin:0}iframe{display:block;width:400px;height:200px;border:4px solid #666;padding:6px;margin:0 0 10px}#scaled{transform:scale(0.5);transform-origin:0 0}#zoomed{zoom:0.5}</style>
 <iframe id="scaled" title="Scaled grid" src="/frames/grid"></iframe>
