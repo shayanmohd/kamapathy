@@ -3,7 +3,8 @@
 // disabled states a chain can carry, fields and selects of every kind, a
 // panel inside a frame below the fold, drawn graphics, boxes that move or
 // whose frames stall, a field and an editing host that log the key events
-// they receive, and the wrappers fill, select and focus retarget through.
+// they receive, a page that logs and may take the paste events it is sent,
+// and the wrappers fill, select and focus retarget through.
 export const inputPages = {
   "/input/buttons": `<!doctype html><meta charset="utf-8"><title>Buttons</title>
 <style>
@@ -220,6 +221,39 @@ for (const type of ["keydown", "keyup"])
       trusted: event.isTrusted,
     });
   });
+</script>`,
+  "/input/paste": `<!doctype html><meta charset="utf-8"><title>Paste</title>
+<style>body{font:14px sans-serif;margin:16px}p{margin:6px 0}</style>
+<p><label for="plain">Plain</label> <input id="plain" type="text"></p>
+<p><label for="rich">Rich</label> <div id="rich" contenteditable="true">Rich text</div></p>
+<p><button id="button" type="button">Nothing to type into</button></p>
+<p><span id="shell" style="display:inline-block"></span></p>
+<script>
+// Every paste event the page receives, with the flavours it carries and the
+// element it reached through the shadow boundary.
+window.pasteLog = [];
+// A page that takes the content for itself cancels the event; a test turns
+// this on to play that handler.
+window.takePaste = false;
+document.addEventListener("paste", (event) => {
+  const data = event.clipboardData;
+  window.pasteLog.push({
+    target: event.target.id,
+    deep: event.composedPath()[0].id,
+    types: Array.from(data.types),
+    text: data.getData("text/plain"),
+    html: data.getData("text/html"),
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    composed: event.composed,
+    trusted: event.isTrusted,
+  });
+  if (window.takePaste) event.preventDefault();
+});
+document
+  .getElementById("shell")
+  .attachShadow({ mode: "open" })
+  .append(Object.assign(document.createElement("input"), { id: "inner" }));
 </script>`,
   "/input/stalled": `<!doctype html><meta charset="utf-8"><title>Stalled frames</title>
 <style>body{font:14px sans-serif;margin:16px}</style>

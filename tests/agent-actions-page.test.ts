@@ -1131,4 +1131,97 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     await send(back.up);
     expect(await page.textContent("#notes")).toBe("Written her");
   }, 30000);
+
+  it("dispatches one paste event at the deep active element and inserts nothing", async () => {
+    await open("/input/paste");
+    const log = () => page.evaluate(() => (window as any).pasteLog);
+    const clear = () => page.evaluate(() => ((window as any).pasteLog = []));
+    const paste = (payload: Record<string, unknown> = {}) =>
+      operate("pasteDispatch", {
+        text: "from the agent",
+        html: "<b>from the agent</b>",
+        ...payload,
+      });
+    // Nothing editable has focus, so the page saw the event and nothing
+    // took it.
+    const nowhere = await paste();
+    expect(nowhere).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "none" },
+    });
+    expect(await log()).toEqual([
+      {
+        target: "",
+        deep: "",
+        types: ["text/plain", "text/html"],
+        text: "from the agent",
+        html: "<b>from the agent</b>",
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        trusted: false,
+      },
+    ]);
+    // A focused editable that ignores the event leaves the insertion to the
+    // main process: the operation puts neither the text nor the HTML in.
+    await clear();
+    await page.focus("#rich");
+    expect(await paste()).toEqual({ ok: true, handled: "none" });
+    expect(await page.innerHTML("#rich")).toBe("Rich text");
+    expect((await log()).map((entry: any) => entry.deep)).toEqual(["rich"]);
+    // A handler that cancels the event took the content itself.
+    await clear();
+    await page.evaluate(() => ((window as any).takePaste = true));
+    expect(await paste()).toEqual({ ok: true, handled: "page" });
+    expect(await page.innerHTML("#rich")).toBe("Rich text");
+    expect(await log()).toHaveLength(1);
+    // A page that takes the paste is answered even with nothing editable
+    // focused.
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    expect(await paste()).toEqual({ ok: true, handled: "page" });
+    await page.evaluate(() => ((window as any).takePaste = false));
+    // The event reaches a field inside a shadow root, which the walk finds
+    // and the composed event carries to the page's own handler.
+    await clear();
+    await page.evaluate(() =>
+      (
+        document
+          .getElementById("shell")!
+          .shadowRoot!.getElementById("inner") as HTMLInputElement
+      ).focus(),
+    );
+    expect(await paste()).toEqual({ ok: true, handled: "none" });
+    expect(await log()).toMatchObject([{ target: "shell", deep: "inner" }]);
+    // Plain text alone carries one flavour.
+    await clear();
+    await page.focus("#plain");
+    expect(await paste({ html: undefined })).toEqual({
+      ok: true,
+      handled: "none",
+    });
+    expect(await log()).toMatchObject([
+      { types: ["text/plain"], text: "from the agent", html: "" },
+    ]);
+    // A focus inside a frame from another origin is the guards' refusal, and
+    // nothing is dispatched.
+    await clear();
+    const foreign = `${origin.replace("127.0.0.1", "localhost")}/input/fields`;
+    await page.evaluate(async (src) => {
+      const frame = document.createElement("iframe");
+      frame.src = src;
+      const loaded = new Promise((done) =>
+        frame.addEventListener("load", done),
+      );
+      document.body.append(frame);
+      await loaded;
+      frame.focus();
+    }, foreign);
+    expect(await paste()).toMatchObject({
+      ok: false,
+      code: "not_editable",
+      fields: { reason: "frame" },
+    });
+    expect(await log()).toEqual([]);
+  }, 30000);
 });

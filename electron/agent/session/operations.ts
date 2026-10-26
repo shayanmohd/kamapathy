@@ -45,6 +45,7 @@ export const OPERATIONS: Record<
   setDirectValue: { mutates: true },
   selectChoose: { mutates: true },
   focusTarget: { mutates: true },
+  pasteDispatch: { mutates: true },
   info: { mutates: false, source: "pageState" },
   loadProbe: { mutates: false, source: "pageState" },
 };

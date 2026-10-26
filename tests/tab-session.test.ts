@@ -1320,6 +1320,7 @@ describe("evaluateInFrame", () => {
       "fillPrepare",
       "focus",
       "focusTarget",
+      "pasteDispatch",
       "scroll",
       "selectChoose",
       "setDirectValue",

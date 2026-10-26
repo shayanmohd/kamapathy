@@ -43,7 +43,8 @@ export type PageOperation =
   | "fillRead"
   | "setDirectValue"
   | "selectChoose"
-  | "focusTarget";
+  | "focusTarget"
+  | "pasteDispatch";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
@@ -2177,7 +2178,8 @@ export function pageOperation(
     operation === "fillRead" ||
     operation === "setDirectValue" ||
     operation === "selectChoose" ||
-    operation === "focusTarget"
+    operation === "focusTarget" ||
+    operation === "pasteDispatch"
   ) {
     const actions = actionOperations!(
       {

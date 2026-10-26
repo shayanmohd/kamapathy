@@ -1477,6 +1477,34 @@ export function actionOperations(
       : blockedResult({ blocker: "not_focused" });
   };
 
+  // Section 5's paste, which never touches the system clipboard: the page is
+  // offered the content in a DataTransfer of its own, and only the plain text
+  // the main process inserts afterwards ever reaches a field.
+  const pasteDispatch = (payload: Record<string, unknown>) => {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    const html = typeof payload.html === "string" ? payload.html : undefined;
+    const active = deepActive();
+    // The walk ended at a frame this page cannot read, so the paste belongs
+    // to a frame agents never reach.
+    if (active && host.opaqueFrame(active)) return notEditable("frame");
+    const at = active || document.body || document.documentElement;
+    if (!at) return notEditable("none");
+    const data = new DataTransfer();
+    data.setData("text/plain", text);
+    if (html !== undefined) data.setData("text/html", html);
+    const event = new ClipboardEvent("paste", {
+      clipboardData: data,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    // A handler that cancels the event took the content, whatever has focus.
+    if (!at.dispatchEvent(event))
+      return { ok: true as const, handled: "page" as const };
+    if (controlKind(at) !== "editable") return notEditable("none");
+    return { ok: true as const, handled: "none" as const };
+  };
+
   return {
     actionPoint,
     stableBox,
@@ -1488,5 +1516,6 @@ export function actionOperations(
     setDirectValue,
     selectChoose,
     focusTarget,
+    pasteDispatch,
   };
 }
