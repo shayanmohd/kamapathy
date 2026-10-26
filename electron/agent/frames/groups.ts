@@ -92,11 +92,18 @@ export interface FrameGroups {
   /**
    * Runs one read per group under the limits, newly found groups after the
    * read that found their owner. `perGroupMs` bounds each read, `from` names
-   * the frame whose group the read starts at, and the scope's own group
-   * fails the whole call rather than being listed unread.
+   * the frame whose group the read starts at, `stop` ends the plan once the
+   * caller has what it needs, leaving the groups left over untouched, and
+   * the scope's own group fails the whole call rather than being listed
+   * unread.
    */
   read<T>(
-    step: Step & { budgetMs: number; perGroupMs?: number; from?: string },
+    step: Step & {
+      budgetMs: number;
+      perGroupMs?: number;
+      from?: string;
+      stop?: () => boolean;
+    },
     run: (group: GroupInfo) => Promise<T>,
   ): Promise<{
     results: { group: GroupInfo; value: T }[];
@@ -556,6 +563,12 @@ export function createFrameGroups(
         }
       };
       while (queue.length || running.size) {
+        // A caller that already has its answer leaves the groups it did not
+        // need as they were: unread, and counted by nothing.
+        if (step.stop?.()) {
+          queue.length = 0;
+          if (!running.size) break;
+        }
         while (queue.length && running.size < READ_LIMITS.inFlight) {
           const group = queue.shift()!;
           const task = readGroup(group)

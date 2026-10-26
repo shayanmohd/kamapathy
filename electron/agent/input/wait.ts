@@ -116,7 +116,16 @@ export interface AttemptContext {
 export interface LoopBlocker extends Omit<Blocked, "blocker"> {
   blocker: ActionBlocker | "no_match";
   selector?: string;
+  /** Section 9's count of the frames the attempt left out. */
+  unreadFrames?: number;
 }
+/** The frames a resolution left out of its attempt, as its error carries them. */
+export const unreadOf = (
+  fields: Record<string, unknown>,
+): { unreadFrames?: number } =>
+  typeof fields.unreadFrames === "number" && fields.unreadFrames > 0
+    ? { unreadFrames: fields.unreadFrames }
+    : {};
 export interface AttemptResult<T> {
   done: boolean;
   value?: T;
@@ -183,6 +192,9 @@ export async function runAttempts<T>(
   }
   const waitedMs = Date.now() - started;
   const stop = real ?? weak;
+  // The frames the last attempt left out, which both answers report.
+  const unread =
+    stop?.unreadFrames === undefined ? {} : { unreadFrames: stop.unreadFrames };
   if (stop?.blocker === "no_match") {
     const selector = options.selector ?? stop.selector;
     return fail(
@@ -191,6 +203,7 @@ export async function runAttempts<T>(
       {
         ...(selector === undefined ? {} : { selector }),
         waitedMs,
+        ...unread,
       },
     );
   }
@@ -206,6 +219,7 @@ export async function runAttempts<T>(
         ? {}
         : { interceptor: stop.interceptor }),
       timeoutMs: options.timeoutMs,
+      ...unread,
     },
   );
 }

@@ -129,8 +129,9 @@ export function createActions(deps: {
     refs,
   } = deps;
   const { authorizeTab } = authority;
-  // Targets, refs and role nodes are the resolver's business.
-  const resolver = createResolver({ refs });
+  // Targets, refs, role nodes and section 9's search are the resolver's
+  // business.
+  const resolver = createResolver({ refs, frames: deps.frames });
   // Each page of a tab the agent controls has a debugger session from the
   // moment its view exists.
   const sessionOf = (id: string, contents: WebContents): TabSession => {
@@ -344,6 +345,8 @@ export function createActions(deps: {
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, session, "scroll", payload, deadline, step);
     } else {
+      // The frames the last check was left without, which its timeout names.
+      let unread = 0;
       for (;;) {
         authorizeTab(id);
         let observation: Record<string, unknown>;
@@ -368,9 +371,16 @@ export function createActions(deps: {
           return fail(
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
-            { awaited: "condition", timeoutMs: payload.timeoutMs },
+            {
+              awaited: "condition",
+              timeoutMs: payload.timeoutMs,
+              ...(unread > 0 ? { unreadFrames: unread } : {}),
+            },
           );
         }
+        if (typeof observation.unreadFrames === "number")
+          unread = observation.unreadFrames;
+        else unread = 0;
         if (observation.matched) {
           result = { ok: true };
           break;
@@ -379,7 +389,11 @@ export function createActions(deps: {
           return fail(
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
-            { awaited: "condition", timeoutMs: payload.timeoutMs },
+            {
+              awaited: "condition",
+              timeoutMs: payload.timeoutMs,
+              ...(unread > 0 ? { unreadFrames: unread } : {}),
+            },
           );
         await run.park(
           () =>

@@ -739,11 +739,11 @@ Every code, its status, whether it can be retried, and its fields:
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |
-| `cross_origin_frame` | 409 | not retryable |  | The control is inside a frame from another origin. |
+| `cross_origin_frame` | 409 | not retryable |  | Retired: frames from other origins are read and actionable, so no route returns this. |
 | `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
-| `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
+| `stale_ref` | 409 | not retryable | `ref`, `frame` | The ref belongs to an earlier snapshot, a control the page removed, refs the page retired, or a frame that loaded another document. |
 | `element_obscured` | 409 | retryable | `presses` | Another element covers the target, after input the action already sent. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
@@ -754,8 +754,8 @@ Every code, its status, whether it can be retried, and its fields:
 | `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
 | `result_too_large` | 422 | not retryable | `bytes`, `limit`, `status`, `url`, `headers` | The result is larger than the route returns. |
 | `fetch_failed` | 422 | not retryable | `url`, `pageOrigin`, `crossOrigin`, `mode`, `name`, `corsError`, `blockedReason`, `netError` | The page could not fetch the URL. |
-| `no_match` | 422 | retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
-| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates` | The selector matched more than one element the action can take. |
+| `no_match` | 422 | retryable | `selector`, `waitedMs`, `unreadFrames` | Nothing matched the selector by the deadline. |
+| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates`, `unreadFrames` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
@@ -782,7 +782,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
-| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The request did not start in time, or its target never became ready for input. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor`, `unreadFrames` | The request did not start in time, or its target never became ready for input. |
 | `evaluation_timeout` | 504 | not retryable | `awaited`, `timeoutMs`, `executionStopped`, `mayHaveLateEffects`, `pageResponsive` | The page script did not finish within the timeout. |
 | `fetch_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The fetch did not answer within the timeout. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
@@ -791,7 +791,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `selector`, `matched`, `visible`, `title`, `popups` | The condition was not met before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `selector`, `matched`, `visible`, `title`, `popups`, `unreadFrames` | The condition was not met before the timeout. |
 | `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
 | `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |
 | `update_download_failed` | in GET /update | retryable when reason is network or stalled, or httpStatus is in range | `reason`, `httpStatus` | The installer download stopped. |

@@ -1591,6 +1591,488 @@ describe("local automation socket", () => {
     expect(body.unreadFrames).toBeUndefined();
   });
 
+  // Section 9's search across frame groups: a probe says what one group
+  // holds, and the operation itself runs in the one group the search picked.
+  const isProbe = (code: string) => code.includes('"tally":true');
+  const callGroup = (code: string) => groupOf(code) ?? "";
+  const tally = (
+    count: number,
+    extra: Partial<{ visible: number; hidden: number; actionable: number }> = {},
+  ) => ({
+    count,
+    visible: extra.visible ?? count,
+    hidden: extra.hidden ?? 0,
+    actionable: extra.actionable ?? count,
+  });
+  const noMatch = {
+    ok: false,
+    code: "no_match",
+    error:
+      "Nothing on the page matches this selector. Take a snapshot to check the page.",
+    fields: { selector: ".pay" },
+  };
+  // A page whose frame holds one control, listed by a snapshot so its ref
+  // has a home: @e1 names the frame itself and @e2 the control inside it.
+  const framedPage = async (tabId: string) => {
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    page.result = (code: string) =>
+      callGroup(code) === ""
+        ? groupRead("", {
+            text: [{ order: 0, value: "Checkout" }],
+            controls: [
+              {
+                order: 1,
+                tier: 6,
+                entry: frameEntry("Card details", "@e1", "0", "card"),
+              },
+            ],
+            owners: [owner("0", 1, "card")],
+          })
+        : groupRead("0", {
+            controls: [
+              { order: 1, tier: 0, entry: control("Card number", "@e2") },
+            ],
+          });
+    const response = await request(`/tabs/${tabId}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(
+      body.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Card details", undefined],
+      ["Card number", "0"],
+    ]);
+    page.scripts.length = 0;
+    return page;
+  };
+
+  it("routes a frame ref to its group", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    page.result = { ok: true, x: 25, y: 45 };
+    // The ref goes straight to the frame that issued it: no search of the
+    // page's own document, and no probe of any group.
+    for (const [route, body] of [
+      ["click", { ref: "@e2" }],
+      ["fill", { ref: "@e2", value: "4111" }],
+    ] as const) {
+      page.scripts.length = 0;
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(200);
+      expect(page.scripts.some((script) => isProbe(script.code))).toBe(false);
+      expect(
+        page.scripts
+          .filter((script) => script.code.includes('"ref":"@e2"'))
+          .every((script) => callGroup(script.code) === "0"),
+        route,
+      ).toBe(true);
+    }
+    // A ref of the page's own document still runs in the page's own world.
+    page.scripts.length = 0;
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(payloads("actionPoint").map((item) => item.frameContext)).toEqual([
+      undefined,
+    ]);
+    // The code no route answers any more keeps its entry for older scripts.
+    expect(ERRORS.cross_origin_frame.summary).toContain("Retired");
+  });
+
+  it("searches the top document, then frames depth first in owner order", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A frame inside a frame, and a sibling after it: the order of the
+    // documents is the page, "0", "0/0", "1".
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      {
+        frameId: "inner",
+        parent: "card",
+        url: "https://deep.example/",
+        local: "0",
+      },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (isProbe(code))
+        return { ok: true, tally: tally(group === "0/0" || group === "1" ? 1 : 0) };
+      return {
+        ok: true,
+        matched: group === "0/0",
+        counts: { matched: group === "0/0" ? 1 : 0, visible: 0 },
+      };
+    };
+    const found = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 2000,
+    });
+    expect(found.status).toBe(200);
+    const checks = payloads("check");
+    // Every frame group answered what it holds, and the earliest document
+    // of the order that holds a match ran the check itself.
+    expect(
+      checks
+        .filter((item) => item.tally === true)
+        .map((item) => item.frameContext.group)
+        .sort(),
+    ).toEqual(["0", "0/0", "1"]);
+    expect(
+      checks
+        .filter((item) => item.tally !== true)
+        .map((item) => item.frameContext?.group ?? ""),
+    ).toEqual(["", "0/0"]);
+    // strict: the page's own document decides while it holds a candidate,
+    // so no frame group is read at all.
+    page.scripts.length = 0;
+    page.result = (code: string) =>
+      isProbe(code) ? { ok: true, tally: tally(1) } : { ok: true, x: 25, y: 45 };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { selector: ".save" }))
+        .status,
+    ).toBe(200);
+    expect(page.scripts.some((script) => isProbe(script.code))).toBe(false);
+    expect(payloads("actionPoint").map((item) => item.frameContext)).toEqual([
+      undefined,
+    ]);
+  });
+
+  it("count sums every document and nth counts document by document", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    // Two matches in each frame and none in the page's own document.
+    page.result = (code: string) => {
+      const matched = callGroup(code) === "" ? 0 : 2;
+      return { ok: true, matched: true, counts: { matched, visible: 0 } };
+    };
+    const hidden = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "hidden",
+      timeoutMs: 1000,
+    });
+    expect(hidden.status).toBe(200);
+    expect((await hidden.json()).matched).toBe(4);
+    expect(
+      payloads("check")
+        .map((item) => item.frameContext?.group ?? "")
+        .sort(),
+    ).toEqual(["", "0", "1"]);
+    // The third match of the page is the first match of the second frame,
+    // and the probes count without the nth.
+    page.scripts.length = 0;
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(callGroup(code) === "" ? 0 : 2) }
+        : { ok: true, x: 25, y: 45 };
+    expect(
+      (
+        await request(`/tabs/${tab.id}/click`, "POST", {
+          selector: "button >> nth=2",
+        })
+      ).status,
+    ).toBe(200);
+    const probes = payloads("check").filter((item) => item.tally === true);
+    expect(probes.map((item) => item.query.ast.nth)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(
+      payloads("actionPoint").map((item) => [
+        item.frameContext?.group,
+        item.query.ast.nth,
+      ]),
+    ).toEqual([["1", 0]]);
+  });
+
+  it("a frame's candidates keep their frame, and two frames are ambiguous", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    let candidate = 0;
+    // Only the first frame holds matches, and two of them, which its own
+    // read reports with a ref from the block it reserved.
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (isProbe(code))
+        return { ok: true, tally: tally(group === "0" ? 2 : 0) };
+      if (group === "") return noMatch;
+      candidate = Number(/"firstRef":(\d+)/.exec(code)![1]);
+      return {
+        ok: false,
+        code: "ambiguous_match",
+        error:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        fields: {
+          selector: ".pay",
+          count: 2,
+          visible: 2,
+          hidden: 0,
+          actionable: 2,
+          candidates: [
+            {
+              ref: `@e${candidate}`,
+              tag: "button",
+              role: "button",
+              name: "Pay",
+              context: "Card details",
+              visible: true,
+              disabled: false,
+              frame: "0",
+            },
+          ],
+        },
+        issued: [candidate],
+      };
+    };
+    const ambiguous = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(ambiguous.status).toBe(422);
+    const ref = (await ambiguous.json()).error.candidates[0].ref;
+    expect(ref).toBe(`@e${candidate}`);
+    // The candidate the frame gave out goes back to that frame alone.
+    page.scripts.length = 0;
+    page.result = { ok: true, x: 25, y: 45 };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref })).status,
+    ).toBe(200);
+    expect(
+      payloads("actionPoint").map((item) => item.frameContext?.group),
+    ).toEqual(["0"]);
+    // A candidate at the level in each of two frames is ambiguous across
+    // them, and nothing is acted on until a snapshot names one.
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(callGroup(code) === "" ? 0 : 1) }
+        : noMatch;
+    const across = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(across.status).toBe(422);
+    expect(await across.json()).toEqual({
+      error: {
+        code: "ambiguous_match",
+        message:
+          "Selector matched 2 elements (2 visible, 0 hidden) in 2 frames. Take a snapshot and use a ref from the frame you mean.",
+        selector: ".pay",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates: [],
+      },
+    });
+  });
+
+  it("a silent frame is left out of the attempt and counted", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    let answers = false;
+    page.result = (code: string) => {
+      if (code.includes(')("ready",'))
+        return { ok: true, readyState: "complete" };
+      if (code.includes(')("input",'))
+        return {
+          ok: true,
+          mouse: page.inputs.filter(
+            (input) => input.parameters.type === "mousePressed",
+          ).length,
+          key: 0,
+          drag: 0,
+        };
+      // The frame answers nothing at all until it is asked again.
+      if (isProbe(code))
+        return answers ? { ok: true, tally: tally(1) } : new Promise(() => {});
+      return callGroup(code) === "" ? noMatch : { ok: true, x: 25, y: 45 };
+    };
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+      timeoutMs: 0,
+    });
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: "no_match",
+      unreadFrames: 1,
+    });
+    // The frame answers now, so the next attempt finds the control there.
+    answers = true;
+    page.scripts.length = 0;
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(clicked.status).toBe(200);
+    expect(payloads("actionPoint").at(-1)!.frameContext.group).toBe("0");
+  });
+
+  it("a wait finds a frame added after the last check", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(1) }
+        : {
+            ok: true,
+            matched: callGroup(code) === "0",
+            counts: { matched: 0, visible: 0 },
+          };
+    const pending = request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 4000,
+    });
+    await expect.poll(() => payloads("check").length).toBeGreaterThan(0);
+    expect(payloads("check").every((item) => !item.frameContext)).toBe(true);
+    // Nothing polls for frames: the frame joins from the registry and the
+    // next check searches it.
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    const found = await pending;
+    expect(found.status).toBe(200);
+    expect(
+      payloads("check").map((item) => item.frameContext?.group ?? ""),
+    ).toContain("0");
+  });
+
+  it("wait text matches within one group", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    // The text runs across the frame boundary, so no group's own text holds
+    // it and the wait never matches.
+    page.result = { ok: true, matched: false };
+    const timedOut = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Card number",
+      timeoutMs: 200,
+    });
+    expect(timedOut.status).toBe(408);
+    expect(
+      payloads("check").map((item) => item.frameContext?.group ?? ""),
+    ).toContain("0");
+    // The same text inside the frame's own document matches.
+    page.result = (code: string) => ({
+      ok: true,
+      matched: callGroup(code) === "0",
+    });
+    const found = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Card number",
+      timeoutMs: 1000,
+    });
+    expect(found.status).toBe(200);
+  });
+
+  it("a stale frame ref names its frame", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    page.result = { ok: true, x: 25, y: 45 };
+    // A navigation inside the frame's own document keeps both refs.
+    page.emitProtocol("Page.navigatedWithinDocument", {
+      frameId: "card",
+      url: "https://pay.example/#done",
+    });
+    for (const ref of ["@e1", "@e2"])
+      expect(
+        (await request(`/tabs/${tab.id}/click`, "POST", { ref })).status,
+        ref,
+      ).toBe(200);
+    // Another document in the frame leaves its own refs stale, and names
+    // the frame they lived in.
+    frameNavigated(page.debugger, {
+      frameId: "card",
+      parentId: "main",
+      loaderId: "loader-card-2",
+      url: "https://pay.example/again",
+    });
+    const stale = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({
+      error: {
+        code: "stale_ref",
+        message: "This element's frame changed. Take a new snapshot.",
+        ref: "@e2",
+        frame: "0",
+      },
+    });
+    // A ref of the page's own document is untouched.
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+  });
+
+  it("a wait timeout carries unreadFrames", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A frame in its own process whose session has ended: it is left out of
+    // every attempt until it attaches again.
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+    ]);
+    page.emitProtocol("Target.detachedFromTarget", {
+      sessionId: "card-session",
+      targetId: "card",
+    });
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(0) }
+        : { ok: true, matched: false, counts: { matched: 0, visible: 0 } };
+    const timedOut = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 200,
+    });
+    expect(timedOut.status).toBe(504);
+    expect((await timedOut.json()).error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "selector",
+      unreadFrames: 1,
+    });
+    // An action that waited out a blocker reports the count too.
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(0) }
+        : { ok: true, box: { left: 0, top: 0, right: 10, bottom: 10 }, blocked: { blocker: "hidden" } };
+    const blocked = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+      timeoutMs: 200,
+    });
+    expect(blocked.status).toBe(504);
+    expect((await blocked.json()).error).toMatchObject({
+      code: "action_timeout",
+      blocker: "hidden",
+      unreadFrames: 1,
+    });
+  });
+
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
     const { tab } = await createPage();
     await request(`/tabs/${tab.id}/snapshot`);
@@ -1686,7 +2168,9 @@ describe("local automation socket", () => {
     const { tab } = await createPage();
     const page = controller.contents;
     page.result = { ok: true, x: 25, y: 45 };
-    const home = { frameId: "frame-1", loaderId: "loader-1", group: "" };
+    // The home of a ref the page's own document issued, as a read records
+    // it: the main frame and the document it holds.
+    const home = { frameId: "main", loaderId: "loader-1", group: "" };
     const first = refs.reserve(MAX_HOMES + 1);
     refs.record(
       tab.id,
@@ -1696,7 +2180,7 @@ describe("local automation socket", () => {
       refs.setHome(tab.id, `@e${first + at}`, home);
     // A navigation inside the same document keeps every home.
     page.emitProtocol("Page.navigatedWithinDocument", {
-      frameId: "frame-1",
+      frameId: "main",
       url: "https://example.com/#paid",
     });
     expect(refs.home(tab.id, `@e${first + 1}`)).toEqual(home);
@@ -2187,57 +2671,6 @@ describe("local automation socket", () => {
       forms: FORMS,
     });
     expect(payloads("check")).toHaveLength(1);
-  });
-
-  it("reaches a control inside a frame from another origin", async () => {
-    const { tab } = await createPage();
-    // Section 9 reads and acts in frames from any web origin, so the page
-    // script no longer answers cross_origin_frame and the action reaches the
-    // frame's own world.
-    controller.contents.result = (code: string) =>
-      code.includes(')("fill",') ? { ok: true } : { ok: true, x: 25, y: 45 };
-    for (const [route, body] of [
-      ["click", { ref: "@e2" }],
-      ["fill", { ref: "@e2", value: "card" }],
-    ] as const) {
-      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
-      expect(response.status).toBe(200);
-      expect((await response.json()).ok).toBe(true);
-    }
-    expect(controller.contents.inputs.length).toBeGreaterThan(0);
-    controller.contents.result = {
-      url: "https://example.com/",
-      title: "Example",
-      text: "Checkout",
-      interactables: [
-        {
-          index: 0,
-          ref: "@e1",
-          tag: "button",
-          role: "button",
-          label: "Pay",
-          selector: "button",
-          disabled: false,
-          frame: "0/1",
-        },
-        {
-          index: 1,
-          ref: "@e2",
-          tag: "iframe",
-          role: "iframe",
-          label: "Card details",
-          selector: "#card",
-          disabled: false,
-          crossOrigin: true,
-        },
-      ],
-      truncated: false,
-    };
-    const snapshot = await (await request(`/tabs/${tab.id}/snapshot`)).json();
-    expect(snapshot.interactables.map((control: any) => control.frame)).toEqual(
-      ["0/1", undefined],
-    );
-    expect(snapshot.interactables[1].crossOrigin).toBe(true);
   });
 
   it("validates an entire batch before performing any action", async () => {

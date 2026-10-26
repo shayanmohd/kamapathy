@@ -58,6 +58,7 @@ import {
   confirmDelivery,
   runAttempts,
   settleAfterInput,
+  unreadOf,
   type AttemptContext,
   type AttemptResult,
   type LoopBlocker,
@@ -646,6 +647,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(selector === undefined ? {} : { selector }),
+            ...unreadOf(error.fields),
           },
         };
       }
@@ -948,6 +950,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(typeof selector === "string" ? { selector } : {}),
+            ...unreadOf(error.fields),
           },
         };
       }
@@ -1170,6 +1173,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(selector === undefined ? {} : { selector }),
+            ...unreadOf(error.fields),
           },
         };
       }

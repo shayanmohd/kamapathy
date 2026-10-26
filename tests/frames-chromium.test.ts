@@ -22,6 +22,7 @@ import {
 } from "../electron/agent/frames/groups";
 import { RefBook } from "../electron/agent/refs";
 import { createResolver, type Resolver } from "../electron/agent/resolve";
+import { parseSelector } from "../electron/agent/selectors";
 import type { AutomationController } from "../electron/agent/server";
 import {
   createSnapshots,
@@ -178,9 +179,14 @@ for (const mode of ISOLATION)
         { timeout: 20000, interval: 100 },
       );
       refs = new RefBook();
-      resolver = createResolver({ refs });
       groups = createFrameGroups(opened, { refs, tabId: "tab-1" });
       const held = groups;
+      // The resolver searches this tab's frame groups, as it does behind a
+      // route, so a selector covers the whole page.
+      resolver = createResolver({
+        refs,
+        frames: { for: () => held, dispose: () => {} },
+      });
       snapshots = createSnapshots({
         controller: {
           state: { tabs: [{ id: "tab-1", url: origin + path, title: "" }] },
@@ -245,6 +251,37 @@ for (const mode of ISOLATION)
       listing.interactables.map((control) => control.label);
     const byLabel = (listing: Listing, label: string) =>
       listing.interactables.find((control) => control.label === label)!;
+    // One page operation with a selector, as a route runs it: the resolver
+    // picks the frame group and sends the operation to that group alone.
+    const act = (
+      operation: "fill" | "actionPoint",
+      selector: string,
+      extra: Record<string, unknown> = {},
+      mode?: "strict" | "first",
+    ) => {
+      const parsed = parseSelector(selector);
+      if (!parsed.ok || parsed.ast.kind === "ref")
+        throw new Error(`Not a search: ${selector}`);
+      return resolver.run(
+        "tab-1",
+        session!,
+        operation,
+        {
+          selector,
+          query: {
+            ast: parsed.ast,
+            ...(mode === undefined ? {} : { mode }),
+          },
+          ...extra,
+        },
+        { deadline: Date.now() + 20000, namespace: "frames" },
+      );
+    };
+    // The frame a path names, once the groups have been bound.
+    const frameAt = async (path: string) => {
+      await groups!.groups({ deadline: Date.now() + 20000 });
+      return groups!.frameAt(path)!.frameId;
+    };
 
     it("reads a cross-site frame and a same-site frame on another port with frame-bound refs", async () => {
       await open("/frames/pay", 3);
@@ -488,4 +525,57 @@ for (const mode of ISOLATION)
       expect(byLabel(next, "Busy widget").content).toBe("unavailable");
       expect(byLabel(next, "Calm widget").content).toBe("read");
     }, 120000);
+    it("searches the top document, then frames in owner order", async () => {
+      await open("/frames/pay", 3);
+      const card = await frameAt("0");
+      const billing = await frameAt("1");
+      // A selector the page's own document answers never reads a frame.
+      expect(
+        await act("actionPoint", "css=h1", { kind: "click" }),
+      ).toMatchObject({ ok: true });
+      expect(groups!.contentOf(card)).toBe("pending");
+      expect(groups!.contentOf(billing)).toBe("pending");
+      // Nothing in the page's own document: the frames follow in owner
+      // order, so the field of the first frame takes the value.
+      expect(
+        await act("fill", "css=input", { value: "4111111111111111" }, "first"),
+      ).toMatchObject({ ok: true });
+      expect(groups!.contentOf(card)).toBe("read");
+      let listing = await take();
+      // The card number is a secret, so only the frame that holds it says
+      // that it has a value at all.
+      expect(byLabel(listing, "Card number")).toMatchObject({
+        valueHidden: true,
+      });
+      expect(byLabel(listing, "Postcode").value).toBeUndefined();
+      // A selector only the second frame holds resolves there.
+      expect(
+        await act("fill", "css=#postcode", { value: "AB1 2CD" }, "first"),
+      ).toMatchObject({ ok: true });
+      listing = await take();
+      expect(byLabel(listing, "Postcode").value).toBe("AB1 2CD");
+    }, 60000);
+
+    it("a text selector passes a covered top-page duplicate for the frame's button", async () => {
+      await open("/frames/covered", 2);
+      const card = await frameAt("0");
+      // The page's own duplicate is under an overlay, so it holds nothing
+      // at the pointer level and the frame's own match answers.
+      const found = await act("actionPoint", "text=Pay now", { kind: "click" });
+      expect(found.blocked).toBeUndefined();
+      expect(found.point).toMatchObject({
+        x: expect.any(Number),
+        y: expect.any(Number),
+      });
+      expect(groups!.contentOf(card)).toBe("read");
+      // The point is inside the frame's own document, far below the overlay
+      // the page's own duplicate sits under.
+      const box = found.box as { top: number };
+      expect(box.top).toBeGreaterThan(100);
+      // The page's own duplicate is the covered one.
+      const covered = await act("actionPoint", "css=#duplicate", {
+        kind: "click",
+      });
+      expect(covered.blocked).toMatchObject({ blocker: "covered" });
+    }, 60000);
   });

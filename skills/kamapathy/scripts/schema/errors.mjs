@@ -303,7 +303,7 @@ export const ERRORS = {
   cross_origin_frame: code(
     409,
     false,
-    "The control is inside a frame from another origin.",
+    "Retired: frames from other origins are read and actionable, so no route returns this.",
   ),
   drag_unavailable: code(409, false, "Chromium could not take over the drag."),
   drag_not_delivered: code(
@@ -315,8 +315,8 @@ export const ERRORS = {
   stale_ref: code(
     409,
     false,
-    "The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired.",
-    ["ref"],
+    "The ref belongs to an earlier snapshot, a control the page removed, refs the page retired, or a frame that loaded another document.",
+    ["ref", "frame"],
   ),
   element_obscured: code(
     409,
@@ -392,14 +392,22 @@ export const ERRORS = {
     422,
     true,
     "Nothing matched the selector by the deadline.",
-    ["selector", "waitedMs"],
+    ["selector", "waitedMs", "unreadFrames"],
     3,
   ),
   ambiguous_match: code(
     422,
     false,
     "The selector matched more than one element the action can take.",
-    ["selector", "count", "visible", "hidden", "actionable", "candidates"],
+    [
+      "selector",
+      "count",
+      "visible",
+      "hidden",
+      "actionable",
+      "candidates",
+      "unreadFrames",
+    ],
     3,
   ),
   drag_out_of_view: code(
@@ -538,7 +546,14 @@ export const ERRORS = {
     504,
     true,
     "The request did not start in time, or its target never became ready for input.",
-    ["awaited", "timeoutMs", "blocker", "detail", "interceptor"],
+    [
+      "awaited",
+      "timeoutMs",
+      "blocker",
+      "detail",
+      "interceptor",
+      "unreadFrames",
+    ],
   ),
   evaluation_timeout: code(
     504,
@@ -618,6 +633,7 @@ export const ERRORS = {
       "visible",
       "title",
       "popups",
+      "unreadFrames",
     ]),
     override: { status: 408, route: "POST /tabs/:id/wait", action: "wait" },
   },

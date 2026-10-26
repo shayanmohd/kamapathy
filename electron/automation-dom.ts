@@ -2435,6 +2435,14 @@ export function pageOperation(
     } else if (query) {
       const picked = pickedFor(query);
       if (picked === null) return failure(PAGE_CHANGED, "page_changed");
+      // Section 9's probe: what this document holds for the query at the
+      // level the search asked about, so the main process can pick one
+      // frame group without acting in any of them.
+      if (payload.tally === true) {
+        const held = engineOf().tally({ ...query, mode: "count" }, picked);
+        if ("kind" in held) return invalidSelector(selector, held);
+        return { ok: true as const, tally: held };
+      }
       if (state === "hidden" || state === "detached") {
         // One count of every match, whatever the state: the level decides
         // nothing a count reads, so this answer serves both.
