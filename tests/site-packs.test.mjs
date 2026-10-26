@@ -2294,7 +2294,7 @@ export const searchRepositories = (context, args) => args;
       expect(checked.source, id).toBe("bundled");
     }
     // The samples this worktree ships; each one arrives with its own task.
-    const samples = ["github"];
+    const samples = ["github", "google-search"];
     expect(ids).toEqual(expect.arrayContaining(samples));
     // The github sample's own tools: the names its manifest declares, and an
     // export runSiteTool can call for each Node tool.

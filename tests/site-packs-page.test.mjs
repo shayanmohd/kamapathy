@@ -14,7 +14,10 @@ import {
   siteRoots,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
-import { sitePackPages } from "./fixtures/site-packs/index.mjs";
+import {
+  sitePackPages,
+  sitePackPrefixes,
+} from "./fixtures/site-packs/index.mjs";
 
 const executable = chromium.executablePath();
 const browserAvailable = !!executable && existsSync(executable);
@@ -58,14 +61,23 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
     const page = {
       url: "about:blank",
       goneTo: [],
+      // The address the next navigation really ends at, the way a consent or
+      // sign-in wall redirects one. A case sets it; one navigation uses it.
+      landsAt: null,
       async goto(url) {
         page.goneTo.push(url);
-        const target = new URL(url);
-        const landed = await tab.goto(origin + target.pathname + target.search);
-        page.url = url;
+        const target = new URL(page.landsAt || url);
+        page.landsAt = null;
+        // Packs that answer the same paths each keep their pages under a
+        // prefix of their own.
+        const prefix = sitePackPrefixes[target.hostname] ?? "";
+        const landed = await tab.goto(
+          origin + prefix + target.pathname + target.search,
+        );
+        page.url = target.href;
         return {
           ok: true,
-          tab: { id: "tab-1", url },
+          tab: { id: "tab-1", url: target.href },
           httpStatus: landed?.status(),
           waitUntil: "load",
         };
@@ -271,5 +283,74 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
     // Anywhere else it answers null instead of guessing.
     await page.goto("https://github.com/search?q=kamapathy&type=repositories");
     expect(await pageTool("repository_stats", {})).toBe(null);
+  }, 60000);
+
+  it("google search skips sponsored results and stops at a consent page", async () => {
+    const page = await fakePage();
+    const run = (tool, args) =>
+      runToolIn(
+        {},
+        { packId: "google-search", tool, args, page, client: null, roots },
+      );
+
+    // The query reaches the URL percent encoded with English results asked
+    // for, and only the organic block comes back: the sponsored result, the
+    // question card and the related searches stay out. A redirect style
+    // address reads as its target and a relative one reads absolute.
+    const found = await run("search", { query: "site:example.com a b" });
+    expect(page.goneTo).toEqual([
+      "https://www.google.com/search?q=site%3Aexample.com%20a%20b&hl=en",
+    ]);
+    expect(found).toEqual([
+      {
+        title: "The example guide",
+        url: "https://docs.example.com/guide",
+        snippet: "How the guide explains itself, in one line.",
+      },
+      {
+        title: "Notes on example",
+        url: `${origin}/notes`,
+        snippet: null,
+      },
+      {
+        title: "A long answer about example",
+        url: "https://long.example.com/",
+        snippet: expect.any(String),
+      },
+    ]);
+    expect(found[2].snippet).toHaveLength(300);
+    expect(found[2].snippet.startsWith("A long answer")).toBe(true);
+
+    // A limit reads that many, and one outside 1 to 20 is the tool's own
+    // refusal before it navigates.
+    expect(await run("search", { query: "example", limit: 2 })).toHaveLength(2);
+    const sent = page.goneTo.length;
+    for (const limit of [0, 21]) {
+      const refused = await thrown(run("search", { query: "x", limit }));
+      expect(refused?.code, String(limit)).toBe("site_tool_failed");
+      expect(refused.packId, String(limit)).toBe("google-search");
+      expect(refused.tool, String(limit)).toBe("search");
+      expect(refused.cause, String(limit)).toBe(
+        "limit must be an integer from 1 to 20.",
+      );
+      expect(refused.at, String(limit)).toMatch(/^tools\/search\.mjs:\d+:\d+$/);
+    }
+    expect(page.goneTo).toHaveLength(sent);
+
+    // Both walls hand the space back to the person. Each wall page carries a
+    // result of its own, so a tool reading the page instead of reading where
+    // it landed would answer with that rather than throw.
+    for (const landsAt of [
+      "https://consent.google.com/consent?continue=https://www.google.com/search",
+      "https://www.google.com/sorry/index?continue=https://www.google.com/search",
+    ]) {
+      page.landsAt = landsAt;
+      const walled = await thrown(run("search", { query: "example" }));
+      expect(walled?.code, landsAt).toBe("site_tool_failed");
+      expect(walled.cause, landsAt).toBe(
+        "Google is asking the person to choose or verify. Hand the space to the person, then run the tool again.",
+      );
+      expect(page.url, landsAt).toBe(landsAt);
+    }
   }, 60000);
 });
