@@ -3028,7 +3028,14 @@ try {
   checked(
     "an update adds Update Kamapathy and an Install dialog that names open agent spaces",
   );
-  await app.close();
+  // The space this check opened makes the quit ask first, and no one is here
+  // to answer it, so this run answers its own question again.
+  await app
+    .evaluate(({ dialog }) => {
+      dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+    })
+    .catch(() => {});
+  await app.close().catch(() => {});
   app = undefined;
   page = await launchWith(updateProfile, updateEnv);
   await page.evaluate(
