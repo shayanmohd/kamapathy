@@ -174,7 +174,14 @@ for (const mode of ISOLATION)
               { ...step(), namespace: "internal" },
             ),
           ).toEqual({ ok: true, readyState: "complete" });
-          expect(await opened.frames(step())).toHaveLength(frames);
+          const known = await opened.frames(step());
+          expect(known).toHaveLength(frames);
+          // Every frame has committed a document of its own site, so a read
+          // of it carries that document's origin rather than the empty one
+          // a frame starts with.
+          expect(
+            known.filter((frame) => /^https?:\/\//.test(frame.origin)),
+          ).toHaveLength(frames);
         },
         { timeout: 20000, interval: 100 },
       );
@@ -349,22 +356,28 @@ for (const mode of ISOLATION)
       // skipped, and below the whole pass. How long either takes is the
       // machine's business and both stretch together when the machine is
       // busy, so a whole read is timed first and the budgets tried are
-      // shares of it rather than fixed milliseconds. The shares run up and
-      // then back down, because the machine can also free up between the
-      // timing and the attempt, and the page is opened again each time so
-      // that no frame is remembered as silent.
-      await open("/frames/many", 13);
-      const began = Date.now();
-      await take();
-      const whole = Math.max(Date.now() - began, 8);
+      // shares of it rather than fixed milliseconds. The shares run up, past
+      // the whole, and then back down, because the machine can also free up
+      // or slow down between the timing and the attempt, and the page is
+      // opened again each time so that no frame is remembered as silent.
       let starved: Listing | undefined;
-      for (const share of [0.25, 0.4, 0.55, 0.7, 0.85, 0.12, 0.06]) {
+      let whole = 0;
+      // Each round times a whole read again, because how long the page's own
+      // group takes against the whole pass moves while the suite runs, and
+      // a budget above the measured whole can still starve a slower one.
+      for (let round = 0; round < 2 && !starved; round += 1) {
         await open("/frames/many", 13);
-        starved = await take({}, Math.ceil(whole * share)).catch(
-          () => undefined,
-        );
-        if (starved?.unreadFrames) break;
-        starved = undefined;
+        const began = Date.now();
+        await take();
+        whole = Math.max(Date.now() - began, 8);
+        for (const share of [0.4, 0.55, 0.7, 0.85, 1.1, 0.25, 0.12]) {
+          await open("/frames/many", 13);
+          starved = await take({}, Math.ceil(whole * share)).catch(
+            () => undefined,
+          );
+          if (starved?.unreadFrames) break;
+          starved = undefined;
+        }
       }
       expect(
         starved,
@@ -374,7 +387,16 @@ for (const mode of ISOLATION)
         (control) =>
           control.content !== undefined && control.content !== "read",
       );
-      expect(left.some((control) => control.content === "pending")).toBe(true);
+      // Whether a frame's turn came up before the budget ran out, which
+      // leaves it pending, or its own read started and ran out, which
+      // leaves it unavailable, is the machine's business; either way the
+      // read did not reach it.
+      expect(
+        left.some(
+          (control) =>
+            control.content === "pending" || control.content === "unavailable",
+        ),
+      ).toBe(true);
       // A frame left unread still says which frame it was.
       expect(
         left.every(
