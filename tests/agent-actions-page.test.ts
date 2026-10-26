@@ -423,6 +423,25 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     expect((await point("#nothing")).point).toBeUndefined();
   }, 30000);
 
+  it("points into a frame drawn at another scale whose own root lies flat", async () => {
+    // The frame is half the size it is laid out at, so the target's own 100
+    // by 40 box at 100,40 is a 50 by 20 box at 50,20 in the page around it,
+    // whose middle is 75,30. The frame's document holds nothing in flow, so
+    // its root has no height of its own to scale by.
+    for (const path of ["/input/scaled-frame", "/input/zoomed-frame"]) {
+      await open(path);
+      const found = await point("#target");
+      expect({ path, blocked: found.blocked }).toEqual({
+        path,
+        blocked: undefined,
+      });
+      expect({ path, point: found.point }).toEqual({
+        path,
+        point: { x: 75, y: 30 },
+      });
+    }
+  }, 30000);
+
   it("reports the viewport and the focused control's kind", async () => {
     await open("/input/fields");
     expect(await operate("viewport")).toEqual({

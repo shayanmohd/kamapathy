@@ -381,8 +381,14 @@ export function actionOperations(
       const root = doc.documentElement || doc.body;
       const local = root.getBoundingClientRect();
       const top = host.placed(root);
-      const scaleX = local.width ? (top.right - top.left) / local.width : 1;
-      const scaleY = local.height ? (top.bottom - top.top) / local.height : 1;
+      // A document that holds nothing in flow has a root with no height of
+      // its own, and a page of positioned boxes is one. The frames around it
+      // scale both axes together, so the axis that measured answers for the
+      // one that could not.
+      const alongX = local.width ? (top.right - top.left) / local.width : 0;
+      const alongY = local.height ? (top.bottom - top.top) / local.height : 0;
+      const scaleX = alongX || alongY || 1;
+      const scaleY = alongY || alongX || 1;
       map = {
         scaleX,
         scaleY,

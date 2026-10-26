@@ -155,6 +155,28 @@ body{font:14px sans-serif;margin:0}
 #deep{position:absolute;left:20px;top:900px}
 </style>
 <div id="panel"><div id="tall"><button id="deep" type="button">Deep inside</button></div></div>`,
+  "/input/scaled-frame": `<!doctype html><meta charset="utf-8"><title>Scaled frame</title>
+<style>
+body{font:14px sans-serif;margin:0}
+iframe{display:block;border:0;width:400px;height:200px}
+#scaled{transform:scale(0.5);transform-origin:0 0}
+</style>
+<iframe id="scaled" title="Flat grid" src="/input/flat-grid"></iframe>`,
+  "/input/zoomed-frame": `<!doctype html><meta charset="utf-8"><title>Zoomed frame</title>
+<style>
+body{font:14px sans-serif;margin:0}
+iframe{display:block;border:0;width:400px;height:200px}
+#zoomed{zoom:0.5}
+</style>
+<iframe id="zoomed" title="Flat grid" src="/input/flat-grid"></iframe>`,
+  // Everything this page draws is positioned, so its own root lies flat and
+  // the frames around it are all that gives its pixels a size.
+  "/input/flat-grid": `<!doctype html><meta charset="utf-8"><title>Flat grid</title>
+<style>
+body{font:14px sans-serif;margin:0}
+button{position:absolute;left:100px;top:40px;width:100px;height:40px;margin:0;padding:0}
+</style>
+<button id="target" type="button">Target</button>`,
   "/input/graphics": `<!doctype html><meta charset="utf-8"><title>Graphics</title>
 <style>body{font:14px sans-serif;margin:16px}svg{transform:scale(1.5);transform-origin:0 0;margin-bottom:60px}</style>
 <svg id="chart" width="200" height="100"><g id="nothing"></g><rect id="bar" x="20" y="10" width="60" height="40" fill="#4a7"></rect></svg>
