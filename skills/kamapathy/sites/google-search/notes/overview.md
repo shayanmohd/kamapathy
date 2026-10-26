@@ -58,6 +58,11 @@ before reading it:
   Type into it with `page.fill` or the keyboard; it is not an input, so a
   value set any other way is ignored. Pressing Enter in it goes to the
   results page, which `search` reaches by address instead.
+- The suggestions under the box sit in a `role=listbox` the box names through
+  `aria-controls`, one `role=option` per suggestion, whose accessible name is
+  the suggestion on its own while its text adds the description beside it.
+  `suggestions` reads that list, and reads nothing while it is closed, so
+  type into the box first and give the list a moment to arrive.
 
 Google changes this page without notice, and a changed marker reads as no
 results rather than as an error. When a result count looks wrong, take a
@@ -65,8 +70,9 @@ snapshot and read the page as it is now, then fix the selectors above.
 
 ## With page scripts off
 
-`search` needs page scripts for its one read. Without them, open the address
-above and take a snapshot; these locators work for the whole site:
+`suggestions` needs page scripts, and so does the reading step of `search`.
+Without them, open the address above and take a snapshot; these locators work
+for the whole site:
 
 - `role=combobox[name="Search"]` for the box, with
   `role=button[name="Google Search"]` beside it

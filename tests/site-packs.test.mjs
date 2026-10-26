@@ -2313,6 +2313,20 @@ export const searchRepositories = (context, args) => args;
       expect(typeof (await importToolExport(pack, tool)), tool.name).toBe(
         "function",
       );
+    // The google-search sample's own tools, read the same way.
+    const google = await readManifest(join(bundled.path, "google-search"), {
+      source: "bundled",
+      id: "google-search",
+    });
+    expect(google.pack.tools.map((tool) => tool.name)).toEqual(["search"]);
+    expect(google.pack.pageTools.map((tool) => tool.name)).toEqual([
+      "suggestions",
+    ]);
+    for (const tool of google.pack.tools)
+      expect(
+        typeof (await importToolExport(google.pack, tool)),
+        tool.name,
+      ).toBe("function");
   });
 
   it("checkPack reports every rule", async () => {

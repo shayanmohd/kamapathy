@@ -1,11 +1,31 @@
 // The pages the google-search sample pack is measured against: a results
 // page with a sponsored block, three organic results, a question card and
-// the related searches, and the two addresses Google sends a space to when
-// it wants the person. Each one is hand written and carries only what the
-// pack reads, in the structure the live pages had when the pack's selectors
-// were settled.
+// the related searches, the two addresses Google sends a space to when it
+// wants the person, and the search box with its suggestion list open and
+// closed. Each one is hand written and carries only what the pack reads, in
+// the structure the live pages had when the pack's selectors were settled.
 const head = (title) =>
   `<!doctype html><meta charset="utf-8"><title>${title}</title>`;
+
+// The box and the list it owns, which the live page names through
+// aria-controls: that name belongs to the wrapper, not to the listbox
+// inside it, and the list stays in the page hidden once it is closed.
+const box = (open) => `<form action="/search">
+  <textarea name="q" role="combobox" aria-label="Search" aria-expanded="${open}"
+    aria-controls="suggestion-hull" aria-owns="suggestion-hull">kamapa</textarea>
+  <button aria-label="Google Search"></button>
+</form>
+<div id="suggestion-hull"${open === "true" ? "" : ' style="display:none"'}>
+  <ul role="listbox" jsname="aajZCb">
+    <li><div role="option" aria-label="kamapathy browser"
+      ><span>kamapathy browser</span><span>Desktop browser</span></div></li>
+    <li><div role="option" aria-label="kamapathy agent api"
+      ><span>kamapathy agent api</span><span></span></div></li>
+    <li><div role="option" aria-label="kamapalli"
+      ><span>Kamapalli</span><span>Neighbourhood in Berhampur</span></div></li>
+    <li><div role="option"><span>kamapathy docs</span></div></li>
+  </ul>
+</div>`;
 
 // A snippet longer than the 300 characters a result keeps.
 const long = `${"A long answer that says the same thing over and over again. ".repeat(6)}The end.`;
@@ -62,4 +82,10 @@ ${trap}`,
 <h1>About this page</h1>
 <p>Our systems have detected unusual traffic from your computer network.</p>
 ${trap}`,
+  // The box with its list open, as it stands while the person types, and the
+  // same page once the list is closed again.
+  "/google/suggest": `${head("Google")}
+${box("true")}`,
+  "/google/closed": `${head("Google")}
+${box("false")}`,
 };

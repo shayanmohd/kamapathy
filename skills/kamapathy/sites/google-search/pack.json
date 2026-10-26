@@ -25,5 +25,16 @@
         "description": "[{ title, url, snippet }]"
       }
     }
+  },
+  "pageTools": {
+    "suggestions": {
+      "description": "Read the open autocomplete suggestions.",
+      "file": "page-tools/suggestions.js",
+      "args": {},
+      "returns": {
+        "type": "array",
+        "description": "The option texts of the open listbox, or []"
+      }
+    }
   }
 }

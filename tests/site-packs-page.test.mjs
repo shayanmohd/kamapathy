@@ -353,4 +353,34 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
       expect(page.url, landsAt).toBe(landsAt);
     }
   }, 60000);
+
+  it("page tools read suggestions and the focused post", async () => {
+    const page = await fakePage();
+    const pageTool = (packId, tool, args) =>
+      runPageToolIn(
+        {},
+        {
+          packId,
+          tool,
+          args,
+          evaluate: (expression) => page.evaluate(expression),
+          roots,
+        },
+      );
+
+    // The open list reads in the order it is shown, each option as the
+    // suggestion alone: an option's own text adds the description Google
+    // puts beside it, and its accessible name does not.
+    await page.goto("https://www.google.com/suggest");
+    expect(await pageTool("google-search", "suggestions", undefined)).toEqual([
+      "kamapathy browser",
+      "kamapathy agent api",
+      "kamapalli",
+      "kamapathy docs",
+    ]);
+
+    // A list that is still in the page but closed reads as no list at all.
+    await page.goto("https://www.google.com/closed");
+    expect(await pageTool("google-search", "suggestions", {})).toEqual([]);
+  }, 60000);
 });
