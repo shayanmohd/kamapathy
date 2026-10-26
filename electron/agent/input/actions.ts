@@ -1370,6 +1370,9 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     const append = action.append === true;
     const asked = { value, append };
 
+    // The frame the resolution ran in, which section 9 places the field's
+    // own point through.
+    const ran: RanIn = {};
     const evaluate = (
       operation: FieldOperation,
       extra: Record<string, unknown> = {},
@@ -1382,6 +1385,8 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         { ...payload, ...extra },
         run.deadline,
         at,
+        undefined,
+        ran,
       );
     // A selector that matched nothing is folded into the blocker the loop
     // waits out, so a field the page draws late still gets its action.
@@ -1408,6 +1413,17 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       done: false,
       blocked: blocked as LoopBlocker,
     });
+    // Section 9: the frame the field sits in. A ref names it before any page
+    // call; a selector names it once the resolution has run.
+    const before = () => refPlace(id, session, action.target, step);
+    const after = async (early: FramePlace) => {
+      const place = early.target
+        ? early
+        : await framePlace(id, session, ran, step);
+      if (place.target)
+        noteFrame(run, frameNote(place.target, session.contents.getURL()));
+      return place;
+    };
     // The page the field was prepared on must still be the page the text
     // lands on.
     const onSamePage = (epoch: number) => {
@@ -1541,9 +1557,13 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     const fillAttempt = async (
       context: AttemptContext,
     ): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const epoch = session.epoch;
       const prepared = await look("fillPrepare", asked);
       if (prepared.blocked) return stop(prepared.blocked);
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       // A date, time, range or colour field takes its value from its own
       // setter instead of typing, and a single select keeps today's fill.
       if (prepared.mode === "direct") {
@@ -1570,7 +1590,21 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       // on another control, so there is nothing left to try.
       const point = prepared.point;
       if (!finitePoint(point)) return refuse(first.match, false);
-      await clickField(context, point);
+      // The click lands at top level, through the owners around the field's
+      // own frame, and a covered boundary leaves nothing to try.
+      let at = point;
+      if (place.target) {
+        const placed = await translatePoint(
+          session,
+          place.target,
+          point,
+          gesture,
+        );
+        if (placed.covered || !inArea(placed.point, placed.area))
+          return refuse(first.match, false);
+        at = placed.point;
+      }
+      await clickField(context, at);
       const again = await evaluate("fillPrepare", asked, gesture);
       if (again.blocked) return refuse(first.match, true);
       const second = await round(context, again, epoch);
@@ -1592,10 +1626,14 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       return { ...blocked, detail: options.join(", ").slice(0, MAX_DETAIL) };
     };
     const selectAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const chosen = await look("selectChoose", {
         values: action.values ?? [],
       });
       if (chosen.blocked) return stop(withOptions(chosen));
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       return {
         done: true,
         value: {
@@ -1605,8 +1643,12 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       };
     };
     const focusAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const focused = await look("focusTarget");
       if (focused.blocked) return stop(focused.blocked);
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       return { done: true, value: { ...reboundOf(focused) } };
     };
 

@@ -57,6 +57,8 @@ const tab = (
   options: {
     spots?: Spot[];
     frames?: KnownFrame[];
+    // The frame paths the registry works out, which a refusal names.
+    paths?: Record<string, string>;
     broken?: unknown;
   } = {},
 ) => {
@@ -80,6 +82,11 @@ const tab = (
   }
   const session = {
     knownFrames: async () => options.frames ?? [known(MAIN)],
+    frames: async () =>
+      Object.entries(options.paths ?? {}).map(([frameId, path]) => ({
+        frameId,
+        path,
+      })),
     send: async (
       method: string,
       params: Record<string, any> = {},
@@ -270,15 +277,21 @@ describe("the input guards", () => {
       known("gone", { unavailable: true }),
       known("card"),
     ];
+    // The path each frame carries, which the refusal names.
+    const paths = { panel: "0", pdf: "1" };
     for (const point of [
       { x: 10, y: 10 },
       { x: 20, y: 10 },
       { x: 30, y: 10 },
       { x: 40, y: 10 },
     ]) {
-      const { session, sent } = tab({ spots, frames });
+      const { session, sent } = tab({ spots, frames, paths });
       const error = await refusal(press(session, point));
       expect([error.code, error.status]).toEqual(["input_target_blocked", 403]);
+      // Section 9 names the frame when the registry can place it.
+      expect(error.fields.frame).toBe(
+        point.x === 10 ? "0" : point.x === 20 ? "1" : undefined,
+      );
       // Nothing but the hit test went out, so no input reached the page.
       expect(sent.map((command) => command.method)).toEqual([
         "DOM.getNodeForLocation",

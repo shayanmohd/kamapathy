@@ -2210,6 +2210,8 @@ describe("local automation socket", () => {
   });
 
   it("an action in a frame of the page's own host adds nothing to the activity", async () => {
+    // The frame is read and acted in exactly as any other, so only its host
+    // decides whether the entry names it.
     const { tab } = await createPage();
     const page = await framedPage(tab.id, {
       url: "https://example.com/card",
@@ -2409,6 +2411,38 @@ describe("local automation socket", () => {
       },
     });
     expect(page.inputs).toEqual([]);
+  });
+
+  it("a fill in a frame types in it and clicks it at the translated point", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 25, y: 45 },
+    };
+    page.pageActions.fillRead = { ok: true, match: "unchanged", value: "old" };
+    page.result = framedPoint();
+    const refused = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e2",
+      value: "4111",
+    });
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+    });
+    // The text went into the frame's own field, and the one retry click
+    // landed where its owner places it.
+    expect(
+      callsOf(page, "fillPrepare").map((command) => command.sessionId),
+    ).toEqual(["card-session", "card-session"]);
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
   });
 
   it("scroll without a target continues into the frame under the viewport centre", async () => {
@@ -6916,6 +6950,14 @@ describe("local automation socket", () => {
     expect(controller.activity.map((entry) => entry.message)).not.toContain(
       "Agent clicked an element",
     );
+    // Section 9 names the frame the point belongs to, once the page can say
+    // where it sits.
+    frameOwners(page.debugger, { "frame-x": { local: "0" } });
+    expect(
+      (await failure(
+        await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+      )).error,
+    ).toMatchObject({ code: "input_target_blocked", frame: "0" });
     // A frame the tab can read, and a hit with no frame of its own, are
     // pressed as usual.
     for (const hit of [

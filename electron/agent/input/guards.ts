@@ -177,11 +177,18 @@ export async function checkPointerTarget(
   if (hit.frameId !== undefined) {
     const frames = await session.knownFrames(step);
     const frame = frames.find((entry) => entry.frameId === hit.frameId);
-    if (!frame || refusesInput(frame))
+    if (!frame || refusesInput(frame)) {
+      // Section 9 names the frame the point belongs to. Its path comes from
+      // the registry, since a frame agents never reach is never bound.
+      const path = (await session.frames(step).catch(() => [])).find(
+        (entry) => entry.frameId === hit.frameId,
+      )?.path;
       fail(
         "input_target_blocked",
         "This point belongs to an extension or an internal page, which agent input never reaches. Act on the page itself.",
+        path ? { frame: path } : {},
       );
+    }
   }
   if (!options.press) return;
   if (platform === "linux" && options.button === "middle" && hit.editable)
