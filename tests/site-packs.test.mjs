@@ -21,6 +21,7 @@ import {
   cleanText,
   declaredFiles,
   hostOf,
+  importToolExport,
   listSitePacks,
   loadPacks,
   matchPacks,
@@ -2292,6 +2293,26 @@ export const searchRepositories = (context, args) => args;
       expect(checked.ok, id).toBe(true);
       expect(checked.source, id).toBe("bundled");
     }
+    // The samples this worktree ships; each one arrives with its own task.
+    const samples = ["github"];
+    expect(ids).toEqual(expect.arrayContaining(samples));
+    // The github sample's own tools: the names its manifest declares, and an
+    // export runSiteTool can call for each Node tool.
+    const { pack } = await readManifest(join(bundled.path, "github"), {
+      source: "bundled",
+      id: "github",
+    });
+    expect(pack.tools.map((tool) => tool.name)).toEqual([
+      "search_repositories",
+      "open_issues",
+    ]);
+    expect(pack.pageTools.map((tool) => tool.name)).toEqual([
+      "repository_stats",
+    ]);
+    for (const tool of pack.tools)
+      expect(typeof (await importToolExport(pack, tool)), tool.name).toBe(
+        "function",
+      );
   });
 
   it("checkPack reports every rule", async () => {

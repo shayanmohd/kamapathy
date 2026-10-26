@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "id": "github",
+  "name": "GitHub",
+  "domains": ["github.com"],
+  "notes": ["notes/overview.md"],
+  "tools": {
+    "search_repositories": {
+      "description": "Search repositories and read the first results.",
+      "file": "tools/search-repositories.mjs",
+      "export": "searchRepositories",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Words to search for."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many results to read, 1 to 50, 10 by default."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "[{ fullName, url, description, stars, language }]"
+      }
+    },
+    "open_issues": {
+      "description": "List a repository's open issues.",
+      "file": "tools/open-issues.mjs",
+      "export": "openIssues",
+      "args": {
+        "owner": {
+          "type": "string",
+          "required": true,
+          "description": "The account or organization."
+        },
+        "repo": {
+          "type": "string",
+          "required": true,
+          "description": "The repository name."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many issues to read, 1 to 50, 25 by default."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "[{ number, title, url, labels }]"
+      }
+    }
+  },
+  "pageTools": {
+    "repository_stats": {
+      "description": "Read the numbers shown on a repository page.",
+      "file": "page-tools/repository-stats.js",
+      "args": {},
+      "returns": {
+        "type": "object",
+        "description": "{ fullName, description, stars, forks, language, topics } or null"
+      }
+    }
+  }
+}
