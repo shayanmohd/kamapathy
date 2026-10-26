@@ -50,6 +50,13 @@ const pages = {
     `<button id="play">Play sound</button><p id="sound">Silent</p>`,
     `document.getElementById('play').onclick=()=>{const audio=new Audio('/silence.wav');audio.ontimeupdate=()=>{if(audio.currentTime>0.15)document.getElementById('sound').textContent='played';};audio.play().catch((error)=>{document.getElementById('sound').textContent='refused '+error.name;});};`,
   ),
+  // A field that reports the keys it was sent and the value they left, and a
+  // panel that reports how far a wheel gesture scrolled it. This run reads
+  // pages only through snapshots, so both report through their own text.
+  "/keys-wheel": page(
+    `<p id="keys">keys none</p><p id="typed">typed ""</p><input id="field" aria-label="Typed"><div id="panel" style="position:absolute;left:0;top:140px;width:240px;height:120px;overflow:auto;border:1px solid"><div style="height:1200px">Panel contents</div></div><p id="scrolled" style="position:absolute;left:0;top:280px">scrolled 0</p>`,
+    `const seen=[];const field=document.getElementById('field');document.addEventListener('keydown',(event)=>{seen.push(event.key+(event.shiftKey?'+shift':'')+(event.isTrusted?'+trusted':'+untrusted'));document.getElementById('keys').textContent='keys '+seen.join(' ');});field.addEventListener('input',()=>{document.getElementById('typed').textContent='typed "'+field.value+'"';});const panel=document.getElementById('panel');panel.addEventListener('scroll',()=>{document.getElementById('scrolled').textContent='scrolled '+Math.round(panel.scrollTop);});`,
+  ),
   // The page asks for an image, fetches, starts a worker that fetches and
   // registers a service worker that fetches, then reports what it sees of
   // itself. Every request shows the server its identity.
@@ -448,6 +455,62 @@ try {
   assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
   assert.ok((await controls(popup.id)).includes("popup clicked"));
   passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
+
+  // Section 5: the keyboard and mouse routes against a tab no window shows,
+  // where phase 1 found the risk for input that never painted.
+  const strokes = await open("/keys-wheel");
+  await poll(async () => (await controls(strokes)).includes("Typed"), {
+    timeoutMs: 10000,
+    label: "the keys and wheel fixture",
+  });
+  const aimed = await api(`/tabs/${strokes}/focus`, "POST", {
+    selector: "#field",
+  });
+  assert.equal(aimed.status, 200, JSON.stringify(await aimed.response.json()));
+  for (const [route, body] of [
+    ["keyboard/down", { key: "Shift" }],
+    ["keyboard/type", { text: "ok" }],
+    ["keyboard/up", { key: "Shift" }],
+  ]) {
+    const sent = await api(`/tabs/${strokes}/${route}`, "POST", body);
+    assert.equal(sent.status, 200, JSON.stringify(await sent.response.json()));
+  }
+  const keyed = await snapshot(strokes);
+  assert.match(keyed.text, /typed "OK"/);
+  assert.match(
+    keyed.text,
+    /keys Shift\+shift\+trusted O\+shift\+trusted K\+shift\+trusted/,
+  );
+  const aimedAtPanel = await api(`/tabs/${strokes}/mouse/move`, "POST", {
+    x: 100,
+    y: 200,
+  });
+  assert.equal(
+    aimedAtPanel.status,
+    200,
+    JSON.stringify(await aimedAtPanel.response.json()),
+  );
+  const wheeled = await api(`/tabs/${strokes}/mouse/wheel`, "POST", {
+    deltaX: 0,
+    deltaY: 300,
+  });
+  assert.equal(
+    wheeled.status,
+    200,
+    JSON.stringify(await wheeled.response.json()),
+  );
+  const panelAt = await poll(
+    async () => {
+      const found = /scrolled (\d+)/.exec((await snapshot(strokes)).text);
+      return found && Number(found[1]) > 0 ? found : null;
+    },
+    { timeoutMs: 10000, label: "the panel scrolling under the wheel" },
+  );
+  assert.ok(
+    Number(panelAt[1]) > 0,
+    `The panel stayed at ${panelAt[1]} after a 300 pixel wheel gesture`,
+  );
+  passed("a chord and a wheel gesture reach an unwatched agent tab");
 
   // Section 16: what every request tells a site about this browser.
   await open("/identity");
