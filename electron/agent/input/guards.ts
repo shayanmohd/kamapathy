@@ -29,6 +29,14 @@ import { MODIFIER_BITS, type Chord } from "./keys";
 import type { Button } from "./state";
 
 export type PickerKind = "select" | "color" | "date";
+/** The focused control the key guards read, with the frame it sits in. */
+export interface FocusedControl {
+  kind: string;
+  blockedFrame?: true;
+  /** A blocked frame's section 9 path and extension, when it is one of the person's. */
+  frame?: string;
+  extension?: string;
+}
 export interface HitNode {
   backendNodeId: number;
   // The frame the input would reach: the frame a frame owner holds, else
@@ -253,13 +261,7 @@ const opensPicker = (chord: Chord, platform: NodeJS.Platform) => {
 // from the focused frame instead. Inserted text and a release carry no
 // chord, so only the frame check applies to them.
 export function checkKeyTarget(
-  focused: {
-    kind: string;
-    blockedFrame?: true;
-    /** The frame's section 9 path and extension, when it is one of the person's. */
-    frame?: string;
-    extension?: string;
-  },
+  focused: FocusedControl,
   chord?: Chord,
   platform: NodeJS.Platform = process.platform,
 ): void {

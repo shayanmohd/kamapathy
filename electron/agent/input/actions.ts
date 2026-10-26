@@ -39,7 +39,11 @@ import type { TabSession } from "../session/tab-session";
 import type { Step } from "../session/types";
 import type { TargetPayload } from "../validate";
 import type { InputDispatcher, InputDispatchers } from "./dispatch";
-import { checkKeyTarget, checkPointerTarget } from "./guards";
+import {
+  checkKeyTarget,
+  checkPointerTarget,
+  type FocusedControl,
+} from "./guards";
 import { inputMarker } from "./marker";
 import {
   KEYS,
@@ -385,13 +389,6 @@ export interface InputActionDeps {
   frames?: FrameGroupsByTab;
   /** Section 17's loaded extensions, which name the frame a refusal is about. */
   extensions?: ExtensionNames;
-}
-/** The focused control the key guards read, with the frame it sits in. */
-export interface FocusedControl {
-  kind: string;
-  blockedFrame?: true;
-  frame?: string;
-  extension?: string;
 }
 /** One drag as its route parsed it. */
 export interface DragAction {
