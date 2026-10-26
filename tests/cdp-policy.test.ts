@@ -142,6 +142,7 @@ describe("the protocol policy", () => {
       "Emulation.setCPUThrottlingRate": "process",
       "Emulation.setTimezoneOverride": "process",
       "Emulation.setLocaleOverride": "process",
+      "Emulation.setEmitTouchEventsForMouse": "managed",
       "Network.getCookies": "session",
       "Network.getAllCookies": "session",
       "Network.setCookie": "session",
@@ -178,6 +179,12 @@ describe("the protocol policy", () => {
     });
     expect(verdict("Page.close")).toMatchObject({
       message: expect.stringContaining("page.close()"),
+    });
+    // A probe of Electron 44 found that with mouse events turned into touch
+    // events, a mouse command Kamapathy sends is delivered but never
+    // answered, for the rest of the page's life.
+    expect(verdict("Emulation.setEmitTouchEventsForMouse")).toMatchObject({
+      message: expect.stringContaining("Input.dispatchTouchEvent"),
     });
     // Security has only its two switches.
     for (const name of PROTOCOL.domains.Security.commands)
@@ -274,6 +281,19 @@ describe("the protocol policy", () => {
         code: "KeyC",
       }),
     ).toEqual({ allow: true, dispatcher: true });
+    // The editor's own clipboard keys: a probe of Electron 44 found
+    // Shift+Insert pasting the system clipboard into a field and
+    // Shift+Delete cutting the selection onto it.
+    for (const key of ["Insert", "Delete"])
+      expect(
+        verdict("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          modifiers: 8,
+          key,
+          code: key,
+        }),
+        key,
+      ).toMatchObject({ block: "person", param: "key" });
     // Middle-button presses paste the selection on Linux.
     const middle = { type: "mousePressed", x: 1, y: 1, button: "middle" };
     expect(verdict("Input.dispatchMouseEvent", middle)).toEqual({

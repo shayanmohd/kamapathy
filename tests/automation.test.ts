@@ -7111,6 +7111,12 @@ describe("local automation socket", () => {
         "person",
         "key",
       ],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "Delete", code: "Delete", modifiers: 8 },
+        "person",
+        "key",
+      ],
       ["Input.setInterceptDrags", { enabled: true }, "managed"],
       [
         "Input.dispatchDragEvent",
