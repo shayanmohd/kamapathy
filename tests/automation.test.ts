@@ -3,6 +3,7 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { INPUT_METHODS } from "../electron/agent/cdp-policy";
+import { CONTINUATIONS } from "../electron/agent/routes/cdp";
 import { ApiError } from "../electron/agent/errors";
 import { takeWaitSlot } from "../electron/agent/expectations";
 import { WHEEL_GAP_MS } from "../electron/agent/input/actions";
@@ -7174,6 +7175,70 @@ describe("local automation socket", () => {
     // ownership check sent nothing after it.
     expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([undefined]);
     expect(attached(page)).toEqual([]);
+  });
+
+  it("the Fetch continuations skip the queue", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect(CONTINUATIONS).toEqual([
+      "Fetch.continueRequest",
+      "Fetch.continueResponse",
+      "Fetch.failRequest",
+      "Fetch.fulfillRequest",
+    ]);
+    // A pending evaluate holds the space's lane for the whole check.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    for (const method of CONTINUATIONS) {
+      const answered = await within(
+        cdp(tab.id, { method, params: { requestId: "7" } }),
+        2000,
+      );
+      expect(answered, method).not.toBe("pending");
+      expect((answered as Response).status, method).toBe(200);
+      // The command still went out on the agent's own session.
+      expect(sentOn(page, method), method).toEqual(["agent-1"]);
+    }
+    // Every other command waits its turn behind the evaluate.
+    const queued = cdp(tab.id, { method: "Page.enable" });
+    expect(await within(settled(queued), 300)).toBe("pending");
+    running.release();
+    expect((await running.done).status).toBe(200);
+    expect((await queued).status).toBe(200);
+  });
+
+  it("a continuation still checks its URL", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Fetch.continueRequest",
+        params: { requestId: "7", url: "file:///etc/passwd" },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Fetch.continueRequest",
+      reason: "scope",
+      param: "url",
+    });
+    expect(sentOn(page, "Fetch.continueRequest")).toEqual([]);
+    // Skipping the queue skips no check: the person's control still answers
+    // first, even with no lane to wait in.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const taken = await failure(
+      await cdp(tab.id, {
+        method: "Fetch.continueRequest",
+        params: { requestId: "7" },
+      }),
+    );
+    expect(taken.status).toBe(409);
+    expect(taken.error).toMatchObject({ code: "human_control" });
+    expect(sentOn(page, "Fetch.continueRequest")).toEqual([]);
   });
 
   // Section 12's space route: the two methods Kamapathy answers about itself,

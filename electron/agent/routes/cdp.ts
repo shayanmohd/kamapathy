@@ -4,6 +4,16 @@ import { cdpFields, eventFields, spaceCdpFields } from "../validate";
 // POST /tabs/:id/events: the protocol events recorded for this tab,
 // POST /tabs/:id/cdp: one protocol command on the agent's own session, and
 // POST /spaces/:id/cdp: the two methods Kamapathy answers about itself.
+
+/** The Fetch commands that release a request a pending call may be waiting
+ *  on, so they take no lane. Every check still applies to them. */
+export const CONTINUATIONS: readonly string[] = [
+  "Fetch.continueRequest",
+  "Fetch.continueResponse",
+  "Fetch.failRequest",
+  "Fetch.fulfillRequest",
+];
+
 export function cdpRoutes(deps: RouteDeps): Record<string, RouteImpl> {
   const { events, pageScripts, cdp } = deps;
   return {
@@ -33,8 +43,11 @@ export function cdpRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       },
     },
     "POST /tabs/:id/cdp": {
-      // Every command waits its turn in its own space.
-      laneFor: () => "space",
+      // Every command waits its turn in its own space, except the four that
+      // let a request through: a call already in the lane may be waiting for
+      // one of them.
+      laneFor: (body) =>
+        CONTINUATIONS.includes(String(body?.method)) ? "none" : "space",
       handler: async ({ response, body, tab, run }) => {
         const answered = await cdp.page(
           { tabId: tab!.id, ...cdpFields(body!) },
