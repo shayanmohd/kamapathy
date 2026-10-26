@@ -1613,10 +1613,10 @@ describe("local automation socket", () => {
   };
   // A page whose frame holds one control, listed by a snapshot so its ref
   // has a home: @e1 names the frame itself and @e2 the control inside it.
-  const framedPage = async (tabId: string) => {
+  const framedPage = async (tabId: string, spec: Partial<FrameSpec> = {}) => {
     const page = controller.contents;
     await addFrames([
-      { frameId: "card", url: "https://pay.example/", local: "0" },
+      { frameId: "card", url: "https://pay.example/", local: "0", ...spec },
     ]);
     page.result = (code: string) =>
       callGroup(code) === ""
@@ -1904,6 +1904,9 @@ describe("local automation socket", () => {
       // The frame answers nothing at all until it is asked again.
       if (isProbe(code))
         return answers ? { ok: true, tally: tally(1) } : new Promise(() => {});
+      // The owner read belongs to the page's own world, whatever the group
+      // of the operation that asked for it.
+      if (code.includes(')("frameBox",')) return { ok: true };
       return callGroup(code) === "" ? noMatch : { ok: true, x: 25, y: 45 };
     };
     const refused = await request(`/tabs/${tab.id}/click`, "POST", {
@@ -2071,6 +2074,143 @@ describe("local automation socket", () => {
       blocker: "hidden",
       unreadFrames: 1,
     });
+  });
+
+  // Section 9's actions: the frame's own world measures and checks, the
+  // owner's world maps the point outward, and section 5's dispatcher sends
+  // the input on the tab's page session at the point that came out.
+  const OWNER_BOX = {
+    box: { x: 40, y: 60, scaleX: 1, scaleY: 1, width: 400, height: 200 },
+    area: { left: 40, top: 60, right: 440, bottom: 260 },
+  };
+  // What a frame action's page calls answer: the control at 25,45 of the
+  // frame's own document, which its owner places at 65,105 in the page.
+  const framedPoint = (extra: Record<string, unknown> = {}) => (code: string) =>
+    code.includes(')("frameBox",')
+      ? { ok: true, ...OWNER_BOX, point: { x: 65, y: 105 }, ...extra }
+      : { ok: true, x: 25, y: 45 };
+  // The page calls one frame action made, with the session each ran on.
+  const callsOf = (page: FakeContents, operation: string) =>
+    page.debugger.sent.filter(
+      (command) =>
+        command.method === "Runtime.evaluate" &&
+        String(command.params.expression).includes(
+          `)(${JSON.stringify(operation)},`,
+        ),
+    );
+  const mouseEvents = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => [input.parameters.type, input.parameters.x, input.parameters.y]);
+
+  it("input goes out on the top page session at top-level coordinates", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    expect(await clicked.json()).toMatchObject({ point: { x: 65, y: 105 } });
+    // Every Input command went out on the tab's own page session, at the
+    // point the owner's world mapped the frame's point to.
+    const sent = page.debugger.sent.filter((command) =>
+      command.method.startsWith("Input."),
+    );
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.map((command) => command.sessionId)).toEqual(
+      sent.map(() => undefined),
+    );
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
+    // The element was measured in the frame's own world, and the owner was
+    // measured in the world around it.
+    expect(
+      callsOf(page, "actionPoint").map((command) => command.sessionId),
+    ).toEqual(["card-session"]);
+    const boxes = callsOf(page, "frameBox");
+    expect(boxes.length).toBeGreaterThan(0);
+    expect(boxes.map((command) => command.sessionId)).toEqual(
+      boxes.map(() => undefined),
+    );
+    expect(payloads("frameBox")).toEqual(
+      boxes.map(() => ({ key: "card", point: { x: 25, y: 45 } })),
+    );
+    // The hit test over the point sees the frame, not the page's own
+    // document.
+    expect(
+      page.debugger.sent
+        .filter((command) => command.method === "DOM.getNodeForLocation")
+        .map((command) => [command.params.x, command.params.y]),
+    ).toEqual([[65, 105]]);
+  });
+
+  it("delivery is confirmed in the frame that holds the target", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    let presses = 0;
+    // Only the frame's own world counts the press; the page's own counters
+    // never see it.
+    page.result = (code: string) => {
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: presses, key: 0, drag: 0 };
+      return framedPoint()(code);
+    };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type === "mousePressed") presses += 1;
+    };
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    const counters = callsOf(page, "input");
+    expect(counters.length).toBeGreaterThan(1);
+    expect(counters.map((command) => command.sessionId)).toEqual(
+      counters.map(() => "card-session"),
+    );
+    // A press no frame counted is answered as it is on the page itself.
+    page.afterInput = undefined;
+    presses = 0;
+    const missed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(missed.status).toBe(409);
+    expect((await missed.json()).error.code).toBe("input_not_delivered");
+  });
+
+  it("an action inside a frame from another host names it in the activity", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e2" })).status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe(
+      "Agent clicked an element in a frame from pay.example",
+    );
+    // The frame itself is an element of the page, so its own click says
+    // nothing about a frame.
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe("Agent clicked an element");
+  });
+
+  it("an action in a frame of the page's own host adds nothing to the activity", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, {
+      url: "https://example.com/card",
+      sessionId: "card-session",
+    });
+    page.result = framedPoint();
+    expect(
+      (await request(`/tabs/${tab.id}/fill`, "POST", { ref: "@e2", value: "1" }))
+        .status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe("Agent filled a field");
   });
 
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {

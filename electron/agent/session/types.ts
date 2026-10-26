@@ -68,6 +68,8 @@ export interface KnownFrame {
   ownSession: boolean;
   blocked: boolean;
   unavailable: boolean;
+  /** Set while the frame has started loading another document. */
+  navigating?: true;
 }
 export interface DialogInfo {
   type: "alert" | "confirm" | "prompt" | "beforeunload";

@@ -106,6 +106,14 @@ export class FakeContents extends FakeHost {
         ? { ...given, point: { x: given.x, y: given.y } }
         : given,
     stableBox: (given: any) => ({ ...given, moved: 0 }),
+    // Section 9's owner: at the document origin, at full scale, showing the
+    // whole viewport, so a frame action behaves like one on the page itself
+    // until a test places the owner itself.
+    frameBox: (given: any) => ({
+      box: { x: 0, y: 0, scaleX: 1, scaleY: 1, width: 1200, height: 800 },
+      area: { left: 0, top: 0, right: 1200, bottom: 800 },
+      ...given,
+    }),
     scrollRequest: (given: any) => ({ ...given, settled: true }),
     viewport: () => ({ ok: true, width: 1200, height: 800, zoom: 1 }),
     focusedKind: () => ({ ok: true, kind: "none" }),

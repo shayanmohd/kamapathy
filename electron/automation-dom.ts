@@ -2538,6 +2538,14 @@ export function pageOperation(
   if (operation === "frameBox") {
     const owner = frames?.byKey.get(payload.key as string);
     if (!owner || !live(owner)) return failure(PAGE_CHANGED, "page_changed");
+    // Section 9's step into view: the owner is brought on screen in this
+    // world before it is measured, as section 5's own last scroll does.
+    if (payload.reveal === true)
+      owner.scrollIntoView({
+        block: "center",
+        inline: "center",
+        behavior: "instant",
+      });
     const own = frameOrigin(owner);
     const placement = ownerPlacement(owner);
     const spot = payload.point as { x: number; y: number } | undefined;

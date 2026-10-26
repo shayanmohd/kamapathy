@@ -8,16 +8,26 @@ import {
   type AxEntry,
   type AxSource,
 } from "./accessibility";
-import { remaining } from "./actions";
+import { remaining, type RanIn } from "./actions";
 import type { PageStateOperation } from "./dom/page-state";
 import type { Level, Mode, Query, Tally, WaitState } from "./dom/select";
+import { ApiError } from "./errors";
 import { comparePaths } from "./frames/compose";
+import {
+  emptyArea,
+  mapPoint,
+  mapRect,
+  type Area,
+  type OwnerBox,
+  type Point,
+} from "./frames/geometry";
 import {
   READ_LIMITS,
   WAIT_GROUP_MS,
   type FrameGroups,
   type FrameGroupsByTab,
   type GroupInfo,
+  type OwnerBinding,
 } from "./frames/groups";
 import { CANDIDATE_REFS, REF_BLOCK, type RefBook } from "./refs";
 import { FORMS, type NameMatch, type SearchAst } from "./selectors";
@@ -255,6 +265,195 @@ export async function searchGroups(
   };
 }
 
+// Section 9's actions inside a frame: the frame the target sits in, the point
+// of its own document in the top viewport, and the boundaries a point outside
+// its visible area is brought through. The page measures and hit-tests; the
+// arithmetic here only follows the owner boxes it reports.
+
+/** Everything an action needs about the target's frame, in one read. */
+export interface FrameTarget {
+  /** The frame whose world ran the operation: the target's group root. */
+  frameId: string;
+  /** That group's frame path, "" for the page's own document. */
+  group: string;
+  /** The owners between the top document and the frame, outermost first. */
+  owners: OwnerBinding[];
+  /** The frame's own path, which an error or an activity entry carries. */
+  path: string;
+  /** The frame's origin, which the activity names by host. */
+  origin: string;
+}
+
+export function frameTargetOf(
+  frames: FrameGroups,
+  frameId: string,
+): FrameTarget {
+  const group = frames.groupOf(frameId);
+  const path = frames.pathOf(frameId) ?? group?.path ?? "";
+  return {
+    frameId,
+    group: group?.path ?? path,
+    owners: frames.ownerChain(frameId),
+    path,
+    origin: group?.origin ?? "",
+  };
+}
+
+/** Where a point of the target's frame lands, and what covers it there. */
+export interface PlacedPoint {
+  point: Point;
+  area: Area;
+  /** What the owners scale the frame's own pixels by, together. */
+  scaleX: number;
+  scaleY: number;
+  covered?: true;
+  interceptor?: Record<string, unknown>;
+}
+
+const intersect = (first: Area, second: Area): Area => ({
+  left: Math.max(first.left, second.left),
+  top: Math.max(first.top, second.top),
+  right: Math.min(first.right, second.right),
+  bottom: Math.min(first.bottom, second.bottom),
+});
+const finite = (point: unknown): point is Point =>
+  !!point &&
+  Number.isFinite((point as Point).x) &&
+  Number.isFinite((point as Point).y);
+
+// The frame whose world holds one owner: the group root just outside it,
+// which is the owner before it in the chain, and the main frame for the
+// outermost one.
+const aroundOwner = (
+  session: TabSession,
+  target: FrameTarget,
+  index: number,
+  step: Step,
+): Promise<string> =>
+  index === 0
+    ? session.mainFrameId(step)
+    : Promise.resolve(target.owners[index - 1].frameId);
+
+// One owner read, in the world around it. An owner the page cannot find any
+// more means the frame around the target changed under the action.
+const readOwner = async (
+  session: TabSession,
+  frameId: string,
+  payload: Record<string, unknown>,
+  target: FrameTarget,
+  step: Step,
+): Promise<Record<string, unknown>> => {
+  const reply = await session.evaluateInFrame(frameId, "frameBox", payload, {
+    deadline: step.deadline,
+    ...(step.signal ? { signal: step.signal } : {}),
+    ...(step.guard ? { guard: step.guard } : {}),
+    namespace: "internal",
+    timeoutMs: remaining(step.deadline),
+  });
+  if (reply?.ok === false)
+    throw new ApiError(
+      "page_changed",
+      "The frame holding the target loaded another page during this action. Inspect it before continuing.",
+      target.path ? { frame: target.path } : {},
+    );
+  return reply;
+};
+
+/**
+ * Translates a point from the target's own frame to top-level viewport
+ * pixels and intersects the visible areas. Each owner's world hit-tests the
+ * owner at the point on the way out, so an element covering a boundary is
+ * section 5's covered blocker with that world's interceptor.
+ */
+export async function translatePoint(
+  session: TabSession,
+  target: FrameTarget,
+  point: Point,
+  step: Step,
+): Promise<PlacedPoint> {
+  let current = point;
+  let area: Area | undefined;
+  let scaleX = 1;
+  let scaleY = 1;
+  let blocker:
+    { covered: true; interceptor?: Record<string, unknown> } | undefined;
+  for (let index = target.owners.length - 1; index >= 0; index -= 1) {
+    const owner = target.owners[index];
+    const around = await aroundOwner(session, target, index, step);
+    const reply = await readOwner(
+      session,
+      around,
+      { key: owner.key, point: current },
+      target,
+      step,
+    );
+    const box = reply.box as OwnerBox | undefined;
+    const level = reply.area as Area | undefined;
+    const mapped = reply.point;
+    current = finite(mapped)
+      ? mapped
+      : box
+        ? mapPoint(current, [box])
+        : current;
+    if (level)
+      area =
+        area === undefined || !box
+          ? level
+          : intersect(mapRect(area, [box]), level);
+    if (box) {
+      scaleX *= box.scaleX;
+      scaleY *= box.scaleY;
+    }
+    if (reply.covered === true && !blocker) {
+      const interceptor = reply.interceptor;
+      blocker = {
+        covered: true,
+        ...(interceptor && typeof interceptor === "object"
+          ? { interceptor: interceptor as Record<string, unknown> }
+          : {}),
+      };
+    }
+  }
+  return {
+    point: current,
+    area: area ?? { left: 0, top: 0, right: 0, bottom: 0 },
+    scaleX,
+    scaleY,
+    ...(blocker ?? {}),
+  };
+}
+
+/** Whether a point lies in the part of the viewport its owners can show. */
+export const inArea = (point: Point, area: Area): boolean =>
+  !emptyArea(area) &&
+  point.x >= area.left &&
+  point.x <= area.right &&
+  point.y >= area.top &&
+  point.y <= area.bottom;
+
+/**
+ * Scrolls each boundary into view, outermost owner first. The page scrolls
+ * the owner itself, as section 5's own scroll does once its gestures are
+ * spent; the element inside the frame is then brought into view by section
+ * 5's gestures in the frame's own world.
+ */
+export async function revealThroughFrames(
+  session: TabSession,
+  target: FrameTarget,
+  step: Step,
+): Promise<void> {
+  for (const [index, owner] of target.owners.entries()) {
+    const around = await aroundOwner(session, target, index, step);
+    await readOwner(
+      session,
+      around,
+      { key: owner.key, reveal: true },
+      target,
+      step,
+    );
+  }
+}
+
 export interface RunOptions {
   deadline: number;
   namespace: string;
@@ -263,6 +462,8 @@ export interface RunOptions {
   dispatch?: { dispatched: boolean };
   /** The frame whose world runs the operation, instead of the main frame. */
   frameId?: string;
+  /** Filled in with the frame whose world ran the operation (section 9). */
+  ran?: RanIn;
 }
 export interface Resolver {
   run(
@@ -509,6 +710,7 @@ export function createResolver(deps: {
           nth?: number,
         ) => {
           const body = bodyOf(group.path === "" ? undefined : context, nth);
+          if (options.ran) options.ran.frameId = group.root;
           await pickRoles(group.root, body);
           const answer = await evaluate(group.root, operation, body);
           // The candidates a group named live in that group's own world, so
@@ -609,6 +811,7 @@ export function createResolver(deps: {
         if (!result) {
           const frameId =
             options.frameId ?? home ?? (await session.mainFrameId(step));
+          if (options.ran) options.ran.frameId = frameId;
           const path = home === undefined ? undefined : frames?.pathOf(home);
           const body = bodyOf(
             path === undefined || path === ""

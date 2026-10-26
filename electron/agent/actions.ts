@@ -1,5 +1,6 @@
 import type { WebContents } from "electron";
 import { ERRORS } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import { AGENT_TEXT_LIMITS, cleanAgentText } from "../../shared/agent-text";
 import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
@@ -18,7 +19,7 @@ import {
 } from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
-import { createResolver } from "./resolve";
+import { createResolver, type FrameTarget } from "./resolve";
 import type { AutomationController } from "./server";
 import { createSnapshots, type SnapshotRequest } from "./snapshot";
 import {
@@ -33,8 +34,40 @@ import type { ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
 
+/** The frame a page operation ran in, which the caller passes in empty. */
+export type RanIn = { frameId?: string };
+
 // The step types the pointer runner owns.
 const POINTER_KINDS: readonly PointerKind[] = ["click", "dblclick", "hover"];
+
+// The frame note one request's action earned, read by the activity line
+// after the action returns. Section 5's runner records it against the
+// request it ran for, so nothing about a frame reaches the response.
+const notes = new WeakMap<Run, string>();
+/** Records the frame a request acted in, for its activity entry. */
+export const noteFrame = (run: Run, note: string): void => {
+  if (note) notes.set(run, note);
+};
+const hostOf = (value: string): string => {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+};
+/**
+ * The activity suffix for a target in a frame from another host:
+ * " in a frame from <host>", with the host cleaned like any agent text and
+ * cut at 60 characters. A frame of the page's own host adds nothing.
+ */
+export function frameNote(target: FrameTarget, topUrl: string): string {
+  const host = cleanAgentText(hostOf(target.origin)).slice(
+    0,
+    AGENT_TEXT_LIMITS.label,
+  );
+  if (!host || host === hostOf(topUrl)) return "";
+  return ` in a frame from ${host}`;
+}
 
 export const finitePoint = (point: unknown): point is Point =>
   !!point &&
@@ -99,6 +132,8 @@ export interface Actions {
     step?: Step,
     /** The frame whose world runs it, for a read inside a frame group. */
     frameId?: string,
+    /** Filled in with the frame whose world ran it, for section 9. */
+    ran?: RanIn,
   ): Promise<Record<string, unknown>>;
   executeToolAction(
     id: string,
@@ -223,6 +258,7 @@ export function createActions(deps: {
     deadline: number,
     step?: Step,
     frameId?: string,
+    ran?: RanIn,
   ) => {
     authorizeTab(id);
     const epoch = session.epoch;
@@ -234,6 +270,7 @@ export function createActions(deps: {
       guard: () => authorizeTab(id),
       dispatch: step?.dispatch,
       ...(frameId === undefined ? {} : { frameId }),
+      ...(ran === undefined ? {} : { ran }),
     });
     authorizeTab(id);
     if (
@@ -282,6 +319,7 @@ export function createActions(deps: {
     authority,
     actions: { readyContents, evaluatePage, dispatcher: dispatcherFor },
     dispatchers,
+    frames: deps.frames,
   });
   const executeToolAction = async (
     id: string,
@@ -420,7 +458,13 @@ export function createActions(deps: {
       "mouse-click": "Agent clicked a point",
       wait: "Agent observed a page condition",
     };
-    controller.addActivity(tab.spaceId, descriptions[action.type], "info");
+    // A target inside a frame from another host says so, which is how the
+    // person sees an agent working in an embedded form.
+    controller.addActivity(
+      tab.spaceId,
+      `${descriptions[action.type]}${notes.get(run) ?? ""}`,
+      "info",
+    );
     return result;
   };
   return {
