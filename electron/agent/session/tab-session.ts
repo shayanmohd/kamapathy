@@ -38,6 +38,9 @@ import type {
 
 export const SETUP_TIMEOUT_MS = 5000;
 export const REATTACH_AT_MS = [0, 250, 1000, 4000];
+// How long the frame tree a crashed session's next document needs may take
+// before the session counts as crashed again.
+export const RECOVER_TIMEOUT_MS = 2000;
 
 export interface TabSessionOptions {
   tabId: string;
@@ -1344,22 +1347,32 @@ export class TabSession {
   }
 
   // The debugger outlives a renderer crash, so the next document only needs
-  // its frame tree read again.
+  // its frame tree read again. That read is the session attaching to the
+  // renderer the document brought, so a command sent while it runs waits it
+  // out instead of failing as crashed, and a read that does not arrive
+  // leaves the session crashed again.
   private recover(): void {
     const generation = this.generation;
-    this.command<FrameTree>("Page.getFrameTree", {}).then(
+    const recovering = () =>
+      generation === this.generation &&
+      this.current === "attaching" &&
+      !this.releasing;
+    this.setState("attaching");
+    this.command<FrameTree>(
+      "Page.getFrameTree",
+      {},
+      undefined,
+      RECOVER_TIMEOUT_MS,
+    ).then(
       (reply) => {
-        if (
-          generation !== this.generation ||
-          this.current !== "crashed" ||
-          this.releasing
-        )
-          return;
+        if (!recovering()) return;
         this.registry.clear();
         this.registry.seed(reply.frameTree);
         this.setState("ready");
       },
-      () => {},
+      () => {
+        if (recovering()) this.setState("crashed");
+      },
     );
   }
 
@@ -1524,6 +1537,17 @@ export class TabSession {
     if (method === "Target.attachedToTarget") this.adopt(params, source);
     else if (method === "Target.detachedFromTarget")
       this.forget(params.sessionId);
+    // A crashed session's next document commits on a renderer that is there
+    // again, and Chromium reports that commit here before Electron's own
+    // navigation event, which a load wait already sends on.
+    if (
+      this.current === "crashed" &&
+      !this.releasing &&
+      source === undefined &&
+      method === "Page.frameNavigated" &&
+      params?.frame?.parentId === undefined
+    )
+      this.recover();
     const before =
       method === "Page.frameNavigated" || method === "Page.frameDetached"
         ? this.registry.list()
