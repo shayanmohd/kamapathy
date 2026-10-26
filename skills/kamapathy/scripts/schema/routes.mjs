@@ -712,6 +712,21 @@ const FIELDS = {
       description: "How long to wait for Chromium's answer.",
     },
   },
+  spaceCdp: {
+    method: {
+      kind: "string",
+      max: 64,
+      required: true,
+      since: 4,
+      description:
+        "The protocol method. Kamapathy answers Target.getTargets and Browser.getVersion itself and refuses every other one.",
+    },
+    params: {
+      kind: "json",
+      since: 4,
+      description: "The command's parameters as an object.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -1156,6 +1171,14 @@ export const ROUTES = [
       follow: true,
       since: 4,
     },
+  ),
+  route(
+    "POST",
+    "/spaces/:id/cdp",
+    "Answers Target.getTargets for this space's pages and Browser.getVersion.",
+    "{ ok: true, result }",
+    FIELDS.spaceCdp,
+    { lane: "none", budget: 10000, since: 4 },
   ),
   route(
     "GET",

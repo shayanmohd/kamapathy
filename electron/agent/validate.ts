@@ -1092,6 +1092,14 @@ export function cdpFields(body: Record<string, unknown>): {
     timeoutMs: integerField(body, "timeoutMs", 15000, 1000, 60000),
   };
 }
+/** One command for the space itself: Kamapathy answers it without a page. */
+export function spaceCdpFields(body: Record<string, unknown>): {
+  method: string;
+  params: Record<string, unknown>;
+} {
+  const { method, params } = cdpFields(body);
+  return { method, params };
+}
 export function expectationFields(body: Record<string, unknown>): {
   event: ExpectationEvent;
   timeoutMs: number;

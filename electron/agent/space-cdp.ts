@@ -1,3 +1,6 @@
+import { cleanAgentText } from "../../shared/agent-text";
+import type { Tab } from "../../shared/types";
+import { reducedUserAgent } from "../identity";
 import { remaining, type Actions } from "./actions";
 import { createAgentCdp, type AgentCdp } from "./agent-cdp";
 import type { Authority } from "./authority";
@@ -16,6 +19,7 @@ import { CdpTimeoutError } from "./session/errors";
 import type { TabSession } from "./session/tab-session";
 import type { TabSessions } from "./session/tab-sessions";
 import type { Step } from "./session/types";
+import { agentVisible } from "./views";
 
 // Section 8's filter: the only path a space's agent protocol traffic takes.
 // Every command goes through the same order here, so no route reaches a tab
@@ -29,6 +33,20 @@ export interface InputDispatcherPort {
     params: Record<string, unknown>,
     step: Step & { timeoutMs: number },
   ): Promise<unknown>;
+}
+/** The two protocol methods Kamapathy answers for a space, itself. */
+export const SPACE_METHODS: readonly [
+  "Target.getTargets",
+  "Browser.getVersion",
+] = ["Target.getTargets", "Browser.getVersion"];
+/** One of this space's pages, as Target.getTargets reports it. */
+export interface TargetInfoView {
+  targetId: string;
+  type: "page";
+  title: string;
+  url: string;
+  attached: true;
+  browserContextId: string;
 }
 /** One command, as the route read it. */
 export interface CdpCall {
@@ -44,6 +62,12 @@ export interface SpaceCdpFilter {
     call: CdpCall,
     run: Run,
   ): Promise<{ result: unknown; newSession?: true }>;
+  /** The space's own two methods, answered here; everything else is refused. */
+  space(
+    spaceId: string,
+    method: string,
+    params: Record<string, unknown>,
+  ): { result: unknown };
   cdpFor(tabId: string): AgentCdp | undefined;
   dispose(): void;
 }
@@ -84,6 +108,35 @@ const refuse = (
       ...(verdict.param === undefined ? {} : { param: verdict.param }),
     },
   );
+
+// What this space holds, as the protocol describes a target: the pages the
+// agent has, each under its own tab id, in the browser context the space is.
+const targetsOf = (
+  tabs: readonly Tab[],
+  spaceId: string,
+): { targetInfos: TargetInfoView[] } => ({
+  targetInfos: tabs
+    .filter(
+      (tab) =>
+        tab.spaceId === spaceId && tab.managed === true && agentVisible(tab),
+    )
+    .map((tab) => ({
+      targetId: tab.id,
+      type: "page" as const,
+      title: cleanAgentText(tab.title),
+      url: tab.url,
+      attached: true as const,
+      browserContextId: spaceId,
+    })),
+});
+// What Kamapathy is, as Browser.getVersion describes a browser. Nothing of
+// this comes from Chromium: the agent never reaches the browser itself.
+const versionOf = () => ({
+  protocolVersion: "1.3",
+  product: `Chrome/${process.versions.chrome ?? ""}`,
+  userAgent: reducedUserAgent(process.versions.chrome ?? ""),
+  jsVersion: process.versions.v8 ?? "",
+});
 
 export function createSpaceCdp(deps: {
   controller: AutomationController;
@@ -356,6 +409,17 @@ export function createSpaceCdp(deps: {
         // page, so the refs it gave out are no longer the page's.
         if (run.dispatch.dispatched) refs.expireTab(call.tabId);
       }
+    },
+    space(spaceId, method) {
+      authority.authorizeSpace(spaceId);
+      pageScripts.require();
+      if (method === "Target.getTargets")
+        return { result: targetsOf(controller.state.tabs, spaceId) };
+      if (method === "Browser.getVersion") return { result: versionOf() };
+      return refuse(method, {
+        block: "browser",
+        message: `About itself Kamapathy answers ${SPACE_METHODS.join(" and ")}, and nothing else.`,
+      });
     },
     cdpFor,
     dispose() {

@@ -1,9 +1,9 @@
 import { send, type RouteDeps, type RouteImpl } from "../http";
-import { cdpFields, eventFields } from "../validate";
+import { cdpFields, eventFields, spaceCdpFields } from "../validate";
 
-// POST /tabs/:id/events: the protocol events recorded for this tab, and
-// POST /tabs/:id/cdp: one protocol command on the agent's own session.
-// Section 12 adds the space route here.
+// POST /tabs/:id/events: the protocol events recorded for this tab,
+// POST /tabs/:id/cdp: one protocol command on the agent's own session, and
+// POST /spaces/:id/cdp: the two methods Kamapathy answers about itself.
 export function cdpRoutes(deps: RouteDeps): Record<string, RouteImpl> {
   const { events, pageScripts, cdp } = deps;
   return {
@@ -19,6 +19,16 @@ export function cdpRoutes(deps: RouteDeps): Record<string, RouteImpl> {
             deadline: run.deadline,
             signal: run.signal,
           })),
+        });
+      },
+    },
+    "POST /spaces/:id/cdp": {
+      // It touches no page, so it waits for none.
+      handler: async ({ response, body, space }) => {
+        const { method, params } = spaceCdpFields(body!);
+        return send(response, 200, {
+          ok: true,
+          ...cdp.space(space!.id, method, params),
         });
       },
     },

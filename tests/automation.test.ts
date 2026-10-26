@@ -7176,6 +7176,158 @@ describe("local automation socket", () => {
     expect(attached(page)).toEqual([]);
   });
 
+  // Section 12's space route: the two methods Kamapathy answers about itself,
+  // outside every queue, with nothing forwarded to Chromium.
+  const spaceCdp = (spaceId: string, body: Record<string, unknown>) => {
+    const done = request(`/spaces/${spaceId}/cdp`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // Commands of the two domains Kamapathy answers itself, which no session
+  // ever carries.
+  const browserCommands = (page: FakeContents) =>
+    page.debugger.sent
+      .filter(
+        (command) =>
+          command.method.startsWith("Browser.") ||
+          command.method === "Target.getTargets",
+      )
+      .map((command) => command.method);
+
+  it("space.cdp answers Target.getTargets from this space only", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    // A title an agent reads is cleaned like other agent text.
+    blank.title = "Checkout\u202e evil";
+    // A page the person opened in the space, and the person's own space,
+    // belong to them.
+    const person = controller.openPersonTab(space.id);
+    const personal = controller.state.tabs.find(
+      (item) => item.spaceId === "personal",
+    )!;
+    const answered = await spaceCdp(space.id, { method: "Target.getTargets" });
+    expect(answered.status).toBe(200);
+    const body = await answered.json();
+    expect(body).toEqual({
+      ok: true,
+      result: {
+        targetInfos: [
+          {
+            targetId: blank.id,
+            type: "page",
+            title: "Checkout evil",
+            url: blank.url,
+            attached: true,
+            browserContextId: space.id,
+          },
+          {
+            targetId: tab.id,
+            type: "page",
+            title: "https://example.com/",
+            url: "https://example.com/",
+            attached: true,
+            browserContextId: space.id,
+          },
+        ],
+      },
+    });
+    const listed = (result: any) =>
+      result.targetInfos.map((info: { targetId: string }) => info.targetId);
+    expect(listed(body.result)).not.toContain(person.id);
+    expect(listed(body.result)).not.toContain(personal.id);
+    // A page the agent let go of is the person's again, so it goes.
+    controller.setManaged(blank.id, false);
+    expect(
+      listed(
+        (await (await spaceCdp(space.id, { method: "Target.getTargets" })).json())
+          .result,
+      ),
+    ).toEqual([tab.id]);
+    expect(browserCommands(page)).toEqual([]);
+  });
+
+  it("space.cdp answers Browser.getVersion itself", async () => {
+    const { space } = await createPage();
+    const page = controller.contents;
+    const answered = await spaceCdp(space.id, { method: "Browser.getVersion" });
+    expect(answered.status).toBe(200);
+    const { result } = await answered.json();
+    // Chromium's version is present only in the app, as health reports it.
+    expect(result).toEqual({
+      protocolVersion: "1.3",
+      product: `Chrome/${process.versions.chrome ?? ""}`,
+      userAgent: expect.any(String),
+      jsVersion: process.versions.v8,
+    });
+    // Section 16's identity: Chrome's reduced user agent, with no Electron
+    // or app token in it.
+    expect(result.userAgent).toMatch(
+      /^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/[\d.]*0\.0\.0 Safari\/537\.36$/,
+    );
+    expect(result.userAgent).not.toMatch(/Electron|Kamapathy/);
+    expect(browserCommands(page)).toEqual([]);
+  });
+
+  it("every other space method is blocked", async () => {
+    const { space } = await createPage();
+    const page = controller.contents;
+    for (const method of [
+      "Target.attachToTarget",
+      "Target.createTarget",
+      "Target.setDiscoverTargets",
+      "Browser.close",
+      "Browser.setWindowBounds",
+      "Page.enable",
+    ]) {
+      const { status, error } = await failure(
+        await spaceCdp(space.id, { method }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "browser",
+      });
+    }
+    // A method is checked for its shape first, as the tab route checks it.
+    for (const body of [
+      { method: "target.getTargets" },
+      { method: "Target" },
+      { method: "Target.getTargets", params: [] },
+    ]) {
+      const { status, error } = await failure(await spaceCdp(space.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error.code, JSON.stringify(body)).toBe("invalid_field");
+    }
+    expect(browserCommands(page)).toEqual([]);
+    expect(
+      page.debugger.sent.some((command) => command.sessionId !== undefined),
+    ).toBe(false);
+  });
+
+  it("space.cdp answers 403 while Page scripts are off", async () => {
+    const { space, tab } = await createPage();
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const off = await failure(await spaceCdp(space.id, { method: "Browser.getVersion" }));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    // A pending evaluate holds the space's lane, and the space answers now.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    const answered = await spaceCdp(space.id, { method: "Target.getTargets" });
+    expect(answered.status).toBe(200);
+    running.release();
+    expect((await running.done).status).toBe(200);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -11355,6 +11507,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/fetch": { url: "/api/cart" },
       "POST /tabs/:id/events": { max: 10 },
       "POST /tabs/:id/cdp": { method: "Page.enable" },
+      "POST /spaces/:id/cdp": { method: "Browser.getVersion" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },
