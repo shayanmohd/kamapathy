@@ -21,7 +21,6 @@ import {
   MAC_COMMAND_FALLBACK,
   macCommands,
 } from "../electron/agent/input/mac-commands";
-import { PRESS_KEYS } from "../electron/agent/validate";
 import { ERRORS } from "../skills/kamapathy/scripts/schema/index.mjs";
 import {
   KEY_NAMES,
@@ -48,6 +47,28 @@ const characters = Array.from(
   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
     "`-=[]\\;',./~!@#$%^&*()_+{}|:\"<>? \n\r",
 );
+
+// The 14 keys press took before it took chords, exactly as the table it read
+// them from spelled them. The route kept this table until chords replaced it.
+const TODAYS_KEYS: Record<
+  string,
+  { key: string; code: string; keyCode: number; text?: string }
+> = {
+  Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
+  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+  Delete: { key: "Delete", code: "Delete", keyCode: 46 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+  Home: { key: "Home", code: "Home", keyCode: 36 },
+  End: { key: "End", code: "End", keyCode: 35 },
+  PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+  Space: { key: " ", code: "Space", keyCode: 32, text: " " },
+};
 
 describe("key names and chords", () => {
   it("splits chords, keeps a literal plus and parses today's keys", () => {
@@ -88,9 +109,9 @@ describe("key names and chords", () => {
     expect(parseKey("\n").name).toBe("Enter");
   });
 
-  it("parses all 14 keys press supports today unchanged", () => {
-    expect(Object.keys(PRESS_KEYS)).toHaveLength(14);
-    for (const [name, spec] of Object.entries(PRESS_KEYS)) {
+  it("parses all 14 keys press supported before chords unchanged", () => {
+    expect(Object.keys(TODAYS_KEYS)).toHaveLength(14);
+    for (const [name, spec] of Object.entries(TODAYS_KEYS)) {
       const key = parseChord(name).key;
       expect(
         { key: key.key, code: key.code, keyCode: key.keyCode, text: key.text },
@@ -310,6 +331,16 @@ describe("key events", () => {
       { method: "Input.insertText", params: { text: "é" } },
     ]);
     expect(textCommands("\r\n", "linux")).toHaveLength(1);
+    // A held modifier travels with each character, so typing while the agent
+    // holds Shift types what a person holding it would.
+    const shifted = textCommands("ab", "linux", { mask: MODIFIER_BITS.Shift });
+    expect(
+      shifted.map((group) => [group[0].params.key, group[0].params.text]),
+    ).toEqual([
+      ["A", "A"],
+      ["B", "B"],
+    ]);
+    expect(shifted[0][0].params.modifiers).toBe(MODIFIER_BITS.Shift);
   });
 });
 

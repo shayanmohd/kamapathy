@@ -50,6 +50,7 @@ import {
   findCommand,
   matchRoute,
   outdated,
+  pointFrom,
   requestBudget,
 } from "./schema/index.mjs";
 
@@ -85,6 +86,7 @@ const EVENTS = matchRoute("POST", "/tabs/:id/expectations").body.event.values;
 const POLICY = matchRoute("POST", "/tabs/:id/dialog-policy").body;
 // A route's own time budget, for a long poll the transport must outlast.
 const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
+const PASTE_LIMIT = 192 * 1024;
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
 
 // A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
@@ -157,21 +159,120 @@ function pngSize(bytes) {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
-// --label and its value, taken out of an action command's arguments
-// wherever they sit, with the rest left in order.
-function takeLabel(args) {
+// --button left, middle or right.
+function button(value) {
+  if (!["left", "middle", "right"].includes(value))
+    throw new Error("--button must be left, middle or right.");
+  return value;
+}
+// A position written x,y, as --position and the drag's two take it.
+function point(value, flag) {
+  const parsed = pointFrom(value);
+  if (
+    !parsed ||
+    [parsed.x, parsed.y].some((number) => Math.abs(number) > 10000)
+  )
+    throw new Error(`${flag} must be x,y in CSS pixels, within 10000.`);
+  return parsed;
+}
+// A coordinate or a wheel delta a raw mouse command takes.
+function coordinate(value, label) {
+  const text = required(value, label);
+  if (
+    !/^[-+]?(\d+(\.\d+)?|\.\d+)$/.test(text) ||
+    Math.abs(Number(text)) > 10000
+  )
+    throw new Error(`${label} must be a number from -10000 to 10000.`);
+  return Number(text);
+}
+
+// What each action flag sets in the body, and how its value is read. A flag
+// with no reader is a switch, and one with no field is only given.
+const FLAGS = {
+  button: { field: "button", read: button },
+  clickCount: {
+    field: "clickCount",
+    read: (value, flag) => bounded(value, flag, 1, 3),
+  },
+  delay: {
+    field: "delayMs",
+    read: (value, flag) => bounded(value, flag, 0, 5000),
+  },
+  typeDelay: {
+    field: "delayMs",
+    read: (value, flag) => bounded(value, flag, 0, 1000),
+  },
+  position: { field: "position", read: point },
+  sourcePosition: { field: "sourcePosition", read: point },
+  targetPosition: { field: "targetPosition", read: point },
+  steps: {
+    field: "steps",
+    read: (value, flag) => bounded(value, flag, 1, 100),
+  },
+  force: { field: "force" },
+  append: { field: "append" },
+  timeout: {
+    field: "timeoutMs",
+    read: (value, flag) => bounded(value, flag, 0, 60000),
+  },
+  label: { field: "label", read: (value) => value },
+  stdin: {},
+  html: {},
+};
+// The flags a command declares, by the option each one is named after.
+const accepts = (...names) =>
+  Object.fromEntries(
+    names.map((name) => [
+      `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
+      FLAGS[name],
+    ]),
+  );
+const POINTER = [
+  "button",
+  "clickCount",
+  "delay",
+  "position",
+  "force",
+  "timeout",
+  "label",
+];
+// The declared flags, taken out of an action command's arguments wherever
+// they sit, with the positional ones left in order. An undeclared option,
+// a missing value and a bad one all fail before anything connects.
+function takeFlags(args, specs) {
   const rest = [];
-  let label;
+  const body = {};
+  const given = new Set();
   for (let index = 0; index < args.length; index++) {
-    if (args[index] !== "--label") {
-      rest.push(args[index]);
+    const flag = args[index];
+    if (!Object.hasOwn(specs, flag)) {
+      if (flag.startsWith("--"))
+        throw new Error(`Unknown option: ${flag}. Run help for usage.`);
+      rest.push(flag);
       continue;
     }
-    if (label !== undefined)
-      throw new Error("Give --label once. Run help for usage.");
-    label = required(args[++index], "--label");
+    if (given.has(flag))
+      throw new Error(`Give ${flag} once. Run help for usage.`);
+    given.add(flag);
+    const spec = specs[flag];
+    if (spec.read)
+      body[spec.field] = spec.read(required(args[++index], flag), flag);
+    else if (spec.field) body[spec.field] = true;
   }
-  return { rest, label: label === undefined ? {} : { label } };
+  return { rest, body, given };
+}
+// An action command's arguments: its own flags, the tab, and at most count
+// more positional arguments.
+function action(args, specs, count, usage) {
+  const { rest, body, given } = takeFlags(args, specs);
+  if (rest.length > count + 1) throw new Error(`Use ${usage}.`);
+  return { id: tab(rest[0]), rest, body, given };
+}
+// The text a command reads from standard input, as itself or as JSON.
+function piped(options, json = false) {
+  const stream = options.stdin || process.stdin;
+  const read = { timeoutMs: options.stdinTimeoutMs };
+  return json ? readJson(stream, read) : readInput(stream, read);
 }
 
 // The session the commands that drive the client themselves work through.
@@ -633,29 +734,86 @@ export const PARSERS = {
     };
   },
   click: (args) => {
-    const { rest, label } = takeLabel(args);
+    const { id, rest, body } = action(
+      args,
+      accepts(...POINTER),
+      1,
+      "click <tab-id> <ref-or-selector>",
+    );
     return {
-      path: `/tabs/${tab(rest[0])}/click`,
+      path: `/tabs/${id}/click`,
       method: "POST",
-      body: { ...target(rest[1]), ...label },
+      body: { ...target(rest[1]), ...body },
     };
   },
-  fill: async (args, { stdin, stdinTimeoutMs }) => {
-    const { rest, label } = takeLabel(args);
-    if (rest[2] !== "--stdin")
+  dblclick: (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("button", "delay", "position", "force", "timeout", "label"),
+      1,
+      "dblclick <tab-id> <ref-or-selector>",
+    );
+    return {
+      path: `/tabs/${id}/dblclick`,
+      method: "POST",
+      body: { ...target(rest[1]), ...body },
+    };
+  },
+  hover: (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("position", "force", "timeout", "label"),
+      1,
+      "hover <tab-id> <ref-or-selector>",
+    );
+    return {
+      path: `/tabs/${id}/hover`,
+      method: "POST",
+      body: { ...target(rest[1]), ...body },
+    };
+  },
+  fill: async (args, options) => {
+    const { id, rest, body, given } = action(
+      args,
+      accepts("stdin", "append", "timeout", "label"),
+      1,
+      "fill <tab-id> <ref-or-selector> --stdin",
+    );
+    if (!given.has("--stdin"))
       throw new Error(
         "Use fill <tab-id> <ref-or-selector> --stdin and pipe the field value.",
       );
     return {
-      path: `/tabs/${tab(rest[0])}/fill`,
+      path: `/tabs/${id}/fill`,
       method: "POST",
-      body: {
-        ...target(rest[1]),
-        value: await readInput(stdin || process.stdin, {
-          timeoutMs: stdinTimeoutMs,
-        }),
-        ...label,
-      },
+      body: { ...target(rest[1]), value: await piped(options), ...body },
+    };
+  },
+  // Every choice after the target, in any order; none clears the select.
+  select: (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("timeout", "label"),
+      101,
+      "select <tab-id> <ref-or-selector> [choice...]",
+    );
+    return {
+      path: `/tabs/${id}/select`,
+      method: "POST",
+      body: { ...target(rest[1]), values: rest.slice(2), ...body },
+    };
+  },
+  focus: (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("timeout", "label"),
+      1,
+      "focus <tab-id> <ref-or-selector>",
+    );
+    return {
+      path: `/tabs/${id}/focus`,
+      method: "POST",
+      body: { ...target(rest[1]), ...body },
     };
   },
   upload: async (args) => ({
@@ -668,28 +826,43 @@ export const PARSERS = {
     limit: UPLOAD_LIMIT,
   }),
   press: (args) => {
-    const { rest, label } = takeLabel(args);
+    const { id, rest, body } = action(
+      args,
+      accepts("delay", "timeout", "label"),
+      2,
+      "press <tab-id> <key> [ref-or-selector]",
+    );
     return {
-      path: `/tabs/${tab(rest[0])}/press`,
+      path: `/tabs/${id}/press`,
       method: "POST",
       body: {
         key: required(rest[1], "key"),
         ...(rest[2] ? target(rest[2]) : {}),
-        ...label,
+        ...body,
       },
     };
   },
   drag: (args) => {
-    const { rest, label } = takeLabel(args);
-    if (rest.length > 3)
-      throw new Error("Use drag <tab-id> <source> <target>.");
+    const { id, rest, body } = action(
+      args,
+      accepts(
+        "sourcePosition",
+        "targetPosition",
+        "button",
+        "force",
+        "timeout",
+        "label",
+      ),
+      2,
+      "drag <tab-id> <source> <target>",
+    );
     return {
-      path: `/tabs/${tab(rest[0])}/drag`,
+      path: `/tabs/${id}/drag`,
       method: "POST",
       body: {
         source: target(required(rest[1], "drag source")),
         target: target(required(rest[2], "drag target")),
-        ...label,
+        ...body,
       },
     };
   },
@@ -697,7 +870,7 @@ export const PARSERS = {
     // Pixels come before the optional target; a target alone is also fine.
     // No CSS selector starts with a digit, a sign, or a dot before a digit,
     // so those are pixels. A class selector such as .panel is a target.
-    const { rest, label } = takeLabel(args);
+    const { rest, body } = takeFlags(args, accepts("label"));
     const pixels = /^[-+]?\.?\d/.test(rest[2] || "");
     const scrolled = pixels ? rest[3] : rest[2];
     if (rest.length > (pixels ? 4 : 3))
@@ -711,7 +884,7 @@ export const PARSERS = {
         direction: required(rest[1], "direction"),
         ...(pixels ? { pixels: integer(rest[2], "pixels", 1) } : {}),
         ...(scrolled ? target(scrolled) : {}),
-        ...label,
+        ...body,
       },
     };
   },
@@ -931,6 +1104,150 @@ export const PARSERS = {
       );
     return { path, method: "POST", body: { origin, username, password } };
   },
+  // The raw mouse and keyboard: each sends one command to the tab's own
+  // input state, without resolving a target.
+  "mouse-move": (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("steps"),
+      2,
+      "mouse-move <tab-id> <x> <y>",
+    );
+    return {
+      path: `/tabs/${id}/mouse/move`,
+      method: "POST",
+      body: {
+        x: coordinate(rest[1], "x"),
+        y: coordinate(rest[2], "y"),
+        ...body,
+      },
+    };
+  },
+  "mouse-down": (args) => {
+    const { id, body } = action(
+      args,
+      accepts("button", "clickCount"),
+      0,
+      "mouse-down <tab-id>",
+    );
+    return { path: `/tabs/${id}/mouse/down`, method: "POST", body };
+  },
+  "mouse-up": (args) => {
+    const { id, body } = action(
+      args,
+      accepts("button", "clickCount"),
+      0,
+      "mouse-up <tab-id>",
+    );
+    return { path: `/tabs/${id}/mouse/up`, method: "POST", body };
+  },
+  "mouse-click": (args) => {
+    const { id, rest, body } = action(
+      args,
+      accepts("button", "clickCount", "delay"),
+      2,
+      "mouse-click <tab-id> <x> <y>",
+    );
+    return {
+      path: `/tabs/${id}/mouse/click`,
+      method: "POST",
+      body: {
+        x: coordinate(rest[1], "x"),
+        y: coordinate(rest[2], "y"),
+        ...body,
+      },
+    };
+  },
+  "mouse-wheel": (args) => {
+    const { id, rest } = action(
+      args,
+      {},
+      2,
+      "mouse-wheel <tab-id> <delta-x> <delta-y>",
+    );
+    return {
+      path: `/tabs/${id}/mouse/wheel`,
+      method: "POST",
+      body: {
+        deltaX: coordinate(rest[1], "delta-x"),
+        deltaY: coordinate(rest[2], "delta-y"),
+      },
+    };
+  },
+  "key-down": (args) => {
+    const { id, rest } = action(args, {}, 1, "key-down <tab-id> <key>");
+    return {
+      path: `/tabs/${id}/keyboard/down`,
+      method: "POST",
+      body: { key: required(rest[1], "key") },
+    };
+  },
+  "key-up": (args) => {
+    const { id, rest } = action(args, {}, 1, "key-up <tab-id> <key>");
+    return {
+      path: `/tabs/${id}/keyboard/up`,
+      method: "POST",
+      body: { key: required(rest[1], "key") },
+    };
+  },
+  type: async (args, options) => {
+    const { id, body, given } = action(
+      args,
+      { "--stdin": FLAGS.stdin, "--delay": FLAGS.typeDelay },
+      0,
+      "type <tab-id> --stdin",
+    );
+    if (!given.has("--stdin"))
+      throw new Error("Use type <tab-id> --stdin and pipe the text to type.");
+    return {
+      path: `/tabs/${id}/keyboard/type`,
+      method: "POST",
+      body: { text: await piped(options), ...body },
+    };
+  },
+  "insert-text": async (args, options) => {
+    const { id, given } = action(
+      args,
+      accepts("stdin"),
+      0,
+      "insert-text <tab-id> --stdin",
+    );
+    if (!given.has("--stdin"))
+      throw new Error(
+        "Use insert-text <tab-id> --stdin and pipe the text to insert.",
+      );
+    return {
+      path: `/tabs/${id}/keyboard/insert-text`,
+      method: "POST",
+      body: { text: await piped(options) },
+    };
+  },
+  // With --html the piped JSON names both flavours; the page's own handler
+  // is the only thing that can take the HTML.
+  paste: async (args, options) => {
+    const { id, given } = action(
+      args,
+      accepts("stdin", "html"),
+      0,
+      "paste <tab-id> --stdin",
+    );
+    if (!given.has("--stdin"))
+      throw new Error("Use paste <tab-id> --stdin and pipe the text to paste.");
+    const input = await piped(options, given.has("--html"));
+    const body = given.has("--html") ? input : { text: input };
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      throw new Error("Paste input must be a JSON object with text and html.");
+    return {
+      path: `/tabs/${id}/keyboard/paste`,
+      method: "POST",
+      body,
+      limit: PASTE_LIMIT,
+    };
+  },
+  "release-input": (args) => {
+    const { id } = action(args, {}, 0, "release-input <tab-id>");
+    return { path: `/tabs/${id}/input/release`, method: "POST", body: {} };
+  },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {
     const input = options.stdin || process.stdin;
@@ -1071,9 +1388,9 @@ export async function runCli(argv, options = {}) {
     const problem = outdated(name, since, session.app);
     throw new KamapathyError(problem.code, problem.message, problem.fields);
   }
-  // Snapshot, screenshot and navigate flags reach routes and fields older
-  // apps do not have, so each is refused by name before it is sent.
-  if (["snapshot", "screenshot", "navigate"].includes(name) && session.app) {
+  // A flag may reach a route or a field an older app does not have, so each
+  // is refused by name before it is sent.
+  if (session.app) {
     const route = matchRoute(method, path);
     const refuse = (required, field) => {
       const problem = outdated(name, required, session.app, field);

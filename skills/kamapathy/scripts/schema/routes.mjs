@@ -93,6 +93,113 @@ const label = {
   description:
     "A few words naming this step, shown by the cursor and in the agent bar.",
 };
+// The pointer options an element press takes, with Playwright's meanings.
+const button = {
+  kind: "enum",
+  values: ["left", "middle", "right"],
+  default: "left",
+  since: 4,
+  description: "Which mouse button to press.",
+};
+const clickCount = {
+  kind: "integer",
+  min: 1,
+  max: 3,
+  default: 1,
+  since: 4,
+  description: "How many presses the one gesture sends.",
+};
+const pressDelay = {
+  kind: "ms",
+  min: 0,
+  max: 5000,
+  default: 0,
+  since: 4,
+  description: "How long to hold each press, and to wait between presses.",
+};
+const positionAxis = (way) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `Pixels ${way} the element's top left corner.`,
+});
+const position = {
+  kind: "object",
+  fields: { x: positionAxis("right of"), y: positionAxis("below") },
+  since: 4,
+  description: "Where in the element to act, instead of its centre.",
+};
+const force = {
+  kind: "boolean",
+  default: false,
+  since: 4,
+  description:
+    "Act even when something covers the target. A disabled target is never forced.",
+};
+// How long an element action waits for a target that can take its input.
+const actionTimeout = {
+  kind: "ms",
+  min: 0,
+  max: 60000,
+  default: 3000,
+  since: 4,
+  description:
+    "How long to wait for a target that can take the input. 0 looks once.",
+};
+// Keeps a field's old value and types after it.
+const append = {
+  kind: "boolean",
+  default: false,
+  since: 4,
+  description: "Add to the field's value instead of replacing it.",
+};
+// The one key a raw keyboard route holds or lets go.
+const keyboardKey = {
+  kind: "string",
+  min: 1,
+  max: 64,
+  required: true,
+  since: 4,
+  description:
+    "One key: a name such as Shift, Enter or KeyA, or a printable character. Not a chord.",
+};
+// Where a raw mouse route acts, in the top frame's viewport pixels.
+const coordinate = (axis) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `The ${axis} of the point, in the page's own viewport pixels.`,
+});
+// A wheel delta, in pixels of the page's own viewport.
+const delta = (way) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `How far to scroll ${way}.`,
+});
+// How many events a move is interpolated into.
+const steps = {
+  kind: "integer",
+  min: 1,
+  max: 100,
+  default: 1,
+  since: 4,
+  description: "How many moves to send from the pointer's stored position.",
+};
+// The options selectOption chooses, as strings or objects.
+const choices = {
+  kind: "array",
+  required: true,
+  since: 4,
+  description:
+    "0 to 100 choices: a string matching an option's value, else its label, or an object with value, label or index. An empty list clears the select.",
+};
 
 const FIELDS = {
   snapshot: {
@@ -163,7 +270,26 @@ const FIELDS = {
         "Give each control a locator: a selector that names it alone, which outlives refs.",
     },
   },
-  click: { ...target, label },
+  click: {
+    ...target,
+    button,
+    clickCount,
+    delayMs: pressDelay,
+    position,
+    force,
+    timeoutMs: actionTimeout,
+    label,
+  },
+  dblclick: {
+    ...target,
+    button,
+    delayMs: pressDelay,
+    position,
+    force,
+    timeoutMs: actionTimeout,
+    label,
+  },
+  hover: { ...target, position, force, timeoutMs: actionTimeout, label },
   fill: {
     ...target,
     value: {
@@ -173,17 +299,26 @@ const FIELDS = {
       required: true,
       description: "The field's new value, exactly.",
     },
+    append,
+    timeoutMs: actionTimeout,
     label,
   },
+  select: { ...target, values: choices, timeoutMs: actionTimeout, label },
+  focus: { ...target, timeoutMs: actionTimeout, label },
   press: {
     key: {
       kind: "string",
-      max: 20,
+      max: 64,
       required: true,
       description:
-        "Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown or Space.",
+        "A key name such as Enter, KeyA or F12, a printable character, or a chord of at most 6 keys such as Shift+KeyA or ControlOrMeta+KeyS.",
     },
     ...target,
+    delayMs: {
+      ...pressDelay,
+      description: "How long to hold the key before releasing it.",
+    },
+    timeoutMs: actionTimeout,
     label,
   },
   scroll: {
@@ -216,7 +351,77 @@ const FIELDS = {
       required: true,
       description: "The element to drop on: a ref or selector.",
     },
+    sourcePosition: {
+      ...position,
+      description: "Where in the source to press, instead of its centre.",
+    },
+    targetPosition: {
+      ...position,
+      description: "Where in the target to drop, instead of its centre.",
+    },
+    button,
+    force,
+    timeoutMs: actionTimeout,
     label,
+  },
+  mouseMove: { x: coordinate("x"), y: coordinate("y"), steps },
+  mouseButton: { button, clickCount },
+  mouseWheel: { deltaX: delta("right"), deltaY: delta("down") },
+  mouseClick: {
+    x: coordinate("x"),
+    y: coordinate("y"),
+    button,
+    clickCount,
+    delayMs: pressDelay,
+  },
+  keyboardKey: { key: keyboardKey },
+  keyboardType: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 2000,
+      required: true,
+      since: 4,
+      description:
+        "The text to type. Characters the US layout has go out as key events, a newline as Enter, and anything else is inserted.",
+    },
+    delayMs: {
+      kind: "ms",
+      min: 0,
+      max: 1000,
+      default: 0,
+      since: 4,
+      description:
+        "How long to wait between characters. Times the text length it is at most 60000 ms.",
+    },
+  },
+  keyboardInsert: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 16384,
+      required: true,
+      since: 4,
+      description: "The text to insert at the focused editable's caret.",
+    },
+  },
+  keyboardPaste: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 16384,
+      required: true,
+      since: 4,
+      description: "The plain text to paste. It may be empty only beside html.",
+    },
+    html: {
+      kind: "string",
+      min: 0,
+      max: 32768,
+      since: 4,
+      description:
+        "The rich flavour offered beside the text, which only the page's own handler can take.",
+    },
   },
   wait: {
     selector: {
@@ -401,11 +606,12 @@ const route = (method, path, summary, response, body, options = {}) => ({
 });
 // An action route takes a label exactly when its fields declare one, so the
 // flag and the field can never disagree.
-const action = (type, summary, response) =>
+const action = (type, summary, response, options = {}) =>
   route("POST", `/tabs/:id/${type}`, summary, response, FIELDS[type], {
     budget: 30000,
     follow: true,
     label: Object.hasOwn(FIELDS[type], "label"),
+    ...options,
   });
 
 export const ROUTES = [
@@ -774,18 +980,45 @@ export const ROUTES = [
   ),
   action(
     "click",
-    "Clicks a control with native mouse input.",
-    "{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Clicks a control with native mouse input, waiting until it can take the press.",
+    "{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "clickBudget", maxMs: 100100 } },
+  ),
+  action(
+    "dblclick",
+    "Double-clicks a control with native mouse input.",
+    "{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "dblclickBudget", maxMs: 90100 }, since: 4 },
+  ),
+  action(
+    "hover",
+    "Moves the mouse onto a control and leaves it there.",
+    "{ ok: true, point, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
   ),
   action(
     "fill",
-    "Replaces the value of a field, select or editable region.",
+    "Replaces the value of a field, select or editable region, or adds to it.",
+    "{ ok: true, match, value?, valueHidden?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 } },
+  ),
+  action(
+    "select",
+    "Chooses a select's options by value, label or index.",
+    "{ ok: true, values, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
+  ),
+  action(
+    "focus",
+    "Focuses a control, retargeting to the nearest one that takes focus.",
     "{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { field: "timeoutMs", plusMs: 10000 }, since: 4 },
   ),
   action(
     "press",
-    "Presses a supported key, focusing a control first when given.",
-    "{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Presses a key or a chord, focusing a control first when given.",
+    "{ ok: true, url, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "pressBudget", maxMs: 80100 } },
   ),
   action(
     "scroll",
@@ -794,10 +1027,108 @@ export const ROUTES = [
   ),
   action(
     "drag",
-    "Drags one element onto another.",
-    "{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Drags one element onto another, waiting until both ends can take the gesture.",
+    "{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "dragBudget", maxMs: 75100 } },
   ),
   action("wait", "Waits for a visible element, text, or both.", "{ ok: true }"),
+  route(
+    "POST",
+    "/tabs/:id/mouse/move",
+    "Moves the mouse to a point, interpolating from where it stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseMove,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/down",
+    "Presses a mouse button where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseButton,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/up",
+    "Lets a held mouse button go where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseButton,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/click",
+    "Clicks at a point with native mouse input, without resolving a target.",
+    "{ ok: true, url, input, loading?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseClick,
+    {
+      budget: { compute: "mouseClickBudget", maxMs: 40100 },
+      follow: true,
+      since: 4,
+    },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/wheel",
+    "Scrolls with the wheel where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseWheel,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/down",
+    "Holds one key down and reports the tab's input state.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardKey,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/up",
+    "Lets one held key go and reports the tab's input state.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardKey,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/type",
+    "Types text as key events, character by character.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardType,
+    { budget: { compute: "typeBudget", maxMs: 70000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/insert-text",
+    "Inserts text at the focused editable's caret, without key events.",
+    "{ ok: true, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardInsert,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/paste",
+    "Pastes text, and optional HTML, without the system clipboard.",
+    "{ ok: true, handled, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardPaste,
+    {
+      budget: { compute: "rawBudget", maxMs: 10000 },
+      limit: 192 * 1024,
+      follow: true,
+      since: 4,
+    },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/input/release",
+    "Lets go of every key and mouse button this tab holds.",
+    "{ ok: true, released }",
+    {},
+    { budget: 10000, since: 4 },
+  ),
   route(
     "POST",
     "/tabs/:id/upload",
@@ -1112,14 +1443,32 @@ export const ACTIONS = [
     since: 1,
   },
   {
+    type: "dblclick",
+    summary: "Double-clicks a control.",
+    fields: FIELDS.dblclick,
+    since: 4,
+  },
+  {
+    type: "hover",
+    summary: "Moves the mouse onto a control.",
+    fields: FIELDS.hover,
+    since: 4,
+  },
+  {
     type: "fill",
     summary: "Replaces a field's value.",
     fields: FIELDS.fill,
     since: 1,
   },
   {
+    type: "select",
+    summary: "Chooses a select's options.",
+    fields: FIELDS.select,
+    since: 4,
+  },
+  {
     type: "press",
-    summary: "Presses a supported key.",
+    summary: "Presses a key or a chord.",
     fields: FIELDS.press,
     since: 1,
   },
@@ -1134,6 +1483,12 @@ export const ACTIONS = [
     summary: "Drags one element onto another.",
     fields: FIELDS.drag,
     since: 1,
+  },
+  {
+    type: "mouse-click",
+    summary: "Clicks at a point, without resolving a target.",
+    fields: FIELDS.mouseClick,
+    since: 4,
   },
   {
     type: "wait",
@@ -1180,8 +1535,39 @@ export const ACTIONS = [
   },
 ];
 
-// Budgets that combine several body fields, by name. Section 5 adds them.
-export const COMPUTE = {};
+// Budgets that combine several body fields, by name. A route declares one as
+// {compute, maxMs}: maxMs is what admission counts, and the request narrows
+// its own deadline to the function's answer.
+// How long the action waits for a target it can take, from the body or the
+// route's own default.
+const timeout = (body, fallback) =>
+  typeof body.timeoutMs === "number" ? body.timeoutMs : fallback;
+// The delay a gesture spends in its gaps: one delayMs per gap.
+const gaps = (count, body) =>
+  Math.max(0, count) * (typeof body.delayMs === "number" ? body.delayMs : 0);
+const clicks = (body) =>
+  typeof body.clickCount === "number" ? body.clickCount : 1;
+// The settle and the load wait every pressing route adds.
+const AFTER_INPUT_MS = 15100;
+
+export const COMPUTE = {
+  clickBudget: (body) =>
+    timeout(body, 3000) + gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
+  dblclickBudget: (body) =>
+    timeout(body, 3000) + gaps(3, body) + AFTER_INPUT_MS,
+  dragBudget: (body) => timeout(body, 3000) + AFTER_INPUT_MS,
+  pressBudget: (body) =>
+    (body.ref || body.selector ? timeout(body, 3000) : 0) +
+    gaps(1, body) +
+    AFTER_INPUT_MS,
+  mouseClickBudget: (body) =>
+    gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
+  typeBudget: (body) =>
+    10000 +
+    (typeof body.delayMs === "number" ? body.delayMs : 0) *
+      (typeof body.text === "string" ? body.text.length : 0),
+  rawBudget: () => 10000,
+};
 
 export const routeKey = ({ method, path }) => `${method} ${path}`;
 

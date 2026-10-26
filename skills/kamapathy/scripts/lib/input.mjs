@@ -1,7 +1,11 @@
-// What commands and page methods read: stdin, targets and upload files.
+// What commands and page methods read: stdin, targets, options and upload
+// files.
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
+import { isChord } from "../keys.mjs";
+import { pointFrom } from "../schema/index.mjs";
+import { KamapathyError } from "./errors.mjs";
 
 export function required(value, label) {
   if (typeof value !== "string" || !value)
@@ -11,6 +15,58 @@ export function required(value, label) {
 export function target(value) {
   const text = required(value, "element ref or CSS selector");
   return /^@e\d+$/.test(text) ? { ref: text } : { selector: text };
+}
+
+// The body fields an element action's options name, under the names the
+// routes use: delay and timeout become delayMs and timeoutMs, a position
+// comes from either spelling, and the rest keep their own names. The entry
+// has already refused every option it does not declare.
+const KEPT = ["button", "clickCount", "steps", "force", "append", "label"];
+const POSITIONS = ["position", "sourcePosition", "targetPosition"];
+export function pointerOptions(options = {}, entry) {
+  const body = {};
+  for (const name of KEPT)
+    if (options[name] !== undefined) body[name] = options[name];
+  if (options.delay !== undefined) body.delayMs = options.delay;
+  if (options.timeout !== undefined) body.timeoutMs = options.timeout;
+  for (const name of POSITIONS)
+    if (options[name] !== undefined)
+      body[name] = position(options[name], entry, name);
+  return body;
+}
+
+// A point from an { x, y } object or an "x,y" string.
+export function position(value, entry, option = "position") {
+  const point = typeof value === "string" ? pointFrom(value) : value;
+  if (!point || typeof point.x !== "number" || typeof point.y !== "number")
+    throw new KamapathyError(
+      "invalid_option",
+      `${entry} got an invalid option: ${option} must be { x, y } or "x,y" in pixels.`,
+      { entry, option },
+    );
+  return { x: point.x, y: point.y };
+}
+
+// selectOption's choices as the route's array: a lone value, label or
+// object is wrapped, and null clears the select.
+export function choices(values) {
+  if (values === null) return [];
+  return Array.isArray(values) ? values : [values];
+}
+
+// Which argument of press is the key: a chord is the key and anything else
+// is the target, so both argument orders work and a lone target is refused
+// instead of guessed at.
+export function pressArguments(first, second) {
+  if (isChord(first))
+    return { key: first, ...(second === undefined ? {} : { target: second }) };
+  if (second !== undefined && isChord(second))
+    return { key: second, target: first };
+  throw new KamapathyError(
+    "invalid_argument",
+    "page.press got no key. Expected page.press(key, target?) or page.press(target, key), where the key is a name such as Enter, a printable character or a chord such as Shift+KeyA.",
+    { entry: "page.press" },
+  );
 }
 // Reads standard input to its end, at most limit bytes, and gives up on a
 // pipe that stays open longer than timeoutMs.

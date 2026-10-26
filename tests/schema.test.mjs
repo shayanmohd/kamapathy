@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
-import { buildRoutes } from "../electron/agent/http.ts";
+import { buildRoutes, routeBudget } from "../electron/agent/http.ts";
 import { createNavigation } from "../electron/agent/routes/navigation.ts";
 import { pdfRoutes } from "../electron/agent/routes/pdf.ts";
 import { downloadRoutes } from "../electron/agent/routes/downloads.ts";
@@ -18,6 +18,8 @@ import {
   Client,
   Download,
   FileChooser,
+  Keyboard,
+  Mouse,
   Page,
   Space,
   schema,
@@ -34,6 +36,7 @@ const {
   API_LEVEL,
   CLIENT_VERSION,
   COMMANDS,
+  COMPUTE,
   ENTRIES,
   ERRORS,
   GLOBAL_FLAGS,
@@ -118,6 +121,9 @@ describe("API schema", () => {
         multiple: false,
         accept: [],
       }),
+      // A page's own controllers, which it builds in its constructor.
+      Mouse: new Mouse(send),
+      Keyboard: new Keyboard(send),
     };
     for (const [type, instance] of Object.entries(instances)) {
       const prototype = Object.getPrototypeOf(instance);
@@ -195,13 +201,25 @@ describe("API schema", () => {
     for (const item of built) {
       expect(item.schema, item.key).toBe(route(item.key));
       expect(item.lane, item.key).toBe(item.schema.lane);
-      // A field budget admits the field's longest value.
+      // A field budget admits the field's longest value, and a computed one
+      // the maximum it declares.
       const { budget } = item.schema;
+      const computed = typeof budget === "object" && "compute" in budget;
       expect(item.budgetMs, item.key).toBe(
         typeof budget === "number"
           ? budget
-          : item.schema.body[budget.field].max + (budget.plusMs ?? 0),
+          : computed
+            ? budget.maxMs
+            : item.schema.body[budget.field].max + (budget.plusMs ?? 0),
       );
+      // Only a computed budget narrows the request from its own body.
+      if (computed) {
+        expect(item.budgetOf({}), item.key).toBe(COMPUTE[budget.compute]({}));
+        expect(item.budgetOf(undefined), item.key).toBe(item.budgetOf({}));
+        expect(item.budgetMs, item.key).toBeGreaterThanOrEqual(
+          item.budgetOf({}),
+        );
+      } else expect(item.budgetOf, item.key).toBeUndefined();
       expect(item.bodyLimit, item.key).toBe(item.schema.limit);
       expect(`${item.method} /${item.path.join("/")}`, item.key).toBe(item.key);
     }
@@ -214,6 +232,13 @@ describe("API schema", () => {
     for (const item of ROUTES) {
       expect(item.limit, routeKey(item)).toBeGreaterThan(0);
       expect(item.budget, routeKey(item)).toBeDefined();
+      // Every compute name a route declares has a function and a maximum.
+      if (typeof item.budget === "object" && "compute" in item.budget) {
+        expect(COMPUTE[item.budget.compute], routeKey(item)).toBeTypeOf(
+          "function",
+        );
+        expect(item.budget.maxMs, routeKey(item)).toBeGreaterThan(0);
+      }
       expect(["space", "server", "none", "body", "preadmission"]).toContain(
         item.lane,
       );
@@ -229,8 +254,8 @@ describe("API schema", () => {
     expect(ACTIONS.map((item) => item.type).sort()).toEqual(
       [...union.matchAll(/"([\w-]+)"/g)].map((m) => m[1]).sort(),
     );
-    expect(() => parseToolAction("hover", {})).toThrow(
-      "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
+    expect(() => parseToolAction("nope", {})).toThrow(
+      "Batch actions support snapshot, click, dblclick, hover, fill, select, press, scroll, drag, mouse-click, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
     );
     // Every code the server, the isolated-world code and the client raise.
     const raised = new Set(["element_action_failed"]);
@@ -242,10 +267,16 @@ describe("API schema", () => {
       ))
         raised.add(match[1]);
     }
-    for (const args of calls(read("electron/automation-dom.ts"), "failure")) {
-      const codes = [...args.matchAll(/"([a-z][a-z_]*)"/g)].map((m) => m[1]);
-      if (codes.length) raised.add(codes.at(-1));
-    }
+    // The page operations raise through their host, with the code as the last
+    // string literal of the call.
+    for (const page of [
+      "electron/automation-dom.ts",
+      "electron/agent/dom/actions.ts",
+    ])
+      for (const args of calls(read(page), "failure")) {
+        const codes = [...args.matchAll(/"([a-z][a-z_]*)"/g)].map((m) => m[1]);
+        if (codes.length) raised.add(codes.at(-1));
+      }
     const client = read("skills/kamapathy/scripts/api.mjs");
     for (const match of client.matchAll(/new KamapathyError\(\s*"([a-z_]+)"/g))
       raised.add(match[1]);
@@ -319,6 +350,22 @@ describe("API schema", () => {
       transient: false,
       since: 4,
     });
+    // The codes retargeting and verifying a field raise.
+    for (const code of [
+      "not_editable",
+      "not_selectable",
+      "not_focusable",
+      "ambiguous_field",
+      "fill_not_accepted",
+    ])
+      expect(ERRORS[code], code).toMatchObject({
+        status: 422,
+        transient: false,
+        since: 4,
+      });
+    expect(ERRORS.not_editable.fields).toEqual(["reason"]);
+    expect(ERRORS.ambiguous_field.fields).toEqual(["candidates"]);
+    expect(ERRORS.fill_not_accepted.fields).toEqual(["match"]);
     expect(ERRORS.invalid_selector.status).toBe(400);
     for (const code of [
       "not_connected",
@@ -541,10 +588,14 @@ describe("API schema", () => {
     const types = [
       "snapshot",
       "click",
+      "dblclick",
+      "hover",
       "fill",
+      "select",
       "press",
       "scroll",
       "drag",
+      "mouse-click",
       "wait",
       "navigate",
       "reload",
@@ -553,10 +604,10 @@ describe("API schema", () => {
       "wait-for-selector",
       "wait-for-function",
     ];
-    expect(checkBody(batch, { actions: [{ type: "hover" }] })).toEqual({
+    expect(checkBody(batch, { actions: [{ type: "nope" }] })).toEqual({
       code: "invalid_action",
       message:
-        "Batch actions support snapshot, click, fill, press, scroll, drag, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
+        "Batch actions support snapshot, click, dblclick, hover, fill, select, press, scroll, drag, mouse-click, wait, navigate, reload, wait-for-url, wait-for-load-state, wait-for-selector, and wait-for-function.",
       fields: { allowed: types, index: 0 },
     });
     for (const action of ["click", {}, null, { type: 5 }])
@@ -620,17 +671,17 @@ describe("API schema", () => {
     expect(checkCall(click, [])).toEqual({
       code: "invalid_argument",
       message:
-        "page.click got no target. Expected page.click(target, { label? }).",
+        "page.click got no target. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
       fields: {
         entry: "page.click",
-        expected: "page.click(target, { label? })",
+        expected: "page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? })",
       },
     });
     expect(checkCall(click, ["#a", "#b"])?.message).toBe(
-      "page.click got a string instead of an options object. Expected page.click(target, { label? }).",
+      "page.click got a string instead of an options object. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     );
     expect(checkCall(click, [42])?.message).toBe(
-      "page.click got a number for target. Expected page.click(target, { label? }).",
+      "page.click got a number for target. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     );
     expect(checkCall(click, ["@e1", undefined])).toBeNull();
     expect(checkCall(click, ["@e1", { label: "Add to cart" }])).toBeNull();
@@ -802,10 +853,57 @@ describe("API schema", () => {
     );
     expect(requestBudget(route("POST /tabs/:id/actions"))).toBe(60000);
     expect(requestBudget(route("POST /tabs/:id/click"), { ref: "@e1" })).toBe(
-      30000,
+      18100,
     );
     expect(route("POST /tabs/:id/upload").limit).toBe(24 * 1024 * 1024);
     expect(route("GET /health").lane).toBe("preadmission");
+  });
+
+  it("computes the budget a pressing route's own body asks for", () => {
+    // The timeout, one delay per gap, and the settle and load wait of 15100.
+    expect(COMPUTE.clickBudget({ ref: "@e1" })).toBe(18100);
+    expect(COMPUTE.clickBudget({ ref: "@e1", timeoutMs: 10000 })).toBe(25100);
+    expect(
+      COMPUTE.clickBudget({ timeoutMs: 0, clickCount: 3, delayMs: 100 }),
+    ).toBe(15600);
+    expect(
+      COMPUTE.clickBudget({ timeoutMs: 60000, clickCount: 3, delayMs: 5000 }),
+    ).toBe(100100);
+    expect(COMPUTE.dblclickBudget({ delayMs: 50 })).toBe(18250);
+    expect(COMPUTE.dblclickBudget({ timeoutMs: 60000, delayMs: 5000 })).toBe(
+      90100,
+    );
+    expect(COMPUTE.dragBudget({})).toBe(18100);
+    expect(COMPUTE.dragBudget({ timeoutMs: 60000 })).toBe(75100);
+    // A press without a target waits for no element.
+    expect(COMPUTE.pressBudget({ key: "Enter" })).toBe(15100);
+    expect(COMPUTE.pressBudget({ key: "Enter", ref: "@e1" })).toBe(18100);
+    expect(
+      COMPUTE.pressBudget({ key: "a", selector: "#name", delayMs: 5000 }),
+    ).toBe(23100);
+    expect(COMPUTE.mouseClickBudget({})).toBe(15100);
+    expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 5000 })).toBe(
+      30100,
+    );
+    expect(COMPUTE.typeBudget({ text: "hello" })).toBe(10000);
+    expect(COMPUTE.typeBudget({ text: "hello", delayMs: 1000 })).toBe(15000);
+    expect(COMPUTE.rawBudget({})).toBe(10000);
+    // The router takes the declared maximum and narrows each request itself.
+    const click = {
+      ...route("POST /tabs/:id/click"),
+      budget: { compute: "clickBudget", maxMs: 100100 },
+    };
+    const budget = routeBudget(click);
+    expect(budget.budgetMs).toBe(100100);
+    expect(budget.budgetOf({ ref: "@e1", timeoutMs: 10000 })).toBe(25100);
+    expect(() =>
+      routeBudget({ ...click, budget: { compute: "noBudget", maxMs: 10 } }),
+    ).toThrow(
+      "POST /tabs/:id/click budgets on noBudget, which the schema does not compute.",
+    );
+    expect(() =>
+      routeBudget({ ...click, budget: { field: "force" } }),
+    ).toThrow("POST /tabs/:id/click budgets on a field without a maximum.");
   });
 
   it("the status and fail routes are declared at level 3", () => {
@@ -846,7 +944,17 @@ describe("API schema", () => {
   });
 
   it("the input routes and their batch steps declare label at level 3", () => {
-    const inputs = ["click", "fill", "press", "scroll", "drag"];
+    const inputs = [
+      "click",
+      "dblclick",
+      "hover",
+      "fill",
+      "select",
+      "focus",
+      "press",
+      "scroll",
+      "drag",
+    ];
     for (const type of inputs) {
       const key = `POST /tabs/:id/${type}`;
       const item = route(key);
@@ -859,8 +967,9 @@ describe("API schema", () => {
       });
       expect(item.body.label.required, key).toBeUndefined();
       expect(typeof item.body.label.description, key).toBe("string");
+      // Focus is the one input route with no batch step of its own.
       const step = ACTIONS.find((action) => action.type === type);
-      expect(step.fields.label, type).toBe(item.body.label);
+      if (step) expect(step.fields.label, type).toBe(item.body.label);
     }
     // Only the routes that take one declare the flag, and the flag and the
     // field never disagree.
@@ -1395,6 +1504,31 @@ describe("hand written docs", () => {
       ],
       ["skills/kamapathy/references/scripting.md", "unminimized window"],
       ["skills/kamapathy/references/scripting.md", "screenshot_unavailable"],
+      [
+        "docs/automation.md",
+        "Modifier combinations, shell shortcuts, and arbitrary key sequences",
+      ],
+      ["docs/automation.md", "Clicks require a visible, enabled element"],
+      ["docs/SECURITY.md", "trusted clicks, keys and drags"],
+      ["skills/kamapathy/SKILL.md", "canvas controls"],
+      ["skills/kamapathy/references/actions.md", "Supported keys:"],
+      [
+        "skills/kamapathy/references/actions.md",
+        "Modifier combinations are unsupported",
+      ],
+      ["skills/kamapathy/references/actions.md", "Press a supported key"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "Home, End, PageUp, PageDown, Space",
+      ],
+      [
+        "README.md",
+        "canvas editors and JavaScript dialogs still need a handoff",
+      ],
+      [
+        "site/index.html",
+        "Canvas editors and JavaScript dialogs are out of reach too",
+      ],
     ];
     for (const [path, sentence] of retired)
       expect(read(path), `${path} still says ${sentence}`).not.toContain(

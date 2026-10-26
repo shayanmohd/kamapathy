@@ -6,6 +6,10 @@ import type { WebContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageOperation } from "../electron/automation-dom";
 import { ApiError, errorBody, toApiError } from "../electron/agent/errors";
+import {
+  COUNTER_SOURCE,
+  registerCounters,
+} from "../electron/agent/input/counters";
 import { createDispatchers } from "../electron/agent/input/dispatch";
 import type { AutomationController } from "../electron/agent/server";
 import {
@@ -802,7 +806,9 @@ describe("TabSession", () => {
     expect(cdp.detachCount).toBe(0);
     host.navigate("https://example.com/again");
     expect(cdp.sent.at(-1)).toEqual(FRAME_TREE);
-    expect(session.state).toBe("crashed");
+    // The document the navigation committed brought a renderer, so the
+    // session is attaching to it until its frame tree arrives.
+    expect(session.state).toBe("attaching");
     cdp.reply("Page.getFrameTree", () =>
       frameTree([
         {
@@ -820,6 +826,81 @@ describe("TabSession", () => {
     await expect(
       session.send("Runtime.evaluate", {}, soon()),
     ).resolves.toEqual({});
+  });
+
+  it("waits out the frame tree a crashed session reads for its next document instead of failing the command with page_crashed", async () => {
+    const { session, cdp, host } = await ready();
+    host.crash();
+    await settle();
+    expect(session.state).toBe("crashed");
+    // Holding the recovery's own read keeps open the window a navigate's
+    // load wait lands in: the document committed, so its renderer is there.
+    cdp.holdReplies = true;
+    host.navigate("https://example.com/again");
+    expect(cdp.sent.at(-1)).toEqual(FRAME_TREE);
+    const read = track(session.send("Runtime.evaluate", {}, soon()));
+    await settle();
+    expect(read.settled).toBe(false);
+    cdp.reply("Page.getFrameTree", () =>
+      frameTree([
+        {
+          id: "main-2",
+          url: "https://example.com/again",
+          loaderId: "loader-2",
+        },
+      ]),
+    );
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(read).toEqual({ settled: true, value: {} });
+  });
+
+  it("starts a crashed session's recovery on the commit Chromium reports, which arrives before the navigation event", async () => {
+    const { session, cdp, host } = await ready();
+    cdp.holdReplies = true;
+    cdp.reply("Page.getFrameTree", () =>
+      frameTree([
+        {
+          id: "main-2",
+          url: "https://example.com/again",
+          loaderId: "loader-2",
+        },
+      ]),
+    );
+    host.crash();
+    await settle();
+    expect(session.state).toBe("crashed");
+    // Chromium reports the new document's commit on the debugger before
+    // Electron's own did-navigate, and a load wait sends on it at once.
+    frameNavigated(cdp, {
+      frameId: "main-2",
+      loaderId: "loader-2",
+      url: "https://example.com/again",
+    });
+    const read = track(session.send("Runtime.evaluate", {}, soon()));
+    await settle();
+    expect(read.settled).toBe(false);
+    cdp.holdReplies = false;
+    cdp.flush();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(read).toEqual({ settled: true, value: {} });
+  });
+
+  it("fails the command with page_crashed again when the frame tree a crashed session reads never arrives", async () => {
+    const { session, cdp, host } = await ready();
+    host.crash();
+    await settle();
+    cdp.holdReplies = true;
+    host.navigate("https://example.com/again");
+    const read = track(session.send("Runtime.evaluate", {}, soon()));
+    await settle();
+    expect(read.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(read.error).toBeInstanceOf(PageCrashedError);
+    expect(session.state).toBe("crashed");
   });
 
   it("captures on the page session with fromSurface and fails fast with screenshot_failed when the main frame navigates, the renderer goes away or the session detaches, dropping the pending command", async () => {
@@ -1314,8 +1395,13 @@ describe("evaluateInFrame", () => {
       "applyFiles",
       "click",
       "fill",
+      "fillPrepare",
       "focus",
+      "focusTarget",
+      "pasteDispatch",
       "scroll",
+      "selectChoose",
+      "setDirectValue",
       "upload",
     ]);
   });
@@ -3629,6 +3715,80 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       MAIN,
       FRAME_TREE,
     ]);
+  });
+
+  it("installs the input counter init script once per session and again after a re-attach", async () => {
+    const { session, cdp } = await framed();
+    session.onSessionSetup(focusHook(session));
+    const sent = cdp.sent.length;
+    const stop = await registerCounters(session);
+    const COUNTERS = {
+      method: "Page.addScriptToEvaluateOnNewDocument",
+      params: {
+        source: expect.stringContaining("kamapathyInput"),
+        runImmediately: true,
+        worldName: WORLD_NAME,
+      },
+    };
+    expect(cdp.sent.slice(sent)).toEqual([
+      COUNTERS,
+      { ...COUNTERS, sessionId: "child-1" },
+    ]);
+    const before = cdp.sent.length;
+    cdp.lose();
+    await settle();
+    expect(session.state).toBe("ready");
+    expect(cdp.sent.slice(before)).toEqual([
+      ...SETUP,
+      FOCUS,
+      COUNTERS,
+      FRAME_TREE,
+    ]);
+    const removed = cdp.sent.length;
+    stop();
+    await settle();
+    expect(cdp.sent.slice(removed).map((command) => command.method)).toEqual([
+      "Page.removeScriptToEvaluateOnNewDocument",
+    ]);
+  });
+
+  it("counts a frame's native input where the input operation reads it", async () => {
+    const listeners = new Map<string, ((event: unknown) => void)[]>();
+    const world: Record<string, unknown> = {
+      document: { title: "A page" },
+      addEventListener: (name: string, listener: (event: unknown) => void) => {
+        listeners.set(name, [...(listeners.get(name) ?? []), listener]);
+      },
+      WeakSet,
+      setTimeout,
+    };
+    // The wrapper runs the source in each new document, and again in the
+    // current one after a re-attach, so it installs its listeners once.
+    const run = () => runInNewContext(`(() => {${COUNTER_SOURCE}})()`, world);
+    run();
+    run();
+    expect([...listeners.keys()]).toEqual(["mousedown", "keydown", "dragstart"]);
+    expect([...listeners.values()].map((list) => list.length)).toEqual([
+      1, 1, 1,
+    ]);
+    expect(world.kamapathyInput).toEqual({ mouse: 0, key: 0, drag: 0 });
+    listeners.get("mousedown")![0]({});
+    listeners.get("mousedown")![0]({});
+    listeners.get("keydown")![0]({});
+    listeners.get("dragstart")![0]({ defaultPrevented: false });
+    // A drag the page cancels in its own handler never counts.
+    listeners.get("dragstart")![0]({ defaultPrevented: true });
+    await settle();
+    expect(world.kamapathyInput).toEqual({ mouse: 2, key: 1, drag: 1 });
+    // The input operation reads the counters and the documents this script
+    // already listens to, so neither counts an event twice.
+    expect(PAGE_SOURCE).toContain("kamapathyInput");
+    expect(PAGE_SOURCE).toContain("kamapathyListening");
+    expect(
+      (world.kamapathyListening as WeakSet<object>).has(
+        world.document as object,
+      ),
+    ).toBe(true);
   });
 
   it("wraps init scripts to return at once outside web frames", async () => {

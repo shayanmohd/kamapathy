@@ -22,6 +22,21 @@ import { ApiError, fail } from "./errors";
 import { requireScripts, scriptFields, type ScriptSource } from "./evaluate";
 import { EXPECTATION_EVENTS, type ExpectationEvent } from "./expectations";
 import type { Route } from "./http";
+import type {
+  DragAction,
+  FieldAction,
+  FieldKind,
+  KeyboardAction,
+  KeyboardKind,
+  MouseAction,
+  MouseKind,
+  PointerAction,
+  PointerKind,
+  PressAction,
+  SelectChoice,
+} from "./input/actions";
+import { MAX_CHORD_CHARS, parseChord } from "./input/keys";
+import type { Button } from "./input/state";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
 import type { UrlWaitBody } from "./navigation/waits";
@@ -35,33 +50,18 @@ import type { AutomationController } from "./server";
 import { MAX_CURSOR } from "./snapshot";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
-export const PRESS_KEYS: Record<
-  string,
-  { key: string; code: string; keyCode: number; text?: string }
-> = {
-  Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
-  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
-  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
-  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
-  Delete: { key: "Delete", code: "Delete", keyCode: 46 },
-  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
-  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
-  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
-  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
-  Home: { key: "Home", code: "Home", keyCode: 36 },
-  End: { key: "End", code: "End", keyCode: 35 },
-  PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
-  PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
-  Space: { key: " ", code: "Space", keyCode: 32, text: " " },
-};
 export type ToolAction = {
   type:
     | "snapshot"
     | "click"
+    | "dblclick"
+    | "hover"
     | "fill"
+    | "select"
     | "press"
     | "scroll"
     | "drag"
+    | "mouse-click"
     | "wait"
     | "navigate"
     | "reload"
@@ -280,6 +280,261 @@ export function targetFields(
     ? { ref: parsed.ast.ref }
     : { selector, query: { ast: parsed.ast } };
 }
+/** The mouse buttons an agent may press. */
+export const BUTTONS: readonly Button[] = ["left", "middle", "right"];
+// A point inside an element, measured from its border box's top left. The
+// schema has already refused a wrong shape; this reads it back.
+export function positionField(
+  body: Record<string, unknown>,
+  name: string,
+): { x: number; y: number } | undefined {
+  const value = body[name];
+  if (value === undefined) return undefined;
+  const expected = "an object with x and y, each a number from -10000 to 10000";
+  const refuse = (): never =>
+    fail("invalid_field", `${name} must be ${expected}.`, {
+      field: name,
+      expected,
+    });
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return refuse();
+  const point = value as Record<string, unknown>;
+  const axis = (key: "x" | "y") => {
+    const number = point[key];
+    if (
+      typeof number !== "number" ||
+      !Number.isFinite(number) ||
+      Math.abs(number) > 10000
+    )
+      return refuse();
+    return number;
+  };
+  return { x: axis("x"), y: axis("y") };
+}
+// The fields click, dblclick and hover share. Each kind reads only the ones
+// its route declares, so the schema and this never disagree.
+export function pointerFields(
+  body: Record<string, unknown>,
+  kind: PointerKind,
+): PointerAction {
+  const position = positionField(body, "position");
+  return {
+    kind,
+    target: targetFields(body) as TargetPayload,
+    button:
+      kind === "hover" ? "left" : enumField(body, "button", BUTTONS, "left"),
+    clickCount:
+      kind === "click"
+        ? integerField(body, "clickCount", 1, 1, 3)
+        : kind === "dblclick"
+          ? 2
+          : 1,
+    delayMs: kind === "hover" ? 0 : integerField(body, "delayMs", 0, 0, 5000),
+    ...(position === undefined ? {} : { position }),
+    force: booleanField(body, "force", false),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
+// The most choices one select route takes.
+const MAX_CHOICES = 100;
+// The options a select route chooses: strings, or objects naming a value, a
+// label or an index. Every field an object carries has to match, so an empty
+// object names nothing and is refused here, before any page work.
+export function selectValues(body: Record<string, unknown>): SelectChoice[] {
+  const expected = `an array of at most ${MAX_CHOICES} choices, each a string or an object with value, label or index`;
+  const refuse = (): never =>
+    fail("invalid_field", `values must be ${expected}.`, {
+      field: "values",
+      expected,
+    });
+  const list = body.values;
+  if (!Array.isArray(list) || list.length > MAX_CHOICES) return refuse();
+  return list.map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return refuse();
+    const given = entry as Record<string, unknown>;
+    const choice: { value?: string; label?: string; index?: number } = {};
+    for (const [key, value] of Object.entries(given)) {
+      if (value === undefined) continue;
+      if (key === "value" || key === "label") {
+        if (typeof value !== "string") return refuse();
+        choice[key] = value;
+      } else if (key === "index") {
+        if (!Number.isInteger(value) || (value as number) < 0) return refuse();
+        choice.index = value as number;
+      } else return refuse();
+    }
+    if (Object.keys(choice).length === 0) return refuse();
+    return choice;
+  });
+}
+// The fields fill, select and focus share. Each kind reads only the ones its
+// route declares, so the schema and this never disagree.
+export function fieldFields(
+  body: Record<string, unknown>,
+  kind: FieldKind,
+): FieldAction {
+  return {
+    kind,
+    target: targetFields(body) as TargetPayload,
+    ...(kind === "fill"
+      ? {
+          value: stringField(body, "value", 16384, true),
+          append: booleanField(body, "append", false),
+        }
+      : {}),
+    ...(kind === "select" ? { values: selectValues(body) } : {}),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
+// press takes any key name, printable character or chord, and focuses an
+// optional target first. The chord is parsed here, so an unknown name is
+// refused before the lane.
+export function pressFields(body: Record<string, unknown>): PressAction {
+  const key = stringField(body, "key", MAX_CHORD_CHARS);
+  parseChord(key);
+  const target = targetFields(body, true);
+  return {
+    key,
+    ...("ref" in target || "selector" in target
+      ? { target: target as TargetPayload }
+      : {}),
+    delayMs: integerField(body, "delayMs", 0, 0, 5000),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
+// The farthest a point or a wheel delta may lie from the origin. The page's
+// own viewport decides whether a point is inside it; this only keeps a
+// nonsense number out of the page.
+const MAX_PIXELS = 10000;
+// A point or a delta as a number, which may be fractional. The schema has
+// already refused a wrong shape; this reads it back.
+function pixelField(body: Record<string, unknown>, name: string): number {
+  const value = body[name];
+  const expected = `a number from -${MAX_PIXELS} to ${MAX_PIXELS}`;
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    Math.abs(value) > MAX_PIXELS
+  )
+    return fail("invalid_field", `${name} must be ${expected}.`, {
+      field: name,
+      expected,
+    });
+  return value;
+}
+// The fields the raw mouse routes take. Each kind reads only the ones its
+// route declares, so the schema and this never disagree.
+export function mouseFields(
+  body: Record<string, unknown>,
+  kind: MouseKind,
+): MouseAction {
+  const press = kind !== "move" && kind !== "wheel";
+  return {
+    kind,
+    ...(kind === "move" || kind === "click"
+      ? { x: pixelField(body, "x"), y: pixelField(body, "y") }
+      : {}),
+    ...(kind === "wheel"
+      ? {
+          deltaX: pixelField(body, "deltaX"),
+          deltaY: pixelField(body, "deltaY"),
+        }
+      : {}),
+    steps: kind === "move" ? integerField(body, "steps", 1, 1, 100) : 1,
+    button: press ? enumField(body, "button", BUTTONS, "left") : "left",
+    clickCount: press ? integerField(body, "clickCount", 1, 1, 3) : 1,
+    delayMs: kind === "click" ? integerField(body, "delayMs", 0, 0, 5000) : 0,
+  };
+}
+
+// The most text one type route sends, one insertion takes, and the gaps a
+// type may spend in all.
+const MAX_TYPE_TEXT = 2000;
+const MAX_INSERT_TEXT = 16384;
+const MAX_TYPE_GAPS_MS = 60000;
+// The raw keyboard routes: one key to hold or let go, or the text to type or
+// insert. One key means one key, so a chord is refused here.
+export function keyboardFields(
+  body: Record<string, unknown>,
+  kind: KeyboardKind,
+): KeyboardAction {
+  if (kind === "paste") return { kind, ...pasteFields(body), delayMs: 0 };
+  if (kind === "down" || kind === "up") {
+    const key = stringField(body, "key", MAX_CHORD_CHARS);
+    if (parseChord(key).tokens.length > 1)
+      return fail(
+        "invalid_field",
+        "key must name one key, not a chord. Hold each modifier with keyboard/down.",
+        { field: "key", expected: "one key name or printable character" },
+      );
+    return { kind, key, delayMs: 0 };
+  }
+  const text = stringField(
+    body,
+    "text",
+    kind === "type" ? MAX_TYPE_TEXT : MAX_INSERT_TEXT,
+    true,
+  );
+  const delayMs =
+    kind === "type" ? integerField(body, "delayMs", 0, 0, 1000) : 0;
+  if (delayMs * text.length > MAX_TYPE_GAPS_MS)
+    return fail(
+      "invalid_field",
+      `delayMs times the text length must be at most ${MAX_TYPE_GAPS_MS} ms.`,
+      { field: "delayMs", expected: `a delay that fits ${MAX_TYPE_GAPS_MS} ms` },
+    );
+  return { kind, text, delayMs };
+}
+// The most a paste carries of each flavour. The route's own 192 KiB body
+// limit leaves room for both, escaped.
+const MAX_PASTE_TEXT = 16384;
+const MAX_PASTE_HTML = 32768;
+// What one paste offers the page. Empty text means something only beside
+// html, since a paste of nothing at all is a mistake, not a request.
+export function pasteFields(body: Record<string, unknown>): {
+  text: string;
+  html?: string;
+} {
+  const text = stringField(body, "text", MAX_PASTE_TEXT, true);
+  const html =
+    body.html === undefined
+      ? undefined
+      : stringField(body, "html", MAX_PASTE_HTML, true);
+  if (!text && html === undefined)
+    return fail("invalid_field", "text may be empty only when html is given.", {
+      field: "text",
+      expected: "the text to paste",
+    });
+  return { text, ...(html === undefined ? {} : { html }) };
+}
+// A drag's two ends and the options the gesture takes. Both ends resolve
+// like any other target, each with its own position.
+export function dragFields(body: Record<string, unknown>): DragAction {
+  const endpoint = (name: "source" | "target") => {
+    const value = body[name];
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return fail(
+        "invalid_target",
+        `${name} must be an object with a ref or selector.`,
+      );
+    return targetFields(value as Record<string, unknown>) as TargetPayload;
+  };
+  const source = endpoint("source");
+  const target = endpoint("target");
+  const sourcePosition = positionField(body, "sourcePosition");
+  const targetPosition = positionField(body, "targetPosition");
+  return {
+    source,
+    target,
+    ...(sourcePosition === undefined ? {} : { sourcePosition }),
+    ...(targetPosition === undefined ? {} : { targetPosition }),
+    button: enumField(body, "button", BUTTONS, "left"),
+    force: booleanField(body, "force", false),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
 // The one grammar check that runs before the request waits for its lane, so
 // a malformed selector costs no page work, no activity and no batch step.
 export function checkSelectors(
@@ -375,25 +630,21 @@ function parseAction(
     };
     return { type, payload: options };
   }
-  if (type === "click" || type === "fill")
+  if (type === "click" || type === "dblclick" || type === "hover")
     return {
       type,
-      payload: {
-        ...targetFields(body),
-        ...(type === "fill"
-          ? { value: stringField(body, "value", 16384, true) }
-          : {}),
-      },
+      payload: pointerFields(body, type) as unknown as Record<string, unknown>,
     };
-  if (type === "press") {
-    const key = stringField(body, "key", 20);
-    if (!Object.hasOwn(PRESS_KEYS, key))
-      return fail(
-        "invalid_key",
-        `Supported keys: ${Object.keys(PRESS_KEYS).join(", ")}.`,
-      );
-    return { type, payload: { key, ...targetFields(body, true) } };
-  }
+  if (type === "fill" || type === "select")
+    return {
+      type,
+      payload: fieldFields(body, type) as unknown as Record<string, unknown>,
+    };
+  if (type === "press")
+    return {
+      type,
+      payload: pressFields(body) as unknown as Record<string, unknown>,
+    };
   if (type === "scroll") {
     const direction = stringField(body, "direction", 5);
     if (!["up", "down", "left", "right"].includes(direction))
@@ -410,21 +661,19 @@ function parseAction(
       },
     };
   }
-  if (type === "drag") {
-    const endpoint = (name: "source" | "target") => {
-      const value = body[name];
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        return fail(
-          "invalid_target",
-          `${name} must be an object with a ref or selector.`,
-        );
-      return targetFields(value as Record<string, unknown>);
-    };
+  if (type === "drag")
     return {
       type,
-      payload: { source: endpoint("source"), target: endpoint("target") },
+      payload: dragFields(body) as unknown as Record<string, unknown>,
     };
-  }
+  if (type === "mouse-click")
+    return {
+      type,
+      payload: mouseFields(body, "click") as unknown as Record<
+        string,
+        unknown
+      >,
+    };
   if (type === "navigate") return { type, payload: navigationFields(body) };
   if (type === "reload") return { type, payload: reloadFields(body) };
   if (type === "wait-for-url") {

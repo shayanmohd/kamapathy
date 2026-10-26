@@ -5,6 +5,16 @@ import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
 import type { Park, Run } from "./http";
+import {
+  createInputActions,
+  type DragAction,
+  type FieldAction,
+  type InputActions,
+  type MouseAction,
+  type PointerAction,
+  type PointerKind,
+  type PressAction,
+} from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
 import { createResolver } from "./resolve";
@@ -18,9 +28,12 @@ import {
 import type { TabSession } from "./session/tab-session";
 import type { TabSessions } from "./session/tab-sessions";
 import type { Step } from "./session/types";
-import { PRESS_KEYS, type ToolAction } from "./validate";
+import type { ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
+
+// The step types the pointer runner owns.
+const POINTER_KINDS: readonly PointerKind[] = ["click", "dblclick", "hover"];
 
 export const finitePoint = (point: unknown): point is Point =>
   !!point &&
@@ -91,6 +104,8 @@ export interface Actions {
   ): Promise<Record<string, unknown>>;
   /** The tab's one input dispatcher; every route sends input through it. */
   dispatcher(id: string, session: TabSession): InputDispatcher;
+  /** Section 5's element actions, which the input routes also run. */
+  input: InputActions;
 }
 
 export function createActions(deps: {
@@ -215,7 +230,9 @@ export function createActions(deps: {
     });
     authorizeTab(id);
     if (
-      ["snapshot", "target", "focus", "drag"].includes(operation) &&
+      ["snapshot", "target", "actionPoint", "focus", "drag"].includes(
+        operation,
+      ) &&
       session.epoch !== epoch
     )
       return fail(
@@ -249,232 +266,15 @@ export function createActions(deps: {
     resolver,
     namespace: namespaceOf,
   });
-  const nativeInput = async (
-    id: string,
-    session: TabSession,
-    commands: {
-      method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent";
-      parameters: Record<string, unknown>;
-    }[],
-    gesture: Step,
-    epoch: number,
-  ) => {
-    for (const command of commands) {
-      authorizeTab(id);
-      if (
-        !["mouseReleased", "keyUp"].includes(
-          command.parameters.type as string,
-        ) &&
-        session.epoch !== epoch
-      )
-        return fail(
-          "page_changed",
-          "The page navigated before input completed. Inspect the new page before continuing.",
-        );
-      await session.send(command.method, command.parameters, gesture);
-    }
-  };
-  // Presses on the source, moves past the distance pages wait for before a
-  // drag starts (4 pixels in Chromium, 5 to 8 in pointer libraries), then on to
-  // the target in steps. An HTML drag the page starts is intercepted, so no
-  // operating system drag begins, and is moved with drag events instead.
-  const nativeDrag = async (
-    id: string,
-    session: TabSession,
-    from: Point,
-    to: Point,
-    armed: Record<string, unknown>,
-    gesture: Step,
-    epoch: number,
-  ): Promise<"html5" | "mouse"> => {
-    authorizeTab(id);
-    let data: unknown;
-    let intercepted = () => {};
-    const stopListening = session.on("Input.dragIntercepted", (event) => {
-      data = event.params.data;
-      intercepted();
-    });
-    let dragging = false;
-    let dropped = false;
-    let last = from;
-    // The final release or drop is still sent after a navigation starts.
-    const send = async (
-      method: string,
-      parameters: Record<string, unknown>,
-      final = false,
-    ) => {
-      authorizeTab(id);
-      if (!final && session.epoch !== epoch)
-        return fail(
-          "page_changed",
-          "The page navigated before input completed. Inspect the new page before continuing.",
-        );
-      await session.send(method, parameters, gesture);
-    };
-    const mouse = (type: string, point: Point, buttons: number, final = false) =>
-      send(
-        "Input.dispatchMouseEvent",
-        {
-          type,
-          x: point.x,
-          y: point.y,
-          button: type === "mouseMoved" && !buttons ? "none" : "left",
-          buttons,
-          ...(type === "mouseMoved" ? {} : { clickCount: 1 }),
-        },
-        final,
-      );
-    const drag = (type: string, point: Point, final = false) =>
-      send("Input.dispatchDragEvent", { type, x: point.x, y: point.y, data }, final);
-    const pause = () => new Promise((resolve) => setTimeout(resolve, 16));
-    try {
-      try {
-        // No guard: a takeover here is reported by the first mouse event.
-        await session.send(
-          "Input.setInterceptDrags",
-          { enabled: true },
-          { deadline: gesture.deadline, dispatch: gesture.dispatch },
-        );
-      } catch {
-        return fail(
-          "drag_unavailable",
-          "Kamapathy could not take over drags in this tab.",
-        );
-      }
-      const dx = to.x - from.x,
-        dy = to.y - from.y;
-      const distance = Math.hypot(dx, dy);
-      const start = distance
-        ? { x: from.x + (dx / distance) * 10, y: from.y + (dy / distance) * 10 }
-        : { x: from.x + 10, y: from.y };
-      const path = Array.from({ length: 8 }, (_, step) => ({
-        x: start.x + ((to.x - start.x) * (step + 1)) / 8,
-        y: start.y + ((to.y - start.y) * (step + 1)) / 8,
-      }));
-      path.push(to);
-      await mouse("mouseMoved", from, 0);
-      await mouse("mousePressed", from, 1);
-      await mouse("mouseMoved", start, 1);
-      last = start;
-      // The page decides in its dragstart handlers whether an HTML drag
-      // starts. Its data reaches Kamapathy shortly after.
-      await evaluatePage(id, session, "frame", {}, gesture.deadline, gesture);
-      const counts = await evaluatePage(
-        id,
-        session,
-        "input",
-        {},
-        gesture.deadline,
-        gesture,
-      );
-      if (
-        data === undefined &&
-        typeof armed.drag === "number" &&
-        typeof counts.drag === "number" &&
-        counts.drag > armed.drag
-      ) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 2000);
-          intercepted = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-        if (data === undefined) {
-          await mouse("mouseReleased", start, 0, true);
-          return fail(
-            "drag_not_delivered",
-            "The page started a drag that Kamapathy could not move. Inspect the page before retrying.",
-          );
-        }
-      }
-      if (data !== undefined) {
-        dragging = true;
-        await drag("dragEnter", start);
-      }
-      for (const point of path) {
-        await pause();
-        if (dragging) await drag("dragOver", point);
-        else if (data !== undefined) {
-          dragging = true;
-          await drag("dragEnter", point);
-        } else await mouse("mouseMoved", point, 1);
-        last = point;
-      }
-      await pause();
-      if (dragging) {
-        await drag("drop", to, true);
-        dropped = true;
-        return "html5";
-      }
-      await mouse("mouseReleased", to, 0, true);
-      return "mouse";
-    } finally {
-      // An intercepted drag holds the tab's mouse until it ends, so it is
-      // cancelled even after the person takes over. A mouse release is never
-      // sent then: pointer libraries drop on it.
-      if (data !== undefined && !dropped)
-        await session
-          .send(
-            "Input.dispatchDragEvent",
-            { type: "dragCancel", x: last.x, y: last.y, data },
-            { deadline: Date.now() + 2000, timeoutMs: 2000 },
-          )
-          .catch(() => {});
-      await session
-        .send(
-          "Input.setInterceptDrags",
-          { enabled: false },
-          { deadline: Date.now() + 2000, timeoutMs: 2000 },
-        )
-        .catch(() => {});
-      stopListening();
-    }
-  };
-  // Chromium reports a successful dispatch for native input that it drops while a
-  // page has not rendered a frame since its last navigation. Confirm the page
-  // received the input and repeat only input that provably never arrived.
-  const deliverNativeInput = async <T>(
-    id: string,
-    session: TabSession,
-    kind: "mouse" | "key",
-    deliver: (armed: Record<string, unknown>) => Promise<T>,
-    step: Step,
-    epoch: number,
-  ): Promise<T> => {
-    for (let attempt = 0; ; attempt += 1) {
-      const armed = await evaluatePage(id, session, "input", {}, step.deadline, step);
-      const delivered = await deliver(armed);
-      // Input that already changed the page was delivered.
-      if (session.epoch !== epoch) return delivered;
-      const received = await evaluatePage(
-        id,
-        session,
-        "input",
-        {},
-        step.deadline,
-        step,
-      );
-      const before = armed[kind];
-      const after = received[kind];
-      // Repeat input only on positive evidence that the page never received it.
-      if (typeof before !== "number" || typeof after !== "number" || after > before)
-        return delivered;
-      if (attempt >= 2)
-        return fail(
-          "input_not_delivered",
-          "The page did not accept native input. Inspect the page before retrying.",
-        );
-      await evaluatePage(
-        id,
-        session,
-        "frame",
-        {},
-        Math.min(step.deadline, Date.now() + 2000),
-        step,
-      ).catch(() => {});
-    }
-  };
+  const dispatcherFor = (_id: string, session: TabSession) =>
+    dispatchers.for(session);
+  // Section 5's element actions, which drive the attempt loop themselves.
+  const input = createInputActions({
+    controller,
+    authority,
+    actions: { readyContents, evaluatePage, dispatcher: dispatcherFor },
+    dispatchers,
+  });
   const executeToolAction = async (
     id: string,
     action: ToolAction,
@@ -489,12 +289,6 @@ export function createActions(deps: {
       guard: () => authorizeTab(id),
       dispatch: run.dispatch,
     };
-    // A gesture runs to its end even if the client goes away.
-    const gesture: Step = {
-      deadline,
-      guard: step.guard,
-      dispatch: step.dispatch,
-    };
     const waitDeadline =
       action.type === "wait"
         ? Math.min(deadline, Date.now() + (action.payload.timeoutMs as number))
@@ -505,9 +299,7 @@ export function createActions(deps: {
       action.type === "wait",
       run.park,
     );
-    const contents = ready.contents;
     let session = ready.session;
-    const epoch = session.epoch;
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
@@ -518,172 +310,30 @@ export function createActions(deps: {
         deadline,
         step,
       );
-    } else if (action.type === "click") {
-      const point = await evaluatePage(
+    } else if (POINTER_KINDS.includes(action.type as PointerKind)) {
+      // Click, dblclick and hover wait for a target that can take the input,
+      // scroll it into view and press it on the loop in input/actions.ts.
+      result = await input.pointer(
         id,
-        session,
-        "target",
-        payload,
-        deadline,
-        step,
+        payload as unknown as PointerAction,
+        run,
       );
-      // A control drawn with no size has no point to press, so the page
-      // clicks it, once its surroundings are on screen and uncovered.
-      const empty = point.empty === true;
-      if (empty) {
-        if (session.epoch !== epoch)
-          return fail(
-            "page_changed",
-            "The page navigated during this operation. Inspect the new page before continuing.",
-          );
-        await evaluatePage(id, session, "click", payload, deadline, step);
-      }
-      else {
-        if (!finitePoint(point))
-          return fail(
-            "invalid_target",
-            "The page did not provide a valid click target.",
-          );
-        await deliverNativeInput(
-          id,
-          session,
-          "mouse",
-          () =>
-            nativeInput(
-              id,
-              session,
-              [
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: { type: "mouseMoved", x: point.x, y: point.y },
-                },
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: {
-                    type: "mousePressed",
-                    x: point.x,
-                    y: point.y,
-                    button: "left",
-                    clickCount: 1,
-                  },
-                },
-                {
-                  method: "Input.dispatchMouseEvent",
-                  parameters: {
-                    type: "mouseReleased",
-                    x: point.x,
-                    y: point.y,
-                    button: "left",
-                    clickCount: 1,
-                  },
-                },
-              ],
-              gesture,
-              epoch,
-            ),
-          step,
-          epoch,
-        );
-      }
-      // Let synchronous submit/navigation handlers start, then wait for their load.
-      // No input operation is retried, including when navigation times out.
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = {
-        ok: true,
-        url: contents.getURL(),
-        ...(empty ? { fallback: "dom_click" } : {}),
-        ...reboundOf(point),
-      };
-    } else if (action.type === "fill") {
-      result = await evaluatePage(id, session, "fill", payload, deadline, step);
+    } else if (action.type === "fill" || action.type === "select") {
+      // Fill and select wait for a field that can take the value, then
+      // type or choose on the loop in input/actions.ts.
+      result = await input.field(id, payload as unknown as FieldAction, run);
     } else if (action.type === "drag") {
-      const points = await evaluatePage(
-        id,
-        session,
-        "drag",
-        payload,
-        deadline,
-        step,
-      );
-      const from = points.from as Point,
-        to = points.to as Point;
-      if (!finitePoint(from) || !finitePoint(to))
-        return fail(
-          "invalid_target",
-          "The page did not provide valid drag points.",
-        );
-      const mode = await deliverNativeInput(
-        id,
-        session,
-        "mouse",
-        (armed) => nativeDrag(id, session, from, to, armed, gesture, epoch),
-        step,
-        epoch,
-      );
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = {
-        ok: true,
-        url: contents.getURL(),
-        drag: mode,
-        ...reboundOf(points),
-      };
+      // Both ends wait for a layout that can take the drag, then today's
+      // engine runs in input/actions.ts.
+      result = await input.drag(id, payload as unknown as DragAction, run);
+    } else if (action.type === "mouse-click") {
+      // A raw click at a point: no target is resolved, so the runner moves,
+      // presses and waits out what the page does next.
+      result = await input.mouse(id, payload as unknown as MouseAction, run);
     } else if (action.type === "press") {
-      let focused: Record<string, unknown> = {};
-      if (payload.ref || payload.selector)
-        focused = await evaluatePage(
-          id,
-          session,
-          "focus",
-          payload,
-          deadline,
-          step,
-        );
-      const key = PRESS_KEYS[payload.key as string];
-      const parameters = {
-        key: key.key,
-        code: key.code,
-        windowsVirtualKeyCode: key.keyCode,
-        nativeVirtualKeyCode: key.keyCode,
-        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      };
-      await deliverNativeInput(
-        id,
-        session,
-        "key",
-        () =>
-          nativeInput(
-            id,
-            session,
-            [
-              {
-                method: "Input.dispatchKeyEvent",
-                parameters: {
-                  type: key.text ? "keyDown" : "rawKeyDown",
-                  ...parameters,
-                },
-              },
-              {
-                method: "Input.dispatchKeyEvent",
-                parameters: {
-                  type: "keyUp",
-                  key: key.key,
-                  code: key.code,
-                  windowsVirtualKeyCode: key.keyCode,
-                  nativeVirtualKeyCode: key.keyCode,
-                },
-              },
-            ],
-            gesture,
-            epoch,
-          ),
-        step,
-        epoch,
-      );
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = { ok: true, url: contents.getURL(), ...reboundOf(focused) };
+      // One chord on the key path: the optional target is focused first,
+      // then the modifiers, the key and the releases go out.
+      result = await input.press(id, payload as unknown as PressAction, run);
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, session, "scroll", payload, deadline, step);
     } else {
@@ -739,10 +389,14 @@ export function createActions(deps: {
     const descriptions: Record<string, string> = {
       snapshot: "Agent read a page snapshot",
       click: "Agent clicked an element",
+      dblclick: "Agent double-clicked an element",
+      hover: "Agent hovered an element",
       fill: "Agent filled a field",
+      select: "Agent chose an option",
       press: "Agent pressed a key",
       scroll: "Agent scrolled a page",
       drag: "Agent dragged an element",
+      "mouse-click": "Agent clicked a point",
       wait: "Agent observed a page condition",
     };
     controller.addActivity(tab.spaceId, descriptions[action.type], "info");
@@ -753,6 +407,7 @@ export function createActions(deps: {
     readyContents,
     evaluatePage,
     executeToolAction,
-    dispatcher: (_id, session) => dispatchers.for(session),
+    dispatcher: dispatcherFor,
+    input,
   };
 }

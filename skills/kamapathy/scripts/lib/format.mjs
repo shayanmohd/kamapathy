@@ -201,9 +201,45 @@ export function dialogLines(body) {
   ];
 }
 
-// What an action did beyond succeeding, such as which panel scrolled.
-export function actionSummary(data) {
+// The raw commands that report where the pointer stands; the other input
+// commands report the keys the page holds.
+const POINTER_STEPS = [
+  "mouse-move",
+  "mouse-down",
+  "mouse-up",
+  "mouse-click",
+  "mouse-wheel",
+];
+
+// What an action did beyond succeeding, such as where it clicked or which
+// panel scrolled. `kind` is the command or batch step it answers.
+export function actionSummary(data, kind) {
   const notes = [];
+  if (data.point)
+    notes.push(
+      `${kind === "hover" ? "moved to" : "clicked at"} ${Number(data.point.x)},${Number(data.point.y)}`,
+    );
+  if (data.input)
+    notes.push(
+      POINTER_STEPS.includes(kind)
+        ? `mouse at ${Number(data.input.x)},${Number(data.input.y)} buttons ${Number(data.input.buttons)}`
+        : data.input.keys?.length
+          ? `keys ${data.input.keys.map(line).join(", ")}`
+          : "no keys held",
+    );
+  if (data.match) notes.push(`filled (${line(data.match)})`);
+  if (Array.isArray(data.values))
+    notes.push(
+      data.values.length
+        ? `selected ${data.values.map(line).join(", ")}`
+        : "selection cleared",
+    );
+  if (Array.isArray(data.released))
+    notes.push(
+      data.released.length
+        ? `released ${data.released.map(line).join(", ")}`
+        : "nothing held",
+    );
   if (data.drag)
     notes.push(
       data.drag === "html5"
@@ -227,7 +263,8 @@ export function actionSummary(data) {
         ? `${line(data.rebound[0])} now points to the redrawn control`
         : `${data.rebound.map(line).join(", ")} now point to the redrawn controls`,
     );
-  return notes.length ? `ok: ${notes.join("; ")}` : "ok";
+  const text = notes.length ? `ok: ${notes.join("; ")}` : "ok";
+  return data.loading ? `${text} (page loading)` : text;
 }
 
 // Older Kamapathy versions return spaces without signIns; nothing is added then.
@@ -402,7 +439,7 @@ export function formatResult(data, command) {
           ? `\n${formatSnapshot(payload)}`
           : result.ok === false || payload?.ok === false
             ? ` ${line(result.error?.message || result.error || payload.error?.message || payload.error || "failed")}`
-            : ` ${actionSummary(payload || {})}`;
+            : ` ${actionSummary(payload || {}, result.type || result.action)}`;
       return [
         `${index + 1}. ${line(name)}${detail}`,
         ...receiptLines(payload || {}),
@@ -426,6 +463,6 @@ export function formatResult(data, command) {
               : "ok: agent control resumed",
             ...boundaryLines(data),
           ].join("\n")
-        : [actionSummary(data), ...receiptLines(data)].join("\n");
+        : [actionSummary(data, command), ...receiptLines(data)].join("\n");
   return JSON.stringify(data);
 }

@@ -4,6 +4,7 @@ import { edgeCases } from './edge-cases.mjs';
 import { componentPages } from './component-pages.mjs';
 import { actionPages } from './action-pages.mjs';
 import { framePages } from './frame-pages.mjs';
+import { inputPages } from './input-pages.mjs';
 import { driverPages, SLOW_IMAGE_MS } from './driver-pages.mjs';
 import { popupPages } from './popup-pages.mjs';
 import { textPdf } from './pdf/index.mjs';
@@ -101,7 +102,7 @@ export async function startFormSite() {
           return response.end(pixel);
         }
       }
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname] ?? navigationPages[url.pathname]);
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? inputPages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname] ?? navigationPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         // A page asking for {{other}} gets this server through its other

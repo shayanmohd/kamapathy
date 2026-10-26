@@ -14,6 +14,7 @@ export type FieldKind =
   | "target"
   | "url"
   | "page"
+  | "point"
   | "object";
 export interface Field {
   kind: FieldKind;
@@ -28,7 +29,10 @@ export interface Field {
   since?: number;
   description: string;
 }
-export type Budget = number | { field: string; plusMs?: number } | { compute: string };
+export type Budget =
+  | number
+  | { field: string; plusMs?: number }
+  | { compute: string; maxMs: number };
 export type SchemaLane = "space" | "server" | "none" | "body" | "preadmission";
 export interface SchemaRoute {
   method: "GET" | "POST" | "DELETE";
@@ -144,6 +148,7 @@ export function outdated(
   option?: string,
 ): Problem;
 export function suggest(name: string, candidates: readonly string[]): string | undefined;
+export function pointFrom(text: unknown): { x: number; y: number } | undefined;
 export function editDistance(a: string, b: string): number;
 export const GLOBAL_FLAGS: readonly { name: string; description: string }[];
 export const ENVIRONMENT: readonly { name: string; description: string }[];

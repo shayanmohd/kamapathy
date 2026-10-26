@@ -44,12 +44,24 @@ export type PageOperation =
   | "ready"
   | "frameIndex"
   | "retargetFile"
-  | "applyFiles";
+  | "applyFiles"
+  | "actionPoint"
+  | "stableBox"
+  | "scrollRequest"
+  | "viewport"
+  | "focusedKind"
+  | "fillPrepare"
+  | "fillRead"
+  | "setDirectValue"
+  | "selectChoose"
+  | "focusTarget"
+  | "pasteDispatch";
 
 // This complete function is serialized into a separate Chromium world. It has no
 // imports, Node APIs, or access to the browser interface's preload bridge. The
-// selector engine and the outline builder travel the same way, as arguments,
-// so operations that resolve no selector and read no outline work without them.
+// selector engine, the outline builder and the action operations travel the
+// same way, as arguments, so operations that resolve no selector, read no
+// outline and check no actionability work without them.
 export function pageOperation(
   operation: PageOperation,
   payload: Record<string, unknown>,
@@ -57,6 +69,8 @@ export function pageOperation(
   selectorEngine?: typeof import("./agent/dom/select").selectorEngine,
   outlineBuilder?: typeof import("./agent/dom/outline").outlineBuilder,
   fileOperations?: typeof import("./agent/dom/files").fileOperation,
+  actionOperations?: typeof import("./agent/dom/actions").actionOperations,
+  fillClassifier?: typeof import("./agent/dom/actions").fillClassifier,
 ) {
   // How a listed control looked, so its ref can follow the control when the
   // page draws it again. It lasts only as long as the document and namespace.
@@ -2217,6 +2231,52 @@ export function pageOperation(
       return failure("The element is not a frame shown in this page.");
     const around = framePath(element);
     return { ok: true, path: around ? `${around}/${index}` : `${index}` };
+  }
+  // Section 5's actionability, measured by its own module with this page's
+  // helpers.
+  if (
+    operation === "actionPoint" ||
+    operation === "stableBox" ||
+    operation === "scrollRequest" ||
+    operation === "viewport" ||
+    operation === "focusedKind" ||
+    operation === "fillPrepare" ||
+    operation === "fillRead" ||
+    operation === "setDirectValue" ||
+    operation === "selectChoose" ||
+    operation === "focusTarget" ||
+    operation === "pasteDispatch"
+  ) {
+    const actions = actionOperations!(
+      {
+        select: (spec: unknown) => target(spec as ElementTarget),
+        isElement,
+        visible,
+        placed,
+        hitAt,
+        within,
+        emptyBox,
+        walk,
+        labelOf,
+        roleOf,
+        styleOf,
+        docOf,
+        parentOf,
+        framePath,
+        framesOf,
+        frameDocument,
+        opaqueFrame,
+        editingHost,
+        live,
+        secret,
+        candidates: (found: Element[]) => candidatesOf(found, undefined),
+        normalizeText: clean,
+        failure,
+        reboundResult,
+      },
+      fillClassifier!,
+    );
+    return actions[operation](payload);
   }
   // The listed controls themselves, for the main process to read their
   // backend nodes from.

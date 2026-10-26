@@ -10,12 +10,23 @@ import type { ReceiptFields, ReceiptScope } from "../receipts";
 import type { TabSession } from "../session/tab-session";
 import { parseToolAction, stringField, uploadFields } from "../validate";
 import { tabView } from "../views";
+import { inputRoutes } from "./input";
 import { screenshotRoutes } from "./screenshot";
 import { checkPageBudget } from "./spaces";
 
 // The actions whose answer carries a receipt: the input routes and their
 // batch steps. A wait or a snapshot changes nothing, so neither gets one.
-const RECEIPT_ACTIONS = ["click", "fill", "press", "scroll", "drag"];
+const RECEIPT_ACTIONS = [
+  "click",
+  "dblclick",
+  "hover",
+  "fill",
+  "select",
+  "press",
+  "scroll",
+  "drag",
+  "mouse-click",
+];
 
 // One file transfer at a time, so the bytes of two never pile up in memory.
 // upload and set-input-files share this slot, which keeps upload_busy
@@ -270,6 +281,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       },
     },
     ...screenshotRoutes(deps),
+    ...inputRoutes(deps),
     ...Object.fromEntries(
       ["click", "fill", "press", "scroll", "drag", "wait"].map((type) => [
         `POST /tabs/:id/${type}`,

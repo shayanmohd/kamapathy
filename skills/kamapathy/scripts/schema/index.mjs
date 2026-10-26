@@ -12,6 +12,7 @@ export {
   checkCall,
   editDistance,
   outdated,
+  pointFrom,
   suggest,
 } from "./check.mjs";
 export { COMMANDS, ENVIRONMENT, GLOBAL_FLAGS } from "./cli.mjs";

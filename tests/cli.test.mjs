@@ -3654,7 +3654,7 @@ describe("scripted sessions", () => {
     expect(run.stdout).toContain(`Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`);
     expect(run.stdout).toContain('help("page.click") shows one entry; help("errors") lists error codes.');
     expect(run.stdout).toContain("page.click(target, options?)\n");
-    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click.');
+    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click, page.mouse.click.');
     expect(run.stdout).toContain("space.close()\n");
     expect(run.stdout).toContain("page.close()\n");
   }, 20000);
@@ -4252,11 +4252,11 @@ describe("scripted sessions", () => {
     expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { label: "x".repeat(61) }])).toMatchObject({
       code: "invalid_option",
       message:
-        "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { label? }).",
+        "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     });
     expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { labl: "Add to cart" }])).toMatchObject({
       message:
-        'page.click got unknown option "labl". Expected page.click(target, { label? }). Did you mean "label"?',
+        'page.click got unknown option "labl". Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }). Did you mean "label"?',
     });
   });
 
@@ -4664,6 +4664,394 @@ describe("scripted sessions", () => {
     expect([page.url, page.title]).toEqual(["https://example.test/done", "Done"]);
     await page.info();
     expect(page.title).toBe("Done page");
+  });
+
+  // Section 5's client surface: the element options, both press orders, the
+  // mouse and keyboard controllers, and the release at the end of a run.
+  const current = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL };
+  const pointer = { x: 40, y: 60, buttons: 0, keys: [], modifiers: 0 };
+  const inputAnswers = {
+    ...level3Routes,
+    "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/dblclick": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/hover": { ok: true, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/fill": { ok: true, match: "equivalent", value: "12.50" },
+    "POST /tabs/tab-1/select": { ok: true, values: ["pro", "team"] },
+    "POST /tabs/tab-1/focus": { ok: true },
+    "POST /tabs/tab-1/press": { ok: true, url: tab.url },
+    "POST /tabs/tab-1/mouse/move": { ok: true, input: pointer },
+    "POST /tabs/tab-1/mouse/down": { ok: true, input: { ...pointer, buttons: 1 } },
+    "POST /tabs/tab-1/mouse/up": { ok: true, input: pointer },
+    "POST /tabs/tab-1/mouse/click": { ok: true, url: tab.url, input: pointer },
+    "POST /tabs/tab-1/mouse/wheel": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/down": { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } },
+    "POST /tabs/tab-1/keyboard/up": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/type": { ok: true, input: pointer },
+    "POST /tabs/tab-1/keyboard/insert-text": { ok: true },
+    "POST /tabs/tab-1/keyboard/paste": { ok: true, handled: "page" },
+    "POST /tabs/tab-1/input/release": { ok: true, released: ["Shift", "left"] },
+  };
+  // One page of an agent space, against an app of this client's own level.
+  const inputPage = async (api, health = current) => {
+    const client = await connect({ env, fetch: api.fetch, health });
+    return (await client.space("space-1")).open("https://example.test/reserve");
+  };
+  const routeOf = (key) => schema.ROUTES.find((item) => schema.routeKey(item) === key);
+
+  it("takes press in both argument orders", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const body = () => api.requests.at(-1).body;
+    await page.press("Enter");
+    expect(body()).toEqual({ key: "Enter" });
+    await page.press("Enter", "@e3");
+    expect(body()).toEqual({ key: "Enter", ref: "@e3" });
+    await page.press("@e3", "Enter");
+    expect(body()).toEqual({ key: "Enter", ref: "@e3" });
+    await page.press("#search", "Shift+KeyA");
+    expect(body()).toEqual({ key: "Shift+KeyA", selector: "#search" });
+    await page.press("ControlOrMeta+KeyS", "@e3", { delay: 50, timeout: 1000 });
+    expect(body()).toEqual({ key: "ControlOrMeta+KeyS", ref: "@e3", delayMs: 50, timeoutMs: 1000 });
+    // A lone argument that is no chord is not guessed at.
+    const sent = api.requests.length;
+    await expect(page.press("@e3")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
+    await expect(page.press("#search")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
+    expect(api.requests).toHaveLength(sent);
+    // keyboard.press is the same route with no target.
+    await page.keyboard.press("Shift+Tab", { delay: 20 });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/press",
+      body: { key: "Shift+Tab", delayMs: 20 },
+    });
+  });
+
+  it("checks the new options before sending", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const sent = api.requests.length;
+    await expect(page.click("@e1", { clickCount: 4 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.click",
+      option: "clickCount",
+    });
+    await expect(page.click("@e1", { button: "back" })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.click",
+      option: "button",
+    });
+    await expect(page.click("@e1", { delayMs: 10 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "delayMs",
+      suggestion: "delay",
+    });
+    await expect(page.dblclick("@e1", { clickCount: 2 })).rejects.toMatchObject({
+      code: "invalid_option",
+      entry: "page.dblclick",
+      option: "clickCount",
+    });
+    await expect(page.hover("@e1", { position: "10" })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "position",
+    });
+    await expect(page.keyboard.type("x".repeat(2001))).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.keyboard.type",
+    });
+    await expect(page.mouse.move(0, "40")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.mouse.move",
+    });
+    await expect(page.mouse.wheel(0, 20000)).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(api.requests).toHaveLength(sent);
+    // A lone choice, an object and null all reach the route as its array.
+    for (const [values, chosen] of [
+      ["pro", ["pro"]],
+      [{ label: "Pro" }, [{ label: "Pro" }]],
+      [null, []],
+      [[], []],
+      [["pro", "team"], ["pro", "team"]],
+    ]) {
+      await page.selectOption("@e1", values);
+      expect(api.requests.at(-1).body, JSON.stringify(values)).toEqual({ ref: "@e1", values: chosen });
+    }
+    // Both position spellings reach the route as { x, y }.
+    await page.click("@e1", { position: "10,20" });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", position: { x: 10, y: 20 } });
+    await page.dragAndDrop("@e1", "#zone", {
+      sourcePosition: { x: 1, y: 2 },
+      targetPosition: "3,4",
+      force: true,
+      timeout: 2000,
+    });
+    expect(api.requests.at(-1).body).toEqual({
+      source: { ref: "@e1" },
+      target: { selector: "#zone" },
+      sourcePosition: { x: 1, y: 2 },
+      targetPosition: { x: 3, y: 4 },
+      force: true,
+      timeoutMs: 2000,
+    });
+    // page.drag keeps its own signature, and fill, focus and the raw routes
+    // send what their options name.
+    await page.drag("@e1", "#zone");
+    expect(api.requests.at(-1).body).toEqual({ source: { ref: "@e1" }, target: { selector: "#zone" } });
+    await page.fill("@e1", "Avery", { append: true, timeout: 1000 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", value: "Avery", append: true, timeoutMs: 1000 });
+    await page.focus("@e1", { timeout: 0 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", timeoutMs: 0 });
+    await page.mouse.move(40, 60, { steps: 10 });
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/move", body: { x: 40, y: 60, steps: 10 } });
+    await page.mouse.down({ button: "right" });
+    expect(api.requests.at(-1).body).toEqual({ button: "right" });
+    await page.mouse.up();
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/up", body: {} });
+    await page.mouse.click(5, 6, { clickCount: 2, delay: 30 });
+    expect(api.requests.at(-1).body).toEqual({ x: 5, y: 6, clickCount: 2, delayMs: 30 });
+    await page.mouse.dblclick(5, 6, { delay: 30 });
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/click", body: { x: 5, y: 6, clickCount: 2, delayMs: 30 } });
+    await page.mouse.wheel(0, 120);
+    expect(api.requests.at(-1).body).toEqual({ deltaX: 0, deltaY: 120 });
+    await page.keyboard.down("Shift");
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/down", body: { key: "Shift" } });
+    await page.keyboard.up("Shift");
+    expect(api.requests.at(-1).body).toEqual({ key: "Shift" });
+    await page.keyboard.type("hello", { delay: 10 });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello", delayMs: 10 });
+    await page.keyboard.insertText("hello");
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/insert-text", body: { text: "hello" } });
+    expect(await page.keyboard.paste("hello")).toEqual({ ok: true, handled: "page" });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello" });
+    await page.keyboard.paste({ text: "hello", html: "<b>hello</b>" });
+    expect(api.requests.at(-1).body).toEqual({ text: "hello", html: "<b>hello</b>" });
+    // The paste body may hold the whole text and HTML the route takes.
+    await page.keyboard.paste({ text: "é".repeat(16384), html: "é".repeat(32768) });
+    expect(api.requests.at(-1).body.text).toHaveLength(16384);
+    await expect(page.keyboard.paste({ text: 5 })).rejects.toMatchObject({ code: "invalid_option", option: "text" });
+  });
+
+  it("sends the HTTP timeouts the spec lists", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api);
+    const timeoutOf = (key, body) => httpTimeout(schema.requestBudget(routeOf(key), body), routeOf(key));
+    // A delayed triple click: the wait for an actionable target, one delay
+    // per gap, the settle and load wait, and the client's own 5000 ms.
+    await page.click("@e1", { clickCount: 3, delay: 500, timeout: 3000 });
+    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", clickCount: 3, delayMs: 500, timeoutMs: 3000 });
+    expect(timeoutOf("POST /tabs/:id/click", api.requests.at(-1).body)).toBe(3000 + 2500 + 15100 + 5000);
+    for (const name of ["hover", "fill", "select", "focus"])
+      expect(timeoutOf(`POST /tabs/:id/${name}`, { timeoutMs: 4000 }), name).toBe(4000 + 15000);
+    for (const name of [
+      "mouse/move",
+      "mouse/down",
+      "mouse/up",
+      "mouse/wheel",
+      "keyboard/down",
+      "keyboard/up",
+      "keyboard/insert-text",
+      "keyboard/paste",
+    ])
+      expect(timeoutOf(`POST /tabs/:id/${name}`, {}), name).toBe(15000);
+    expect(timeoutOf("POST /tabs/:id/keyboard/type", { text: "hello", delayMs: 100 })).toBe(10000 + 500 + 5000);
+    // input/release declares a plain budget, which the client passes itself.
+    const release = routeOf("POST /tabs/:id/input/release");
+    expect(httpTimeout(schema.requestBudget(release), release)).toBe(15000);
+    await page.releaseInput();
+    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/input/release", body: {} });
+  });
+
+  it("runs every new command", async () => {
+    for (const [args, path, body, piped] of [
+      [
+        ["click", "tab-1", "@e2", "--button", "right", "--click-count", "2", "--delay", "100", "--position", "10,20", "--force", "--timeout", "5000", "--label", "Add"],
+        "/tabs/tab-1/click",
+        { ref: "@e2", button: "right", clickCount: 2, delayMs: 100, position: { x: 10, y: 20 }, force: true, timeoutMs: 5000, label: "Add" },
+      ],
+      [
+        ["dblclick", "tab-1", "#row", "--button", "left", "--delay", "0", "--position", "-5,2.5", "--timeout", "0"],
+        "/tabs/tab-1/dblclick",
+        { selector: "#row", button: "left", delayMs: 0, position: { x: -5, y: 2.5 }, timeoutMs: 0 },
+      ],
+      [["hover", "tab-1", "@e2", "--position", "4,5", "--force", "--timeout", "1000"], "/tabs/tab-1/hover", { ref: "@e2", position: { x: 4, y: 5 }, force: true, timeoutMs: 1000 }],
+      [
+        ["drag", "tab-1", "@e1", "#zone", "--source-position", "1,2", "--target-position", "3,4", "--button", "left", "--force", "--timeout", "9000"],
+        "/tabs/tab-1/drag",
+        { source: { ref: "@e1" }, target: { selector: "#zone" }, sourcePosition: { x: 1, y: 2 }, targetPosition: { x: 3, y: 4 }, button: "left", force: true, timeoutMs: 9000 },
+      ],
+      [["fill", "tab-1", "@e1", "--stdin", "--append", "--timeout", "2000"], "/tabs/tab-1/fill", { ref: "@e1", value: "Avery Quinn", append: true, timeoutMs: 2000 }, "Avery Quinn"],
+      [["select", "tab-1", "@e1", "pro", "team", "max", "--timeout", "3000"], "/tabs/tab-1/select", { ref: "@e1", values: ["pro", "team", "max"], timeoutMs: 3000 }],
+      [["select", "tab-1", "@e1"], "/tabs/tab-1/select", { ref: "@e1", values: [] }],
+      [["focus", "tab-1", "@e1", "--timeout", "1500"], "/tabs/tab-1/focus", { ref: "@e1", timeoutMs: 1500 }],
+      [["press", "tab-1", "Shift+KeyA", "@e1", "--delay", "40", "--timeout", "2500"], "/tabs/tab-1/press", { key: "Shift+KeyA", ref: "@e1", delayMs: 40, timeoutMs: 2500 }],
+      [["mouse-move", "tab-1", "40", "60", "--steps", "20"], "/tabs/tab-1/mouse/move", { x: 40, y: 60, steps: 20 }],
+      [["mouse-down", "tab-1", "--button", "middle", "--click-count", "2"], "/tabs/tab-1/mouse/down", { button: "middle", clickCount: 2 }],
+      [["mouse-up", "tab-1", "--button", "middle"], "/tabs/tab-1/mouse/up", { button: "middle" }],
+      [["mouse-click", "tab-1", "-1.5", "60", "--button", "right", "--click-count", "3", "--delay", "20"], "/tabs/tab-1/mouse/click", { x: -1.5, y: 60, button: "right", clickCount: 3, delayMs: 20 }],
+      [["mouse-wheel", "tab-1", "0", "-120"], "/tabs/tab-1/mouse/wheel", { deltaX: 0, deltaY: -120 }],
+      [["key-down", "tab-1", "Shift"], "/tabs/tab-1/keyboard/down", { key: "Shift" }],
+      [["key-up", "tab-1", "Shift"], "/tabs/tab-1/keyboard/up", { key: "Shift" }],
+      [["type", "tab-1", "--stdin", "--delay", "15"], "/tabs/tab-1/keyboard/type", { text: "Avery Quinn", delayMs: 15 }, "Avery Quinn"],
+      [["insert-text", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/insert-text", { text: "Avery Quinn" }, "Avery Quinn"],
+      [["paste", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/paste", { text: "Avery Quinn" }, "Avery Quinn"],
+      [["paste", "tab-1", "--stdin", "--html"], "/tabs/tab-1/keyboard/paste", { text: "Avery", html: "<b>Avery</b>" }, '{"text":"Avery","html":"<b>Avery</b>"}'],
+      [["release-input", "tab-1"], "/tabs/tab-1/input/release", {}],
+    ]) {
+      const fetch = vi.fn(async () => Response.json({ ok: true }));
+      expect(
+        await runCli(args, {
+          env,
+          fetch,
+          health: current,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).toBe(0);
+      const [url, options] = fetch.mock.calls[0];
+      expect(url.pathname, args.join(" ")).toBe(path);
+      expect(options.method, args.join(" ")).toBe("POST");
+      expect(JSON.parse(options.body), args.join(" ")).toEqual(body);
+    }
+    // An unknown flag, a bad value and a missing argument fail before
+    // anything connects.
+    const unused = vi.fn();
+    for (const args of [
+      ["click", "tab-1", "@e2", "--clicks", "2"],
+      ["click", "tab-1", "@e2", "--click-count", "4"],
+      ["click", "tab-1", "@e2", "--button", "back"],
+      ["click", "tab-1", "@e2", "--position", "10"],
+      ["click", "tab-1", "@e2", "--position", "a,b"],
+      ["click", "tab-1", "@e2", "--timeout"],
+      ["click", "tab-1", "@e2", "@e3"],
+      ["dblclick", "tab-1", "@e2", "--click-count", "2"],
+      ["hover", "tab-1"],
+      ["select", "tab-1"],
+      ["focus", "tab-1", "@e1", "--force"],
+      ["mouse-move", "tab-1", "40"],
+      ["mouse-move", "tab-1", "40", "60", "--steps", "0"],
+      ["mouse-move", "tab-1", "40", "99999"],
+      ["mouse-click", "tab-1", "40", "x"],
+      ["mouse-wheel", "tab-1", "0"],
+      ["key-down", "tab-1"],
+      ["type", "tab-1"],
+      ["type", "tab-1", "--stdin", "--delay", "2000"],
+      ["insert-text", "tab-1"],
+      ["paste", "tab-1", "--html"],
+      ["release-input"],
+      ["release-input", "tab-1", "tab-2"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdin: Readable.from(["x"]), stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("prints the new results", async () => {
+    const print = async (args, answer, piped) => {
+      const stdout = sink();
+      expect(
+        await runCli(args, {
+          env,
+          fetch: vi.fn(async () => Response.json(answer)),
+          health: current,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout,
+        }),
+        args.join(" "),
+      ).toBe(0);
+      return stdout.text();
+    };
+    const clicked = { ok: true, url: tab.url, point: { x: 40, y: 60 } };
+    expect(await print(["click", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
+    expect(await print(["click", "tab-1", "@e2"], { ...clicked, loading: true })).toBe("ok: clicked at 40,60 (page loading)\n");
+    expect(await print(["dblclick", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
+    expect(await print(["hover", "tab-1", "@e2"], { ok: true, point: { x: 12, y: 8 } })).toBe("ok: moved to 12,8\n");
+    expect(await print(["fill", "tab-1", "@e1", "--stdin"], { ok: true, match: "equivalent", value: "12.50" }, "12.5")).toBe("ok: filled (equivalent)\n");
+    expect(await print(["select", "tab-1", "@e1", "pro", "team"], { ok: true, values: ["pro", "team"] })).toBe("ok: selected pro, team\n");
+    expect(await print(["select", "tab-1", "@e1"], { ok: true, values: [] })).toBe("ok: selection cleared\n");
+    expect(await print(["mouse-move", "tab-1", "40", "60"], { ok: true, input: pointer })).toBe("ok: mouse at 40,60 buttons 0\n");
+    expect(await print(["mouse-down", "tab-1"], { ok: true, input: { ...pointer, buttons: 1 } })).toBe("ok: mouse at 40,60 buttons 1\n");
+    expect(await print(["key-down", "tab-1", "Shift"], { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } })).toBe("ok: keys Shift\n");
+    expect(await print(["key-up", "tab-1", "Shift"], { ok: true, input: pointer })).toBe("ok: no keys held\n");
+    expect(await print(["release-input", "tab-1"], { ok: true, released: ["Shift", "left"] })).toBe("ok: released Shift, left\n");
+    expect(await print(["release-input", "tab-1"], { ok: true, released: [] })).toBe("ok: nothing held\n");
+    expect(await print(["paste", "tab-1", "--stdin"], { ok: true, handled: "page" }, "hello")).toBe("ok\n");
+    // --json prints the body unchanged.
+    const json = sink();
+    await runCli(["mouse-wheel", "tab-1", "0", "120", "--json"], {
+      env,
+      fetch: vi.fn(async () => Response.json({ ok: true, input: pointer })),
+      health: current,
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({ ok: true, input: pointer });
+  });
+
+  it("refuses level 4 calls and flags against an older app", async () => {
+    const api = fakeApi(inputAnswers);
+    const page = await inputPage(api, level3);
+    const sent = api.requests.length;
+    for (const [call, fields] of [
+      [() => page.hover("@e1"), { entry: "page.hover" }],
+      [() => page.dblclick("@e1"), { entry: "page.dblclick" }],
+      [() => page.selectOption("@e1", "pro"), { entry: "page.selectOption" }],
+      [() => page.focus("@e1"), { entry: "page.focus" }],
+      [() => page.dragAndDrop("@e1", "#zone"), { entry: "page.dragAndDrop" }],
+      [() => page.releaseInput(), { entry: "page.releaseInput" }],
+      [() => page.mouse.move(10, 10), { entry: "page.mouse.move" }],
+      [() => page.keyboard.type("hi"), { entry: "page.keyboard.type" }],
+      [() => page.click("@e1", { force: true }), { entry: "page.click", option: "force" }],
+      [() => page.fill("@e1", "x", { append: true }), { entry: "page.fill", option: "append" }],
+      [() => page.press("Enter", "@e1", { delay: 10 }), { entry: "page.press", option: "delay" }],
+    ])
+      await expect(call()).rejects.toMatchObject({ code: "app_outdated", required: 4, available: 3, ...fields });
+    expect(api.requests).toHaveLength(sent);
+    // The CLI makes the same check after its health check and before the
+    // route, for a new command and for a level 4 flag on an old one.
+    const older = fakeApi(inputAnswers);
+    await expect(
+      runCli(["hover", "tab-1", "@e1"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "hover", required: 4, available: 3 });
+    await expect(
+      runCli(["click", "tab-1", "@e1", "--force"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
+    ).rejects.toMatchObject({ code: "app_outdated", entry: "click", option: "force", required: 4 });
+    expect(older.requests).toEqual([]);
+  });
+
+  it("releases input at the end of a run", async () => {
+    const released = [];
+    const table = {
+      ...sectionTwo,
+      "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
+      "POST /tabs/tab-2/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
+      "POST /tabs/tab-1/input/release": () => {
+        released.push("tab-1");
+        return Response.json({ ok: true, released: ["Shift"] });
+      },
+      // A failed release is not the script's business.
+      "POST /tabs/tab-2/input/release": () => {
+        released.push("tab-2");
+        return Response.json({ error: { code: "tab_not_found", message: "Gone." } }, { status: 404 });
+      },
+    };
+    const clicked = await runIn(
+      'const [first, second] = await (await space("space-1")).tabs(); await first.click("@e2"); await second.click("@e2"); process.stdout.write("done\\n");',
+      table,
+      { options: { health: current } },
+    );
+    expect(clicked).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
+    expect(released).toEqual(["tab-1", "tab-2"]);
+    expect(clicked.api.requests.filter((item) => item.path.endsWith("/input/release"))).toHaveLength(2);
+    // A page the run only listed holds nothing to let go of.
+    released.length = 0;
+    const listed = await runIn(
+      'await (await space("space-1")).tabs(); process.stdout.write("listed\\n");',
+      table,
+      { options: { health: current } },
+    );
+    expect(listed).toMatchObject({ status: 0, stdout: "listed\n", stderr: "" });
+    expect(released).toEqual([]);
   });
 });
 

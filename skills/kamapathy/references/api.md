@@ -413,6 +413,18 @@ Whether the agent may use the page. Adopt a page to manage it.
 
 Returns `boolean | undefined`. Since API level 1.
 
+### `page.mouse`
+
+This page's mouse: it moves, presses and scrolls where it stands.
+
+Returns `Mouse`. Since API level 4.
+
+### `page.keyboard`
+
+This page's keyboard: it holds keys, types text and pastes.
+
+Returns `Keyboard`. Since API level 4.
+
 ### `page.navigate(url)`
 
 Loads a complete http or https URL, or about:blank, and returns once the new document commits. Refs from before become stale.
@@ -489,33 +501,93 @@ Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_fie
 
 ### `page.click(target, options?)`
 
-Clicks a control.
+Clicks a control, waiting until it can take the press.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `clickCount` | integer from 1 to 3 | `1` | How many presses the one gesture sends. |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
+| `position` | point |  | Where in the element to act, instead of its centre, as { x, y } or "x,y" from its top left corner. |
+| `force` | true or false | `false` | Act even when something covers the target. A disabled target is never forced. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.dblclick(target, options?)`
+
+Double-clicks a control with one gesture of two presses.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
+| `position` | point |  | Where in the element to act, instead of its centre, as { x, y } or "x,y" from its top left corner. |
+| `force` | true or false | `false` | Act even when something covers the target. A disabled target is never forced. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
+Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/dblclick`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.hover(target, options?)`
+
+Moves the mouse onto a control and leaves it there.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `position` | point |  | Where in the element to act, instead of its centre, as { x, y } or "x,y" from its top left corner. |
+| `force` | true or false | `false` | Act even when something covers the target. A disabled target is never forced. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
+Returns `Promise<{ ok: true, point, rebound? }>`. Route `POST /tabs/:id/hover`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.fill(target, value, options?)`
 
-Replaces the value of a field, select or editable region.
+Replaces the value of a field, select or editable region, or adds to it.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
+| `append` | true or false | `false` | Add to the field's value instead of replacing it. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, match, value?, valueHidden?, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `not_editable`, `ambiguous_field`, `fill_not_accepted`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.selectOption(target, values, options?)`
+
+Chooses a select's options by value, label or index. A lone choice is wrapped; null and [] clear the select.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
+Returns `Promise<{ ok: true, values, rebound? }>`. Route `POST /tabs/:id/select`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_selectable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.focus(target, options?)`
+
+Focuses a control, retargeting to the nearest one that takes focus.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/focus`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_focusable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.press(key, target?, options?)`
 
-Presses a supported key, focusing a control first when given.
+Presses a key name, a printable character or a chord, focusing a control first when given. page.press(target, key) works too.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold the key before releasing it. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, loading?, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.scroll(direction, pixels?, target?, options?)`
 
@@ -535,7 +607,22 @@ Drags one element onto another with native mouse input or HTML drag and drop.
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, drag, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.dragAndDrop(source, target, options?)`
+
+Drags one element onto another, with its own positions and a button.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `sourcePosition` | point |  | Where in the source to press, instead of its centre, as { x, y } or "x,y" from its top left corner. |
+| `targetPosition` | point |  | Where in the target to drop, instead of its centre, as { x, y } or "x,y" from its top left corner. |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `force` | true or false | `false` | Act even when something covers the target. A disabled target is never forced. |
+| `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
+| `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
+
+Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.wait(options?)`
 
@@ -603,7 +690,7 @@ Returns `Promise<void>`. Since API level 4.
 
 Runs 1 to 20 actions in order and stops at the first failure.
 
-Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.upload(ref, files)`
 
@@ -682,11 +769,129 @@ The open page that opened this popup, or null.
 
 Returns `Promise<Page | null>`. Route `GET /spaces/:id/tabs`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
 
+### `page.releaseInput()`
+
+Lets go of every key and mouse button this page holds. A run sends it for each page it touched.
+
+Returns `Promise<{ ok: true, released }>`. Route `POST /tabs/:id/input/release`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
 ### `page.close()`
 
 Closes the tab.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+## Page controllers
+
+### `page.mouse.move(x, y, options?)`
+
+Moves the pointer to a point in the page's viewport, interpolating from where it stands.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `steps` | integer from 1 to 100 | `1` | How many moves to send from the pointer's stored position. |
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/mouse/move`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.mouse.down(options?)`
+
+Presses a mouse button where the pointer stands.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `clickCount` | integer from 1 to 3 | `1` | How many presses the one gesture sends. |
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/mouse/down`. Errors: `invalid_field`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.mouse.up(options?)`
+
+Lets a held mouse button go where the pointer stands.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `clickCount` | integer from 1 to 3 | `1` | How many presses the one gesture sends. |
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/mouse/up`. Errors: `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.mouse.click(x, y, options?)`
+
+Moves to a point and clicks there, without resolving a target.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `clickCount` | integer from 1 to 3 | `1` | How many presses the one gesture sends. |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
+
+Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.mouse.dblclick(x, y, options?)`
+
+Clicks twice at a point in one gesture.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
+
+Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.mouse.wheel(deltaX, deltaY)`
+
+Scrolls with the wheel where the pointer stands.
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/mouse/wheel`. Errors: `invalid_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.down(key)`
+
+Holds one key down, so later input carries it.
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/keyboard/down`. Errors: `invalid_field`, `input_target_blocked`, `invalid_key`, `native_popup_blocked`, `clipboard_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.up(key)`
+
+Lets one held key go.
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/keyboard/up`. Errors: `invalid_key`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.press(chord, options?)`
+
+Presses a key or a chord where the focus is, holding its modifiers.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `delay` | milliseconds from 0 to 5000 | `0` | How long to hold the key before releasing it. |
+
+Returns `Promise<{ ok: true, url, loading? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.type(text, options?)`
+
+Types text where the focus is, character by character.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `delay` | milliseconds from 0 to 1000 | `0` | How long to wait between characters. Times the text length it is at most 60000 ms. |
+
+Returns `Promise<{ ok: true, input }>`. Route `POST /tabs/:id/keyboard/type`. Errors: `invalid_field`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.insertText(text)`
+
+Inserts text at the focused editable's caret, without key events.
+
+Returns `Promise<{ ok: true }>`. Route `POST /tabs/:id/keyboard/insert-text`. Errors: `invalid_field`, `input_target_blocked`, `not_editable`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.keyboard.paste(text | { text, html })`
+
+Offers the page a paste in a DataTransfer of its own, without the system clipboard.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `text` | string of at most 16384 characters, required |  | The plain text to paste. It may be empty only beside html. |
+| `html` | string of at most 32768 characters |  | The rich flavour offered beside the text, which only the page's own handler can take. |
+
+Returns `Promise<{ ok: true, handled: "page" | "text" }>`. Route `POST /tabs/:id/keyboard/paste`. Errors: `invalid_field`, `input_target_blocked`, `not_editable`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ## Download
 
@@ -856,23 +1061,39 @@ Close a tab
 
 Read bounded page text and control refs
 
-### `click <tab-id> <ref-or-selector> [--label <text>]`
+### `click <tab-id> <ref-or-selector> [--button left|middle|right] [--click-count <n>] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
 
-Click a control
+Click a control, waiting until it can take the press
 
-### `fill <tab-id> <ref-or-selector> --stdin [--label <text>]`
+### `dblclick <tab-id> <ref-or-selector> [--button left|middle|right] [--delay <ms>] [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
+
+Double-click a control with one gesture of two presses
+
+### `hover <tab-id> <ref-or-selector> [--position x,y] [--force] [--timeout <ms>] [--label <text>]`
+
+Move the mouse onto a control and leave it there
+
+### `fill <tab-id> <ref-or-selector> --stdin [--append] [--timeout <ms>] [--label <text>]`
 
 Read the exact field value from stdin
+
+### `select <tab-id> <ref-or-selector> [choice...] [--timeout <ms>] [--label <text>]`
+
+Choose a select's options by value or label; no choice clears it
+
+### `focus <tab-id> <ref-or-selector> [--timeout <ms>] [--label <text>]`
+
+Focus a control, retargeting to the nearest one that takes focus
 
 ### `upload <tab-id> <ref> <file> [files]`
 
 Select up to 8 files, 16 MiB total
 
-### `press <tab-id> <key> [ref-or-selector] [--label <text>]`
+### `press <tab-id> <key> [ref-or-selector] [--delay <ms>] [--timeout <ms>] [--label <text>]`
 
-Press a supported key
+Press a key, a printable character or a chord
 
-### `drag <tab-id> <source> <target> [--label <text>]`
+### `drag <tab-id> <source> <target> [--source-position x,y] [--target-position x,y] [--button left|middle|right] [--force] [--timeout <ms>] [--label <text>]`
 
 Drag one element onto another (refs or selectors)
 
@@ -960,6 +1181,50 @@ Delete a held download's bytes from the browser's profile
 
 Store a name and password for one origin in memory, to answer its first server sign-in in this space, or forget every origin
 
+### `mouse-move <tab-id> <x> <y> [--steps <n>]`
+
+Move the pointer to a point, interpolating from where it stands
+
+### `mouse-down <tab-id> [--button left|middle|right] [--click-count <n>]`
+
+Press a mouse button where the pointer stands
+
+### `mouse-up <tab-id> [--button left|middle|right] [--click-count <n>]`
+
+Let a held mouse button go where the pointer stands
+
+### `mouse-click <tab-id> <x> <y> [--button left|middle|right] [--click-count <n>] [--delay <ms>]`
+
+Click at a point, without resolving a target
+
+### `mouse-wheel <tab-id> <delta-x> <delta-y>`
+
+Scroll with the wheel where the pointer stands
+
+### `key-down <tab-id> <key>`
+
+Hold one key down, so later input carries it
+
+### `key-up <tab-id> <key>`
+
+Let one held key go
+
+### `type <tab-id> --stdin [--delay <ms>]`
+
+Type text from stdin where the focus is, character by character
+
+### `insert-text <tab-id> --stdin`
+
+Insert text from stdin at the focused editable's caret
+
+### `paste <tab-id> --stdin [--html]`
+
+Offer the page a paste of stdin, without the system clipboard
+
+### `release-input <tab-id>`
+
+Let go of every key and mouse button the page holds
+
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
 Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself
@@ -1020,12 +1285,27 @@ Show the commands, or help on one
 | POST | `/tabs/:id/actions` | `actions` | Runs 1 to 20 actions in order, stopping at the first failure. Returns `{ ok: true, results } or { ok: false, results, failedIndex, error }`. |
 | GET | `/tabs/:id/screenshot` |  | Captures the viewport as PNG at CSS scale in any window state, the same as POST with {}. Returns `image/png`. |
 | POST | `/tabs/:id/screenshot` | `fullPage?`, `clip?`, `scale?`, `timeoutMs?` | Captures the viewport, the whole page or a clip as PNG, at CSS or device scale. Returns `image/png with X-Kamapathy-Clip and X-Kamapathy-Pixel-Ratio`. |
-| POST | `/tabs/:id/click` | `ref?`, `selector?`, `label?` | Clicks a control with native mouse input. Returns `{ ok: true, url, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value`, `label?` | Replaces the value of a field, select or editable region. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `label?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/click` | `ref?`, `selector?`, `button?`, `clickCount?`, `delayMs?`, `position?`, `force?`, `timeoutMs?`, `label?` | Clicks a control with native mouse input, waiting until it can take the press. Returns `{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/dblclick` | `ref?`, `selector?`, `button?`, `delayMs?`, `position?`, `force?`, `timeoutMs?`, `label?` | Double-clicks a control with native mouse input. Returns `{ ok: true, url, point, loading?, fallback?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/hover` | `ref?`, `selector?`, `position?`, `force?`, `timeoutMs?`, `label?` | Moves the mouse onto a control and leaves it there. Returns `{ ok: true, point, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value`, `append?`, `timeoutMs?`, `label?` | Replaces the value of a field, select or editable region, or adds to it. Returns `{ ok: true, match, value?, valueHidden?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/select` | `ref?`, `selector?`, `values`, `timeoutMs?`, `label?` | Chooses a select's options by value, label or index. Returns `{ ok: true, values, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/focus` | `ref?`, `selector?`, `timeoutMs?`, `label?` | Focuses a control, retargeting to the nearest one that takes focus. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `delayMs?`, `timeoutMs?`, `label?` | Presses a key or a chord, focusing a control first when given. Returns `{ ok: true, url, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?`, `label?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/drag` | `source`, `target`, `label?` | Drags one element onto another. Returns `{ ok: true, url, drag, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/drag` | `source`, `target`, `sourcePosition?`, `targetPosition?`, `button?`, `force?`, `timeoutMs?`, `label?` | Drags one element onto another, waiting until both ends can take the gesture. Returns `{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
+| POST | `/tabs/:id/mouse/move` | `x`, `y`, `steps?` | Moves the mouse to a point, interpolating from where it stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/down` | `button?`, `clickCount?` | Presses a mouse button where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/up` | `button?`, `clickCount?` | Lets a held mouse button go where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/click` | `x`, `y`, `button?`, `clickCount?`, `delayMs?` | Clicks at a point with native mouse input, without resolving a target. Returns `{ ok: true, url, input, loading?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/wheel` | `deltaX`, `deltaY` | Scrolls with the wheel where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/keyboard/down` | `key` | Holds one key down and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/keyboard/up` | `key` | Lets one held key go and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/keyboard/type` | `text`, `delayMs?` | Types text as key events, character by character. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/keyboard/insert-text` | `text` | Inserts text at the focused editable's caret, without key events. Returns `{ ok: true, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/keyboard/paste` | `text`, `html?` | Pastes text, and optional HTML, without the system clipboard. Returns `{ ok: true, handled, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/input/release` | `{}` | Lets go of every key and mouse button this tab holds. Returns `{ ok: true, released }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/set-input-files` | `ref?`, `selector?`, `files`, `timeoutMs?` | Puts files on the file input a target names, retargeting from a label or the panel around it, hidden inputs included. An empty list clears the input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/file-choosers/:id/files` | `files` | Files bytes on the input of a file chooser an armed wait received, even one the page has removed. An empty list cancels the chooser. Returns `{ ok: true, selected }`. |
@@ -1069,6 +1349,8 @@ Show the commands, or help on one
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
+| `input_target_blocked` | 403 | not retryable |  | The point, or the frame holding focus, belongs to an extension or an internal page. |
+| `native_popup_blocked` | 403 | not retryable | `use` | The input would open a native select, color or date picker. |
 | `route_not_found` | 404 | not retryable | `method`, `route`, `apiLevel`, `version` | This Kamapathy has no such route. |
 | `space_not_found` | 404 | not retryable |  | No accessible agent space has this ID. |
 | `tab_not_found` | 404 | not retryable | `tabId` | No tab in an accessible agent space has this ID. |
@@ -1108,7 +1390,7 @@ Show the commands, or help on one
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
 | `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
-| `element_obscured` | 409 | retryable |  | Another element covers the target. |
+| `element_obscured` | 409 | retryable | `presses` | Another element covers the target, after input the action already sent. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
 | `content_type` | 415 | not retryable |  | The request body is not JSON. |
@@ -1124,6 +1406,12 @@ Show the commands, or help on one
 | `multiple_file_inputs` | 422 | not retryable | `count` | The target holds several file inputs, so none of them is the one to file. |
 | `file_chooser_opened` | 422 | not retryable |  | An action opened a file chooser no wait was armed for, so Kamapathy closed it. |
 | `invalid_value` | 422 | not retryable |  | The control cannot take this value. |
+| `not_editable` | 422 | not retryable | `reason` | Nothing at, around or inside the target can take typing or a value. |
+| `not_selectable` | 422 | not retryable |  | No select at, for or inside the target. |
+| `not_focusable` | 422 | not retryable |  | Nothing focusable at, around or inside the target. |
+| `ambiguous_field` | 422 | not retryable | `candidates` | Retargeting found several candidates. |
+| `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry. |
+| `point_outside_viewport` | 422 | not retryable | `width`, `height` | The point lies outside the page's viewport. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |
@@ -1138,7 +1426,7 @@ Show the commands, or help on one
 | `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
-| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The action did not start in time. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The request did not start in time, or its target never became ready for input. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |

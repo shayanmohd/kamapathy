@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Space, Tab } from "../../shared/types";
 import {
+  COMPUTE,
   ROUTES,
   routeKey,
   type SchemaRoute,
@@ -65,8 +66,38 @@ export interface Route extends RouteImpl {
   path: string[];
   lane: "space" | "server" | "none";
   budgetMs: number;
+  // A route whose budget depends on its body: what this request gets, which
+  // never widens the maximum admission counted.
+  budgetOf?(body: Record<string, unknown> | undefined): number;
   bodyLimit: number;
   schema: SchemaRoute;
+}
+
+// One route's time budget: a fixed number, a body field's largest value, or
+// a computed maximum the request narrows itself.
+export function routeBudget(schema: SchemaRoute): {
+  budgetMs: number;
+  budgetOf?(body: Record<string, unknown> | undefined): number;
+} {
+  const key = routeKey(schema);
+  const { budget } = schema;
+  if (typeof budget === "number") return { budgetMs: budget };
+  if ("compute" in budget) {
+    const compute = COMPUTE[budget.compute];
+    if (!compute)
+      throw new Error(
+        `${key} budgets on ${budget.compute}, which the schema does not compute.`,
+      );
+    return {
+      budgetMs: budget.maxMs,
+      budgetOf: (body) => compute(body ?? {}),
+    };
+  }
+  // A wait's own field bounds it; admission counts its largest value.
+  const max = schema.body?.[budget.field]?.max;
+  if (max === undefined)
+    throw new Error(`${key} budgets on a field without a maximum.`);
+  return { budgetMs: max + (budget.plusMs ?? 0) };
 }
 
 // One route object for each route the schema declares, except /health,
@@ -82,16 +113,7 @@ export function buildRoutes(impls: Record<string, RouteImpl>): Route[] {
     if (!impl) throw new Error(`${key} has no handler.`);
     if (schema.lane === "body" || schema.lane === "preadmission")
       throw new Error(`${key} uses a lane this router does not run.`);
-    const { budget } = schema;
-    let budgetMs: number;
-    if (typeof budget === "number") budgetMs = budget;
-    else if ("field" in budget) {
-      // A wait's own field bounds it; admission counts its largest value.
-      const max = schema.body?.[budget.field]?.max;
-      if (max === undefined)
-        throw new Error(`${key} budgets on a field without a maximum.`);
-      budgetMs = max + (budget.plusMs ?? 0);
-    } else throw new Error(`${key} has a computed budget this router lacks.`);
+    const { budgetMs, budgetOf } = routeBudget(schema);
     return {
       ...impl,
       key,
@@ -99,6 +121,7 @@ export function buildRoutes(impls: Record<string, RouteImpl>): Route[] {
       path: schema.path.split("/").filter(Boolean),
       lane: schema.lane,
       budgetMs,
+      ...(budgetOf ? { budgetOf } : {}),
       bodyLimit: schema.limit,
       schema,
     };

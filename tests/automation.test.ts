@@ -3,6 +3,8 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { takeWaitSlot } from "../electron/agent/expectations";
+import { WHEEL_GAP_MS } from "../electron/agent/input/actions";
+import { inputMarker } from "../electron/agent/input/marker";
 import {
   createExtractor,
   type Extractor,
@@ -11,6 +13,7 @@ import {
 import type { PdfPages } from "../electron/agent/pdf/worker";
 import { RefBook } from "../electron/agent/refs";
 import { watchLeaveGuard } from "../electron/agent/routes/navigation";
+import { LIMITS, Scheduler } from "../electron/agent/scheduler";
 import { FORMS, REF_HINT } from "../electron/agent/selectors";
 import { PAGE_STATE_SOURCE } from "../electron/agent/session/operations";
 import {
@@ -22,6 +25,7 @@ import {
   ACTIONS,
   API_LEVEL,
   COMMANDS,
+  COMPUTE,
   ENTRIES,
   ERRORS,
   ROUTES,
@@ -42,6 +46,7 @@ import {
   socketFetch,
   testSocket,
 } from "./fake-automation";
+import { frameNavigated } from "./fake-cdp";
 
 // The size a PNG's header reports.
 const pngSize = (image: ArrayBuffer): number[] => {
@@ -812,15 +817,16 @@ describe("local automation socket", () => {
     const executed = controller.contents.scripts[0];
     expect(
       executed.code.includes(
-        `)("fill",${JSON.stringify({
+        `)("fillPrepare",${JSON.stringify({
           selector,
           query: {
             ast: { kind: "css", css: selector, raw: true },
             level: "enabled",
             mode: "strict",
-            firstRef: payloads("fill")[0].query.firstRef,
+            firstRef: payloads("fillPrepare")[0].query.firstRef,
           },
           value: 'quote " and newline\n',
+          append: false,
         })},`,
       ),
     ).toBe(true);
@@ -1367,7 +1373,7 @@ describe("local automation socket", () => {
     expect((await response.json()).error.code).toBe("stale_ref");
     expect(controller.contents.scripts).toHaveLength(1);
     expect(controller.contents.scripts[0].code).toContain(
-      ')("fill",{"ref":"@e1","value":"test"}',
+      ')("fillPrepare",{"ref":"@e1","value":"test","append":false}',
     );
   });
 
@@ -1439,7 +1445,7 @@ describe("local automation socket", () => {
     page.result = (code: string) =>
       code.includes(')("input",')
         ? counted()
-        : code.includes(')("drag",')
+        : code.includes(')("actionPoint",') && code.includes('"kind":"drag"')
           ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
           : code.includes(')("check",')
             ? { ok: true, matched: true }
@@ -1464,14 +1470,14 @@ describe("local automation socket", () => {
       firstRef: expect.any(Number),
       ...extra,
     });
-    expect(queryOf("target")).toEqual(
+    expect(queryOf("actionPoint")).toEqual(
       strict({ kind: "css", css: "#save", raw: true }, "pointer-enabled"),
     );
-    expect(queryOf("fill")).toEqual(
+    expect(queryOf("fillPrepare")).toEqual(
       strict({ kind: "text", value: "Save now", exact: false }, "enabled"),
     );
     // A role selector also carries the key its picked nodes wait under.
-    expect(queryOf("focus")).toEqual(
+    expect(queryOf("focusTarget")).toEqual(
       strict({ kind: "role", role: "textbox" }, "enabled", {
         picked: expect.any(String),
       }),
@@ -1479,7 +1485,7 @@ describe("local automation socket", () => {
     expect(queryOf("scroll")).toEqual(
       strict({ kind: "href", href: "/plans" }, "visible"),
     );
-    const drag = payloads("drag")[0];
+    const drag = payloads("actionPoint")[1];
     expect(drag.source.query).toEqual(
       strict({ kind: "css", css: "#card", raw: true }, "pointer"),
     );
@@ -1495,7 +1501,14 @@ describe("local automation socket", () => {
     );
     // Every strict resolution reserves its own candidate refs.
     const reserved = [
-      ...["target", "fill", "focus", "scroll", "check", "snapshot"].map(
+      ...[
+        "actionPoint",
+        "fillPrepare",
+        "focusTarget",
+        "scroll",
+        "check",
+        "snapshot",
+      ].map(
         (operation) => queryOf(operation).firstRef,
       ),
       drag.source.query.firstRef,
@@ -1504,7 +1517,11 @@ describe("local automation socket", () => {
     expect(new Set(reserved).size).toBe(reserved.length);
     // A ref-form selector is the ref.
     expect((await act("click", { selector: "@e3" })).status).toBe(200);
-    expect(payloads("target").at(-1)).toEqual({ ref: "@e3" });
+    expect(payloads("actionPoint").at(-1)).toEqual({
+      ref: "@e3",
+      kind: "click",
+      force: false,
+    });
   });
 
   it("maps page resolution failures to their codes and fields without showing blocked", async () => {
@@ -1544,12 +1561,13 @@ describe("local automation socket", () => {
         "Nothing on the page matches this selector. Take a snapshot to check the page.",
       fields: { selector: ".save" },
     };
+    // The loop raises no_match itself, with how long it waited for a match.
     expect(await click()).toEqual({
       status: 422,
       error: {
         code: "no_match",
         message:
-          "Nothing on the page matches this selector. Take a snapshot to check the page.",
+          "Nothing on the page matched this selector before the timeout. Take a snapshot to check the page.",
         selector: ".save",
         waitedMs: expect.any(Number),
         retryable: true,
@@ -1694,7 +1712,11 @@ describe("local automation socket", () => {
     expect(ref).toBe(`@e${candidate}`);
     const accepted = await request(`/tabs/${tab.id}/click`, "POST", { ref });
     expect(accepted.status).toBe(200);
-    expect(payloads("target").at(-1)).toEqual({ ref });
+    expect(payloads("actionPoint").at(-1)).toEqual({
+      ref,
+      kind: "click",
+      force: false,
+    });
   });
 
   it("keeps the wait route polling while a selector is ambiguous and stops at once on invalid_selector", async () => {
@@ -1809,8 +1831,10 @@ describe("local automation socket", () => {
 
   it("returns completed batch steps and stops at the first failed action without retrying", async () => {
     const { tab } = await createPage();
+    // The fill step prepares the field and reads it back; the click that
+    // follows finds a stale ref.
     controller.contents.result = (code: string) =>
-      code.includes(')("fill",')
+      code.includes(')("fill')
         ? { ok: true }
         : {
             ok: false,
@@ -1832,7 +1856,7 @@ describe("local automation socket", () => {
       error: { code: "stale_ref" },
       results: [{ index: 0, type: "fill", result: { ok: true } }],
     });
-    expect(controller.contents.scripts).toHaveLength(2);
+    expect(controller.contents.scripts).toHaveLength(3);
     expect(controller.contents.inputs).toEqual([]);
   });
 
@@ -1893,9 +1917,15 @@ describe("local automation socket", () => {
       ),
     ).toBe(true);
     expect(controller.state.activeTabId).toBe(activeTab);
-    for (const key of ["Control+W", "F12", "a", "constructor"])
+    for (const key of ["Control+KeyW", "F12", "a"])
       expect(
         (await request(`/tabs/${tab.id}/press`, "POST", { key })).status,
+        key,
+      ).toBe(200);
+    for (const key of ["constructor", "KeyA+KeyB", "Control+"])
+      expect(
+        (await request(`/tabs/${tab.id}/press`, "POST", { key })).status,
+        key,
       ).toBe(400);
   });
 
@@ -4099,6 +4129,52 @@ describe("local automation socket", () => {
     );
   });
 
+  it("narrows a request's budget from its own body", async () => {
+    // The click route declares the computed budget the server narrows from.
+    expect(
+      ROUTES.find((item) => routeKey(item) === "POST /tabs/:id/click")!.budget,
+    ).toEqual({ compute: "clickBudget", maxMs: 100100 });
+    // A click with its own options answers inside that budget, while
+    // admission counted the maximum the route declares.
+    const body = { ref: "@e1", timeoutMs: 10000 };
+    const budgetMs = COMPUTE.clickBudget(body);
+    expect(budgetMs).toBe(25100);
+    const scheduler = new Scheduler();
+    const ticket = scheduler.admit({ spaceId: "space-1", budgetMs: 100100 });
+    expect(ticket.runDeadline).toBe(
+      ticket.arrival + 100100 + LIMITS.graceMs,
+    );
+    ticket.narrow(budgetMs);
+    expect(ticket.runDeadline).toBe(ticket.arrival + 25100 + LIMITS.graceMs);
+    // Nothing widens a request that already asked for less.
+    ticket.narrow(100100);
+    ticket.narrow(Number.NaN);
+    expect(ticket.runDeadline).toBe(ticket.arrival + 25100 + LIMITS.graceMs);
+    const before = Date.now();
+    const deadline = await ticket.start({
+      kind: "space",
+      spaceId: "space-1",
+    });
+    // The request answers within its own budget, not the declared maximum.
+    expect(deadline).toBeLessThanOrEqual(Date.now() + 25100);
+    expect(deadline).toBeGreaterThan(before + 24000);
+    ticket.finish();
+
+    // Queue time beyond the grace comes out of the request's own budget.
+    const queued = new Scheduler({ ...LIMITS, graceMs: 50 });
+    const first = queued.admit({ spaceId: "space-1", budgetMs: 100100 });
+    await first.start({ kind: "space", spaceId: "space-1" });
+    const second = queued.admit({ spaceId: "space-1", budgetMs: 100100 });
+    second.narrow(budgetMs);
+    const starting = second.start({ kind: "space", spaceId: "space-1" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    first.finish();
+    const late = await starting;
+    expect(late).toBe(second.runDeadline);
+    expect(late - Date.now()).toBeLessThan(25100);
+    second.finish();
+  });
+
   it("the body is validated before the lane", async () => {
     const { tab } = await createPage();
     const refuse = async (body: Record<string, unknown>) =>
@@ -4201,10 +4277,531 @@ describe("local automation socket", () => {
     ).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
   });
 
+  // Section 5's pointer actions over a fake page: `pageActions` says what
+  // each look at the target reports, so a blocker, a scroll or a moving box
+  // is driven from the test.
+  const pointPage = () => {
+    const page = controller.contents;
+    page.result = { ok: true, x: 25, y: 45 };
+    return page;
+  };
+  const gestureOf = (page: FakeContents) =>
+    page.inputs.map((input) => input.parameters.type);
+
+  it("clicks with Playwright's options and answers with its point", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const click = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+      button: "middle",
+      clickCount: 2,
+      delayMs: 1,
+      position: { x: 4, y: 6 },
+      force: true,
+    });
+    expect(click.status).toBe(200);
+    expect(await click.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      point: { x: 25, y: 45 },
+    });
+    // The page is asked for the point with this action's own checks.
+    expect(payloads("actionPoint")[0]).toEqual({
+      ref: "@e1",
+      kind: "click",
+      force: true,
+      position: { x: 4, y: 6 },
+    });
+    // One move, then a press and a release per click, each carrying the
+    // button and the mask the page would see from a person.
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.button,
+        input.parameters.clickCount,
+        input.parameters.buttons,
+      ]),
+    ).toEqual([
+      ["mouseMoved", "none", undefined, 0],
+      ["mousePressed", "middle", 1, 4],
+      ["mouseReleased", "middle", 1, 0],
+      ["mousePressed", "middle", 2, 4],
+      ["mouseReleased", "middle", 2, 0],
+    ]);
+    // A double click sends clickCount 1 then 2, with a delay in each of its
+    // three gaps, and the 100 ms settle after the gesture.
+    page.inputs = [];
+    const started = Date.now();
+    const twice = await request(`/tabs/${tab.id}/dblclick`, "POST", {
+      ref: "@e1",
+      delayMs: 20,
+    });
+    expect(twice.status).toBe(200);
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.clickCount,
+      ]),
+    ).toEqual([
+      ["mouseMoved", undefined],
+      ["mousePressed", 1],
+      ["mouseReleased", 1],
+      ["mousePressed", 2],
+      ["mouseReleased", 2],
+    ]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(160);
+  });
+
+  it("refuses undeclared and bad pointer fields", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const refuse = async (route: string, body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/${route}`, "POST", body));
+    // dblclick sends clickCount 1 then 2 itself, so it declares none.
+    expect(await refuse("dblclick", { ref: "@e1", clickCount: 2 })).toMatchObject(
+      {
+        status: 400,
+        error: {
+          code: "unknown_field",
+          field: "clickCount",
+          route: "POST /tabs/:id/dblclick",
+        },
+      },
+    );
+    // hover presses nothing, so it takes no button, count or delay.
+    for (const field of ["button", "clickCount", "delayMs"])
+      expect(
+        (await refuse("hover", { ref: "@e1", [field]: 1 })).error,
+        field,
+      ).toMatchObject({ code: "unknown_field", field });
+    for (const [route, body, field] of [
+      ["click", { ref: "@e1", button: "back" }, "button"],
+      ["click", { ref: "@e1", clickCount: 4 }, "clickCount"],
+      ["click", { ref: "@e1", delayMs: 5001 }, "delayMs"],
+      ["click", { ref: "@e1", timeoutMs: 60001 }, "timeoutMs"],
+      ["click", { ref: "@e1", position: { x: 10 } }, "position.y"],
+      ["click", { ref: "@e1", position: { x: 10001, y: 0 } }, "position.x"],
+      ["dblclick", { ref: "@e1", button: "both" }, "button"],
+      ["hover", { ref: "@e1", position: { x: 0, y: -10001 } }, "position.y"],
+      ["hover", { ref: "@e1", force: "yes" }, "force"],
+    ] as const) {
+      const { status, error } = await refuse(route, body);
+      expect(status, field).toBe(400);
+      expect(error, field).toMatchObject({ code: "invalid_field", field });
+    }
+    // A bad field inside a batch step carries its index, and an undeclared
+    // one also names the step's type.
+    const batch = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "snapshot" },
+          { type: "hover", ref: "@e1", timeoutMs: 60001 },
+        ],
+      }),
+    );
+    expect(batch.status).toBe(400);
+    expect(batch.error).toMatchObject({
+      code: "invalid_field",
+      field: "timeoutMs",
+      index: 1,
+    });
+    const step = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "hover", ref: "@e1", clickCount: 2 }],
+      }),
+    );
+    expect(step.error).toMatchObject({
+      code: "unknown_field",
+      field: "clickCount",
+      index: 0,
+      action: "hover",
+    });
+    expect(page.inputs).toEqual([]);
+    // Today's bodies still pass.
+    for (const [route, body] of [
+      ["click", { ref: "@e1" }],
+      ["press", { key: "Enter", ref: "@e1" }],
+    ] as const)
+      expect(
+        (await request(`/tabs/${tab.id}/${route}`, "POST", body)).status,
+        route,
+      ).toBe(200);
+  });
+
+  it("waits out a transient blocker and presses once", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const looks: number[] = [];
+    page.pageActions.actionPoint = () => {
+      looks.push(Date.now());
+      return looks.length <= 3
+        ? { ok: true, blocked: { blocker: "covered", interceptor: "div#shade" } }
+        : { ok: true, point: { x: 25, y: 45 } };
+    };
+    const order: string[] = [];
+    const click = request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }).then(
+      (response) => {
+        order.push("click");
+        return response;
+      },
+    );
+    // The space's lane is free between attempts, so a snapshot there runs
+    // while the click is still waiting.
+    const snapshot = request(`/tabs/${tab.id}/snapshot`).then((response) => {
+      order.push("snapshot");
+      return response;
+    });
+    expect((await snapshot).status).toBe(200);
+    expect((await click).status).toBe(200);
+    expect(order).toEqual(["snapshot", "click"]);
+    expect(looks).toHaveLength(4);
+    expect(looks[1] - looks[0]).toBeGreaterThanOrEqual(45);
+    expect(looks[2] - looks[1]).toBeGreaterThanOrEqual(95);
+    expect(looks[3] - looks[2]).toBeGreaterThanOrEqual(245);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
+  it("ends a staying blocker as 504 action_timeout and never presses", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    page.pageActions.actionPoint = {
+      ok: true,
+      point: { x: 25, y: 45 },
+      blocked: {
+        blocker: "covered",
+        interceptor: 'div#consent.banner "Accept all"',
+      },
+    };
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/click`, "POST", {
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(status).toBe(504);
+    expect(error).toMatchObject({
+      code: "action_timeout",
+      message: "click timed out after 120 ms: Another element covers the target.",
+      awaited: "actionable",
+      blocker: "covered",
+      interceptor: 'div#consent.banner "Accept all"',
+      timeoutMs: 120,
+      retryable: true,
+    });
+    expect(error.dispatched).toBeUndefined();
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity.map((entry) => entry.message)).not.toContain(
+      "Agent clicked an element",
+    );
+  });
+
+  it("scrolls the point into view before the press, and the gestures mark nothing", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const first = { x: 600, y: 400, deltaX: 0, deltaY: 80 };
+    const second = { x: 600, y: 300, deltaX: 0, deltaY: 40 };
+    let asked = 0;
+    page.pageActions.scrollRequest = () => {
+      asked += 1;
+      return asked === 1
+        ? { ok: true, scroll: second }
+        : { ok: true, settled: true };
+    };
+    let looks = 0;
+    // The target stays out of view, so nothing is pressed and the request
+    // still counts as having changed nothing.
+    page.pageActions.actionPoint = () => {
+      looks += 1;
+      return looks === 1
+        ? { ok: true, scroll: first }
+        : { ok: true, blocked: { blocker: "outside_viewport" } };
+    };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/click`, "POST", {
+        ref: "@e1",
+        timeoutMs: 0,
+      }),
+    );
+    expect(refused.status).toBe(504);
+    expect(refused.error).toMatchObject({
+      blocker: "outside_viewport",
+      retryable: true,
+    });
+    expect(refused.error.dispatched).toBeUndefined();
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.deltaY,
+        input.parameters.y,
+      ]),
+    ).toEqual([
+      ["mouseWheel", 80, 400],
+      ["mouseWheel", 40, 300],
+    ]);
+    expect(asked).toBe(2);
+    // With the target in view the press follows the gestures.
+    page.inputs = [];
+    asked = 0;
+    looks = 0;
+    page.pageActions.actionPoint = () => {
+      looks += 1;
+      return looks === 1
+        ? { ok: true, scroll: first }
+        : { ok: true, point: { x: 25, y: 45 } };
+    };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(gestureOf(page)).toEqual([
+      "mouseWheel",
+      "mouseWheel",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+    ]);
+  });
+
+  it("measures the point again after the page's own frames, so a scroll the compositor has gone past cannot aim the press", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    let looks = 0;
+    // The page reports the target off screen, and only its frames carry the
+    // scroll the compositor already made, so the second look is the one the
+    // press may use.
+    page.pageActions.actionPoint = () => {
+      looks += 1;
+      return looks === 1
+        ? { ok: true, scroll: { x: 600, y: 400, deltaX: 0, deltaY: 80 } }
+        : { ok: true, point: { x: 25, y: 45 } };
+    };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    const ran = page.scripts
+      .map((script) =>
+        ["actionPoint", "scrollRequest", "stableBox", "frame"].find((name) =>
+          script.code.includes(`)(${JSON.stringify(name)},`),
+        ),
+      )
+      .filter((name) => name !== undefined);
+    expect(ran).toEqual([
+      "actionPoint",
+      "frame",
+      "stableBox",
+      "scrollRequest",
+      "actionPoint",
+    ]);
+    expect(gestureOf(page)).toEqual([
+      "mouseWheel",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+    ]);
+  });
+
+  it("right clicks without opening a native menu and keeps the dom_click fallback", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+      button: "right",
+    });
+    expect(clicked.status).toBe(200);
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.button,
+        input.parameters.modifiers,
+      ]),
+    ).toEqual([
+      ["mouseMoved", "none", 0],
+      ["mousePressed", "right", 0],
+      ["mouseReleased", "right", 0],
+    ]);
+    // The shell's own menu guard saw the agent's pointer, so no native menu
+    // opens for it.
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+    // A control drawn with no size has no point, so the page clicks it.
+    page.inputs = [];
+    page.pageActions.actionPoint = { ok: true, empty: true };
+    const fallback = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e1",
+    });
+    expect(await fallback.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      fallback: "dom_click",
+    });
+    expect(page.inputs).toEqual([]);
+    // Neither a double click nor a hover has a page equivalent.
+    for (const route of ["dblclick", "hover"] as const) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/${route}`, "POST", { ref: "@e1" }),
+      );
+      expect(status, route).toBe(422);
+      expect(error.code, route).toBe("element_action_failed");
+    }
+  });
+
+  it("hovers with one move, needs a box that holds still, and presses nothing", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const hovered = await request(`/tabs/${tab.id}/hover`, "POST", {
+      ref: "@e1",
+    });
+    expect(hovered.status).toBe(200);
+    expect(await hovered.json()).toEqual({ ok: true, point: { x: 25, y: 45 } });
+    expect(gestureOf(page)).toEqual(["mouseMoved"]);
+    expect(payloads("actionPoint")[0]).toEqual({
+      ref: "@e1",
+      kind: "hover",
+      force: false,
+    });
+    expect(payloads("stableBox")).toHaveLength(1);
+    // A box that keeps moving ends the wait with its own blocker.
+    page.inputs = [];
+    page.pageActions.stableBox = {
+      ok: true,
+      moved: 3,
+      blocked: { blocker: "moving" },
+    };
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/hover`, "POST", {
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(status).toBe(504);
+    expect(error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "moving",
+      timeoutMs: 120,
+    });
+    expect(page.inputs).toEqual([]);
+    // force skips the stability check as well as the pointer one.
+    expect(
+      (await request(`/tabs/${tab.id}/hover`, "POST", {
+        ref: "@e1",
+        force: true,
+      })).status,
+    ).toBe(200);
+    expect(gestureOf(page)).toEqual(["mouseMoved"]);
+  });
+
+  it("runs dblclick and hover as batch steps and names them among the step types", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const results = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "dblclick", ref: "@e1" },
+          { type: "hover", selector: "#zone" },
+        ],
+      })
+    ).json();
+    expect(results.ok).toBe(true);
+    expect(results.results.map((entry: any) => entry.type)).toEqual([
+      "dblclick",
+      "hover",
+    ]);
+    expect(results.results[0].result).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      point: { x: 25, y: 45 },
+    });
+    expect(results.results[1].result).toEqual({
+      ok: true,
+      point: { x: 25, y: 45 },
+    });
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.clickCount,
+      ]),
+    ).toEqual([
+      ["mouseMoved", undefined],
+      ["mousePressed", 1],
+      ["mouseReleased", 1],
+      ["mousePressed", 2],
+      ["mouseReleased", 2],
+      ["mouseMoved", undefined],
+    ]);
+    expect(controller.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining([
+        "Agent double-clicked an element",
+        "Agent hovered an element",
+      ]),
+    );
+    // A step type nothing declares names every one that works.
+    const { error } = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "nope" }],
+      }),
+    );
+    expect(error.message).toContain("snapshot, click, dblclick, hover, fill");
+  });
+
+  it("refuses a press in a frame agents never reach, or one that would open a native picker", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    // An extension's own frame, as the tab learns of it.
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+    });
+    // The hit at the point is the element that holds that frame.
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    for (const force of [false, true]) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1", force }),
+      );
+      expect(status, `force ${force}`).toBe(403);
+      expect(error.code, `force ${force}`).toBe("input_target_blocked");
+    }
+    expect(page.inputs).toEqual([]);
+    expect(controller.activity.map((entry) => entry.message)).not.toContain(
+      "Agent clicked an element",
+    );
+    // A frame the tab can read, and a hit with no frame of its own, are
+    // pressed as usual.
+    for (const hit of [
+      { x: 25, y: 45, nodeName: "button", frameId: "main" },
+      { x: 25, y: 45, nodeName: "button" },
+    ]) {
+      page.hits = [hit];
+      expect(
+        (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+        JSON.stringify(hit),
+      ).toBe(200);
+    }
+    // A dropdown select under the point would open the browser's own list.
+    page.inputs = [];
+    page.hits = [{ x: 25, y: 45, nodeName: "select" }];
+    const picker = await failure(
+      await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+    );
+    expect(picker.status).toBe(403);
+    expect(picker.error).toMatchObject({
+      code: "native_popup_blocked",
+      use: "selectOption",
+    });
+    expect(page.inputs).toEqual([]);
+    // A move opens nothing, so hover over the same select is allowed.
+    expect(
+      (await request(`/tabs/${tab.id}/hover`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(gestureOf(page)).toEqual(["mouseMoved"]);
+  });
+
   // A page answering drag, input-count and frame operations. `dragging`
   // reports whether the page started an HTML drag.
   const dragPage = (dragging: () => boolean) => (code: string) =>
-    code.includes(')("drag",')
+    code.includes(')("actionPoint",')
       ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
       : code.includes(')("input",')
         ? {
@@ -4253,20 +4850,11 @@ describe("local automation socket", () => {
       url: "https://example.com/",
       drag: "mouse",
     });
-    expect(controller.contents.scripts[0].code).toContain(
-      `)("drag",${JSON.stringify({
-        source: { ref: "@e1" },
-        target: {
-          selector: "#zone",
-          query: {
-            ast: { kind: "css", css: "#zone", raw: true },
-            level: "pointer",
-            mode: "strict",
-            firstRef: payloads("drag")[0].target.query.firstRef,
-          },
-        },
-      })}`,
-    );
+    expect(payloads("actionPoint")[0]).toMatchObject({
+      source: { ref: "@e1" },
+      target: { selector: "#zone" },
+      kind: "drag",
+    });
     expect(steps()).toEqual([
       "intercept true",
       "mouseMoved",
@@ -4385,10 +4973,302 @@ describe("local automation socket", () => {
     expectOneAttach();
   });
 
+  it("drags both ends with their positions, a button and force", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    const response = await request(`/tabs/${tab.id}/drag`, "POST", {
+      ...dragBody,
+      sourcePosition: { x: 4, y: 6 },
+      targetPosition: { x: 8, y: 2 },
+      force: true,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      drag: "mouse",
+    });
+    // One look measures both ends against the same layout, with their
+    // positions and the strictness a drag counts matches at.
+    const measured = payloads("actionPoint")[0];
+    expect(measured).toEqual({
+      source: { ref: "@e1" },
+      target: {
+        selector: "#zone",
+        query: {
+          ast: { kind: "css", css: "#zone", raw: true },
+          level: "pointer",
+          mode: "strict",
+          firstRef: measured.target.query.firstRef,
+        },
+      },
+      kind: "drag",
+      force: true,
+      sourcePosition: { x: 4, y: 6 },
+      targetPosition: { x: 8, y: 2 },
+      scrolls: 0,
+    });
+    // force skips the stability wait as well as the pointer check.
+    expect(payloads("stableBox")).toEqual([]);
+    // The press lands on the source point and the release on the target's.
+    const mouse = page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => input.parameters);
+    expect(mouse[1]).toMatchObject({
+      type: "mousePressed",
+      x: 10,
+      y: 20,
+      button: "left",
+      buttons: 1,
+    });
+    expect(mouse.at(-1)).toMatchObject({
+      type: "mouseReleased",
+      x: 110,
+      y: 220,
+    });
+    // A right drag presses the right button and intercepts no HTML drag.
+    page.inputs = [];
+    const right = await request(`/tabs/${tab.id}/drag`, "POST", {
+      ...dragBody,
+      button: "right",
+    });
+    expect(right.status).toBe(200);
+    expect((await right.json()).drag).toBe("mouse");
+    expect(steps()).not.toContain("intercept true");
+    expect(
+      page.inputs
+        .filter((input) => input.parameters.type !== "mouseMoved")
+        .map((input) => [input.parameters.type, input.parameters.button]),
+    ).toEqual([
+      ["mousePressed", "right"],
+      ["mouseReleased", "right"],
+    ]);
+    // The shell's marker saw the agent's pointer, so the right button it
+    // pressed opens no native menu.
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+  });
+
+  it("waits for both ends and then presses once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    let looks = 0;
+    page.result = (code: string) => {
+      if (!code.includes(')("actionPoint",')) return base(code);
+      looks += 1;
+      return looks <= 2
+        ? {
+            ok: true,
+            blocked: {
+              blocker: "covered",
+              end: "source",
+              interceptor: "div#shade",
+            },
+          }
+        : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+    };
+    const dragged = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    expect(dragged.status).toBe(200);
+    // Two covered looks, the look that measures, and the look after the
+    // stability wait.
+    expect(looks).toBe(4);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+    // Both ends must hold still before the press.
+    expect(payloads("stableBox")).toEqual([
+      { ref: "@e1" },
+      expect.objectContaining({ selector: "#zone" }),
+    ]);
+    // Two ends that cannot share the screen is permanent: no press, 422.
+    page.inputs = [];
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? {
+            ok: false,
+            code: "drag_out_of_view",
+            error:
+              "Scroll so the source and target are both on screen, then drag again.",
+          }
+        : base(code);
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", dragBody),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error.code).toBe("drag_out_of_view");
+    expect(page.inputs).toEqual([]);
+    // A blocker that only shows after the press ends the drag with what it
+    // already sent, and names the end it found.
+    page.inputs = [];
+    let pressed = false;
+    page.result = (code: string) => {
+      if (code.includes(')("actionPoint",'))
+        return pressed
+          ? { ok: true, blocked: { blocker: "covered", end: "target" } }
+          : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: 0, key: 0, drag: 0 };
+      return { ok: true };
+    };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mousePressed") pressed = true;
+    };
+    const obscured = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", dragBody),
+    );
+    expect(obscured.status).toBe(409);
+    expect(obscured.error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+      dispatched: true,
+    });
+    expect(obscured.error.retryable).toBeUndefined();
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
+  it("brings both ends into view with a wheel gesture before it presses", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    let looks = 0;
+    page.result = (code: string) => {
+      if (!code.includes(')("actionPoint",')) return base(code);
+      looks += 1;
+      return looks === 1
+        ? {
+            ok: true,
+            scroll: { x: 600, y: 400, deltaX: 0, deltaY: 80, end: "target" },
+          }
+        : { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } };
+    };
+    const response = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    expect(response.status).toBe(200);
+    // The gesture the page asked for goes out first, and the next look is
+    // told how many have gone out.
+    expect(page.inputs[0].parameters).toMatchObject({
+      type: "mouseWheel",
+      x: 600,
+      y: 400,
+      deltaY: 80,
+    });
+    expect(payloads("actionPoint")[1]).toMatchObject({ scrolls: 1 });
+    // Both ends come to rest after the gesture, and both are checked again
+    // before the press.
+    expect(looks).toBe(3);
+    expect(payloads("stableBox")).toHaveLength(4);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
+  });
+
+  it("ends a staying blocker as 504 action_timeout naming the end", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const base = dragPage(() => false);
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? { ok: true, blocked: { blocker: "covered", end: "target" } }
+        : base(code);
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/drag`, "POST", {
+        ...dragBody,
+        timeoutMs: 120,
+      }),
+    );
+    expect(status).toBe(504);
+    expect(error).toMatchObject({
+      code: "action_timeout",
+      message:
+        "drag timed out after 120 ms: Another element covers the target.",
+      awaited: "actionable",
+      blocker: "covered",
+      detail: "target",
+      timeoutMs: 120,
+      retryable: true,
+    });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("waits for a load the drop started before it answers", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mouseReleased")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/drag`, "POST", dragBody);
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const response = await answering;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      drag: "mouse",
+    });
+  });
+
+  it("refuses undeclared and bad drag fields", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = dragPage(() => false);
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/drag`, "POST", body));
+    // A drag presses once and counts no gesture delay, so it declares
+    // neither field.
+    for (const field of ["clickCount", "delayMs"])
+      expect(
+        (await refuse({ ...dragBody, [field]: 1 })).error,
+        field,
+      ).toMatchObject({
+        code: "unknown_field",
+        field,
+        route: "POST /tabs/:id/drag",
+      });
+    for (const [body, field] of [
+      [{ ...dragBody, sourcePosition: { y: 3 } }, "sourcePosition.x"],
+      [{ ...dragBody, targetPosition: { x: 10001, y: 0 } }, "targetPosition.x"],
+      [{ ...dragBody, button: "back" }, "button"],
+      [{ ...dragBody, force: "yes" }, "force"],
+      [{ ...dragBody, timeoutMs: 60001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await refuse(body as Record<string, unknown>);
+      expect(status, field).toBe(400);
+      expect(error, field).toMatchObject({ code: "invalid_field", field });
+    }
+    expect(page.inputs).toEqual([]);
+    // Today's body still drags, and a batch step takes the new fields.
+    expect(
+      (await request(`/tabs/${tab.id}/drag`, "POST", dragBody)).status,
+    ).toBe(200);
+    const batch = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          {
+            type: "drag",
+            ...dragBody,
+            button: "middle",
+            force: true,
+            timeoutMs: 1000,
+          },
+        ],
+      })
+    ).json();
+    expect(batch.ok).toBe(true);
+    expect(batch.results[0].result.drag).toBe("mouse");
+  });
+
   it("clicks a control drawn with no size in the page, without native input, and reports it", async () => {
     const { tab } = await createPage();
     controller.contents.result = (code: string) =>
-      code.includes(')("target",')
+      code.includes(')("actionPoint",')
         ? { ok: true, empty: true, rebound: ["@e1"] }
         : { ok: true };
     const response = await request(`/tabs/${tab.id}/click`, "POST", {
@@ -4407,23 +5287,23 @@ describe("local automation socket", () => {
         (script) =>
           script.code.slice(script.code.lastIndexOf(')("') + 3).split('"')[0],
       ),
-    ).toEqual(["target", "click"]);
+    ).toEqual(["actionPoint", "click"]);
   });
 
   it("reports refs the page moved to a redrawn control for clicks, key presses and drags", async () => {
     const { tab } = await createPage();
     controller.contents.result = (code: string) =>
-      code.includes(')("target",')
-        ? { ok: true, x: 25, y: 45, rebound: ["@e1"] }
-        : code.includes(')("focus",')
-          ? { ok: true, rebound: ["@e2"] }
-          : code.includes(')("drag",')
-            ? {
-                ok: true,
-                from: { x: 10, y: 20 },
-                to: { x: 110, y: 220 },
-                rebound: ["@e3", "@e4"],
-              }
+      code.includes('"kind":"drag"')
+        ? {
+            ok: true,
+            from: { x: 10, y: 20 },
+            to: { x: 110, y: 220 },
+            rebound: ["@e3", "@e4"],
+          }
+        : code.includes(')("actionPoint",')
+          ? { ok: true, x: 25, y: 45, rebound: ["@e1"] }
+          : code.includes(')("focusTarget",')
+            ? { ok: true, rebound: ["@e2"] }
             : code.includes(')("input",')
               ? {
                   ok: true,
@@ -4472,7 +5352,7 @@ describe("local automation socket", () => {
     });
     expect(batch.status).toBe(400);
     const unknown = await request(`/tabs/${tab.id}/actions`, "POST", {
-      actions: [{ type: "hover", ref: "@e1" }],
+      actions: [{ type: "nope" }],
     });
     expect((await unknown.json()).error.message).toContain("drag");
     for (const body of [
@@ -4499,6 +5379,1688 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts.at(-1)!.code).toContain(
       ')("scroll",{"direction":"down","pixels":600,"ref":"@e3"}',
     );
+  });
+
+  // Section 5's field actions over a fake page: each operation answers from
+  // `pageActions`, so a kept value, a missing option or a blocker is driven
+  // from the test.
+  const fieldPage = () => {
+    const page = controller.contents;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 12, y: 34 },
+    };
+    page.pageActions.fillRead = { ok: true, match: "exact", value: "Ada" };
+    page.pageActions.setDirectValue = { ok: true, value: "7" };
+    page.pageActions.selectChoose = { ok: true, values: ["ams"] };
+    page.pageActions.focusTarget = { ok: true };
+    return page;
+  };
+  // Every Input command the tab received, in order. Input.insertText is not
+  // page input, so it is read from the debugger rather than from `inputs`.
+  const commandsOf = (page: FakeContents) =>
+    page.debugger.sent
+      .filter((command) => command.method.startsWith("Input."))
+      .map((command) =>
+        command.method === "Input.insertText"
+          ? `insertText ${command.params.text}`
+          : String(command.params.type),
+      );
+
+  it("fills with trusted insertion and reports its match", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const filled = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "Ada",
+    });
+    expect(filled.status).toBe(200);
+    expect(await filled.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    // The field is prepared, the text is inserted at its caret, and the
+    // result is read back.
+    expect(payloads("fillPrepare")[0]).toEqual({
+      ref: "@e1",
+      value: "Ada",
+      append: false,
+    });
+    expect(payloads("fillRead")[0]).toEqual({
+      ref: "@e1",
+      value: "Ada",
+      append: false,
+      previous: "old",
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    // A secret field reports no value at all, and a long one is cut.
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "",
+      valueHidden: true,
+    };
+    page.pageActions.fillRead = {
+      ok: true,
+      match: "exact",
+      valueHidden: true,
+    };
+    const secret = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "hunter2",
+    });
+    expect(await secret.json()).toEqual({
+      ok: true,
+      match: "exact",
+      valueHidden: true,
+    });
+    page.pageActions.fillPrepare = { ok: true, mode: "insert", previous: "" };
+    page.pageActions.fillRead = {
+      ok: true,
+      match: "transformed",
+      value: "x".repeat(300),
+    };
+    const long = await (
+      await request(`/tabs/${tab.id}/fill`, "POST", { ref: "@e1", value: "x" })
+    ).json();
+    expect(long).toEqual({
+      ok: true,
+      match: "transformed",
+      value: "x".repeat(200),
+    });
+    // An empty value is deleted with a key that carries no modifier, so no
+    // clipboard chord can be formed from it.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "delete",
+      previous: "old",
+    };
+    page.pageActions.fillRead = { ok: true, match: "exact", value: "" };
+    const cleared = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "",
+    });
+    expect(await cleared.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "",
+    });
+    expect(
+      page.debugger.sent
+        .filter((command) => command.method.startsWith("Input."))
+        .map((command) => [
+          command.method,
+          command.params.type,
+          command.params.key,
+          command.params.modifiers,
+        ]),
+    ).toEqual([
+      ["Input.dispatchKeyEvent", "rawKeyDown", "Delete", 0],
+      ["Input.dispatchKeyEvent", "keyUp", "Delete", 0],
+    ]);
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent filled a field",
+    );
+    // A field that leaves the page before the read can classify it ends on
+    // its blocker rather than answering without a match, and the text that
+    // already went out is not sent again.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = { ok: true, mode: "insert", previous: "" };
+    page.pageActions.fillRead = { ok: true, blocked: { blocker: "detached" } };
+    const gone = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+        timeoutMs: 120,
+      }),
+    );
+    expect(gone.status).toBe(504);
+    expect(gone.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "detached",
+      dispatched: true,
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+  });
+
+  it("retries a field that kept its old value once, then gives up", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    page.pageActions.fillRead = { ok: true, match: "unchanged", value: "old" };
+    const { status, error } = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+      }),
+    );
+    expect(status).toBe(422);
+    expect(error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+      dispatched: true,
+    });
+    expect(error.retryable).toBeUndefined();
+    // One insertion, then one real click at the field, then one more round.
+    expect(commandsOf(page)).toEqual([
+      "insertText Ada",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+      "insertText Ada",
+    ]);
+    expect(payloads("fillPrepare")).toHaveLength(2);
+    expect(payloads("fillRead")).toHaveLength(2);
+    // A point another control would take is not reported, so there is
+    // nothing to click and the fill ends after the first round.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+    };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Ada",
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    // A page that accepts the value on the second round answers its match.
+    page.debugger.sent.length = 0;
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 12, y: 34 },
+    };
+    let reads = 0;
+    page.pageActions.fillRead = () => {
+      reads += 1;
+      return reads === 1
+        ? { ok: true, match: "unchanged", value: "old" }
+        : { ok: true, match: "exact", value: "Ada" };
+    };
+    const second = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "Ada",
+    });
+    expect(await second.json()).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    expect(commandsOf(page)).toEqual([
+      "insertText Ada",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+      "insertText Ada",
+    ]);
+  });
+
+  it("sets a date, range or color value directly instead of typing", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "direct",
+      previous: "#336699",
+    };
+    page.pageActions.setDirectValue = { ok: true, value: "#abcdef" };
+    const tinted = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e1",
+      value: "#ABCDEF",
+    });
+    expect(tinted.status).toBe(200);
+    // The field answered in its own case, which the match names.
+    expect(await tinted.json()).toEqual({
+      ok: true,
+      match: "transformed",
+      value: "#abcdef",
+    });
+    expect(payloads("setDirectValue")[0]).toEqual({
+      ref: "@e1",
+      value: "#ABCDEF",
+    });
+    // Nothing was typed, and the value was never read back.
+    expect(commandsOf(page)).toEqual([]);
+    expect(payloads("fillRead")).toEqual([]);
+    // A single select keeps today's exact value fill.
+    page.pageActions.fillPrepare = { ok: true, mode: "direct", previous: "" };
+    page.pageActions.setDirectValue = { ok: true, value: "ams" };
+    expect(
+      await (
+        await request(`/tabs/${tab.id}/fill`, "POST", {
+          ref: "@e1",
+          value: "ams",
+        })
+      ).json(),
+    ).toEqual({ ok: true, match: "exact", value: "ams" });
+    page.pageActions.setDirectValue = {
+      ok: false,
+      code: "invalid_value",
+      error: "The value is not valid for this input type.",
+    };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/fill`, "POST", {
+        ref: "@e1",
+        value: "Amsterdam",
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error.code).toBe("invalid_value");
+  });
+
+  it("selects options and reports the values the page holds", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const chosen = await request(`/tabs/${tab.id}/select`, "POST", {
+      ref: "@e1",
+      values: ["ams"],
+    });
+    expect(chosen.status).toBe(200);
+    expect(await chosen.json()).toEqual({ ok: true, values: ["ams"] });
+    expect(payloads("selectChoose")[0]).toEqual({
+      ref: "@e1",
+      values: ["ams"],
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // Objects and an empty list reach the page as they were written.
+    page.pageActions.selectChoose = { ok: true, values: [] };
+    expect(
+      (
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          selector: "#city",
+          values: [{ label: "Amsterdam", index: 1 }],
+        })
+      ).status,
+    ).toBe(200);
+    expect(payloads("selectChoose")[1].values).toEqual([
+      { label: "Amsterdam", index: 1 },
+    ]);
+    expect(
+      await (
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          ref: "@e1",
+          values: [],
+        })
+      ).json(),
+    ).toEqual({ ok: true, values: [] });
+    // A missing option is waited out, then named with the page's options.
+    let looks = 0;
+    page.pageActions.selectChoose = () => {
+      looks += 1;
+      return {
+        ok: true,
+        blocked: { blocker: "option_missing", detail: "Blue" },
+        options: ["Red", "Green"],
+      };
+    };
+    const missing = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["Blue"],
+        timeoutMs: 120,
+      }),
+    );
+    expect(missing.status).toBe(504);
+    expect(missing.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "option_missing",
+      detail: "Red, Green",
+      timeoutMs: 120,
+    });
+    expect(looks).toBeGreaterThan(1);
+    // The twenty options the page reports are cut to 200 characters.
+    page.pageActions.selectChoose = {
+      ok: true,
+      blocked: { blocker: "option_missing", detail: "Blue" },
+      options: Array.from(
+        { length: 20 },
+        (_, index) => `Shade number ${index}`,
+      ),
+    };
+    const long = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["Blue"],
+        timeoutMs: 0,
+      }),
+    );
+    expect(long.status).toBe(504);
+    expect(long.error.detail).toHaveLength(200);
+    expect(long.error.detail).toMatch(/^Shade number 0, Shade number 1, /);
+    // A single select given two choices is the page's own refusal.
+    page.pageActions.selectChoose = {
+      ok: false,
+      code: "invalid_field",
+      error: "A single select takes one choice.",
+      fields: { field: "values" },
+    };
+    const two = await failure(
+      await request(`/tabs/${tab.id}/select`, "POST", {
+        ref: "@e1",
+        values: ["a", "b"],
+      }),
+    );
+    expect(two.status).toBe(400);
+    expect(two.error).toMatchObject({ code: "invalid_field", field: "values" });
+    // A list too long, or a choice of the wrong shape, costs no page work.
+    const scripts = page.scripts.length;
+    for (const values of [
+      Array.from({ length: 101 }, (_, index) => `v${index}`),
+      "ams",
+      [1],
+      [{}],
+      [{ value: "a", nope: true }],
+      [{ index: -1 }],
+    ]) {
+      const bad = await failure(
+        await request(`/tabs/${tab.id}/select`, "POST", {
+          ref: "@e1",
+          values,
+        }),
+      );
+      expect(bad.status, JSON.stringify(values)).toBe(400);
+      expect(bad.error, JSON.stringify(values)).toMatchObject({
+        code: "invalid_field",
+        field: "values",
+      });
+    }
+    expect(page.scripts).toHaveLength(scripts);
+    // values is required.
+    expect(
+      (await request(`/tabs/${tab.id}/select`, "POST", { ref: "@e1" })).status,
+    ).toBe(400);
+  });
+
+  it("focuses with retargeting and waits for the focus to stay", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const focused = await request(`/tabs/${tab.id}/focus`, "POST", {
+      ref: "@e1",
+    });
+    expect(focused.status).toBe(200);
+    expect(await focused.json()).toEqual({ ok: true });
+    expect(payloads("focusTarget")[0]).toEqual({ ref: "@e1" });
+    expect(commandsOf(page)).toEqual([]);
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent focused an element",
+    );
+    // A field whose own handler moves focus away is waited out.
+    page.pageActions.focusTarget = {
+      ok: true,
+      blocked: { blocker: "not_focused" },
+    };
+    const moved = await failure(
+      await request(`/tabs/${tab.id}/focus`, "POST", {
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(moved.status).toBe(504);
+    expect(moved.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "not_focused",
+      timeoutMs: 120,
+    });
+    // Several editable descendants are reported at once, with the
+    // candidates to choose between.
+    page.pageActions.focusTarget = {
+      ok: false,
+      code: "ambiguous_field",
+      error: "Retargeting found several fields. Name the one to use.",
+      fields: {
+        candidates: [
+          { ref: "@e2", tag: "input", role: "textbox", name: "One" },
+          { ref: "@e3", tag: "input", role: "textbox", name: "Two" },
+        ],
+      },
+    };
+    const many = await failure(
+      await request(`/tabs/${tab.id}/focus`, "POST", { ref: "@e1" }),
+    );
+    expect(many.status).toBe(422);
+    expect(many.error.code).toBe("ambiguous_field");
+    expect(many.error.candidates).toHaveLength(2);
+  });
+
+  it("never scrolls or forces a field, select or focus", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    for (const [route, body] of [
+      ["fill", { ref: "@e1", value: "Ada", force: true }],
+      ["select", { ref: "@e1", values: ["a"], force: true }],
+      ["focus", { ref: "@e1", force: true }],
+    ] as const) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/${route}`, "POST", body),
+      );
+      expect(status, route).toBe(400);
+      expect(error, route).toMatchObject({
+        code: "unknown_field",
+        field: "force",
+        route: `POST /tabs/:id/${route}`,
+      });
+    }
+    // The page is never asked for a point or a scroll gesture, so a field
+    // off screen is still filled and no wheel event is sent.
+    for (const [route, body] of [
+      ["fill", { ref: "@e1", value: "Ada" }],
+      ["select", { ref: "@e1", values: ["ams"] }],
+      ["focus", { ref: "@e1" }],
+    ] as const)
+      expect(
+        (await request(`/tabs/${tab.id}/${route}`, "POST", body)).status,
+        route,
+      ).toBe(200);
+    expect(payloads("actionPoint")).toEqual([]);
+    expect(payloads("scrollRequest")).toEqual([]);
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mouseWheel"),
+    ).toEqual([]);
+  });
+
+  it("runs select and the fields' new options as batch steps", async () => {
+    const { tab } = await createPage();
+    const page = fieldPage();
+    const results = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "select", ref: "@e1", values: ["ams"], timeoutMs: 1000 },
+          { type: "fill", ref: "@e2", value: "Ada", append: true },
+        ],
+      })
+    ).json();
+    expect(results.ok).toBe(true);
+    expect(results.results.map((entry: any) => entry.type)).toEqual([
+      "select",
+      "fill",
+    ]);
+    expect(results.results[0].result).toEqual({ ok: true, values: ["ams"] });
+    expect(results.results[1].result).toEqual({
+      ok: true,
+      match: "exact",
+      value: "Ada",
+    });
+    expect(payloads("fillPrepare")[0]).toEqual({
+      ref: "@e2",
+      value: "Ada",
+      append: true,
+    });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    expect(controller.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining(["Agent chose an option"]),
+    );
+    // A step type nothing declares names select among the ones that work.
+    const { error } = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [{ type: "nope" }],
+      }),
+    );
+    expect(error.message).toContain("fill, select, press");
+  });
+
+  // Section 5's key actions over a fake page: the focused control's kind and
+  // the field path a press focuses through come from `pageActions`.
+  const keyPage = () => {
+    const page = controller.contents;
+    page.result = { ok: true };
+    return page;
+  };
+  // Every key event the tab received, with the mask and the commands it
+  // carried.
+  const keysOf = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchKeyEvent")
+      .map((input) => [
+        input.parameters.type,
+        input.parameters.key,
+        input.parameters.code,
+        input.parameters.modifiers,
+        ...(input.parameters.commands ? [input.parameters.commands] : []),
+      ]);
+  // The 14 keys press took before chords: what they sent then, and still send.
+  const TODAYS_KEYS = {
+    Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
+    Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+    Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+    Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+    Delete: { key: "Delete", code: "Delete", keyCode: 46 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+    Home: { key: "Home", code: "Home", keyCode: 36 },
+    End: { key: "End", code: "End", keyCode: 35 },
+    PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
+    PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+    Space: { key: " ", code: "Space", keyCode: 32, text: " " },
+  } as Record<
+    string,
+    { key: string; code: string; keyCode: number; text?: string }
+  >;
+
+  it("presses a chord and releases it in reverse", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const times: number[] = [];
+    page.afterInput = () => times.push(Date.now());
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Shift+Meta+KeyZ",
+      delayMs: 120,
+    });
+    expect(pressed.status).toBe(200);
+    expect(await pressed.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+    });
+    // The modifiers go down in order, each event carrying the mask as it is
+    // at that moment, and come up in reverse. Shift picks the shifted key.
+    const mac = process.platform === "darwin";
+    expect(keysOf(page)).toEqual([
+      ["keyDown", "Shift", "ShiftLeft", 8],
+      ["keyDown", "Meta", "MetaLeft", 12],
+      ["rawKeyDown", "Z", "KeyZ", 12, ...(mac ? [["redo"]] : [])],
+      ["keyUp", "Z", "KeyZ", 12],
+      ["keyUp", "Meta", "MetaLeft", 8],
+      ["keyUp", "Shift", "ShiftLeft", 0],
+    ]);
+    // The delay sits between the key's own down and its up, nowhere else.
+    const gaps = times.slice(1).map((at, index) => at - times[index]);
+    expect(gaps[2]).toBeGreaterThanOrEqual(120);
+    for (const index of [0, 1, 3, 4])
+      expect(gaps[index], `gap ${index}`).toBeLessThan(100);
+    // Today's 14 keys send the key, code, virtual key code and text they
+    // send now, with no modifier of their own.
+    for (const [name, spec] of Object.entries(TODAYS_KEYS)) {
+      page.inputs = [];
+      expect(
+        (await request(`/tabs/${tab.id}/press`, "POST", { key: name })).status,
+        name,
+      ).toBe(200);
+      expect(
+        page.inputs.map((input) => [
+          input.parameters.type,
+          input.parameters.key,
+          input.parameters.code,
+          input.parameters.windowsVirtualKeyCode,
+          input.parameters.nativeVirtualKeyCode,
+          input.parameters.text,
+          input.parameters.modifiers,
+        ]),
+        name,
+      ).toEqual([
+        [
+          spec.text ? "keyDown" : "rawKeyDown",
+          spec.key,
+          spec.code,
+          spec.keyCode,
+          spec.keyCode,
+          spec.text,
+          0,
+        ],
+        ["keyUp", spec.key, spec.code, spec.keyCode, spec.keyCode, undefined, 0],
+      ]);
+    }
+    // On macOS the standard editing commands ride along with the key.
+    if (mac) {
+      page.inputs = [];
+      await request(`/tabs/${tab.id}/press`, "POST", { key: "Backspace" });
+      expect(page.inputs[0].parameters.commands).toEqual(["deleteBackward"]);
+    }
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent pressed a key",
+    );
+  });
+
+  it("focuses an optional target first and reports its rebound", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    // A press with no target waits for nothing, so its budget counts no
+    // timeout at all.
+    expect(
+      ROUTES.find((item) => routeKey(item) === "POST /tabs/:id/press")!.budget,
+    ).toEqual({ compute: "pressBudget", maxMs: 80100 });
+    expect(COMPUTE.pressBudget({ key: "Enter" })).toBe(15100);
+    expect(COMPUTE.pressBudget({ key: "Enter", ref: "@e1" })).toBe(18100);
+    page.pageActions.focusTarget = { ok: true, rebound: ["@e2"] };
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+      selector: "role=textbox",
+    });
+    expect(pressed.status).toBe(200);
+    expect(await pressed.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      rebound: ["@e2"],
+    });
+    // The field path focuses it, counted at the enabled level, before the key.
+    expect(payloads("focusTarget")[0].query).toMatchObject({
+      level: "enabled",
+      mode: "strict",
+    });
+    expect(keysOf(page).map((event) => event[0])).toEqual([
+      "keyDown",
+      "keyUp",
+    ]);
+    // A field that does not take focus yet is waited out, then pressed.
+    page.inputs = [];
+    let looks = 0;
+    page.pageActions.focusTarget = () =>
+      ++looks <= 2 ? { ok: true, blocked: { blocker: "not_focused" } } : { ok: true };
+    const waited = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+      ref: "@e1",
+      timeoutMs: 2000,
+    });
+    expect(waited.status).toBe(200);
+    expect(looks).toBe(3);
+    expect(keysOf(page)).toHaveLength(2);
+    // A blocker that stays ends the press the way focus ends, with no key.
+    page.inputs = [];
+    page.pageActions.focusTarget = {
+      ok: true,
+      blocked: { blocker: "not_focused" },
+    };
+    const stuck = await failure(
+      await request(`/tabs/${tab.id}/press`, "POST", {
+        key: "Enter",
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(stuck.status).toBe(504);
+    expect(stuck.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "not_focused",
+    });
+    expect(page.inputs).toEqual([]);
+    // Retargeting answers exactly as the focus route does.
+    page.pageActions.focusTarget = {
+      ok: false,
+      code: "ambiguous_field",
+      error: "Several fields are inside this element.",
+      fields: { candidates: [{ ref: "@e1" }, { ref: "@e2" }] },
+    };
+    const several = await failure(
+      await request(`/tabs/${tab.id}/press`, "POST", {
+        key: "Enter",
+        ref: "@e1",
+      }),
+    );
+    expect(several.status).toBe(422);
+    expect(several.error).toMatchObject({ code: "ambiguous_field" });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("refuses a clipboard chord and a picker key before any key is sent", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/press`, "POST", body));
+    const clipboard = await refuse({ key: "ControlOrMeta+KeyV" });
+    expect(clipboard.status).toBe(403);
+    expect(clipboard.error.code).toBe("clipboard_blocked");
+    expect(page.inputs).toEqual([]);
+    // A held modifier makes the same chord, whichever route sends the key.
+    expect(
+      (
+        await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+          key: "ControlOrMeta",
+        })
+      ).status,
+    ).toBe(200);
+    page.inputs = [];
+    for (const [route, body] of [
+      ["press", { key: "KeyV" }],
+      ["keyboard/down", { key: "KeyV" }],
+      ["keyboard/type", { text: "av" }],
+    ] as const) {
+      const refused = await failure(
+        await request(`/tabs/${tab.id}/${route}`, "POST", body),
+      );
+      expect(refused.status, route).toBe(403);
+      expect(refused.error.code, route).toBe("clipboard_blocked");
+    }
+    expect(page.inputs).toEqual([]);
+    expect(
+      (
+        await request(`/tabs/${tab.id}/keyboard/up`, "POST", {
+          key: "ControlOrMeta",
+        })
+      ).status,
+    ).toBe(200);
+    page.inputs = [];
+    // A dropdown select with focus answers for the keys that would open it.
+    page.pageActions.focusedKind = { ok: true, kind: "select" };
+    const picker = await refuse({ key: "Space" });
+    expect(picker.status).toBe(403);
+    expect(picker.error).toMatchObject({
+      code: "native_popup_blocked",
+      use: "selectOption",
+    });
+    expect(page.inputs).toEqual([]);
+    // Every other key still reaches the same select.
+    expect(
+      (await request(`/tabs/${tab.id}/press`, "POST", { key: "KeyA" })).status,
+    ).toBe(200);
+    expect(keysOf(page)).toHaveLength(2);
+    // Keys never reach a frame agents may not touch.
+    page.inputs = [];
+    page.pageActions.focusedKind = {
+      ok: true,
+      kind: "other",
+      blockedFrame: true,
+    };
+    const frame = await refuse({ key: "Enter" });
+    expect(frame.status).toBe(403);
+    expect(frame.error.code).toBe("input_target_blocked");
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("holds and releases keys through keyboard/down and keyboard/up", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const down = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Shift",
+    });
+    expect(down.status).toBe(200);
+    expect(await down.json()).toEqual({
+      ok: true,
+      input: { x: 0, y: 0, buttons: 0, keys: ["Shift"], modifiers: 8 },
+    });
+    // A key that types nothing goes down raw, as it does in a chord.
+    expect(keysOf(page)).toEqual([["rawKeyDown", "Shift", "ShiftLeft", 8]]);
+    // A click while the key is held carries the modifier a person's would.
+    page.inputs = [];
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(page.inputs.map((input) => input.parameters.modifiers)).toEqual([
+      8, 8, 8,
+    ]);
+    // The same key again repeats it, and the position the click left stays.
+    page.inputs = [];
+    const again = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Shift",
+    });
+    expect((await again.json()).input).toEqual({
+      x: 25,
+      y: 45,
+      buttons: 0,
+      keys: ["Shift"],
+      modifiers: 8,
+    });
+    expect(page.inputs[0].parameters.autoRepeat).toBe(true);
+    // The release carries the mask as it is once the key is up.
+    page.inputs = [];
+    const up = await request(`/tabs/${tab.id}/keyboard/up`, "POST", {
+      key: "Shift",
+    });
+    expect(await up.json()).toEqual({
+      ok: true,
+      input: { x: 25, y: 45, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(keysOf(page)).toEqual([["keyUp", "Shift", "ShiftLeft", 0]]);
+    // A key nothing holds cannot be released, so the stored state cannot
+    // drift from the page's.
+    page.inputs = [];
+    const loose = await failure(
+      await request(`/tabs/${tab.id}/keyboard/up`, "POST", { key: "Shift" }),
+    );
+    expect(loose.status).toBe(400);
+    expect(loose.error).toMatchObject({ code: "invalid_field", field: "key" });
+    expect(String(loose.error.message)).toContain("not held");
+    expect(page.inputs).toEqual([]);
+    // One key, not a chord, and only keys this layout names.
+    for (const key of ["Shift+KeyA", "Cmd"])
+      expect(
+        (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key }))
+          .status,
+        key,
+      ).toBe(400);
+    // The raw routes name themselves once for a stroke of requests.
+    expect(
+      controller.activity.filter(
+        (entry) => entry.message === "Agent used the keyboard",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("types text and inserts text into the focused editable", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const times: number[] = [];
+    page.afterInput = () => times.push(Date.now());
+    const typed = await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+      text: "aB\né",
+      delayMs: 20,
+    });
+    expect(typed.status).toBe(200);
+    expect(await typed.json()).toEqual({
+      ok: true,
+      input: { x: 0, y: 0, buttons: 0, keys: [], modifiers: 0 },
+    });
+    // What the US layout types goes out as key events, a newline as Enter,
+    // and anything else as inserted text.
+    expect(keysOf(page)).toEqual([
+      ["keyDown", "a", "KeyA", 0],
+      ["keyUp", "a", "KeyA", 0],
+      ["keyDown", "B", "KeyB", 8],
+      ["keyUp", "B", "KeyB", 8],
+      ["keyDown", "Enter", "Enter", 0],
+      ["keyUp", "Enter", "Enter", 0],
+    ]);
+    expect(commandsOf(page).at(-1)).toBe("insertText é");
+    // The delay sits between characters, not inside one.
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(20);
+    expect(times[1] - times[0]).toBeLessThan(20);
+    // The gaps are counted before the lane, so a long text with a long delay
+    // cannot outrun the route's budget.
+    const slow = await failure(
+      await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+        text: "x".repeat(100),
+        delayMs: 1000,
+      }),
+    );
+    expect(slow.status).toBe(400);
+    expect(slow.error).toMatchObject({
+      code: "invalid_field",
+      field: "delayMs",
+    });
+    expect(COMPUTE.typeBudget({ text: "x".repeat(60), delayMs: 1000 })).toBe(
+      70000,
+    );
+    // Inserted text reaches a focused editable, and nowhere else.
+    page.debugger.sent.length = 0;
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    const inserted = await request(
+      `/tabs/${tab.id}/keyboard/insert-text`,
+      "POST",
+      { text: "Ada" },
+    );
+    expect(inserted.status).toBe(200);
+    expect(await inserted.json()).toEqual({ ok: true });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    page.debugger.sent.length = 0;
+    page.pageActions.focusedKind = { ok: true, kind: "none" };
+    const nowhere = await failure(
+      await request(`/tabs/${tab.id}/keyboard/insert-text`, "POST", {
+        text: "Ada",
+      }),
+    );
+    expect(nowhere.status).toBe(422);
+    expect(nowhere.error).toMatchObject({
+      code: "not_editable",
+      reason: "none",
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // Each route's text limit is the schema's.
+    for (const [path, text] of [
+      ["type", "x".repeat(2001)],
+      ["insert-text", "x".repeat(16385)],
+    ] as const) {
+      const long = await failure(
+        await request(`/tabs/${tab.id}/keyboard/${path}`, "POST", { text }),
+      );
+      expect(long.status, path).toBe(400);
+      expect(long.error, path).toMatchObject({
+        code: "invalid_field",
+        field: "text",
+      });
+    }
+  });
+
+  it("adds no settle or load wait to the keyboard routes, while press waits out a load", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    // Each raw route declares the plain 10 s budget, follows its page and
+    // takes no label.
+    for (const path of [
+      "keyboard/down",
+      "keyboard/up",
+      "keyboard/type",
+      "keyboard/insert-text",
+    ]) {
+      const route = ROUTES.find(
+        (item) => routeKey(item) === `POST /tabs/:id/${path}`,
+      )!;
+      expect(route.budget, path).toEqual(
+        path === "keyboard/type"
+          ? { compute: "typeBudget", maxMs: 70000 }
+          : { compute: "rawBudget", maxMs: 10000 },
+      );
+      expect(route.lane, path).toBe("space");
+      expect(route.follow, path).toBe(true);
+      expect(route.label, path).toBe(false);
+      expect(route.since, path).toBe(4);
+      expect(route.limit, path).toBe(65536);
+    }
+    // A key that starts a load answers at once: the raw routes wait for
+    // neither the page's handlers nor the load.
+    page.afterInput = () => {
+      page.isLoadingMainFrame = () => true;
+    };
+    const started = Date.now();
+    const down = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Enter",
+    });
+    expect(down.status).toBe(200);
+    expect((await down.json()).loading).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(page.listenerCount("did-stop-loading")).toBe(0);
+    // Nor is the next request held by the load the key started.
+    page.afterInput = undefined;
+    page.isLoadingMainFrame = () => false;
+    expect(
+      (await request(`/tabs/${tab.id}/keyboard/up`, "POST", { key: "Enter" }))
+        .status,
+    ).toBe(200);
+    // press settles and then waits out the load its key started.
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "keyUp")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const pressed = await answering;
+    expect(pressed.status).toBe(200);
+    expect((await pressed.json()).loading).toBeUndefined();
+  });
+
+  it("reports who took the paste", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const paste = (body: Record<string, unknown>) =>
+      request(`/tabs/${tab.id}/keyboard/paste`, "POST", body);
+    const both = { text: "from the agent", html: "<b>from the agent</b>" };
+    // A handler that cancelled the event took the content, so Kamapathy
+    // inserts nothing after it.
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const took = await paste(both);
+    expect(took.status).toBe(200);
+    expect(await took.json()).toEqual({ ok: true, handled: "page" });
+    expect(commandsOf(page)).toEqual([]);
+    // Both flavours reach the page exactly as the route was given them.
+    expect(payloads("pasteDispatch")).toEqual([both]);
+    // A page that ignored the event leaves the insertion to Kamapathy, which
+    // puts in the plain text and never the HTML.
+    page.debugger.sent.length = 0;
+    page.pageActions.pasteDispatch = { ok: true, handled: "none" };
+    const inserted = await paste(both);
+    expect(inserted.status).toBe(200);
+    expect(await inserted.json()).toEqual({ ok: true, handled: "text" });
+    expect(commandsOf(page)).toEqual(["insertText from the agent"]);
+    // Nothing editable has focus and no handler took the event.
+    page.debugger.sent.length = 0;
+    const refuse = (reason: string) => {
+      page.pageActions.pasteDispatch = {
+        ok: false,
+        code: "not_editable",
+        error: "Nothing that takes typing has focus.",
+        fields: { reason },
+      };
+    };
+    refuse("none");
+    const nowhere = await failure(await paste({ text: "from the agent" }));
+    expect(nowhere.status).toBe(422);
+    expect(nowhere.error).toMatchObject({
+      code: "not_editable",
+      reason: "none",
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // A frame holding focus that Kamapathy cannot read is the guards' own
+    // refusal, as it is for every other key.
+    refuse("frame");
+    const frame = await failure(await paste({ text: "from the agent" }));
+    expect(frame.status).toBe(403);
+    expect(frame.error.code).toBe("input_target_blocked");
+    expect(frame.error.reason).toBeUndefined();
+    expect(commandsOf(page)).toEqual([]);
+    // Nothing on this path reaches the system clipboard.
+    expect(
+      page.debugger.sent.filter((command) => /clipboard/i.test(command.method)),
+    ).toEqual([]);
+  });
+
+  it("accepts a 192 KiB keyboard/paste body while every other route keeps 64 KiB", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/keyboard/paste",
+    )!;
+    expect(route.limit).toBe(192 * 1024);
+    expect(route.budget).toEqual({ compute: "rawBudget", maxMs: 10000 });
+    expect(route.follow).toBe(true);
+    expect(route.since).toBe(4);
+    // What the widest paste weighs on the wire: a character JSON escapes
+    // costs six bytes, which is why this one route takes three times the
+    // ordinary body.
+    const body = {
+      text: "\u0001".repeat(16384),
+      html: "\u0001".repeat(15000),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(body));
+    expect(bytes).toBeGreaterThan(180 * 1024);
+    const wide = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", body);
+    expect(wide.status).toBe(200);
+    expect(await wide.json()).toEqual({ ok: true, handled: "page" });
+    // A larger one is refused by its declared size, before any body is read.
+    expect(
+      await declaredSize(`/tabs/${tab.id}/keyboard/paste`, 200 * 1024),
+    ).toBe(413);
+    // Every other route keeps the ordinary 64 KiB.
+    expect(await declaredSize(`/tabs/${tab.id}/click`, 70 * 1024)).toBe(413);
+    expect(
+      await declaredSize(`/tabs/${tab.id}/keyboard/insert-text`, 70 * 1024),
+    ).toBe(413);
+  });
+
+  it("refuses bad paste bodies", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const refused = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/keyboard/paste`, "POST", body));
+    // Empty text means something only beside html.
+    const empty = await refused({ text: "" });
+    expect(empty.status).toBe(400);
+    expect(empty.error).toMatchObject({ code: "invalid_field", field: "text" });
+    expect((await refused({ text: 7 })).error.code).toBe("invalid_field");
+    for (const body of [
+      { text: "x".repeat(16385) },
+      { text: "x", html: "x".repeat(32769) },
+    ]) {
+      const long = await refused(body);
+      expect(long.status).toBe(400);
+      expect(long.error.code).toBe("invalid_field");
+    }
+    const unknown = await refused({ text: "x", flavour: "text/rtf" });
+    expect(unknown.status).toBe(400);
+    expect(unknown.error).toMatchObject({
+      code: "unknown_field",
+      field: "flavour",
+      allowed: ["text", "html"],
+    });
+    // Nothing was sent to the page for any of them.
+    expect(page.scripts).toEqual([]);
+    // html alone carries an empty text, which the page is offered as it is.
+    const only = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", {
+      text: "",
+      html: "<b>from the agent</b>",
+    });
+    expect(only.status).toBe(200);
+    expect(payloads("pasteDispatch")).toEqual([
+      { text: "", html: "<b>from the agent</b>" },
+    ]);
+  });
+
+  // Section 5's raw mouse routes over a fake page: nothing resolves a
+  // target, so the page is asked only for its viewport and its counters.
+  const mousePage = () => {
+    const page = controller.contents;
+    page.result = { ok: true };
+    return page;
+  };
+  // Every mouse event the tab received, with the point, button, count and
+  // mask it carried.
+  const mouseOf = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => [
+        input.parameters.type,
+        input.parameters.x,
+        input.parameters.y,
+        input.parameters.button,
+        input.parameters.buttons,
+        input.parameters.clickCount,
+        input.parameters.modifiers,
+      ]);
+
+  it("moves, presses and releases the mouse and reports the state", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    const moved = await request(`/tabs/${tab.id}/mouse/move`, "POST", {
+      x: 40,
+      y: 60,
+      steps: 4,
+    });
+    expect(moved.status).toBe(200);
+    expect(await moved.json()).toEqual({
+      ok: true,
+      input: { x: 40, y: 60, buttons: 0, keys: [], modifiers: 0 },
+    });
+    // Four events from the stored position, evenly spaced, the last exactly
+    // on target.
+    expect(mouseOf(page)).toEqual([
+      ["mouseMoved", 10, 15, "none", 0, undefined, 0],
+      ["mouseMoved", 20, 30, "none", 0, undefined, 0],
+      ["mouseMoved", 30, 45, "none", 0, undefined, 0],
+      ["mouseMoved", 40, 60, "none", 0, undefined, 0],
+    ]);
+    // A press and a release act where the move left the pointer.
+    page.inputs = [];
+    const down = await request(`/tabs/${tab.id}/mouse/down`, "POST", {});
+    expect(down.status).toBe(200);
+    expect(await down.json()).toEqual({
+      ok: true,
+      input: { x: 40, y: 60, buttons: 1, keys: [], modifiers: 0 },
+    });
+    expect(mouseOf(page)).toEqual([
+      ["mousePressed", 40, 60, "left", 1, 1, 0],
+    ]);
+    page.inputs = [];
+    const up = await request(`/tabs/${tab.id}/mouse/up`, "POST", {});
+    expect(await up.json()).toEqual({
+      ok: true,
+      input: { x: 40, y: 60, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(mouseOf(page)).toEqual([
+      ["mouseReleased", 40, 60, "left", 0, 1, 0],
+    ]);
+    // A button the tab does not hold cannot be released, so the stored
+    // state and the page's never drift apart.
+    page.inputs = [];
+    const loose = await failure(
+      await request(`/tabs/${tab.id}/mouse/up`, "POST", { button: "right" }),
+    );
+    expect(loose.status).toBe(400);
+    expect(loose.error).toMatchObject({
+      code: "invalid_field",
+      field: "button",
+    });
+    expect(String(loose.error.message)).toContain("not held");
+    expect(page.inputs).toEqual([]);
+    // A held key travels with the press, as a person's keyboard would make
+    // it, and the state names both.
+    expect(
+      (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key: "Shift" }))
+        .status,
+    ).toBe(200);
+    page.inputs = [];
+    const shifted = await request(`/tabs/${tab.id}/mouse/down`, "POST", {
+      button: "middle",
+      clickCount: 2,
+    });
+    expect(await shifted.json()).toEqual({
+      ok: true,
+      input: { x: 40, y: 60, buttons: 4, keys: ["Shift"], modifiers: 8 },
+    });
+    expect(mouseOf(page)).toEqual([
+      ["mousePressed", 40, 60, "middle", 4, 2, 8],
+    ]);
+    // Each raw mouse route declares the plain 10 s budget, follows its page
+    // and takes no label.
+    for (const path of ["mouse/move", "mouse/down", "mouse/up"]) {
+      const route = ROUTES.find(
+        (item) => routeKey(item) === `POST /tabs/:id/${path}`,
+      )!;
+      expect(route.budget, path).toEqual({
+        compute: "rawBudget",
+        maxMs: 10000,
+      });
+      expect(route.lane, path).toBe("space");
+      expect(route.follow, path).toBe(true);
+      expect(route.label, path).toBe(false);
+      expect(route.since, path).toBe(4);
+      expect(route.limit, path).toBe(65536);
+    }
+    // The fields each route declares, and the values it accepts.
+    for (const [path, body, field] of [
+      ["mouse/move", { x: 10 }, "y"],
+      ["mouse/move", { x: 10, y: 10, steps: 101 }, "steps"],
+      ["mouse/move", { x: 10, y: 10, button: "left" }, "button"],
+      ["mouse/down", { clickCount: 4 }, "clickCount"],
+      ["mouse/down", { button: "back" }, "button"],
+      ["mouse/up", { steps: 2 }, "steps"],
+    ] as const) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", body),
+      );
+      expect(status, field).toBe(400);
+      expect(error, field).toMatchObject({ field });
+    }
+  });
+
+  it("refuses a point outside the viewport", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    for (const path of ["mouse/move", "mouse/click"]) {
+      const refused = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", { x: 1300, y: 100 }),
+      );
+      expect(refused.status, path).toBe(422);
+      expect(refused.error, path).toMatchObject({
+        code: "point_outside_viewport",
+        width: 1200,
+        height: 800,
+      });
+      expect(page.inputs, path).toEqual([]);
+    }
+    // The bound is the page's own viewport, so a tab that was never shown
+    // answers its content area and nothing here assumes a size.
+    page.pageActions.viewport = { ok: true, width: 600, height: 400, zoom: 1 };
+    const smaller = await failure(
+      await request(`/tabs/${tab.id}/mouse/move`, "POST", { x: 700, y: 100 }),
+    );
+    expect(smaller.error).toMatchObject({
+      code: "point_outside_viewport",
+      width: 600,
+      height: 400,
+    });
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/move`, "POST", {
+          x: 600,
+          y: 400,
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("clicks at a point with the settle and the load wait", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    const started = Date.now();
+    const click = await request(`/tabs/${tab.id}/mouse/click`, "POST", {
+      x: 80,
+      y: 120,
+      button: "right",
+      clickCount: 2,
+      delayMs: 20,
+    });
+    expect(click.status).toBe(200);
+    expect(await click.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      input: { x: 80, y: 120, buttons: 0, keys: [], modifiers: 0 },
+    });
+    // One move, then a press and a release per click, with a delay in each
+    // of the gesture's three gaps and the 100 ms settle after it.
+    expect(mouseOf(page)).toEqual([
+      ["mouseMoved", 80, 120, "none", 0, undefined, 0],
+      ["mousePressed", 80, 120, "right", 2, 1, 0],
+      ["mouseReleased", 80, 120, "right", 0, 1, 0],
+      ["mousePressed", 80, 120, "right", 2, 2, 0],
+      ["mouseReleased", 80, 120, "right", 0, 2, 0],
+    ]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(160);
+    // Nothing resolves a target: the page is asked for its viewport and the
+    // delivery counters, never for a point.
+    expect(payloads("actionPoint")).toEqual([]);
+    expect(payloads("stableBox")).toEqual([]);
+    expect(payloads("viewport")).toHaveLength(1);
+    // A load the click started is waited out before the answer.
+    page.inputs = [];
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mouseReleased")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/mouse/click`, "POST", {
+      x: 10,
+      y: 10,
+    });
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const loaded = await answering;
+    expect(loaded.status).toBe(200);
+    expect((await loaded.json()).loading).toBeUndefined();
+    // The route budgets on its own body, follows its page and takes no
+    // label, and the budget counts one delay per gap.
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/mouse/click",
+    )!;
+    expect(route.budget).toEqual({
+      compute: "mouseClickBudget",
+      maxMs: 40100,
+    });
+    expect(route.lane).toBe("space");
+    expect(route.follow).toBe(true);
+    expect(route.label).toBe(false);
+    expect(route.since).toBe(4);
+    expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 20 })).toBe(
+      15160,
+    );
+  });
+
+  it("runs mouse-click as a batch step", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    const results = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "mouse-click", x: 30, y: 40 },
+          { type: "mouse-click", x: 50, y: 60, button: "middle" },
+        ],
+      })
+    ).json();
+    expect(results.ok).toBe(true);
+    expect(results.results.map((entry: any) => entry.type)).toEqual([
+      "mouse-click",
+      "mouse-click",
+    ]);
+    expect(results.results[1].result).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      input: { x: 50, y: 60, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(mouseOf(page).map((event) => [event[0], event[1], event[3]])).toEqual(
+      [
+        ["mouseMoved", 30, "none"],
+        ["mousePressed", 30, "left"],
+        ["mouseReleased", 30, "left"],
+        ["mouseMoved", 50, "none"],
+        ["mousePressed", 50, "middle"],
+        ["mouseReleased", 50, "middle"],
+      ],
+    );
+    expect(controller.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining(["Agent clicked a point"]),
+    );
+    // Each step keeps its own dispatch record, so a step that sent nothing
+    // stays retryable after one that pressed.
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? { ok: true, blocked: { blocker: "covered" } }
+        : { ok: true };
+    const failed = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "mouse-click", x: 30, y: 40 },
+          { type: "click", ref: "@e1", timeoutMs: 0 },
+        ],
+      })
+    ).json();
+    expect(failed.ok).toBe(false);
+    expect(failed.failedIndex).toBe(1);
+    expect(failed.error).toMatchObject({
+      code: "action_timeout",
+      blocker: "covered",
+      retryable: true,
+    });
+    expect(failed.error.dispatched).toBeUndefined();
+  });
+
+  it("sends wheel events at the stored position", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/move`, "POST", { x: 100, y: 200 })
+      ).status,
+    ).toBe(200);
+    // One event up to a step, at the point the pointer stands on.
+    page.inputs = [];
+    const one = await request(`/tabs/${tab.id}/mouse/wheel`, "POST", {
+      deltaX: 0,
+      deltaY: 60,
+    });
+    expect(one.status).toBe(200);
+    expect(await one.json()).toEqual({
+      ok: true,
+      input: { x: 100, y: 200, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.x,
+        input.parameters.y,
+        input.parameters.deltaX,
+        input.parameters.deltaY,
+        input.parameters.modifiers,
+      ]),
+    ).toEqual([["mouseWheel", 100, 200, 0, 60, 0]]);
+    // A longer delta is eased into at most ten events, 12 ms apart, that
+    // sum to exactly what was asked for.
+    page.inputs = [];
+    const times: number[] = [];
+    page.afterInput = () => times.push(Date.now());
+    const many = await request(`/tabs/${tab.id}/mouse/wheel`, "POST", {
+      deltaX: 0,
+      deltaY: 900,
+    });
+    expect(many.status).toBe(200);
+    const deltas = page.inputs.map((input) => input.parameters.deltaY as number);
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.length).toBeLessThanOrEqual(10);
+    expect(deltas.reduce((sum, delta) => sum + delta, 0)).toBe(900);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(WHEEL_GAP_MS);
+    // The held modifiers travel with each event.
+    page.afterInput = undefined;
+    expect(
+      (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key: "Shift" }))
+        .status,
+    ).toBe(200);
+    page.inputs = [];
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/wheel`, "POST", {
+          deltaX: -40,
+          deltaY: 0,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.deltaX,
+        input.parameters.modifiers,
+      ]),
+    ).toEqual([[-40, 8]]);
+    // A delta past the range, or a missing one, never reaches the page.
+    page.inputs = [];
+    for (const [body, field] of [
+      [{ deltaX: 10001, deltaY: 0 }, "deltaX"],
+      [{ deltaX: 0, deltaY: -10001 }, "deltaY"],
+      [{ deltaY: 10 }, "deltaX"],
+    ] as const) {
+      const { status, error } = await failure(
+        await request(`/tabs/${tab.id}/mouse/wheel`, "POST", body),
+      );
+      expect(status, field).toBe(400);
+      expect(error, field).toMatchObject({ code: "invalid_field", field });
+    }
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("checks every raw mouse point, and still lets a held button go", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    // A dropdown select under the point would open the browser's own list.
+    page.hits = [{ x: 25, y: 45, nodeName: "select" }];
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/move`, "POST", { x: 25, y: 45 })
+      ).status,
+    ).toBe(200);
+    for (const [path, body] of [
+      ["mouse/down", {}],
+      ["mouse/click", { x: 25, y: 45 }],
+    ] as const) {
+      const picker = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", body),
+      );
+      expect(picker.status, path).toBe(403);
+      expect(picker.error, path).toMatchObject({
+        code: "native_popup_blocked",
+        use: "selectOption",
+      });
+    }
+    // A move and a wheel open nothing, so both act over the same select.
+    page.inputs = [];
+    expect(
+      (
+        await request(`/tabs/${tab.id}/mouse/wheel`, "POST", {
+          deltaX: 0,
+          deltaY: 40,
+        })
+      ).status,
+    ).toBe(200);
+    expect(page.inputs).toHaveLength(1);
+    // A point inside an extension's own frame refuses every mouse route
+    // that aims at one.
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+    });
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    page.inputs = [];
+    for (const [path, body] of [
+      ["mouse/move", { x: 25, y: 45 }],
+      ["mouse/down", {}],
+      ["mouse/click", { x: 25, y: 45 }],
+      ["mouse/wheel", { deltaX: 0, deltaY: 40 }],
+    ] as const) {
+      const blocked = await failure(
+        await request(`/tabs/${tab.id}/${path}`, "POST", body),
+      );
+      expect(blocked.status, path).toBe(403);
+      expect(blocked.error.code, path).toBe("input_target_blocked");
+    }
+    expect(page.inputs).toEqual([]);
+    // A release is never refused: the press that put the button there
+    // passed the guard, and refusing it would leave it held.
+    page.hits = [];
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/down`, "POST", {})).status,
+    ).toBe(200);
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    page.inputs = [];
+    expect((await request(`/tabs/${tab.id}/mouse/up`, "POST", {})).status).toBe(
+      200,
+    );
+    expect(page.inputs.map((input) => input.parameters.type)).toEqual([
+      "mouseReleased",
+    ]);
+  });
+
+  it("releases held input on request", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    for (const key of ["Shift", "Control"])
+      expect(
+        (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key })).status,
+        key,
+      ).toBe(200);
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/down`, "POST", {})).status,
+    ).toBe(200);
+    page.inputs = [];
+    const let_go = await request(`/tabs/${tab.id}/input/release`, "POST", {});
+    expect(let_go.status).toBe(200);
+    expect(await let_go.json()).toEqual({
+      ok: true,
+      released: ["Control", "Shift", "left"],
+    });
+    // The keys come up last held first, each carrying the mask as it is
+    // once it is up, and the button is let go after them.
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.key ?? input.parameters.button,
+        input.parameters.modifiers,
+      ]),
+    ).toEqual([
+      ["keyUp", "Control", 8],
+      ["keyUp", "Shift", 0],
+      ["mouseReleased", "left", 0],
+    ]);
+    // A second release lets nothing go and sends nothing.
+    page.inputs = [];
+    const again = await request(`/tabs/${tab.id}/input/release`, "POST", {});
+    expect(await again.json()).toEqual({ ok: true, released: [] });
+    expect(page.inputs).toEqual([]);
+    // The position stays where the pointer was left.
+    const moved = await request(`/tabs/${tab.id}/mouse/move`, "POST", {
+      x: 0,
+      y: 0,
+    });
+    expect((await moved.json()).input).toEqual({
+      x: 0,
+      y: 0,
+      buttons: 0,
+      keys: [],
+      modifiers: 0,
+    });
+    // The route never reveals its tab, takes no label and declares the
+    // plain 10 s budget.
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/input/release",
+    )!;
+    expect(route.budget).toBe(10000);
+    expect(route.lane).toBe("space");
+    expect(route.follow).toBe(false);
+    expect(route.label).toBe(false);
+    expect(route.since).toBe(4);
+    expect(route.body).toEqual({});
+  });
+
+  it("names raw input once a stroke, per tab and kind", async () => {
+    const { space, tab } = await createPage();
+    mousePage();
+    const lines = (message: string) =>
+      controller.activity.filter((entry) => entry.message === message).length;
+    for (const [x, y] of [
+      [10, 10],
+      [20, 20],
+      [30, 30],
+    ])
+      expect(
+        (await request(`/tabs/${tab.id}/mouse/move`, "POST", { x, y })).status,
+      ).toBe(200);
+    expect(lines("Agent used the mouse")).toBe(1);
+    // The keyboard keeps its own line, so one kind never silences the other.
+    expect(
+      (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key: "Shift" }))
+        .status,
+    ).toBe(200);
+    expect(lines("Agent used the keyboard")).toBe(1);
+    // Another tab names its own stroke.
+    const second = await request(`/spaces/${space.id}/tabs`, "POST", {
+      url: "https://example.com/second",
+    });
+    const other = (await second.json()).tab as BrowserState["tabs"][number];
+    expect(
+      (await request(`/tabs/${other.id}/mouse/move`, "POST", { x: 5, y: 5 }))
+        .status,
+    ).toBe(200);
+    expect(lines("Agent used the mouse")).toBe(2);
+    // An element action keeps writing its own line per request.
+    refs.record(other.id, [1]);
+    controller.contents.result = { ok: true, x: 25, y: 45 };
+    for (const round of [1, 2]) {
+      expect(
+        (await request(`/tabs/${other.id}/click`, "POST", { ref: "@e1" }))
+          .status,
+        String(round),
+      ).toBe(200);
+      expect(lines("Agent clicked an element"), String(round)).toBe(round);
+    }
   });
 
   it("honors wait deadlines during loading and stalled page evaluation", async () => {
@@ -4567,7 +7129,9 @@ describe("local automation socket", () => {
     const { tab } = await createPage();
     const page = controller.contents;
     page.result = (code: string) =>
-      code.includes(')("target",') ? { ok: true, x: 25, y: 45 } : { ok: true };
+      code.includes(')("actionPoint",')
+        ? { ok: true, x: 25, y: 45 }
+        : { ok: true };
     const click = await request(`/tabs/${tab.id}/click`, "POST", {
       ref: "@e1",
     });
@@ -4575,6 +7139,7 @@ describe("local automation socket", () => {
     expect(await click.json()).toEqual({
       ok: true,
       url: "https://example.com/",
+      point: { x: 25, y: 45 },
     });
 
     // The page opens a window while the upload runs, so its answer names it.
@@ -4735,7 +7300,7 @@ describe("local automation socket", () => {
     const waiting = request(`/expectations/${expectation.id}/wait`, "POST", {});
     let opened = false;
     controller.contents.result = (code: string) => {
-      if (!code.includes(')("target",')) return { ok: true };
+      if (!code.includes(')("actionPoint",')) return { ok: true };
       if (!opened) {
         opened = true;
         controller.openPopup(tab.id, "https://example.com/share");
@@ -4785,7 +7350,7 @@ describe("local automation socket", () => {
     const held = await arm(tab.id, "popup");
     let releaseClick!: () => void;
     controller.contents.result = (code: string) =>
-      code.includes(')("target",')
+      code.includes(')("actionPoint",')
         ? new Promise((resolve) => {
             releaseClick = () => resolve({ ok: true, x: 25, y: 45 });
           })
@@ -4991,7 +7556,7 @@ describe("local automation socket", () => {
     });
     // A dialog the action itself causes is in its receipt.
     controller.contents.result = (code: string) => {
-      if (!code.includes(')("target",')) return { ok: true };
+      if (!code.includes(')("actionPoint",')) return { ok: true };
       controller.contents.emitProtocol("Runtime.bindingCalled", {
         name: binding,
         executionContextId: 1,
@@ -5442,7 +8007,7 @@ describe("local automation socket", () => {
     const next = await openChooser(tab.id);
     let releaseClick!: () => void;
     controller.contents.result = (code: string) =>
-      code.includes(')("target",')
+      code.includes(')("actionPoint",')
         ? new Promise((resolve) => {
             releaseClick = () => resolve({ ok: true, x: 25, y: 45 });
           })
@@ -5813,8 +8378,23 @@ describe("local automation socket", () => {
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },
+      "POST /tabs/:id/dblclick": { ref: "@e1" },
+      "POST /tabs/:id/hover": { ref: "@e1" },
       "POST /tabs/:id/fill": { ref: "@e1", value: "x" },
+      "POST /tabs/:id/select": { ref: "@e1", values: ["a"] },
+      "POST /tabs/:id/focus": { ref: "@e1" },
       "POST /tabs/:id/press": { key: "Enter" },
+      "POST /tabs/:id/keyboard/down": { key: "Shift" },
+      "POST /tabs/:id/keyboard/up": { key: "Shift" },
+      "POST /tabs/:id/keyboard/type": { text: "Ada" },
+      "POST /tabs/:id/keyboard/insert-text": { text: "Ada" },
+      "POST /tabs/:id/keyboard/paste": { text: "Ada", html: "<b>Ada</b>" },
+      "POST /tabs/:id/mouse/move": { x: 10, y: 10 },
+      "POST /tabs/:id/mouse/down": {},
+      "POST /tabs/:id/mouse/up": {},
+      "POST /tabs/:id/mouse/wheel": { deltaX: 0, deltaY: 60 },
+      "POST /tabs/:id/mouse/click": { x: 10, y: 10 },
+      "POST /tabs/:id/input/release": {},
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
@@ -5883,16 +8463,31 @@ describe("local automation socket", () => {
         apiLevel: API_LEVEL,
       });
     }
+    // A field one step type declares and another does not: dblclick sends
+    // clickCount 1 then 2 itself, so it takes none.
     const response = await request(`/tabs/${tab.id}/actions`, "POST", {
-      actions: [{ type: "snapshot" }, { type: "click", ref: "@e1", button: "right" }],
+      actions: [
+        { type: "snapshot" },
+        { type: "dblclick", ref: "@e1", clickCount: 2 },
+      ],
     });
     expect(response.status).toBe(400);
     expect((await response.json()).error).toMatchObject({
       code: "unknown_field",
-      field: "button",
+      field: "clickCount",
       index: 1,
-      action: "click",
-      allowed: ["type", "ref", "selector", "label"],
+      action: "dblclick",
+      allowed: [
+        "type",
+        "ref",
+        "selector",
+        "button",
+        "delayMs",
+        "position",
+        "force",
+        "timeoutMs",
+        "label",
+      ],
       route: "POST /tabs/:id/actions",
     });
     expect(controller.contents.scripts).toEqual([]);
@@ -7203,7 +9798,7 @@ describe("local automation socket", () => {
             interactables: [],
             truncated: false,
           }
-        : code.includes(')("drag",')
+        : code.includes('"kind":"drag"')
           ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 220 } }
           : { ok: true, x: 25, y: 45 };
     for (const [type, body] of [
