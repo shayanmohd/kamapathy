@@ -128,6 +128,16 @@ const append = {
   since: 4,
   description: "Add to the field's value instead of replacing it.",
 };
+// The one key a raw keyboard route holds or lets go.
+const keyboardKey = {
+  kind: "string",
+  min: 1,
+  max: 64,
+  required: true,
+  since: 4,
+  description:
+    "One key: a name such as Shift, Enter or KeyA, or a printable character. Not a chord.",
+};
 // The options selectOption chooses, as strings or objects.
 const choices = {
   kind: "array",
@@ -299,6 +309,37 @@ const FIELDS = {
     force,
     timeoutMs: actionTimeout,
     label,
+  },
+  keyboardKey: { key: keyboardKey },
+  keyboardType: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 2000,
+      required: true,
+      since: 4,
+      description:
+        "The text to type. Characters the US layout has go out as key events, a newline as Enter, and anything else is inserted.",
+    },
+    delayMs: {
+      kind: "ms",
+      min: 0,
+      max: 1000,
+      default: 0,
+      since: 4,
+      description:
+        "How long to wait between characters. Times the text length it is at most 60000 ms.",
+    },
+  },
+  keyboardInsert: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 16384,
+      required: true,
+      since: 4,
+      description: "The text to insert at the focused editable's caret.",
+    },
   },
   wait: {
     selector: {
@@ -884,6 +925,38 @@ export const ROUTES = [
     { budget: { compute: "dragBudget", maxMs: 75100 } },
   ),
   action("wait", "Waits for a visible element, text, or both.", "{ ok: true }"),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/down",
+    "Holds one key down and reports the tab's input state.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardKey,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/up",
+    "Lets one held key go and reports the tab's input state.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardKey,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/type",
+    "Types text as key events, character by character.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardType,
+    { budget: { compute: "typeBudget", maxMs: 70000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/insert-text",
+    "Inserts text at the focused editable's caret, without key events.",
+    "{ ok: true, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardInsert,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
   route(
     "POST",
     "/tabs/:id/upload",

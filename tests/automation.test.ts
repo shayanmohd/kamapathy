@@ -5674,6 +5674,222 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+  it("holds and releases keys through keyboard/down and keyboard/up", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    const down = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Shift",
+    });
+    expect(down.status).toBe(200);
+    expect(await down.json()).toEqual({
+      ok: true,
+      input: { x: 0, y: 0, buttons: 0, keys: ["Shift"], modifiers: 8 },
+    });
+    // A key that types nothing goes down raw, as it does in a chord.
+    expect(keysOf(page)).toEqual([["rawKeyDown", "Shift", "ShiftLeft", 8]]);
+    // A click while the key is held carries the modifier a person's would.
+    page.inputs = [];
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(page.inputs.map((input) => input.parameters.modifiers)).toEqual([
+      8, 8, 8,
+    ]);
+    // The same key again repeats it, and the position the click left stays.
+    page.inputs = [];
+    const again = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Shift",
+    });
+    expect((await again.json()).input).toEqual({
+      x: 25,
+      y: 45,
+      buttons: 0,
+      keys: ["Shift"],
+      modifiers: 8,
+    });
+    expect(page.inputs[0].parameters.autoRepeat).toBe(true);
+    // The release carries the mask as it is once the key is up.
+    page.inputs = [];
+    const up = await request(`/tabs/${tab.id}/keyboard/up`, "POST", {
+      key: "Shift",
+    });
+    expect(await up.json()).toEqual({
+      ok: true,
+      input: { x: 25, y: 45, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(keysOf(page)).toEqual([["keyUp", "Shift", "ShiftLeft", 0]]);
+    // A key nothing holds cannot be released, so the stored state cannot
+    // drift from the page's.
+    page.inputs = [];
+    const loose = await failure(
+      await request(`/tabs/${tab.id}/keyboard/up`, "POST", { key: "Shift" }),
+    );
+    expect(loose.status).toBe(400);
+    expect(loose.error).toMatchObject({ code: "invalid_field", field: "key" });
+    expect(String(loose.error.message)).toContain("not held");
+    expect(page.inputs).toEqual([]);
+    // One key, not a chord, and only keys this layout names.
+    for (const key of ["Shift+KeyA", "Cmd"])
+      expect(
+        (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key }))
+          .status,
+        key,
+      ).toBe(400);
+    // The raw routes name themselves once for a stroke of requests.
+    expect(
+      controller.activity.filter(
+        (entry) => entry.message === "Agent used the keyboard",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("types text and inserts text into the focused editable", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const times: number[] = [];
+    page.afterInput = () => times.push(Date.now());
+    const typed = await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+      text: "aB\né",
+      delayMs: 20,
+    });
+    expect(typed.status).toBe(200);
+    expect(await typed.json()).toEqual({
+      ok: true,
+      input: { x: 0, y: 0, buttons: 0, keys: [], modifiers: 0 },
+    });
+    // What the US layout types goes out as key events, a newline as Enter,
+    // and anything else as inserted text.
+    expect(keysOf(page)).toEqual([
+      ["keyDown", "a", "KeyA", 0],
+      ["keyUp", "a", "KeyA", 0],
+      ["keyDown", "B", "KeyB", 8],
+      ["keyUp", "B", "KeyB", 8],
+      ["keyDown", "Enter", "Enter", 0],
+      ["keyUp", "Enter", "Enter", 0],
+    ]);
+    expect(commandsOf(page).at(-1)).toBe("insertText é");
+    // The delay sits between characters, not inside one.
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(20);
+    expect(times[1] - times[0]).toBeLessThan(20);
+    // The gaps are counted before the lane, so a long text with a long delay
+    // cannot outrun the route's budget.
+    const slow = await failure(
+      await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+        text: "x".repeat(100),
+        delayMs: 1000,
+      }),
+    );
+    expect(slow.status).toBe(400);
+    expect(slow.error).toMatchObject({
+      code: "invalid_field",
+      field: "delayMs",
+    });
+    expect(COMPUTE.typeBudget({ text: "x".repeat(60), delayMs: 1000 })).toBe(
+      70000,
+    );
+    // Inserted text reaches a focused editable, and nowhere else.
+    page.debugger.sent.length = 0;
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    const inserted = await request(
+      `/tabs/${tab.id}/keyboard/insert-text`,
+      "POST",
+      { text: "Ada" },
+    );
+    expect(inserted.status).toBe(200);
+    expect(await inserted.json()).toEqual({ ok: true });
+    expect(commandsOf(page)).toEqual(["insertText Ada"]);
+    page.debugger.sent.length = 0;
+    page.pageActions.focusedKind = { ok: true, kind: "none" };
+    const nowhere = await failure(
+      await request(`/tabs/${tab.id}/keyboard/insert-text`, "POST", {
+        text: "Ada",
+      }),
+    );
+    expect(nowhere.status).toBe(422);
+    expect(nowhere.error).toMatchObject({
+      code: "not_editable",
+      reason: "none",
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // Each route's text limit is the schema's.
+    for (const [path, text] of [
+      ["type", "x".repeat(2001)],
+      ["insert-text", "x".repeat(16385)],
+    ] as const) {
+      const long = await failure(
+        await request(`/tabs/${tab.id}/keyboard/${path}`, "POST", { text }),
+      );
+      expect(long.status, path).toBe(400);
+      expect(long.error, path).toMatchObject({
+        code: "invalid_field",
+        field: "text",
+      });
+    }
+  });
+
+  it("adds no settle or load wait to the keyboard routes, while press waits out a load", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    // Each raw route declares the plain 10 s budget, follows its page and
+    // takes no label.
+    for (const path of [
+      "keyboard/down",
+      "keyboard/up",
+      "keyboard/type",
+      "keyboard/insert-text",
+    ]) {
+      const route = ROUTES.find(
+        (item) => routeKey(item) === `POST /tabs/:id/${path}`,
+      )!;
+      expect(route.budget, path).toEqual(
+        path === "keyboard/type"
+          ? { compute: "typeBudget", maxMs: 70000 }
+          : { compute: "rawBudget", maxMs: 10000 },
+      );
+      expect(route.lane, path).toBe("space");
+      expect(route.follow, path).toBe(true);
+      expect(route.label, path).toBe(false);
+      expect(route.since, path).toBe(4);
+      expect(route.limit, path).toBe(65536);
+    }
+    // A key that starts a load answers at once: the raw routes wait for
+    // neither the page's handlers nor the load.
+    page.afterInput = () => {
+      page.isLoadingMainFrame = () => true;
+    };
+    const started = Date.now();
+    const down = await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+      key: "Enter",
+    });
+    expect(down.status).toBe(200);
+    expect((await down.json()).loading).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(page.listenerCount("did-stop-loading")).toBe(0);
+    // Nor is the next request held by the load the key started.
+    page.afterInput = undefined;
+    page.isLoadingMainFrame = () => false;
+    expect(
+      (await request(`/tabs/${tab.id}/keyboard/up`, "POST", { key: "Enter" }))
+        .status,
+    ).toBe(200);
+    // press settles and then waits out the load its key started.
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "keyUp")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const pressed = await answering;
+    expect(pressed.status).toBe(200);
+    expect((await pressed.json()).loading).toBeUndefined();
+  });
+
   it("honors wait deadlines during loading and stalled page evaluation", async () => {
     const { tab } = await createPage();
     controller.contents.isLoadingMainFrame = () => true;
@@ -6733,6 +6949,10 @@ describe("local automation socket", () => {
       "POST /tabs/:id/select": { ref: "@e1", values: ["a"] },
       "POST /tabs/:id/focus": { ref: "@e1" },
       "POST /tabs/:id/press": { key: "Enter" },
+      "POST /tabs/:id/keyboard/down": { key: "Shift" },
+      "POST /tabs/:id/keyboard/up": { key: "Shift" },
+      "POST /tabs/:id/keyboard/type": { text: "Ada" },
+      "POST /tabs/:id/keyboard/insert-text": { text: "Ada" },
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },

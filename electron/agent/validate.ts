@@ -19,6 +19,8 @@ import type {
   DragAction,
   FieldAction,
   FieldKind,
+  KeyboardAction,
+  KeyboardKind,
   PointerAction,
   PointerKind,
   PressAction,
@@ -366,6 +368,43 @@ export function pressFields(body: Record<string, unknown>): PressAction {
     delayMs: integerField(body, "delayMs", 0, 0, 5000),
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
+}
+// The most text one type route sends, one insertion takes, and the gaps a
+// type may spend in all.
+const MAX_TYPE_TEXT = 2000;
+const MAX_INSERT_TEXT = 16384;
+const MAX_TYPE_GAPS_MS = 60000;
+// The raw keyboard routes: one key to hold or let go, or the text to type or
+// insert. One key means one key, so a chord is refused here.
+export function keyboardFields(
+  body: Record<string, unknown>,
+  kind: KeyboardKind,
+): KeyboardAction {
+  if (kind === "down" || kind === "up") {
+    const key = stringField(body, "key", MAX_CHORD_CHARS);
+    if (parseChord(key).tokens.length > 1)
+      return fail(
+        "invalid_field",
+        "key must name one key, not a chord. Hold each modifier with keyboard/down.",
+        { field: "key", expected: "one key name or printable character" },
+      );
+    return { kind, key, delayMs: 0 };
+  }
+  const text = stringField(
+    body,
+    "text",
+    kind === "type" ? MAX_TYPE_TEXT : MAX_INSERT_TEXT,
+    true,
+  );
+  const delayMs =
+    kind === "type" ? integerField(body, "delayMs", 0, 0, 1000) : 0;
+  if (delayMs * text.length > MAX_TYPE_GAPS_MS)
+    return fail(
+      "invalid_field",
+      `delayMs times the text length must be at most ${MAX_TYPE_GAPS_MS} ms.`,
+      { field: "delayMs", expected: `a delay that fits ${MAX_TYPE_GAPS_MS} ms` },
+    );
+  return { kind, text, delayMs };
 }
 // A drag's two ends and the options the gesture takes. Both ends resolve
 // like any other target, each with its own position.

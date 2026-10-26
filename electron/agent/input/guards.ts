@@ -209,10 +209,11 @@ const opensPicker = (chord: Chord, platform: NodeJS.Platform) => {
 };
 
 // The focused control as the page reports it, which section 9 will read
-// from the focused frame instead.
+// from the focused frame instead. Inserted text and a release carry no
+// chord, so only the frame check applies to them.
 export function checkKeyTarget(
   focused: { kind: string; blockedFrame?: true },
-  chord: Chord,
+  chord?: Chord,
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (focused.blockedFrame)
@@ -220,7 +221,7 @@ export function checkKeyTarget(
       "input_target_blocked",
       "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.",
     );
-  if (!PICKER_KINDS.includes(focused.kind)) return;
+  if (!chord || !PICKER_KINDS.includes(focused.kind)) return;
   if (!opensPicker(chord, platform)) return;
   const use = pickerUse(focused.kind as PickerKind);
   fail(

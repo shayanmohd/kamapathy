@@ -3,7 +3,12 @@
 // the route and the batch can never drift apart. A route with no batch step
 // of its own runs the same element action directly.
 import { send, type RouteDeps, type RouteImpl } from "../http";
-import { fieldFields, parseToolAction } from "../validate";
+import type { KeyboardKind } from "../input/actions";
+import { fieldFields, keyboardFields, parseToolAction } from "../validate";
+
+// How often a stroke of raw input names itself in the space's activity, so a
+// run of key or mouse requests on one tab is one line.
+const RAW_ACTIVITY_MS = 5000;
 
 export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
   const {
@@ -24,11 +29,43 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
         ),
       ),
   });
+  // When each tab's raw input last named itself.
+  const named = new Map<string, number>();
+  const nameRawInput = (tabId: string, what: "keyboard" | "mouse") => {
+    const at = Date.now();
+    const key = `${tabId}:${what}`;
+    if (at - (named.get(key) ?? 0) < RAW_ACTIVITY_MS) return;
+    named.set(key, at);
+    controller.addActivity(
+      authority.authorizeTab(tabId).spaceId,
+      `Agent used the ${what}`,
+      "info",
+    );
+  };
+  // The raw keyboard routes: no settle, no load wait and no receipt tail, as
+  // sections 5 and 7 say.
+  const keyboard = (kind: KeyboardKind): RouteImpl => ({
+    handler: async ({ response, body, tab, run }) => {
+      const result = await receipts.with(
+        tab!.id,
+        () => input.keyboard(tab!.id, keyboardFields(body!, kind), run),
+        { settleMs: 0 },
+      );
+      nameRawInput(tab!.id, "keyboard");
+      send(response, 200, result);
+    },
+  });
   return {
     ...Object.fromEntries(
       ["dblclick", "hover", "select"].map((type) => [
         `POST /tabs/:id/${type}`,
         tool(type),
+      ]),
+    ),
+    ...Object.fromEntries(
+      (["down", "up", "type", "insert-text"] as const).map((kind) => [
+        `POST /tabs/:id/keyboard/${kind}`,
+        keyboard(kind),
       ]),
     ),
     // Focus is no batch step: a plan that focuses a field fills or presses

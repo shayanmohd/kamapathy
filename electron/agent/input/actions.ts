@@ -35,15 +35,19 @@ import { checkKeyTarget, checkPointerTarget } from "./guards";
 import { inputMarker } from "./marker";
 import {
   KEYS,
+  MODIFIER_BITS,
   checkClipboardChord,
   chordCommands,
   keyParams,
   keyType,
   parseChord,
+  textCommands,
   type Chord,
   type InputCommand,
+  type KeyDef,
   type Modifier,
 } from "./keys";
+import { macCommands } from "./mac-commands";
 import { BUTTON_BITS, type Button } from "./state";
 import {
   ACTION_LEVELS,
@@ -399,6 +403,14 @@ export interface PressAction {
   delayMs: number;
   timeoutMs: number;
 }
+export type KeyboardKind = "down" | "up" | "type" | "insert-text";
+/** One raw keyboard request as its route parsed it. */
+export interface KeyboardAction {
+  kind: KeyboardKind;
+  key?: string;
+  text?: string;
+  delayMs: number;
+}
 export interface InputActions {
   pointer(
     id: string,
@@ -408,6 +420,11 @@ export interface InputActions {
   press(
     id: string,
     action: PressAction,
+    run: Run,
+  ): Promise<Record<string, unknown>>;
+  keyboard(
+    id: string,
+    action: KeyboardAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
   drag(
@@ -422,6 +439,12 @@ export interface InputActions {
   ): Promise<Record<string, unknown>>;
 }
 
+// The characters a typed text sends as a key that could open a focused
+// control's picker, with the key each one types.
+const TYPED_PICKER_KEYS: readonly (readonly [string, KeyDef])[] = [
+  [" ", KEYS.space],
+  ["\n", KEYS.enter],
+];
 // The kinds that need a box holding still before they act. A click may land
 // on one that is still moving, as a person's would.
 const NEEDS_STABLE: readonly PointerKind[] = ["hover"];
@@ -465,16 +488,15 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       .heldKeys()
       .map((key) => key.modifier)
       .filter((modifier): modifier is Modifier => modifier !== undefined);
-  // The focused control as the page reports it: a key that would open a
-  // native picker, or one aimed at a frame agents never reach, is refused
-  // here, before anything is sent.
-  const checkKeyFocus = async (
+  // The focused control as the page reports it, which the key guards read:
+  // a key that would open a native picker, or one aimed at a frame agents
+  // never reach, is refused before anything is sent.
+  const focusedControl = async (
     id: string,
     session: TabSession,
-    chord: Chord,
     deadline: number,
     step: Step,
-  ) => {
+  ): Promise<{ kind: string; blockedFrame?: true }> => {
     const found = await actions.evaluatePage(
       id,
       session,
@@ -483,15 +505,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       deadline,
       step,
     );
-    checkKeyTarget(
-      {
-        kind: typeof found.kind === "string" ? found.kind : "none",
-        ...(found.blockedFrame === true ? { blockedFrame: true as const } : {}),
-      },
-      chord,
-      platformName,
-    );
+    return {
+      kind: typeof found.kind === "string" ? found.kind : "none",
+      ...(found.blockedFrame === true ? { blockedFrame: true as const } : {}),
+    };
   };
+  // One key as a chord of its own, for the guards and the raw routes.
+  const chordOf = (key: KeyDef, mask: number): Chord => ({
+    tokens: [key.name],
+    modifiers: [],
+    mask,
+    key,
+  });
 
   const pointer = async (id: string, action: PointerAction, run: Run) => {
     const { kind, button, force } = action;
@@ -1328,7 +1353,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           run,
         )
       : {};
-    await checkKeyFocus(id, session, chord, run.deadline, step);
+    checkKeyTarget(
+      await focusedControl(id, session, run.deadline, step),
+      chord,
+      platformName,
+    );
     const epoch = session.epoch;
     const { down, up } = chordCommands(
       chord,
@@ -1378,5 +1407,117 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       ...reboundOf(focused),
     };
   };
-  return { pointer, drag, field, press };
+  // The raw keyboard routes: one key held or let go, text typed character by
+  // character, or text inserted at the caret. None of them settles and none
+  // waits for a load, so a key that navigates leaves the load to the next
+  // request, and none is ever sent twice.
+  const keyboard = async (id: string, action: KeyboardAction, run: Run) => {
+    const guard = () => {
+      authorizeTab(id);
+    };
+    const step: Step = {
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const gesture: Step = {
+      deadline: run.deadline,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const { session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      false,
+      run.park,
+    );
+    const dispatcher = actions.dispatcher(id, session);
+    const state = dispatcher.state;
+    const look = () => focusedControl(id, session, run.deadline, step);
+    const withState = () => ({ ok: true, input: state.view() });
+    if (action.kind === "down" || action.kind === "up") {
+      const chord = parseChord(action.key ?? "", platformName);
+      const key = chord.key;
+      const own = key.modifier ? MODIFIER_BITS[key.modifier] : 0;
+      if (action.kind === "down") {
+        const mask = state.modifiers | chord.mask | own;
+        checkKeyTarget(await look(), chordOf(key, mask), platformName);
+        // A key already held repeats, as a person's keyboard repeats it.
+        const repeat = state
+          .heldKeys()
+          .some((other) => other.name === key.name);
+        await dispatcher.key(
+          [
+            {
+              method: "Input.dispatchKeyEvent",
+              params: keyParams(key, keyType(key, mask), mask, {
+                ...(repeat ? { autoRepeat: true } : {}),
+                commands: macCommands(chordOf(key, mask), platformName),
+              }),
+            },
+          ],
+          gesture,
+        );
+        return withState();
+      }
+      // A release carries the mask as it is once the key is up, and only a
+      // key the tab holds can be released, so the stored state and the
+      // page's never drift apart.
+      if (!state.heldKeys().some((other) => other.name === key.name))
+        return fail(
+          "invalid_field",
+          "The key is not held. Hold it with keyboard/down first.",
+          { field: "key", expected: "a key this tab holds" },
+        );
+      const mask = state.modifiers & ~own;
+      await dispatcher.key(
+        [
+          {
+            method: "Input.dispatchKeyEvent",
+            params: keyParams(key, "keyUp", mask),
+          },
+        ],
+        gesture,
+      );
+      return withState();
+    }
+    const text = action.text ?? "";
+    if (action.kind === "insert-text") {
+      const focused = await look();
+      checkKeyTarget(focused, undefined, platformName);
+      if (focused.kind !== "editable")
+        return fail(
+          "not_editable",
+          "Nothing that takes typing has focus, so there is nowhere to insert this text. Focus a field or use fill.",
+          { reason: "none" },
+        );
+      await dispatcher.send(
+        [{ method: "Input.insertText", params: { text } }],
+        gesture,
+      );
+      return { ok: true };
+    }
+    const groups = textCommands(text, platformName, { mask: state.modifiers });
+    const focused = await look();
+    checkKeyTarget(focused, undefined, platformName);
+    // Space and Enter are the only keys a typed text sends that could open a
+    // focused control's own picker.
+    for (const [character, key] of TYPED_PICKER_KEYS)
+      if (text.includes(character))
+        checkKeyTarget(
+          focused,
+          chordOf(key, state.modifiers),
+          platformName,
+        );
+    for (const [index, group] of groups.entries()) {
+      if (index > 0 && action.delayMs) await pause(action.delayMs);
+      const insertion = group[0].method === "Input.insertText";
+      await (insertion
+        ? dispatcher.send(group, gesture)
+        : dispatcher.key(group, gesture));
+    }
+    return withState();
+  };
+  return { pointer, drag, field, press, keyboard };
 }
