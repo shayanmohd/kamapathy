@@ -2413,6 +2413,60 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+  it("a wheel for a target inside a frame goes to the translated point with the scaled delta", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The frame is drawn at half size at 40,60, so its own pixels are worth
+    // half a page pixel each.
+    let looks = 0;
+    page.result = (code: string) => {
+      if (code.includes(')("frameBox",')) {
+        const point = /"point":\{"x":(-?[\d.]+),"y":(-?[\d.]+)\}/.exec(code);
+        return {
+          ok: true,
+          box: { x: 40, y: 60, scaleX: 0.5, scaleY: 0.5, width: 400, height: 200 },
+          area: { left: 40, top: 60, right: 240, bottom: 160 },
+          ...(point
+            ? {
+                point: {
+                  x: 40 + Number(point[1]) * 0.5,
+                  y: 60 + Number(point[2]) * 0.5,
+                },
+              }
+            : {}),
+        };
+      }
+      if (!code.includes(')("actionPoint",')) return { ok: true };
+      looks += 1;
+      // The control is below the frame's own fold at first, so the frame
+      // asks for a wheel in its own pixels.
+      return looks === 1
+        ? { ok: true, scroll: { x: 100, y: 50, deltaX: 0, deltaY: 300 } }
+        : { ok: true, x: 100, y: 50 };
+    };
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    expect(await clicked.json()).toMatchObject({ point: { x: 90, y: 85 } });
+    const wheels = page.inputs.filter(
+      (input) => input.parameters.type === "mouseWheel",
+    );
+    expect(wheels.length).toBeGreaterThan(0);
+    // Every wheel event went to the point the owner places the frame's own
+    // point at, and the deltas add up to the frame's ask at the owner's
+    // scale.
+    expect(
+      wheels.map((input) => [input.parameters.x, input.parameters.y]),
+    ).toEqual(wheels.map(() => [90, 85]));
+    expect(
+      wheels.reduce(
+        (total, input) => total + Number(input.parameters.deltaY),
+        0,
+      ),
+    ).toBe(150);
+  });
+
   it("a fill in a frame types in it and clicks it at the translated point", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });
