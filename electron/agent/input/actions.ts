@@ -1484,6 +1484,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     }
     const text = action.text ?? "";
     if (action.kind === "insert-text") {
+      // Inserted text opens no picker, so only its frame is checked.
       const focused = await look();
       checkKeyTarget(focused, undefined, platformName);
       if (focused.kind !== "editable")
@@ -1498,18 +1499,14 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       );
       return { ok: true };
     }
-    const groups = textCommands(text, platformName, { mask: state.modifiers });
     const focused = await look();
     checkKeyTarget(focused, undefined, platformName);
     // Space and Enter are the only keys a typed text sends that could open a
     // focused control's own picker.
     for (const [character, key] of TYPED_PICKER_KEYS)
       if (text.includes(character))
-        checkKeyTarget(
-          focused,
-          chordOf(key, state.modifiers),
-          platformName,
-        );
+        checkKeyTarget(focused, chordOf(key, state.modifiers), platformName);
+    const groups = textCommands(text, platformName, { mask: state.modifiers });
     for (const [index, group] of groups.entries()) {
       if (index > 0 && action.delayMs) await pause(action.delayMs);
       const insertion = group[0].method === "Input.insertText";
