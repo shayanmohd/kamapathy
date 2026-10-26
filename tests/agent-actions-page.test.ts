@@ -8,6 +8,15 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Level, Mode } from "../electron/agent/dom/select";
+import {
+  KEYS,
+  MODIFIER_BITS,
+  chordCommands,
+  keyParams,
+  parseChord,
+  textCommands,
+  type InputCommand,
+} from "../electron/agent/input/keys";
 import { parseSelector } from "../electron/agent/selectors";
 import { PAGE_SOURCE } from "../electron/agent/session/operations";
 import type { PageOperation } from "../electron/automation-dom";
@@ -1027,5 +1036,99 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
     expect(
       await point("#overlaid", { position: { x: 2, y: 2 } }),
     ).toMatchObject({ blocked: { blocker: "covered", interceptor: "div#shade" } });
+  }, 30000);
+  it("types with a held Shift and takes the macOS editing commands", async () => {
+    await open("/input/keys");
+    const cdp = await page.context().newCDPSession(page);
+    const send = async (commands: readonly InputCommand[]) => {
+      for (const command of commands)
+        await cdp.send(
+          command.method as "Input.dispatchKeyEvent",
+          command.params as any,
+        );
+    };
+    const log = () => page.evaluate(() => (window as any).keyLog);
+    const caret = (id: string) =>
+      page.evaluate((id) => {
+        const field = document.getElementById(id) as HTMLInputElement;
+        return { start: field.selectionStart, end: field.selectionEnd };
+      }, id);
+    expect(await operate("focusTarget", aim("#typed", {}, "enabled"))).toEqual({
+      ok: true,
+    });
+    // Shift goes down and stays down, so each character after it is typed as
+    // the one the US layout gives with Shift.
+    const shift = (type: "keyDown" | "keyUp") => [
+      {
+        method: "Input.dispatchKeyEvent" as const,
+        params: keyParams(
+          KEYS.shift,
+          type,
+          type === "keyDown" ? MODIFIER_BITS.Shift : 0,
+        ),
+      },
+    ];
+    await send(shift("keyDown"));
+    for (const group of textCommands("abc", "darwin", {
+      mask: MODIFIER_BITS.Shift,
+    }))
+      await send(group);
+    await send(shift("keyUp"));
+    expect(await page.inputValue("#typed")).toBe("ABC");
+    // Every event the page saw is trusted and carries the key, the code and
+    // the modifier a person's keyboard would.
+    expect(await log()).toEqual([
+      ...[
+        ["keydown", "Shift", "ShiftLeft"],
+        ["keydown", "A", "KeyA"],
+        ["keyup", "A", "KeyA"],
+        ["keydown", "B", "KeyB"],
+        ["keyup", "B", "KeyB"],
+        ["keydown", "C", "KeyC"],
+        ["keyup", "C", "KeyC"],
+      ].map(([type, key, code]) => ({
+        type,
+        key,
+        code,
+        shift: true,
+        meta: false,
+        trusted: true,
+      })),
+      {
+        type: "keyup",
+        key: "Shift",
+        code: "ShiftLeft",
+        shift: false,
+        meta: false,
+        trusted: true,
+      },
+    ]);
+    // The macOS chord carries its command, which is what selects the value:
+    // the probe showed the same chord without the command does nothing.
+    const chord = (key: string) =>
+      chordCommands(parseChord(key, "darwin"), { mask: 0 }, "darwin");
+    const selectAll = chord("Meta+KeyA");
+    expect(selectAll.down.at(-1)!.params.commands).toEqual(["selectAll"]);
+    await send(selectAll.down);
+    await send(selectAll.up);
+    expect(await caret("typed")).toEqual({ start: 0, end: 3 });
+    // The delete commands reach an editing host the same way.
+    expect(await operate("focusTarget", aim("#notes", {}, "enabled"))).toEqual({
+      ok: true,
+    });
+    await page.evaluate(() => {
+      const notes = document.getElementById("notes")!;
+      const range = document.createRange();
+      range.setStart(notes.firstChild!, 12);
+      range.collapse(true);
+      const selection = getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    const back = chord("Backspace");
+    expect(back.down[0].params.commands).toEqual(["deleteBackward"]);
+    await send(back.down);
+    await send(back.up);
+    expect(await page.textContent("#notes")).toBe("Written her");
   }, 30000);
 });

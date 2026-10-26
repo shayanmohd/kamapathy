@@ -392,10 +392,13 @@ export function chordCommands(
 }
 
 // One group per character: key events for what the US layout types, one
-// insertText for anything else, and Enter for a newline.
+// insertText for anything else, and Enter for a newline. The held mask
+// travels with each character, so typing while the agent holds Shift types
+// what a person holding it would.
 export function textCommands(
   text: string,
   platform: NodeJS.Platform = process.platform,
+  held: { mask: number } = { mask: 0 },
 ): InputCommand[][] {
   return Array.from(text.replace(/\r\n/g, "\n")).map((character) => {
     const key = CHARACTERS[character];
@@ -410,7 +413,7 @@ export function textCommands(
         mask: key.shift ? MODIFIER_BITS.Shift : 0,
         key,
       },
-      { mask: 0 },
+      held,
       platform,
     );
     return [...down, ...up];

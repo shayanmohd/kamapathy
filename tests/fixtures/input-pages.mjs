@@ -2,8 +2,8 @@
 // banner, a modal, a bare box or their own interactive ancestors take, the
 // disabled states a chain can carry, fields and selects of every kind, a
 // panel inside a frame below the fold, drawn graphics, boxes that move or
-// whose frames stall, and the wrappers fill, select and focus retarget
-// through.
+// whose frames stall, a field and an editing host that log the key events
+// they receive, and the wrappers fill, select and focus retarget through.
 export const inputPages = {
   "/input/buttons": `<!doctype html><meta charset="utf-8"><title>Buttons</title>
 <style>
@@ -202,6 +202,25 @@ div{box-sizing:border-box;position:absolute}
 <div id="far">Far zone</div>
 <div id="rail">Rail</div>
 <div id="flat"></div>`,
+  "/input/keys": `<!doctype html><meta charset="utf-8"><title>Keys</title>
+<style>body{font:14px sans-serif;margin:16px}p{margin:6px 0}</style>
+<p><label for="typed">Typed</label> <input id="typed" type="text"></p>
+<p><label for="notes">Notes</label> <div id="notes" contenteditable="true">Written here</div></p>
+<script>
+// Every key event the page receives, as the page sees it.
+window.keyLog = [];
+for (const type of ["keydown", "keyup"])
+  document.addEventListener(type, (event) => {
+    window.keyLog.push({
+      type: event.type,
+      key: event.key,
+      code: event.code,
+      shift: event.shiftKey,
+      meta: event.metaKey,
+      trusted: event.isTrusted,
+    });
+  });
+</script>`,
   "/input/stalled": `<!doctype html><meta charset="utf-8"><title>Stalled frames</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
 <button id="waiting" type="button">Waiting for a frame</button>

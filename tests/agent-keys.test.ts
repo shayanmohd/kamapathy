@@ -310,6 +310,16 @@ describe("key events", () => {
       { method: "Input.insertText", params: { text: "é" } },
     ]);
     expect(textCommands("\r\n", "linux")).toHaveLength(1);
+    // A held modifier travels with each character, so typing while the agent
+    // holds Shift types what a person holding it would.
+    const shifted = textCommands("ab", "linux", { mask: MODIFIER_BITS.Shift });
+    expect(
+      shifted.map((group) => [group[0].params.key, group[0].params.text]),
+    ).toEqual([
+      ["A", "A"],
+      ["B", "B"],
+    ]);
+    expect(shifted[0][0].params.modifiers).toBe(MODIFIER_BITS.Shift);
   });
 });
 
