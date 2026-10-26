@@ -95,6 +95,12 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
         mouse(kind),
       ]),
     ),
+    // A release ends a stroke rather than starting one, so it names no
+    // activity line of its own and carries no receipt.
+    "POST /tabs/:id/input/release": {
+      handler: async ({ response, tab, run }) =>
+        send(response, 200, await input.release(tab!.id, run)),
+    },
     // Focus is no batch step: a plan that focuses a field fills or presses
     // it next, and both focus it themselves.
     "POST /tabs/:id/focus": {

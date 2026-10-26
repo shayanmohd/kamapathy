@@ -1040,6 +1040,14 @@ export const ROUTES = [
   ),
   route(
     "POST",
+    "/tabs/:id/input/release",
+    "Lets go of every key and mouse button this tab holds.",
+    "{ ok: true, released }",
+    {},
+    { budget: 10000, since: 4 },
+  ),
+  route(
+    "POST",
     "/tabs/:id/upload",
     "Selects files on a file input.",
     "{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",

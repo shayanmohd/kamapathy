@@ -471,6 +471,7 @@ A capture reaching past the current visual viewport, which is any full page and 
 | POST | `/tabs/:id/keyboard/up` | `key` | Lets one held key go and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/type` | `text`, `delayMs?` | Types text as key events, character by character. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/insert-text` | `text` | Inserts text at the focused editable's caret, without key events. Returns `{ ok: true, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/input/release` | `{}` | Lets go of every key and mouse button this tab holds. Returns `{ ok: true, released }`. |
 | POST | `/tabs/:id/upload` | `ref?`, `selector?`, `files` | Selects files on a file input. Returns `{ ok: true, selected, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/pdf/text` | `from?`, `to?`, `maxChars?`, `timeoutMs?` | Reads a PDF's text by page without entering Chromium's viewer. Returns `PdfText`. |
 | POST | `/tabs/:id/expectations` | `event`, `timeoutMs?` | Arms a wait for the next popup, download, file chooser or dialog in the tab, before the action that causes it. Returns `201 { expectation: { id, event, tabId, expiresAt } }`. |

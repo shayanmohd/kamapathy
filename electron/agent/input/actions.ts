@@ -445,6 +445,8 @@ export interface InputActions {
     action: MouseAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
+  /** Lets go of every key and button the tab holds. */
+  release(id: string, run: Run): Promise<Record<string, unknown>>;
   drag(
     id: string,
     action: DragAction,
@@ -1758,5 +1760,28 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     }
     return withState();
   };
-  return { pointer, drag, field, press, keyboard, mouse };
+  // input/release: everything the tab holds goes, the keys last held first
+  // and then the buttons, and the answer names what was let go. It reveals
+  // no tab and reports no point.
+  const release = async (id: string, run: Run) => {
+    const guard = () => {
+      authorizeTab(id);
+    };
+    // A key that started a load can still be let go, so a loading page is
+    // not waited for here.
+    const { session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      true,
+      run.park,
+    );
+    const released = await actions.dispatcher(id, session).release({
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    });
+    return { ok: true, released };
+  };
+  return { pointer, drag, field, press, keyboard, mouse, release };
 }

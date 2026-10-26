@@ -6290,6 +6290,67 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+  it("releases held input on request", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    for (const key of ["Shift", "Control"])
+      expect(
+        (await request(`/tabs/${tab.id}/keyboard/down`, "POST", { key })).status,
+        key,
+      ).toBe(200);
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/down`, "POST", {})).status,
+    ).toBe(200);
+    page.inputs = [];
+    const let_go = await request(`/tabs/${tab.id}/input/release`, "POST", {});
+    expect(let_go.status).toBe(200);
+    expect(await let_go.json()).toEqual({
+      ok: true,
+      released: ["Control", "Shift", "left"],
+    });
+    // The keys come up last held first, each carrying the mask as it is
+    // once it is up, and the button is let go after them.
+    expect(
+      page.inputs.map((input) => [
+        input.parameters.type,
+        input.parameters.key ?? input.parameters.button,
+        input.parameters.modifiers,
+      ]),
+    ).toEqual([
+      ["keyUp", "Control", 8],
+      ["keyUp", "Shift", 0],
+      ["mouseReleased", "left", 0],
+    ]);
+    // A second release lets nothing go and sends nothing.
+    page.inputs = [];
+    const again = await request(`/tabs/${tab.id}/input/release`, "POST", {});
+    expect(await again.json()).toEqual({ ok: true, released: [] });
+    expect(page.inputs).toEqual([]);
+    // The position stays where the pointer was left.
+    const moved = await request(`/tabs/${tab.id}/mouse/move`, "POST", {
+      x: 0,
+      y: 0,
+    });
+    expect((await moved.json()).input).toEqual({
+      x: 0,
+      y: 0,
+      buttons: 0,
+      keys: [],
+      modifiers: 0,
+    });
+    // The route never reveals its tab, takes no label and declares the
+    // plain 10 s budget.
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/input/release",
+    )!;
+    expect(route.budget).toBe(10000);
+    expect(route.lane).toBe("space");
+    expect(route.follow).toBe(false);
+    expect(route.label).toBe(false);
+    expect(route.since).toBe(4);
+    expect(route.body).toEqual({});
+  });
+
   it("names raw input once a stroke, per tab and kind", async () => {
     const { space, tab } = await createPage();
     mousePage();
@@ -7401,6 +7462,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/mouse/up": {},
       "POST /tabs/:id/mouse/wheel": { deltaX: 0, deltaY: 60 },
       "POST /tabs/:id/mouse/click": { x: 10, y: 10 },
+      "POST /tabs/:id/input/release": {},
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },
