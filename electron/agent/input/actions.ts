@@ -416,12 +416,13 @@ export interface MouseAction {
   deltaX?: number;
   deltaY?: number;
 }
-export type KeyboardKind = "down" | "up" | "type" | "insert-text";
+export type KeyboardKind = "down" | "up" | "type" | "insert-text" | "paste";
 /** One raw keyboard request as its route parsed it. */
 export interface KeyboardAction {
   kind: KeyboardKind;
   key?: string;
   text?: string;
+  html?: string;
   delayMs: number;
 }
 export interface InputActions {
@@ -536,6 +537,42 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       kind: typeof found.kind === "string" ? found.kind : "none",
       ...(found.blockedFrame === true ? { blockedFrame: true as const } : {}),
     };
+  };
+  // The content the page is offered, as one mutating page call. A walk that
+  // ended at a frame Kamapathy cannot read is the refusal the guards answer
+  // wherever else a key goes out, so it is raised with their own wording.
+  const pasteOnPage = async (
+    id: string,
+    session: TabSession,
+    action: KeyboardAction,
+    deadline: number,
+    step: Step,
+  ) => {
+    try {
+      return await actions.evaluatePage(
+        id,
+        session,
+        "pasteDispatch",
+        {
+          text: action.text ?? "",
+          ...(action.html === undefined ? {} : { html: action.html }),
+        },
+        deadline,
+        step,
+      );
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.code === "not_editable" &&
+        error.fields.reason === "frame"
+      )
+        checkKeyTarget(
+          { kind: "other", blockedFrame: true },
+          undefined,
+          platformName,
+        );
+      throw error;
+    }
   };
   // One key as a chord of its own, for the guards and the raw routes.
   const chordOf = (key: KeyDef, mask: number): Chord => ({
@@ -1513,6 +1550,25 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       return withState();
     }
     const text = action.text ?? "";
+    if (action.kind === "paste") {
+      // The page is offered the content first, in a DataTransfer of its own,
+      // and nothing here ever touches the system clipboard.
+      const offered = await pasteOnPage(
+        id,
+        session,
+        action,
+        run.deadline,
+        step,
+      );
+      if (offered.handled === "page") return { ok: true, handled: "page" };
+      // The page ignored the event, so Kamapathy inserts the plain text, and
+      // only the plain text, at the focused editable's caret.
+      await dispatcher.send(
+        [{ method: "Input.insertText", params: { text } }],
+        gesture,
+      );
+      return { ok: true, handled: "text" };
+    }
     if (action.kind === "insert-text") {
       // Inserted text opens no picker, so only its frame is checked.
       const focused = await look();

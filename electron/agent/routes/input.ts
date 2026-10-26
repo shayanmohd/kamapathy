@@ -84,7 +84,7 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     // activity line rather than the throttled one the raw routes write.
     "POST /tabs/:id/mouse/click": tool("mouse-click"),
     ...Object.fromEntries(
-      (["down", "up", "type", "insert-text"] as const).map((kind) => [
+      (["down", "up", "type", "insert-text", "paste"] as const).map((kind) => [
         `POST /tabs/:id/keyboard/${kind}`,
         keyboard(kind),
       ]),

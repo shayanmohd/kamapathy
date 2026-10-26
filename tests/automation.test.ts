@@ -5920,6 +5920,134 @@ describe("local automation socket", () => {
     expect((await pressed.json()).loading).toBeUndefined();
   });
 
+  it("reports who took the paste", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const paste = (body: Record<string, unknown>) =>
+      request(`/tabs/${tab.id}/keyboard/paste`, "POST", body);
+    const both = { text: "from the agent", html: "<b>from the agent</b>" };
+    // A handler that cancelled the event took the content, so Kamapathy
+    // inserts nothing after it.
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const took = await paste(both);
+    expect(took.status).toBe(200);
+    expect(await took.json()).toEqual({ ok: true, handled: "page" });
+    expect(commandsOf(page)).toEqual([]);
+    // Both flavours reach the page exactly as the route was given them.
+    expect(payloads("pasteDispatch")).toEqual([both]);
+    // A page that ignored the event leaves the insertion to Kamapathy, which
+    // puts in the plain text and never the HTML.
+    page.debugger.sent.length = 0;
+    page.pageActions.pasteDispatch = { ok: true, handled: "none" };
+    const inserted = await paste(both);
+    expect(inserted.status).toBe(200);
+    expect(await inserted.json()).toEqual({ ok: true, handled: "text" });
+    expect(commandsOf(page)).toEqual(["insertText from the agent"]);
+    // Nothing editable has focus and no handler took the event.
+    page.debugger.sent.length = 0;
+    const refuse = (reason: string) => {
+      page.pageActions.pasteDispatch = {
+        ok: false,
+        code: "not_editable",
+        error: "Nothing that takes typing has focus.",
+        fields: { reason },
+      };
+    };
+    refuse("none");
+    const nowhere = await failure(await paste({ text: "from the agent" }));
+    expect(nowhere.status).toBe(422);
+    expect(nowhere.error).toMatchObject({
+      code: "not_editable",
+      reason: "none",
+    });
+    expect(commandsOf(page)).toEqual([]);
+    // A frame holding focus that Kamapathy cannot read is the guards' own
+    // refusal, as it is for every other key.
+    refuse("frame");
+    const frame = await failure(await paste({ text: "from the agent" }));
+    expect(frame.status).toBe(403);
+    expect(frame.error.code).toBe("input_target_blocked");
+    expect(frame.error.reason).toBeUndefined();
+    expect(commandsOf(page)).toEqual([]);
+    // Nothing on this path reaches the system clipboard.
+    expect(
+      page.debugger.sent.filter((command) => /clipboard/i.test(command.method)),
+    ).toEqual([]);
+  });
+
+  it("accepts a 192 KiB keyboard/paste body while every other route keeps 64 KiB", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/keyboard/paste",
+    )!;
+    expect(route.limit).toBe(192 * 1024);
+    expect(route.budget).toEqual({ compute: "rawBudget", maxMs: 10000 });
+    expect(route.follow).toBe(true);
+    expect(route.since).toBe(4);
+    // What the widest paste weighs on the wire: a character JSON escapes
+    // costs six bytes, which is why this one route takes three times the
+    // ordinary body.
+    const body = {
+      text: "\u0001".repeat(16384),
+      html: "\u0001".repeat(15000),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(body));
+    expect(bytes).toBeGreaterThan(180 * 1024);
+    const wide = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", body);
+    expect(wide.status).toBe(200);
+    expect(await wide.json()).toEqual({ ok: true, handled: "page" });
+    // A larger one is refused by its declared size, before any body is read.
+    expect(
+      await declaredSize(`/tabs/${tab.id}/keyboard/paste`, 200 * 1024),
+    ).toBe(413);
+    // Every other route keeps the ordinary 64 KiB.
+    expect(await declaredSize(`/tabs/${tab.id}/click`, 70 * 1024)).toBe(413);
+    expect(
+      await declaredSize(`/tabs/${tab.id}/keyboard/insert-text`, 70 * 1024),
+    ).toBe(413);
+  });
+
+  it("refuses bad paste bodies", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    page.pageActions.pasteDispatch = { ok: true, handled: "page" };
+    const refused = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/keyboard/paste`, "POST", body));
+    // Empty text means something only beside html.
+    const empty = await refused({ text: "" });
+    expect(empty.status).toBe(400);
+    expect(empty.error).toMatchObject({ code: "invalid_field", field: "text" });
+    expect((await refused({ text: 7 })).error.code).toBe("invalid_field");
+    for (const body of [
+      { text: "x".repeat(16385) },
+      { text: "x", html: "x".repeat(32769) },
+    ]) {
+      const long = await refused(body);
+      expect(long.status).toBe(400);
+      expect(long.error.code).toBe("invalid_field");
+    }
+    const unknown = await refused({ text: "x", flavour: "text/rtf" });
+    expect(unknown.status).toBe(400);
+    expect(unknown.error).toMatchObject({
+      code: "unknown_field",
+      field: "flavour",
+      allowed: ["text", "html"],
+    });
+    // Nothing was sent to the page for any of them.
+    expect(page.scripts).toEqual([]);
+    // html alone carries an empty text, which the page is offered as it is.
+    const only = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", {
+      text: "",
+      html: "<b>from the agent</b>",
+    });
+    expect(only.status).toBe(200);
+    expect(payloads("pasteDispatch")).toEqual([
+      { text: "", html: "<b>from the agent</b>" },
+    ]);
+  });
+
   // Section 5's raw mouse routes over a fake page: nothing resolves a
   // target, so the page is asked only for its viewport and its counters.
   const mousePage = () => {
@@ -7530,6 +7658,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/keyboard/up": { key: "Shift" },
       "POST /tabs/:id/keyboard/type": { text: "Ada" },
       "POST /tabs/:id/keyboard/insert-text": { text: "Ada" },
+      "POST /tabs/:id/keyboard/paste": { text: "Ada", html: "<b>Ada</b>" },
       "POST /tabs/:id/mouse/move": { x: 10, y: 10 },
       "POST /tabs/:id/mouse/down": {},
       "POST /tabs/:id/mouse/up": {},

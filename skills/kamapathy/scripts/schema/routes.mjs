@@ -378,6 +378,24 @@ const FIELDS = {
       description: "The text to insert at the focused editable's caret.",
     },
   },
+  keyboardPaste: {
+    text: {
+      kind: "string",
+      min: 0,
+      max: 16384,
+      required: true,
+      since: 4,
+      description: "The plain text to paste. It may be empty only beside html.",
+    },
+    html: {
+      kind: "string",
+      min: 0,
+      max: 32768,
+      since: 4,
+      description:
+        "The rich flavour offered beside the text, which only the page's own handler can take.",
+    },
+  },
   wait: {
     selector: {
       ...selector,
@@ -1037,6 +1055,19 @@ export const ROUTES = [
     "{ ok: true, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
     FIELDS.keyboardInsert,
     { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/keyboard/paste",
+    "Pastes text, and optional HTML, without the system clipboard.",
+    "{ ok: true, handled, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.keyboardPaste,
+    {
+      budget: { compute: "rawBudget", maxMs: 10000 },
+      limit: 192 * 1024,
+      follow: true,
+      since: 4,
+    },
   ),
   route(
     "POST",

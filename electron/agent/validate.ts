@@ -428,6 +428,7 @@ export function keyboardFields(
   body: Record<string, unknown>,
   kind: KeyboardKind,
 ): KeyboardAction {
+  if (kind === "paste") return { kind, ...pasteFields(body), delayMs: 0 };
   if (kind === "down" || kind === "up") {
     const key = stringField(body, "key", MAX_CHORD_CHARS);
     if (parseChord(key).tokens.length > 1)
@@ -453,6 +454,28 @@ export function keyboardFields(
       { field: "delayMs", expected: `a delay that fits ${MAX_TYPE_GAPS_MS} ms` },
     );
   return { kind, text, delayMs };
+}
+// The most a paste carries of each flavour. The route's own 192 KiB body
+// limit leaves room for both, escaped.
+const MAX_PASTE_TEXT = 16384;
+const MAX_PASTE_HTML = 32768;
+// What one paste offers the page. Empty text means something only beside
+// html, since a paste of nothing at all is a mistake, not a request.
+export function pasteFields(body: Record<string, unknown>): {
+  text: string;
+  html?: string;
+} {
+  const text = stringField(body, "text", MAX_PASTE_TEXT, true);
+  const html =
+    body.html === undefined
+      ? undefined
+      : stringField(body, "html", MAX_PASTE_HTML, true);
+  if (!text && html === undefined)
+    return fail("invalid_field", "text may be empty only when html is given.", {
+      field: "text",
+      expected: "the text to paste",
+    });
+  return { text, ...(html === undefined ? {} : { html }) };
 }
 // A drag's two ends and the options the gesture takes. Both ends resolve
 // like any other target, each with its own position.
