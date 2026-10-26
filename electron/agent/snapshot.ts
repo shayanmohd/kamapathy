@@ -7,6 +7,7 @@ import type { Actions } from "./actions";
 import { fail } from "./errors";
 import {
   NO_EXTENSION_NAMES,
+  blockedFrameUrls,
   extensionFrame,
   type ExtensionNames,
 } from "./extension-frames";
@@ -703,11 +704,10 @@ async function extensionsOf(
 ): Promise<ReadonlyMap<string, string>> {
   const found = new Map<string, string>();
   if (!entries.some((entry) => entry.blocked === true)) return found;
-  const frames = await session.frames(step).catch(() => []);
-  for (const frame of frames) {
-    if (frame.blocked !== true) continue;
-    const extension = extensionFrame(frame.url, names);
-    if (extension) found.set(frame.path, extension.name);
+  const urls = await blockedFrameUrls(session, step).catch(() => undefined);
+  for (const [path, url] of urls ?? []) {
+    const extension = extensionFrame(url, names);
+    if (extension) found.set(path, extension.name);
   }
   return found;
 }

@@ -16,6 +16,13 @@
 // only asked for a date input, to tell its picker indicator from the fields
 // that take typing.
 import { fail, toApiError } from "../errors";
+import {
+  NO_EXTENSION_NAMES,
+  blockedFrameOf,
+  extensionFrame,
+  extensionInputMessage,
+  type ExtensionNames,
+} from "../extension-frames";
 import type { TabSession } from "../session/tab-session";
 import type { KnownFrame, Step } from "../session/types";
 import { MODIFIER_BITS, type Chord } from "./keys";
@@ -149,6 +156,32 @@ export async function blockedFrames(
   return new Set(frames.filter(refusesInput).map((frame) => frame.frameId));
 }
 
+// What agents are told about a frame their input may not reach. A frame of
+// one of the person's extensions is named for them, as section 17 says;
+// every other blocked frame answers for itself. A registry read that fails,
+// or runs out of time, leaves the plain refusal rather than another error.
+const POINT_MESSAGE =
+  "This point belongs to an extension or an internal page, which agent input never reaches. Act on the page itself.";
+const FOCUS_MESSAGE =
+  "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.";
+async function refusePoint(
+  session: TabSession,
+  frameId: string,
+  step: Step,
+  names: ExtensionNames,
+): Promise<never> {
+  const blocked = await blockedFrameOf(session, frameId, step).catch(
+    () => undefined,
+  );
+  const extension = blocked && extensionFrame(blocked.url, names);
+  if (!blocked || !extension)
+    return fail("input_target_blocked", POINT_MESSAGE);
+  return fail("input_target_blocked", extensionInputMessage(extension.name), {
+    frame: blocked.path,
+    extension: extension.name,
+  });
+}
+
 const pickerAt = async (
   session: TabSession,
   point: { x: number; y: number },
@@ -169,7 +202,13 @@ export async function checkPointerTarget(
   session: TabSession,
   point: { x: number; y: number },
   step: Step,
-  options: { button: Button; press: boolean; platform?: NodeJS.Platform },
+  options: {
+    button: Button;
+    press: boolean;
+    platform?: NodeJS.Platform;
+    /** Section 17's loaded extensions, which name the frame a refusal is about. */
+    extensions?: ExtensionNames;
+  },
 ): Promise<void> {
   const platform = options.platform ?? process.platform;
   const hit = await hitNodeAt(session, point, step);
@@ -178,9 +217,11 @@ export async function checkPointerTarget(
     const frames = await session.knownFrames(step);
     const frame = frames.find((entry) => entry.frameId === hit.frameId);
     if (!frame || refusesInput(frame))
-      fail(
-        "input_target_blocked",
-        "This point belongs to an extension or an internal page, which agent input never reaches. Act on the page itself.",
+      await refusePoint(
+        session,
+        hit.frameId,
+        step,
+        options.extensions ?? NO_EXTENSION_NAMES,
       );
   }
   if (!options.press) return;
@@ -212,15 +253,24 @@ const opensPicker = (chord: Chord, platform: NodeJS.Platform) => {
 // from the focused frame instead. Inserted text and a release carry no
 // chord, so only the frame check applies to them.
 export function checkKeyTarget(
-  focused: { kind: string; blockedFrame?: true },
+  focused: {
+    kind: string;
+    blockedFrame?: true;
+    /** The frame's section 9 path and extension, when it is one of the person's. */
+    frame?: string;
+    extension?: string;
+  },
   chord?: Chord,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (focused.blockedFrame)
-    fail(
-      "input_target_blocked",
-      "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.",
-    );
+  if (focused.blockedFrame) {
+    const name = focused.extension;
+    if (name === undefined) return fail("input_target_blocked", FOCUS_MESSAGE);
+    return fail("input_target_blocked", extensionInputMessage(name), {
+      ...(focused.frame === undefined ? {} : { frame: focused.frame }),
+      extension: name,
+    });
+  }
   if (!chord || !PICKER_KINDS.includes(focused.kind)) return;
   if (!opensPicker(chord, platform)) return;
   const use = pickerUse(focused.kind as PickerKind);

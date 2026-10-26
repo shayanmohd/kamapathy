@@ -194,11 +194,34 @@ describe("local automation socket", () => {
     expect(controller.contents.debugger.attachCount).toBe(1);
     expect(controller.contents.debugger.attached).toBe(true);
   };
+  // One of the person's extensions, whose own frames section 17 names where
+  // they are refused.
+  const EXTENSION_ID = "abcdefghijklmnopabcdefghijklmnop";
+  const EXTENSION_NAME = "Price watcher";
+  const EXTENSION_MESSAGE =
+    "This is part of the Price watcher extension. Agents can't use extensions; ask the person to continue there.";
+  // The path section 9 gives a frame the page cannot read: its owner
+  // element, resolved into the page's world, and the index it counts there.
+  const framePath = (page: FakeContents, path: string) => {
+    page.debugger.reply("DOM.getFrameOwner", () => ({ backendNodeId: 9 }));
+    page.debugger.reply("DOM.resolveNode", () => ({
+      object: { type: "object", subtype: "node", objectId: "owner-9" },
+    }));
+    page.debugger.reply("Runtime.callFunctionOn", () => ({
+      result: { type: "object", value: { ok: true, path } },
+    }));
+  };
   beforeEach(async () => {
     controller = new FakeController();
     refs = new RefBook();
     socket = testSocket();
-    api = await startAutomation(controller, { socketPath: socket.path, refs });
+    api = await startAutomation(controller, {
+      socketPath: socket.path,
+      refs,
+      extensions: {
+        nameOf: (id) => (id === EXTENSION_ID ? EXTENSION_NAME : undefined),
+      },
+    });
     send = socketFetch(socket.path);
   });
   afterEach(async () => {
@@ -6059,12 +6082,19 @@ describe("local automation socket", () => {
     });
     // The hit at the point is the element that holds that frame.
     page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "frame-x" }];
+    framePath(page, "1");
     for (const force of [false, true]) {
       const { status, error } = await failure(
         await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1", force }),
       );
       expect(status, `force ${force}`).toBe(403);
       expect(error.code, `force ${force}`).toBe("input_target_blocked");
+      // The refusal names the extension whose page that frame shows.
+      expect(error.message, `force ${force}`).toBe(EXTENSION_MESSAGE);
+      expect([error.frame, error.extension], `force ${force}`).toEqual([
+        "1",
+        EXTENSION_NAME,
+      ]);
     }
     expect(page.inputs).toEqual([]);
     expect(controller.activity.map((entry) => entry.message)).not.toContain(
@@ -6099,6 +6129,63 @@ describe("local automation socket", () => {
       (await request(`/tabs/${tab.id}/hover`, "POST", { ref: "@e1" })).status,
     ).toBe(200);
     expect(gestureOf(page)).toEqual(["mouseMoved"]);
+  });
+
+  it("names the extension when keys or a paste go to its frame", async () => {
+    const { tab } = await createPage();
+    const page = pointPage();
+    page.result = { ok: true };
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+    });
+    framePath(page, "1");
+    // The page reports the focus in a frame it cannot read, and section 9's
+    // walk says which frame that is.
+    page.pageActions.focusedKind = {
+      ok: true,
+      kind: "other",
+      blockedFrame: true,
+    };
+    page.pageActions.activeFrame = {
+      ok: true,
+      path: "1",
+      blocked: true,
+      editable: false,
+    };
+    const named = {
+      code: "input_target_blocked",
+      message: EXTENSION_MESSAGE,
+      frame: "1",
+      extension: EXTENSION_NAME,
+    };
+    const pressed = await failure(
+      await request(`/tabs/${tab.id}/press`, "POST", { key: "Enter" }),
+    );
+    expect(pressed.status).toBe(403);
+    expect(pressed.error).toMatchObject(named);
+    const typed = await failure(
+      await request(`/tabs/${tab.id}/keyboard/type`, "POST", { text: "hi" }),
+    );
+    expect(typed.error).toMatchObject(named);
+    // A paste whose event reached nothing Kamapathy may read is the same
+    // refusal, raised where the page answered.
+    page.pageActions.pasteDispatch = {
+      ok: false,
+      code: "not_editable",
+      error: "Nothing that takes typing has focus.",
+      fields: { reason: "frame" },
+    };
+    const pasted = await failure(
+      await request(`/tabs/${tab.id}/keyboard/paste`, "POST", {
+        text: "from the agent",
+      }),
+    );
+    expect(pasted.status).toBe(403);
+    expect(pasted.error).toMatchObject(named);
+    expect(page.inputs).toEqual([]);
   });
 
   // A page answering drag, input-count and frame operations. `dragging`

@@ -4,6 +4,8 @@ import {
   extensionIdOf,
   isComponentExtension,
 } from "../../shared/extensions";
+import type { TabSession } from "./session/tab-session";
+import type { Step } from "./session/types";
 
 // Section 17's agent-facing rule, in one place: which frames belong to one of
 // the person's extensions, what agents are told about them, and why input
@@ -49,4 +51,48 @@ export function extensionOrigin(origin: string | undefined): boolean {
 
 export function extensionInputMessage(name: string): string {
   return `This is part of the ${name} extension. Agents can't use extensions; ask the person to continue there.`;
+}
+
+/** What the frame registry is asked for: the tab's frames, blocked ones included. */
+type FrameReader = Pick<TabSession, "knownFrames" | "frames">;
+
+/**
+ * The URL each blocked frame of a tab committed, by the path section 9 gives
+ * it. Only the registry holds that URL, and only frames whose owner can be
+ * read have a path, so a frame inside a blocked one is not listed.
+ */
+export async function blockedFrameUrls(
+  session: FrameReader,
+  step: Step,
+): Promise<ReadonlyMap<string, string>> {
+  const urls = new Map<string, string>();
+  for (const frame of await session.frames(step))
+    if (frame.blocked === true) urls.set(frame.path, frame.url);
+  return urls;
+}
+
+/**
+ * The blocked frame around a frame, with the path and URL agents are told
+ * about: the outermost one, since the page shows that frame and nothing
+ * inside it has a path of its own.
+ */
+export async function blockedFrameOf(
+  session: FrameReader,
+  frameId: string,
+  step: Step,
+): Promise<{ path: string; url: string } | undefined> {
+  const known = await session.knownFrames(step);
+  const byId = new Map(known.map((frame) => [frame.frameId, frame]));
+  let outer: string | undefined;
+  for (
+    let at = byId.get(frameId);
+    at;
+    at = at.parentFrameId === undefined ? undefined : byId.get(at.parentFrameId)
+  )
+    if (at.blocked) outer = at.frameId;
+  if (outer === undefined) return undefined;
+  const frame = (await session.frames(step)).find(
+    (entry) => entry.frameId === outer,
+  );
+  return frame && { path: frame.path, url: frame.url };
 }

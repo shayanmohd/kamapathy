@@ -285,6 +285,8 @@ export function createActions(deps: {
     authority,
     actions: { readyContents, evaluatePage, dispatcher: dispatcherFor },
     dispatchers,
+    frames: deps.frames,
+    extensions: deps.extensions,
   });
   const executeToolAction = async (
     id: string,
