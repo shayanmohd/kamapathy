@@ -716,11 +716,23 @@ try {
     assert.equal(response.status, 200, png.toString("utf8").slice(0, 300));
     const frame = await middleOf(png);
     const band = bandAt(y, frame.height);
-    assert.ok(
-      frame.color.every(
-        (channel, index) => Math.abs(channel - BANDS[band][index]) < 60,
-      ),
-      `A capture at ${y} shows ${frame.color} where band ${band} is ${BANDS[band]}`,
+    // A wide-gamut screen hands back the bands in its own colour space, so
+    // the band is the one the captured colour is nearest to: pure green
+    // reads as 117,251,76 on a Display P3 screen and as 0,255,0 on an sRGB
+    // one, and both are nearest to green.
+    const apart = (colour) =>
+      colour.reduce(
+        (total, channel, index) => total + (channel - frame.color[index]) ** 2,
+        0,
+      );
+    const nearest = BANDS.reduce(
+      (best, colour, index) => (apart(colour) < apart(BANDS[best]) ? index : best),
+      0,
+    );
+    assert.equal(
+      nearest,
+      band,
+      `A capture at ${y} shows ${frame.color}, nearest band ${nearest}, where band ${band} is ${BANDS[band]}`,
     );
     assert.ok(
       Date.now() - started < 5000,
