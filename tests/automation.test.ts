@@ -6858,9 +6858,11 @@ describe("local automation socket", () => {
       code: "unknown_ref",
       ref: "@e9",
     });
-    // No session was opened and nothing was sent on one.
+    // No session was opened, nothing was sent on one, and the refs the
+    // snapshot gave out are still the page's.
     expect(attached(page)).toEqual([]);
     expect(sentOn(page, "DOM.getDocument")).toEqual([]);
+    expect(refs.classify(tab.id, "@e2")).toBe("live");
   });
 
   it("sessions close when control or the switch changes", async () => {
