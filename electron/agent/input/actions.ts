@@ -1753,8 +1753,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           run,
         )
       : {};
+    // The keys go to the frame that holds the focus, which the target's own
+    // focus step may just have changed.
+    const focus = await focusedFrame(id, session, step);
     checkKeyTarget(
-      await focusedControl(id, session, run.deadline, step),
+      await focusedControl(id, session, run.deadline, step, focus?.frameId),
       chord,
       platformName,
     );
@@ -1777,8 +1780,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     };
     await confirmDelivery({
       kind: "key",
+      // The counters of the frame that holds the focus: a key inside a frame
+      // never reaches the page's own document.
       counters: () =>
-        actions.evaluatePage(id, session, "input", {}, step.deadline, step),
+        actions.evaluatePage(
+          id,
+          session,
+          "input",
+          {},
+          step.deadline,
+          step,
+          focus?.frameId,
+        ),
       frames: async () => {
         await actions.evaluatePage(
           id,
@@ -1787,6 +1800,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           {},
           Math.min(step.deadline, Date.now() + 2000),
           step,
+          focus?.frameId,
         );
       },
       epoch: () => session.epoch,

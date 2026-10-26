@@ -2392,8 +2392,18 @@ describe("local automation socket", () => {
     expect(pasted.status).toBe(200);
     expect(await pasted.json()).toMatchObject({ handled: "page" });
     expect(ranIn(page, "pasteDispatch")).toEqual(["deep"]);
+    // A press goes to the focused frame too, and its delivery is confirmed
+    // by that frame's own counters.
+    hops = 0;
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    expect(pressed.status).toBe(200);
+    expect(ranIn(page, "focusedKind").at(-1)).toBe("deep");
+    expect(ranIn(page, "input").at(-1)).toBe("deep");
     // A frame agents never reach refuses the keys, and names itself.
     hops = 0;
+    page.inputs.length = 0;
     page.result = (code: string) =>
       code.includes(')("activeFrame",')
         ? { ok: true, path: "0", key: "panel", blocked: true }
