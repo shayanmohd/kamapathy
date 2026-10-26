@@ -244,12 +244,17 @@ const FIELDS = {
   press: {
     key: {
       kind: "string",
-      max: 20,
+      max: 64,
       required: true,
       description:
-        "Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown or Space.",
+        "A key name such as Enter, KeyA or F12, a printable character, or a chord of at most 6 keys such as Shift+KeyA or ControlOrMeta+KeyS.",
     },
     ...target,
+    delayMs: {
+      ...pressDelay,
+      description: "How long to hold the key before releasing it.",
+    },
+    timeoutMs: actionTimeout,
     label,
   },
   scroll: {
@@ -863,8 +868,9 @@ export const ROUTES = [
   ),
   action(
     "press",
-    "Presses a supported key, focusing a control first when given.",
-    "{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    "Presses a key or a chord, focusing a control first when given.",
+    "{ ok: true, url, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    { budget: { compute: "pressBudget", maxMs: 80100 } },
   ),
   action(
     "scroll",

@@ -217,9 +217,9 @@ export const PAGE_ENTRIES = [
   method(
     "Page.press",
     "page.press(key, target?, options?)",
-    "Presses a supported key, focusing a control first when given.",
+    "Presses a key name, a printable character or a chord, focusing a control first when given.",
     [{ name: "key", kind: "string" }, target("target", true), OPTIONS],
-    "Promise<{ ok: true, rebound? }>",
+    "Promise<{ ok: true, url, loading?, rebound? }>",
     "POST /tabs/:id/press",
     ["invalid_key", ...TARGET, ...INPUT],
     labelOption("press"),

@@ -21,8 +21,10 @@ import type {
   FieldKind,
   PointerAction,
   PointerKind,
+  PressAction,
   SelectChoice,
 } from "./input/actions";
+import { MAX_CHORD_CHARS, parseChord } from "./input/keys";
 import type { Button } from "./input/state";
 import { WAIT_UNTIL, type WaitUntil } from "./navigation/await";
 import { MAX_GLOB, compileUrlGlob } from "./navigation/url-glob";
@@ -37,25 +39,6 @@ import type { AutomationController } from "./server";
 import { MAX_CURSOR } from "./snapshot";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
-export const PRESS_KEYS: Record<
-  string,
-  { key: string; code: string; keyCode: number; text?: string }
-> = {
-  Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
-  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
-  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
-  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
-  Delete: { key: "Delete", code: "Delete", keyCode: 46 },
-  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
-  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
-  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
-  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
-  Home: { key: "Home", code: "Home", keyCode: 36 },
-  End: { key: "End", code: "End", keyCode: 35 },
-  PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
-  PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
-  Space: { key: " ", code: "Space", keyCode: 32, text: " " },
-};
 export type ToolAction = {
   type:
     | "snapshot"
@@ -368,6 +351,22 @@ export function fieldFields(
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
 }
+// press takes any key name, printable character or chord, and focuses an
+// optional target first. The chord is parsed here, so an unknown name is
+// refused before the lane.
+export function pressFields(body: Record<string, unknown>): PressAction {
+  const key = stringField(body, "key", MAX_CHORD_CHARS);
+  parseChord(key);
+  const target = targetFields(body, true);
+  return {
+    key,
+    ...("ref" in target || "selector" in target
+      ? { target: target as TargetPayload }
+      : {}),
+    delayMs: integerField(body, "delayMs", 0, 0, 5000),
+    timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
+  };
+}
 // A drag's two ends and the options the gesture takes. Both ends resolve
 // like any other target, each with its own position.
 export function dragFields(body: Record<string, unknown>): DragAction {
@@ -499,15 +498,11 @@ function parseAction(
       type,
       payload: fieldFields(body, type) as unknown as Record<string, unknown>,
     };
-  if (type === "press") {
-    const key = stringField(body, "key", 20);
-    if (!Object.hasOwn(PRESS_KEYS, key))
-      return fail(
-        "invalid_key",
-        `Supported keys: ${Object.keys(PRESS_KEYS).join(", ")}.`,
-      );
-    return { type, payload: { key, ...targetFields(body, true) } };
-  }
+  if (type === "press")
+    return {
+      type,
+      payload: pressFields(body) as unknown as Record<string, unknown>,
+    };
   if (type === "scroll") {
     const direction = stringField(body, "direction", 5);
     if (!["up", "down", "left", "right"].includes(direction))

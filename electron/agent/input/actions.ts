@@ -31,9 +31,19 @@ import type { TabSession } from "../session/tab-session";
 import type { Step } from "../session/types";
 import type { TargetPayload } from "../validate";
 import type { InputDispatcher, InputDispatchers } from "./dispatch";
-import { checkPointerTarget } from "./guards";
+import { checkKeyTarget, checkPointerTarget } from "./guards";
 import { inputMarker } from "./marker";
-import { KEYS, keyParams, keyType, type InputCommand } from "./keys";
+import {
+  KEYS,
+  checkClipboardChord,
+  chordCommands,
+  keyParams,
+  keyType,
+  parseChord,
+  type Chord,
+  type InputCommand,
+  type Modifier,
+} from "./keys";
 import { BUTTON_BITS, type Button } from "./state";
 import {
   ACTION_LEVELS,
@@ -382,10 +392,22 @@ export interface FieldAction {
   values?: SelectChoice[];
   timeoutMs: number;
 }
+/** One press as its route parsed it. */
+export interface PressAction {
+  key: string;
+  target?: TargetPayload;
+  delayMs: number;
+  timeoutMs: number;
+}
 export interface InputActions {
   pointer(
     id: string,
     action: PointerAction,
+    run: Run,
+  ): Promise<Record<string, unknown>>;
+  press(
+    id: string,
+    action: PressAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
   drag(
@@ -436,6 +458,40 @@ export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
   const { authorizeTab } = authority;
   const platform = deps.platform ? { platform: deps.platform } : {};
+  const platformName = deps.platform ?? process.platform;
+  // The modifiers the tab is holding, which join a chord's own.
+  const heldModifiers = (dispatcher: InputDispatcher): Modifier[] =>
+    dispatcher.state
+      .heldKeys()
+      .map((key) => key.modifier)
+      .filter((modifier): modifier is Modifier => modifier !== undefined);
+  // The focused control as the page reports it: a key that would open a
+  // native picker, or one aimed at a frame agents never reach, is refused
+  // here, before anything is sent.
+  const checkKeyFocus = async (
+    id: string,
+    session: TabSession,
+    chord: Chord,
+    deadline: number,
+    step: Step,
+  ) => {
+    const found = await actions.evaluatePage(
+      id,
+      session,
+      "focusedKind",
+      {},
+      deadline,
+      step,
+    );
+    checkKeyTarget(
+      {
+        kind: typeof found.kind === "string" ? found.kind : "none",
+        ...(found.blockedFrame === true ? { blockedFrame: true as const } : {}),
+      },
+      chord,
+      platformName,
+    );
+  };
 
   const pointer = async (id: string, action: PointerAction, run: Run) => {
     const { kind, button, force } = action;
@@ -1224,5 +1280,103 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     );
     return { ok: true, ...outcome };
   };
-  return { pointer, drag, field };
+  // press: an optional target focused through the field path, then one chord
+  // as its modifier downs, the key's own down with its text or raw, its up
+  // and the modifier ups in reverse. The first keyDown is the commit point,
+  // so a modifier that went out is always released.
+  //
+  // Keys go out on the top page session, which reaches a focused field in a
+  // frame of its own process: a probe of Electron 44 (Chromium 152) typed
+  // into a cross-origin frame's field that way and read the value back from
+  // the frame itself. The macOS editing commands ride along on the key's own
+  // down, where the same probe showed they take effect; with no commands the
+  // chord did nothing at all.
+  const press = async (id: string, action: PressAction, run: Run) => {
+    const guard = () => {
+      authorizeTab(id);
+    };
+    const step: Step = {
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    };
+    // The gesture runs to its end even if the client goes away, so a key
+    // that went down always comes up.
+    const gesture: Step = {
+      deadline: run.deadline,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const { contents, session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      false,
+      run.park,
+    );
+    const dispatcher = actions.dispatcher(id, session);
+    const chord = parseChord(action.key, platformName);
+    // The chord's own modifiers plus the held ones, checked once, before
+    // anything is sent.
+    checkClipboardChord(chord, heldModifiers(dispatcher), platformName);
+    // The target is focused exactly as the focus route focuses it, on the
+    // same loop and at the same level.
+    const focused = action.target
+      ? await field(
+          id,
+          { kind: "focus", target: action.target, timeoutMs: action.timeoutMs },
+          run,
+        )
+      : {};
+    await checkKeyFocus(id, session, chord, run.deadline, step);
+    const epoch = session.epoch;
+    const { down, up } = chordCommands(
+      chord,
+      { mask: dispatcher.state.modifiers },
+      platformName,
+    );
+    const send = async () => {
+      guard();
+      if (session.epoch !== epoch)
+        fail(
+          "page_changed",
+          "The page navigated before input completed. Inspect the new page before continuing.",
+        );
+      await dispatcher.key(down, gesture);
+      if (action.delayMs) await pause(action.delayMs);
+      await dispatcher.key(up, gesture);
+    };
+    await confirmDelivery({
+      kind: "key",
+      counters: () =>
+        actions.evaluatePage(id, session, "input", {}, step.deadline, step),
+      frames: async () => {
+        await actions.evaluatePage(
+          id,
+          session,
+          "frame",
+          {},
+          Math.min(step.deadline, Date.now() + 2000),
+          step,
+        );
+      },
+      epoch: () => session.epoch,
+      budget: step.deadline,
+      deliver: send,
+    });
+    // The page's own handlers, then a load the key started.
+    const settled = await settleAfterInput({
+      contents,
+      park: run.park,
+      budget: run.deadline,
+      guard,
+    });
+    return {
+      ok: true,
+      url: contents.getURL(),
+      ...settled,
+      ...reboundOf(focused),
+    };
+  };
+  return { pointer, drag, field, press };
 }

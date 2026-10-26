@@ -423,13 +423,13 @@ Returns `Promise<{ ok: true, match, value?, valueHidden?, rebound? }>`. Route `P
 
 ### `page.press(key, target?, options?)`
 
-Presses a supported key, focusing a control first when given.
+Presses a key name, a printable character or a chord, focusing a control first when given.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, loading?, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.scroll(direction, pixels?, target?, options?)`
 
@@ -697,7 +697,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/fill` | `ref?`, `selector?`, `value`, `append?`, `timeoutMs?`, `label?` | Replaces the value of a field, select or editable region, or adds to it. Returns `{ ok: true, match, value?, valueHidden?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/select` | `ref?`, `selector?`, `values`, `timeoutMs?`, `label?` | Chooses a select's options by value, label or index. Returns `{ ok: true, values, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/focus` | `ref?`, `selector?`, `timeoutMs?`, `label?` | Focuses a control, retargeting to the nearest one that takes focus. Returns `{ ok: true, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
-| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `label?` | Presses a supported key, focusing a control first when given. Returns `{ ok: true, url, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/press` | `key`, `ref?`, `selector?`, `delayMs?`, `timeoutMs?`, `label?` | Presses a key or a chord, focusing a control first when given. Returns `{ ok: true, url, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?`, `label?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/drag` | `source`, `target`, `sourcePosition?`, `targetPosition?`, `button?`, `force?`, `timeoutMs?`, `label?` | Drags one element onto another, waiting until both ends can take the gesture. Returns `{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |

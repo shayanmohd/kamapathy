@@ -1476,7 +1476,7 @@ describe("local automation socket", () => {
       strict({ kind: "text", value: "Save now", exact: false }, "enabled"),
     );
     // A role selector also carries the key its picked nodes wait under.
-    expect(queryOf("focus")).toEqual(
+    expect(queryOf("focusTarget")).toEqual(
       strict({ kind: "role", role: "textbox" }, "enabled", {
         picked: expect.any(String),
       }),
@@ -1503,7 +1503,7 @@ describe("local automation socket", () => {
       ...[
         "actionPoint",
         "fillPrepare",
-        "focus",
+        "focusTarget",
         "scroll",
         "check",
         "snapshot",
@@ -1916,9 +1916,15 @@ describe("local automation socket", () => {
       ),
     ).toBe(true);
     expect(controller.state.activeTabId).toBe(activeTab);
-    for (const key of ["Control+W", "F12", "a", "constructor"])
+    for (const key of ["Control+KeyW", "F12", "a"])
       expect(
         (await request(`/tabs/${tab.id}/press`, "POST", { key })).status,
+        key,
+      ).toBe(200);
+    for (const key of ["constructor", "KeyA+KeyB", "Control+"])
+      expect(
+        (await request(`/tabs/${tab.id}/press`, "POST", { key })).status,
+        key,
       ).toBe(400);
   });
 
@@ -4827,7 +4833,7 @@ describe("local automation socket", () => {
           }
         : code.includes(')("actionPoint",')
           ? { ok: true, x: 25, y: 45, rebound: ["@e1"] }
-          : code.includes(')("focus",')
+          : code.includes(')("focusTarget",')
             ? { ok: true, rebound: ["@e2"] }
             : code.includes(')("input",')
               ? {
@@ -5436,6 +5442,236 @@ describe("local automation socket", () => {
       }),
     );
     expect(error.message).toContain("fill, select, press");
+  });
+
+  // Section 5's key actions over a fake page: the focused control's kind and
+  // the field path a press focuses through come from `pageActions`.
+  const keyPage = () => {
+    const page = controller.contents;
+    page.result = { ok: true };
+    return page;
+  };
+  // Every key event the tab received, with the mask and the commands it
+  // carried.
+  const keysOf = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchKeyEvent")
+      .map((input) => [
+        input.parameters.type,
+        input.parameters.key,
+        input.parameters.code,
+        input.parameters.modifiers,
+        ...(input.parameters.commands ? [input.parameters.commands] : []),
+      ]);
+  // The 14 keys press took before chords: what they sent then, and still send.
+  const TODAYS_KEYS = {
+    Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
+    Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+    Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+    Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+    Delete: { key: "Delete", code: "Delete", keyCode: 46 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+    Home: { key: "Home", code: "Home", keyCode: 36 },
+    End: { key: "End", code: "End", keyCode: 35 },
+    PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
+    PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+    Space: { key: " ", code: "Space", keyCode: 32, text: " " },
+  } as Record<
+    string,
+    { key: string; code: string; keyCode: number; text?: string }
+  >;
+
+  it("presses a chord and releases it in reverse", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const times: number[] = [];
+    page.afterInput = () => times.push(Date.now());
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Shift+Meta+KeyZ",
+      delayMs: 120,
+    });
+    expect(pressed.status).toBe(200);
+    expect(await pressed.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+    });
+    // The modifiers go down in order, each event carrying the mask as it is
+    // at that moment, and come up in reverse. Shift picks the shifted key.
+    const mac = process.platform === "darwin";
+    expect(keysOf(page)).toEqual([
+      ["keyDown", "Shift", "ShiftLeft", 8],
+      ["keyDown", "Meta", "MetaLeft", 12],
+      ["rawKeyDown", "Z", "KeyZ", 12, ...(mac ? [["redo"]] : [])],
+      ["keyUp", "Z", "KeyZ", 12],
+      ["keyUp", "Meta", "MetaLeft", 8],
+      ["keyUp", "Shift", "ShiftLeft", 0],
+    ]);
+    // The delay sits between the key's own down and its up, nowhere else.
+    const gaps = times.slice(1).map((at, index) => at - times[index]);
+    expect(gaps[2]).toBeGreaterThanOrEqual(120);
+    for (const index of [0, 1, 3, 4])
+      expect(gaps[index], `gap ${index}`).toBeLessThan(100);
+    // Today's 14 keys send the key, code, virtual key code and text they
+    // send now, with no modifier of their own.
+    for (const [name, spec] of Object.entries(TODAYS_KEYS)) {
+      page.inputs = [];
+      expect(
+        (await request(`/tabs/${tab.id}/press`, "POST", { key: name })).status,
+        name,
+      ).toBe(200);
+      expect(
+        page.inputs.map((input) => [
+          input.parameters.type,
+          input.parameters.key,
+          input.parameters.code,
+          input.parameters.windowsVirtualKeyCode,
+          input.parameters.nativeVirtualKeyCode,
+          input.parameters.text,
+          input.parameters.modifiers,
+        ]),
+        name,
+      ).toEqual([
+        [
+          spec.text ? "keyDown" : "rawKeyDown",
+          spec.key,
+          spec.code,
+          spec.keyCode,
+          spec.keyCode,
+          spec.text,
+          0,
+        ],
+        ["keyUp", spec.key, spec.code, spec.keyCode, spec.keyCode, undefined, 0],
+      ]);
+    }
+    // On macOS the standard editing commands ride along with the key.
+    if (mac) {
+      page.inputs = [];
+      await request(`/tabs/${tab.id}/press`, "POST", { key: "Backspace" });
+      expect(page.inputs[0].parameters.commands).toEqual(["deleteBackward"]);
+    }
+    expect(controller.activity.map((entry) => entry.message)).toContain(
+      "Agent pressed a key",
+    );
+  });
+
+  it("focuses an optional target first and reports its rebound", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    // A press with no target waits for nothing, so its budget counts no
+    // timeout at all.
+    expect(
+      ROUTES.find((item) => routeKey(item) === "POST /tabs/:id/press")!.budget,
+    ).toEqual({ compute: "pressBudget", maxMs: 80100 });
+    expect(COMPUTE.pressBudget({ key: "Enter" })).toBe(15100);
+    expect(COMPUTE.pressBudget({ key: "Enter", ref: "@e1" })).toBe(18100);
+    page.pageActions.focusTarget = { ok: true, rebound: ["@e2"] };
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+      selector: "role=textbox",
+    });
+    expect(pressed.status).toBe(200);
+    expect(await pressed.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      rebound: ["@e2"],
+    });
+    // The field path focuses it, counted at the enabled level, before the key.
+    expect(payloads("focusTarget")[0].query).toMatchObject({
+      level: "enabled",
+      mode: "strict",
+    });
+    expect(keysOf(page).map((event) => event[0])).toEqual([
+      "keyDown",
+      "keyUp",
+    ]);
+    // A field that does not take focus yet is waited out, then pressed.
+    page.inputs = [];
+    let looks = 0;
+    page.pageActions.focusTarget = () =>
+      ++looks <= 2 ? { ok: true, blocked: { blocker: "not_focused" } } : { ok: true };
+    const waited = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+      ref: "@e1",
+      timeoutMs: 2000,
+    });
+    expect(waited.status).toBe(200);
+    expect(looks).toBe(3);
+    expect(keysOf(page)).toHaveLength(2);
+    // A blocker that stays ends the press the way focus ends, with no key.
+    page.inputs = [];
+    page.pageActions.focusTarget = {
+      ok: true,
+      blocked: { blocker: "not_focused" },
+    };
+    const stuck = await failure(
+      await request(`/tabs/${tab.id}/press`, "POST", {
+        key: "Enter",
+        ref: "@e1",
+        timeoutMs: 120,
+      }),
+    );
+    expect(stuck.status).toBe(504);
+    expect(stuck.error).toMatchObject({
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "not_focused",
+    });
+    expect(page.inputs).toEqual([]);
+    // Retargeting answers exactly as the focus route does.
+    page.pageActions.focusTarget = {
+      ok: false,
+      code: "ambiguous_field",
+      error: "Several fields are inside this element.",
+      fields: { candidates: [{ ref: "@e1" }, { ref: "@e2" }] },
+    };
+    const several = await failure(
+      await request(`/tabs/${tab.id}/press`, "POST", {
+        key: "Enter",
+        ref: "@e1",
+      }),
+    );
+    expect(several.status).toBe(422);
+    expect(several.error).toMatchObject({ code: "ambiguous_field" });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("refuses a clipboard chord and a picker key before any key is sent", async () => {
+    const { tab } = await createPage();
+    const page = keyPage();
+    const refuse = async (body: Record<string, unknown>) =>
+      failure(await request(`/tabs/${tab.id}/press`, "POST", body));
+    const clipboard = await refuse({ key: "ControlOrMeta+KeyV" });
+    expect(clipboard.status).toBe(403);
+    expect(clipboard.error.code).toBe("clipboard_blocked");
+    expect(page.inputs).toEqual([]);
+    // A dropdown select with focus answers for the keys that would open it.
+    page.pageActions.focusedKind = { ok: true, kind: "select" };
+    const picker = await refuse({ key: "Space" });
+    expect(picker.status).toBe(403);
+    expect(picker.error).toMatchObject({
+      code: "native_popup_blocked",
+      use: "selectOption",
+    });
+    expect(page.inputs).toEqual([]);
+    // Every other key still reaches the same select.
+    expect(
+      (await request(`/tabs/${tab.id}/press`, "POST", { key: "KeyA" })).status,
+    ).toBe(200);
+    expect(keysOf(page)).toHaveLength(2);
+    // Keys never reach a frame agents may not touch.
+    page.inputs = [];
+    page.pageActions.focusedKind = {
+      ok: true,
+      kind: "other",
+      blockedFrame: true,
+    };
+    const frame = await refuse({ key: "Enter" });
+    expect(frame.status).toBe(403);
+    expect(frame.error.code).toBe("input_target_blocked");
+    expect(page.inputs).toEqual([]);
   });
 
   it("honors wait deadlines during loading and stalled page evaluation", async () => {

@@ -12,9 +12,9 @@ import {
   type InputActions,
   type PointerAction,
   type PointerKind,
+  type PressAction,
 } from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
-import { confirmDelivery } from "./input/wait";
 import type { RefBook } from "./refs";
 import { createResolver } from "./resolve";
 import type { AutomationController } from "./server";
@@ -27,7 +27,7 @@ import {
 import type { TabSession } from "./session/tab-session";
 import type { TabSessions } from "./session/tab-sessions";
 import type { Step } from "./session/types";
-import { PRESS_KEYS, type ToolAction } from "./validate";
+import type { ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
 
@@ -265,69 +265,6 @@ export function createActions(deps: {
     resolver,
     namespace: namespaceOf,
   });
-  const nativeInput = async (
-    id: string,
-    session: TabSession,
-    commands: {
-      method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent";
-      parameters: Record<string, unknown>;
-    }[],
-    gesture: Step,
-    epoch: number,
-  ) => {
-    for (const command of commands) {
-      authorizeTab(id);
-      if (
-        !["mouseReleased", "keyUp"].includes(
-          command.parameters.type as string,
-        ) &&
-        session.epoch !== epoch
-      )
-        return fail(
-          "page_changed",
-          "The page navigated before input completed. Inspect the new page before continuing.",
-        );
-      await session.send(command.method, command.parameters, gesture);
-    }
-  };
-  // Section 5's delivery check, reading this tab's page counters and waiting
-  // out its frames. The gesture goes out again only on positive evidence
-  // that no frame received it.
-  const deliverNativeInput = <T>(
-    id: string,
-    session: TabSession,
-    kind: "mouse" | "key",
-    deliver: (armed: Record<string, unknown>) => Promise<T>,
-    step: Step,
-  ): Promise<T> => {
-    // The counters the gesture was armed with, which a drag compares against.
-    let armed: Record<string, unknown> = {};
-    return confirmDelivery({
-      kind,
-      counters: async () =>
-        (armed = await evaluatePage(
-          id,
-          session,
-          "input",
-          {},
-          step.deadline,
-          step,
-        )),
-      frames: async () => {
-        await evaluatePage(
-          id,
-          session,
-          "frame",
-          {},
-          Math.min(step.deadline, Date.now() + 2000),
-          step,
-        );
-      },
-      epoch: () => session.epoch,
-      budget: step.deadline,
-      deliver: () => deliver(armed),
-    });
-  };
   const dispatcherFor = (_id: string, session: TabSession) =>
     dispatchers.for(session);
   // Section 5's element actions, which drive the attempt loop themselves.
@@ -351,12 +288,6 @@ export function createActions(deps: {
       guard: () => authorizeTab(id),
       dispatch: run.dispatch,
     };
-    // A gesture runs to its end even if the client goes away.
-    const gesture: Step = {
-      deadline,
-      guard: step.guard,
-      dispatch: step.dispatch,
-    };
     const waitDeadline =
       action.type === "wait"
         ? Math.min(deadline, Date.now() + (action.payload.timeoutMs as number))
@@ -367,9 +298,7 @@ export function createActions(deps: {
       action.type === "wait",
       run.park,
     );
-    const contents = ready.contents;
     let session = ready.session;
-    const epoch = session.epoch;
     const payload = action.payload;
     let result: Record<string, unknown>;
     if (action.type === "snapshot") {
@@ -397,59 +326,9 @@ export function createActions(deps: {
       // engine runs in input/actions.ts.
       result = await input.drag(id, payload as unknown as DragAction, run);
     } else if (action.type === "press") {
-      let focused: Record<string, unknown> = {};
-      if (payload.ref || payload.selector)
-        focused = await evaluatePage(
-          id,
-          session,
-          "focus",
-          payload,
-          deadline,
-          step,
-        );
-      const key = PRESS_KEYS[payload.key as string];
-      const parameters = {
-        key: key.key,
-        code: key.code,
-        windowsVirtualKeyCode: key.keyCode,
-        nativeVirtualKeyCode: key.keyCode,
-        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      };
-      await deliverNativeInput(
-        id,
-        session,
-        "key",
-        () =>
-          nativeInput(
-            id,
-            session,
-            [
-              {
-                method: "Input.dispatchKeyEvent",
-                parameters: {
-                  type: key.text ? "keyDown" : "rawKeyDown",
-                  ...parameters,
-                },
-              },
-              {
-                method: "Input.dispatchKeyEvent",
-                parameters: {
-                  type: "keyUp",
-                  key: key.key,
-                  code: key.code,
-                  windowsVirtualKeyCode: key.keyCode,
-                  nativeVirtualKeyCode: key.keyCode,
-                },
-              },
-            ],
-            gesture,
-            epoch,
-          ),
-        step,
-      );
-      await run.park(() => new Promise((resolve) => setTimeout(resolve, 100)));
-      await readyContents(id, remaining(deadline), false, run.park);
-      result = { ok: true, url: contents.getURL(), ...reboundOf(focused) };
+      // One chord on the key path: the optional target is focused first,
+      // then the modifiers, the key and the releases go out.
+      result = await input.press(id, payload as unknown as PressAction, run);
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, session, "scroll", payload, deadline, step);
     } else {
