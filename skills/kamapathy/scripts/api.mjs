@@ -2201,27 +2201,16 @@ export async function connect({ env, lazy = false, connect, fetch, health, sessi
   // run and the REPL pass their session in, and they announce an update.
   if (session) session.announceUpdate = true;
   installEndHooks(current);
-  // A run lets go of the input of every page it touched, whatever happened
-  // to the script, so a held key never outlives it. Failures are not the
-  // script's business, and an app without the route is left alone.
-  current.onRunEnd(async ({ touched }) => {
-    if ((current.app?.apiLevel ?? 0) < RELEASE_LEVEL) return;
-    for (const id of touched)
-      try {
-        await current.request(`/tabs/${id}/input/release`, {
-          method: "POST",
-          body: {},
-          budgetMs: RELEASE_BUDGET_MS,
-        });
-      } catch {}
-  });
   if (!lazy) await current.ready();
   return new Client(current);
 }
 
-// The two hooks a run's end step runs for this client, in this order: the
-// popups nothing reported, then the downloads it took bytes from. Each is
-// best effort, and a tab or download that answers nothing changes nothing.
+// The three hooks a run's end step runs for this client, in this order: the
+// popups nothing reported, the downloads it took bytes from, then the input
+// every page it touched still holds. Each is best effort, and a tab or
+// download that answers nothing changes nothing. run and the REPL connect
+// with a session they already hold, so the set keeps a second connect from
+// stacking the hooks up.
 const hooked = new WeakSet();
 function installEndHooks(session) {
   if (hooked.has(session)) return;
@@ -2262,5 +2251,19 @@ function installEndHooks(session) {
         await session.request(`/downloads/${id}`, { method: "DELETE" });
       } catch {}
     }
+  });
+  // A run lets go of the input of every page it touched, whatever happened
+  // to the script, so a held key never outlives it. Failures are not the
+  // script's business, and an app without the route is left alone.
+  session.onRunEnd(async ({ touched }) => {
+    if ((session.app?.apiLevel ?? 0) < RELEASE_LEVEL) return;
+    for (const id of touched)
+      try {
+        await session.request(`/tabs/${id}/input/release`, {
+          method: "POST",
+          body: {},
+          budgetMs: RELEASE_BUDGET_MS,
+        });
+      } catch {}
   });
 }

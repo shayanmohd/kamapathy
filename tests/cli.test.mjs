@@ -5,7 +5,18 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -21,28 +32,48 @@ import {
   runCli,
   socketFetch,
 } from "../skills/kamapathy/scripts/kamapathy.mjs";
-import { Download, FileChooser, KamapathyError, Page, connect, schema } from "../skills/kamapathy/scripts/api.mjs";
-import { httpTimeout, queueNotice, takeNotices } from "../skills/kamapathy/scripts/lib/request.mjs";
+import {
+  Download,
+  FileChooser,
+  KamapathyError,
+  Page,
+  connect,
+  schema,
+} from "../skills/kamapathy/scripts/api.mjs";
+import {
+  httpTimeout,
+  queueNotice,
+  Session,
+  takeNotices,
+} from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
 // A workspace that does not exist, so runs load no .env from the real profile.
 const env = {
   KAMAPATHY_NO_LAUNCH: "1",
-  KAMAPATHY_WORKSPACE: join(tmpdir(), `kamapathy-no-workspace-${randomBytes(8).toString("hex")}`),
+  KAMAPATHY_WORKSPACE: join(
+    tmpdir(),
+    `kamapathy-no-workspace-${randomBytes(8).toString("hex")}`,
+  ),
 };
 const posix = process.platform !== "win32";
 const directories = [];
 const servers = [];
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => new Promise((done) => server.close(done))));
+  await Promise.all(
+    servers
+      .splice(0)
+      .map((server) => new Promise((done) => server.close(done))),
+  );
   await Promise.all(
     directories
       .splice(0)
       .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
-const realpathOf = async (path) => (await import("node:fs/promises")).realpath(path);
+const realpathOf = async (path) =>
+  (await import("node:fs/promises")).realpath(path);
 const sink = () => {
   const output = [];
   return { write: (value) => output.push(value), text: () => output.join("") };
@@ -60,11 +91,18 @@ async function profile() {
   directories.push(userData);
   const paths = agentPaths({ KAMAPATHY_USER_DATA: userData });
   await mkdir(paths.directory, { mode: 0o700 });
-  return { userData, paths, env: { KAMAPATHY_USER_DATA: userData, KAMAPATHY_NO_LAUNCH: "1" } };
+  return {
+    userData,
+    paths,
+    env: { KAMAPATHY_USER_DATA: userData, KAMAPATHY_NO_LAUNCH: "1" },
+  };
 }
-const newPipe = () => `\\\\.\\pipe\\kamapathy-${randomBytes(16).toString("hex")}`;
+const newPipe = () =>
+  `\\\\.\\pipe\\kamapathy-${randomBytes(16).toString("hex")}`;
 const publish = (paths, socket, instance) =>
-  writeFile(paths.endpoint, JSON.stringify({ socket, instance }), { mode: 0o600 });
+  writeFile(paths.endpoint, JSON.stringify({ socket, instance }), {
+    mode: 0o600,
+  });
 // A stand-in Kamapathy on the profile's socket or pipe. `answerAs` is the instance
 // it claims; an impostor answers with another value or none.
 async function fakeKamapathy(paths, { answerAs, handler } = {}) {
@@ -75,7 +113,9 @@ async function fakeKamapathy(paths, { answerAs, handler } = {}) {
     if (claimed) response.setHeader("X-Kamapathy-Instance", claimed);
     if (handler) return handler(request, response);
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ status: "ok", version: "test", path: request.url }));
+    response.end(
+      JSON.stringify({ status: "ok", version: "test", path: request.url }),
+    );
   });
   await new Promise((done) => server.listen(socket, done));
   servers.push(server);
@@ -108,34 +148,39 @@ describe("automatic connection", () => {
     const userData = join(tmpdir(), "kamapathy-agreement");
     const client = agentPaths({ KAMAPATHY_USER_DATA: userData });
     const app = kamapathyAgentPaths(userData);
-    expect([client.directory, client.endpoint, client.off, client.launch]).toEqual([
-      app.directory,
-      app.endpoint,
-      app.off,
-      app.launch,
-    ]);
+    expect([
+      client.directory,
+      client.endpoint,
+      client.off,
+      client.launch,
+    ]).toEqual([app.directory, app.endpoint, app.off, app.launch]);
   });
 
-  it.skipIf(!posix)("refuses a rendezvous that others could read, replace, or redirect", async () => {
-    const { paths, env: profileEnv } = await profile();
-    const kamapathy = await fakeKamapathy(paths);
-    await chmod(paths.endpoint, 0o644);
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("0600");
-    await chmod(paths.endpoint, 0o600);
-    const real = `${paths.endpoint}.real`;
-    await writeFile(real, JSON.stringify(kamapathy), { mode: 0o600 });
-    await rm(paths.endpoint);
-    await symlink(real, paths.endpoint);
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("link");
-    await rm(paths.endpoint);
-    await publish(paths, "/tmp/elsewhere.sock", kamapathy.instance);
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("kamapathy.sock");
-    await publish(paths, "/tmp/kamapathy.sock", kamapathy.instance);
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("private");
-    await publish(paths, kamapathy.socket, kamapathy.instance);
-    await chmod(paths.directory, 0o755);
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("private directory");
-  });
+  it.skipIf(!posix)(
+    "refuses a rendezvous that others could read, replace, or redirect",
+    async () => {
+      const { paths, env: profileEnv } = await profile();
+      const kamapathy = await fakeKamapathy(paths);
+      await chmod(paths.endpoint, 0o644);
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("0600");
+      await chmod(paths.endpoint, 0o600);
+      const real = `${paths.endpoint}.real`;
+      await writeFile(real, JSON.stringify(kamapathy), { mode: 0o600 });
+      await rm(paths.endpoint);
+      await symlink(real, paths.endpoint);
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("link");
+      await rm(paths.endpoint);
+      await publish(paths, "/tmp/elsewhere.sock", kamapathy.instance);
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("kamapathy.sock");
+      await publish(paths, "/tmp/kamapathy.sock", kamapathy.instance);
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("private");
+      await publish(paths, kamapathy.socket, kamapathy.instance);
+      await chmod(paths.directory, 0o755);
+      await expect(resolveSocket(profileEnv)).rejects.toThrow(
+        "private directory",
+      );
+    },
+  );
 
   it("refuses a pipe that is not Kamapathy's own on Windows-style endpoints", async () => {
     const { paths } = await profile();
@@ -181,7 +226,10 @@ describe("automatic connection", () => {
       kamapathy = await fakeKamapathy(paths);
     });
     expect(
-      await resolveSocket({ KAMAPATHY_USER_DATA: userData }, { launch, intervalMs: 10 }),
+      await resolveSocket(
+        { KAMAPATHY_USER_DATA: userData },
+        { launch, intervalMs: 10 },
+      ),
     ).toEqual(kamapathy);
     expect(launch).toHaveBeenCalledTimes(1);
     expect(launch.mock.calls[0][0].directory).toBe(paths.directory);
@@ -198,20 +246,34 @@ describe("automatic connection", () => {
     ).rejects.toThrow("did not accept agents");
   });
 
-  it.skipIf(!posix)("treats a socket and endpoint left by a crashed Kamapathy as not running", async () => {
-    const { paths, env: profileEnv } = await profile();
-    const socket = join(paths.directory, "kamapathy.sock");
-    await staleSocket(socket);
-    expect(existsSync(socket)).toBe(true);
-    await publish(paths, socket, "a".repeat(32));
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("not running");
-  });
+  it.skipIf(!posix)(
+    "treats a socket and endpoint left by a crashed Kamapathy as not running",
+    async () => {
+      const { paths, env: profileEnv } = await profile();
+      const socket = join(paths.directory, "kamapathy.sock");
+      await staleSocket(socket);
+      expect(existsSync(socket)).toBe(true);
+      await publish(paths, socket, "a".repeat(32));
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("not running");
+    },
+  );
 
-  it.skipIf(!posix)("treats a crashed Kamapathy's vanished fallback folder as not running", async () => {
-    const { paths, env: profileEnv } = await profile();
-    await publish(paths, join(tmpdir(), `kamapathy-gone-${randomBytes(4).toString("hex")}`, "kamapathy.sock"), "a".repeat(32));
-    await expect(resolveSocket(profileEnv)).rejects.toThrow("not running");
-  });
+  it.skipIf(!posix)(
+    "treats a crashed Kamapathy's vanished fallback folder as not running",
+    async () => {
+      const { paths, env: profileEnv } = await profile();
+      await publish(
+        paths,
+        join(
+          tmpdir(),
+          `kamapathy-gone-${randomBytes(4).toString("hex")}`,
+          "kamapathy.sock",
+        ),
+        "a".repeat(32),
+      );
+      await expect(resolveSocket(profileEnv)).rejects.toThrow("not running");
+    },
+  );
 
   it("reads Kamapathy's answer even when it replies before the whole request is sent", async () => {
     const { paths } = await profile();
@@ -231,111 +293,161 @@ describe("automatic connection", () => {
     expect(response.status).toBe(429);
   });
 
-  it.skipIf(!posix)("never runs a recorded program that another account could have replaced", async () => {
-    const { paths, userData } = await profile();
-    const shared = join(userData, "shared");
-    await mkdir(shared);
-    await chmod(shared, 0o777);
-    const marker = join(userData, "ran");
-    const program = join(shared, "kamapathy");
-    await writeFile(program, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o755 });
-    await writeFile(paths.launch, JSON.stringify({ command: program, args: [] }), { mode: 0o600 });
-    await expect(
-      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData }, { platform: "darwin" }),
-    ).rejects.toThrow("other accounts");
-    await new Promise((done) => setTimeout(done, 200));
-    expect(existsSync(marker)).toBe(false);
-    await chmod(shared, 0o700);
-    await launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData, PATH: process.env.PATH });
-    await expect.poll(() => existsSync(marker)).toBe(true);
-  });
+  it.skipIf(!posix)(
+    "never runs a recorded program that another account could have replaced",
+    async () => {
+      const { paths, userData } = await profile();
+      const shared = join(userData, "shared");
+      await mkdir(shared);
+      await chmod(shared, 0o777);
+      const marker = join(userData, "ran");
+      const program = join(shared, "kamapathy");
+      await writeFile(program, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, {
+        mode: 0o755,
+      });
+      await writeFile(
+        paths.launch,
+        JSON.stringify({ command: program, args: [] }),
+        { mode: 0o600 },
+      );
+      await expect(
+        launchKamapathy(
+          paths,
+          { KAMAPATHY_USER_DATA: userData },
+          { platform: "darwin" },
+        ),
+      ).rejects.toThrow("other accounts");
+      await new Promise((done) => setTimeout(done, 200));
+      expect(existsSync(marker)).toBe(false);
+      await chmod(shared, 0o700);
+      await launchKamapathy(paths, {
+        KAMAPATHY_USER_DATA: userData,
+        PATH: process.env.PATH,
+      });
+      await expect.poll(() => existsSync(marker)).toBe(true);
+    },
+  );
 
   it("on macOS, does not start the default profile for a named profile Kamapathy never recorded", async () => {
     const { paths, userData } = await profile();
     const darwin = { platform: "darwin" };
-    await expect(launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData }, darwin)).rejects.toThrow(
-      "has not started with this profile",
-    );
+    await expect(
+      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData }, darwin),
+    ).rejects.toThrow("has not started with this profile");
     await writeFile(
       paths.launch,
-      JSON.stringify({ command: join(userData, "missing", "kamapathy"), args: [] }),
+      JSON.stringify({
+        command: join(userData, "missing", "kamapathy"),
+        args: [],
+      }),
       { mode: 0o600 },
     );
-    await expect(launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData }, darwin)).rejects.toThrow(
-      "has not started with this profile",
-    );
+    await expect(
+      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData }, darwin),
+    ).rejects.toThrow("has not started with this profile");
   });
 
   it("elsewhere, starts the installed Kamapathy with the named profile passed on", async () => {
     const { paths, userData } = await profile();
     // The installed launcher receives KAMAPATHY_USER_DATA; here it is not installed.
     await expect(
-      launchKamapathy(paths, { KAMAPATHY_USER_DATA: userData, PATH: "", HOME: userData }, { platform: "linux" }),
+      launchKamapathy(
+        paths,
+        { KAMAPATHY_USER_DATA: userData, PATH: "", HOME: userData },
+        { platform: "linux" },
+      ),
     ).rejects.toThrow("Could not start Kamapathy");
   });
 
-  it.skipIf(!posix)("Linux start tries kamapathy-browser, then the AppImage", async () => {
-    const { paths, userData } = await profile();
-    const bin = join(userData, "bin");
-    const home = join(userData, "home");
-    const appImage = join(home, "Applications", "Kamapathy.AppImage");
-    await mkdir(bin);
-    await mkdir(join(home, "Applications"), { recursive: true });
-    const marker = join(userData, "started");
-    // Shell builtins only, since PATH holds nothing but the stubs.
-    const stub = async (program, name) => {
-      await writeFile(program, `#!/bin/sh\nprintf '%s %s' ${name} "$KAMAPATHY_USER_DATA" > ${JSON.stringify(marker)}\n`);
-      await chmod(program, 0o755);
-    };
-    await stub(join(bin, "kamapathy-browser"), "browser");
-    await stub(appImage, "appimage");
-    const start = (PATH) =>
-      launchKamapathy(paths, { PATH, HOME: home, KAMAPATHY_USER_DATA: userData }, { platform: "linux" });
-    const started = async (name) => {
-      await expect.poll(() => readFile(marker, "utf8").catch(() => "")).toBe(`${name} ${userData}`);
-      await rm(marker);
-    };
-    await start(bin);
-    await started("browser");
-    await start("");
-    await started("appimage");
-    const refusal = (promise) =>
-      promise.then(
-        () => "started",
-        (error) => [error.reason, error.message],
-      );
-    const notInstalled = ["not_installed", "Could not start Kamapathy (ENOENT). Open Kamapathy, then retry."];
-    // An AppImage another account could replace is never run.
-    await chmod(appImage, 0o777);
-    expect(await refusal(start(""))).toEqual(notInstalled);
-    await new Promise((done) => setTimeout(done, 200));
-    expect(existsSync(marker)).toBe(false);
-    await rm(appImage);
-    expect(await refusal(start(""))).toEqual(notInstalled);
-  });
+  it.skipIf(!posix)(
+    "Linux start tries kamapathy-browser, then the AppImage",
+    async () => {
+      const { paths, userData } = await profile();
+      const bin = join(userData, "bin");
+      const home = join(userData, "home");
+      const appImage = join(home, "Applications", "Kamapathy.AppImage");
+      await mkdir(bin);
+      await mkdir(join(home, "Applications"), { recursive: true });
+      const marker = join(userData, "started");
+      // Shell builtins only, since PATH holds nothing but the stubs.
+      const stub = async (program, name) => {
+        await writeFile(
+          program,
+          `#!/bin/sh\nprintf '%s %s' ${name} "$KAMAPATHY_USER_DATA" > ${JSON.stringify(marker)}\n`,
+        );
+        await chmod(program, 0o755);
+      };
+      await stub(join(bin, "kamapathy-browser"), "browser");
+      await stub(appImage, "appimage");
+      const start = (PATH) =>
+        launchKamapathy(
+          paths,
+          { PATH, HOME: home, KAMAPATHY_USER_DATA: userData },
+          { platform: "linux" },
+        );
+      const started = async (name) => {
+        await expect
+          .poll(() => readFile(marker, "utf8").catch(() => ""))
+          .toBe(`${name} ${userData}`);
+        await rm(marker);
+      };
+      await start(bin);
+      await started("browser");
+      await start("");
+      await started("appimage");
+      const refusal = (promise) =>
+        promise.then(
+          () => "started",
+          (error) => [error.reason, error.message],
+        );
+      const notInstalled = [
+        "not_installed",
+        "Could not start Kamapathy (ENOENT). Open Kamapathy, then retry.",
+      ];
+      // An AppImage another account could replace is never run.
+      await chmod(appImage, 0o777);
+      expect(await refusal(start(""))).toEqual(notInstalled);
+      await new Promise((done) => setTimeout(done, 200));
+      expect(existsSync(marker)).toBe(false);
+      await rm(appImage);
+      expect(await refusal(start(""))).toEqual(notInstalled);
+    },
+  );
 
-  it.skipIf(!posix)("starts the checked program itself, not a link that could be swapped", async () => {
-    const { paths, userData } = await profile();
-    const program = join(userData, "kamapathy");
-    await writeFile(program, "#!/bin/sh\n", { mode: 0o755 });
-    const link = join(userData, "kamapathy-link");
-    await symlink(program, link);
-    await writeFile(paths.launch, JSON.stringify({ command: link, args: ["/app"] }), { mode: 0o600 });
-    const record = await launchRecord(paths);
-    expect(record).toEqual({ command: await realpathOf(program), args: ["/app"] });
-  });
+  it.skipIf(!posix)(
+    "starts the checked program itself, not a link that could be swapped",
+    async () => {
+      const { paths, userData } = await profile();
+      const program = join(userData, "kamapathy");
+      await writeFile(program, "#!/bin/sh\n", { mode: 0o755 });
+      const link = join(userData, "kamapathy-link");
+      await symlink(program, link);
+      await writeFile(
+        paths.launch,
+        JSON.stringify({ command: link, args: ["/app"] }),
+        { mode: 0o600 },
+      );
+      const record = await launchRecord(paths);
+      expect(record).toEqual({
+        command: await realpathOf(program),
+        args: ["/app"],
+      });
+    },
+  );
 
   it("treats a server that never answers the health check as not running", async () => {
     const { paths, env: profileEnv } = await profile();
     await fakeKamapathy(paths, { handler: () => {} });
-    await expect(resolveSocket(profileEnv, { healthTimeoutMs: 200 })).rejects.toThrow(
-      "not running",
-    );
+    await expect(
+      resolveSocket(profileEnv, { healthTimeoutMs: 200 }),
+    ).rejects.toThrow("not running");
   });
 
   it("reports a busy Kamapathy instead of starting another when it resets the connection", async () => {
     const { paths, userData } = await profile();
-    await fakeKamapathy(paths, { handler: (request) => request.socket.destroy() });
+    await fakeKamapathy(paths, {
+      handler: (request) => request.socket.destroy(),
+    });
     const launch = vi.fn();
     await expect(
       resolveSocket({ KAMAPATHY_USER_DATA: userData }, { launch }),
@@ -351,12 +463,12 @@ describe("automatic connection", () => {
     expect(agentPaths({ HOME: home }, "linux").directory).toBe(
       join(home, ".config", "Kamapathy", "agent"),
     );
-    expect(agentPaths({ HOME: home, XDG_CONFIG_HOME: "/xdg" }, "linux").directory).toBe(
-      join("/xdg", "Kamapathy", "agent"),
-    );
-    expect(agentPaths({ USERPROFILE: home, APPDATA: "/roaming" }, "win32").directory).toBe(
-      join("/roaming", "Kamapathy", "agent"),
-    );
+    expect(
+      agentPaths({ HOME: home, XDG_CONFIG_HOME: "/xdg" }, "linux").directory,
+    ).toBe(join("/xdg", "Kamapathy", "agent"));
+    expect(
+      agentPaths({ USERPROFILE: home, APPDATA: "/roaming" }, "win32").directory,
+    ).toBe(join("/roaming", "Kamapathy", "agent"));
   });
 
   it("starts Kamapathy as an app even from editors that run Electron as Node", () => {
@@ -376,7 +488,10 @@ describe("automatic connection", () => {
       KAMAPATHY_USER_DATA: "/profile",
       PATH: "/bin",
     });
-    expect(environment).toEqual({ KAMAPATHY_USER_DATA: "/profile", PATH: "/bin" });
+    expect(environment).toEqual({
+      KAMAPATHY_USER_DATA: "/profile",
+      PATH: "/bin",
+    });
   });
 
   it("discovery failures name their reason: not_installed for a missing app or start command and quit_by_person under a fresh quit marker, neither retryable", async () => {
@@ -388,7 +503,10 @@ describe("automatic connection", () => {
     const missing = await profile();
     for (const options of [
       { platform: "linux", env: { PATH: "", HOME: missing.userData } },
-      { platform: "win32", env: { USERPROFILE: missing.userData, LOCALAPPDATA: missing.userData } },
+      {
+        platform: "win32",
+        env: { USERPROFILE: missing.userData, LOCALAPPDATA: missing.userData },
+      },
     ])
       expect(
         await reasonOf(
@@ -407,25 +525,50 @@ describe("automatic connection", () => {
         options.platform,
       ).toEqual(["not_connected", "not_installed", false]);
     const quit = await profile();
-    await writeFile(quit.paths.quit, JSON.stringify({ at: Date.now() }), { mode: 0o600 });
+    await writeFile(quit.paths.quit, JSON.stringify({ at: Date.now() }), {
+      mode: 0o600,
+    });
     const launch = vi.fn();
     expect(
-      await reasonOf(resolveSocket({ KAMAPATHY_USER_DATA: quit.userData }, { launch })),
+      await reasonOf(
+        resolveSocket({ KAMAPATHY_USER_DATA: quit.userData }, { launch }),
+      ),
     ).toEqual(["not_connected", "quit_by_person", false]);
     expect(launch).not.toHaveBeenCalled();
     // An old quit no longer blocks starting Kamapathy.
-    await writeFile(quit.paths.quit, JSON.stringify({ at: Date.now() - 600001 }), { mode: 0o600 });
-    expect(await reasonOf(resolveSocket(quit.env))).toEqual(["not_connected", "not_running", false]);
+    await writeFile(
+      quit.paths.quit,
+      JSON.stringify({ at: Date.now() - 600001 }),
+      { mode: 0o600 },
+    );
+    expect(await reasonOf(resolveSocket(quit.env))).toEqual([
+      "not_connected",
+      "not_running",
+      false,
+    ]);
     expect(
       await reasonOf(
-        resolveSocket({ KAMAPATHY_USER_DATA: quit.userData }, { launch, intervalMs: 10, timeoutMs: 50 }),
+        resolveSocket(
+          { KAMAPATHY_USER_DATA: quit.userData },
+          { launch, intervalMs: 10, timeoutMs: 50 },
+        ),
       ),
     ).toEqual(["not_connected", "start_timeout", false]);
     await writeFile(quit.paths.off, "", { mode: 0o600 });
-    expect(await reasonOf(resolveSocket(quit.env))).toEqual(["not_connected", "access_off", false]);
+    expect(await reasonOf(resolveSocket(quit.env))).toEqual([
+      "not_connected",
+      "access_off",
+      false,
+    ]);
     const busy = await profile();
-    await fakeKamapathy(busy.paths, { handler: (request) => request.socket.destroy() });
-    expect(await reasonOf(resolveSocket(busy.env))).toEqual(["not_connected", "busy", true]);
+    await fakeKamapathy(busy.paths, {
+      handler: (request) => request.socket.destroy(),
+    });
+    expect(await reasonOf(resolveSocket(busy.env))).toEqual([
+      "not_connected",
+      "busy",
+      true,
+    ]);
     if (posix) {
       const untrusted = await profile();
       await fakeKamapathy(untrusted.paths);
@@ -452,13 +595,18 @@ describe("automatic connection", () => {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
         JSON.stringify(
-          request.url === "/health" ? { status: "ok", version: "test" } : { spaces: [] },
+          request.url === "/health"
+            ? { status: "ok", version: "test" }
+            : { spaces: [] },
         ),
       );
     };
     const first = await fakeKamapathy(paths, { handler: answer });
     const launch = vi.fn();
-    const client = await connect({ env: { KAMAPATHY_USER_DATA: userData }, connect: { launch } });
+    const client = await connect({
+      env: { KAMAPATHY_USER_DATA: userData },
+      connect: { launch },
+    });
     expect(await client.spaces()).toEqual([]);
     // Kamapathy quits: the call in progress loses its connection.
     const server = servers.pop();
@@ -504,14 +652,25 @@ describe("standalone skill client", () => {
     const directory = await mkdtemp(join(tmpdir(), "kamapathy-cli-link-"));
     directories.push(directory);
     const link = join(directory, "kamapathy");
-    await symlink(join(process.cwd(), "skills", "kamapathy"), link, posix ? "dir" : "junction");
-    const child = spawn(process.execPath, [join(link, "scripts", "kamapathy.mjs"), "help"], {
-      env: { ...process.env, ...env },
-    });
+    await symlink(
+      join(process.cwd(), "skills", "kamapathy"),
+      link,
+      posix ? "dir" : "junction",
+    );
+    const child = spawn(
+      process.execPath,
+      [join(link, "scripts", "kamapathy.mjs"), "help"],
+      {
+        env: { ...process.env, ...env },
+      },
+    );
     let stdout = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
     const status = await new Promise((done) => child.once("close", done));
-    expect([status, stdout.split("\n")[0]]).toEqual([0, "Kamapathy browser client"]);
+    expect([status, stdout.split("\n")[0]]).toEqual([
+      0,
+      "Kamapathy browser client",
+    ]);
   });
   it("preserves exact stdin values and sends one request", async () => {
     const value = 'Quoted "value" with a newline\n';
@@ -571,7 +730,9 @@ describe("standalone skill client", () => {
     const help = sink();
     await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
     expect(help.text()).toMatch(/ handoff <space-id> .*\n  resume <space-id> /);
-    const fetch = vi.fn(async () => Response.json({ ok: true, owner: "agent" }));
+    const fetch = vi.fn(async () =>
+      Response.json({ ok: true, owner: "agent" }),
+    );
     const stdout = sink();
     expect(await runCli(["resume", "space-1"], { env, fetch, stdout })).toBe(0);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -582,7 +743,13 @@ describe("standalone skill client", () => {
     expect(JSON.parse(options.body)).toEqual({});
     expect(stdout.text()).toBe("ok: agent control resumed\n");
     const json = sink();
-    expect(await runCli(["resume", "space-1", "--json"], { env, fetch, stdout: json })).toBe(0);
+    expect(
+      await runCli(["resume", "space-1", "--json"], {
+        env,
+        fetch,
+        stdout: json,
+      }),
+    ).toBe(0);
     expect(JSON.parse(json.text())).toEqual({ ok: true, owner: "agent" });
   });
   it("prints control state, field values, group questions and omitted controls on one line each", async () => {
@@ -592,14 +759,56 @@ describe("standalone skill client", () => {
       title: "Store listing",
       text: "Main store listing",
       interactables: [
-        { ref: "@e1", role: "radio", label: "Yes", checked: false, group: "Does your app\ntarget children?" },
-        { ref: "@e2", role: "radio", label: "No", checked: true, group: "Does your app target children?" },
-        { ref: "@e3", role: "checkbox", label: "Select all", disabled: true, checked: "mixed" },
-        { ref: "@e4", role: "option", label: "France", checked: true, selected: true },
+        {
+          ref: "@e1",
+          role: "radio",
+          label: "Yes",
+          checked: false,
+          group: "Does your app\ntarget children?",
+        },
+        {
+          ref: "@e2",
+          role: "radio",
+          label: "No",
+          checked: true,
+          group: "Does your app target children?",
+        },
+        {
+          ref: "@e3",
+          role: "checkbox",
+          label: "Select all",
+          disabled: true,
+          checked: "mixed",
+        },
+        {
+          ref: "@e4",
+          role: "option",
+          label: "France",
+          checked: true,
+          selected: true,
+        },
         { ref: "@e5", role: "tab", label: "Custom listings", selected: false },
-        { ref: "@e6", role: "button", label: "Data safety", expanded: false, pressed: "mixed" },
-        { ref: "@e7", role: "button", label: "Notify", expanded: true, pressed: false },
-        { ref: "@e8", role: "input", label: "Short description", value: 'Count "taps"\nquickly\u001b[31m', valueTruncated: true },
+        {
+          ref: "@e6",
+          role: "button",
+          label: "Data safety",
+          expanded: false,
+          pressed: "mixed",
+        },
+        {
+          ref: "@e7",
+          role: "button",
+          label: "Notify",
+          expanded: true,
+          pressed: false,
+        },
+        {
+          ref: "@e8",
+          role: "input",
+          label: "Short description",
+          value: 'Count "taps"\nquickly\u001b[31m',
+          valueTruncated: true,
+        },
         { ref: "@e9", role: "input", label: "Password", valueHidden: true },
         {
           ref: "@e10",
@@ -648,7 +857,13 @@ describe("standalone skill client", () => {
     await runCli(["snapshot", "tab-1", "--max-controls", "0"], {
       env,
       fetch: vi.fn(async () =>
-        Response.json({ ...snapshot, text: "", interactables: [], omittedControls: 3, truncated: true }),
+        Response.json({
+          ...snapshot,
+          text: "",
+          interactables: [],
+          omittedControls: 3,
+          truncated: true,
+        }),
       ),
       stdout: controlsOnly,
     });
@@ -663,15 +878,45 @@ describe("standalone skill client", () => {
     const help = sink();
     await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
     expect(help.text()).toContain("drag <tab-id> <source> <target>");
-    expect(help.text()).toContain("scroll <tab-id> <direction> [pixels] [ref-or-selector]");
+    expect(help.text()).toContain(
+      "scroll <tab-id> <direction> [pixels] [ref-or-selector]",
+    );
     for (const [args, path, body] of [
-      [["drag", "tab-1", "@e1", "#zone"], "/tabs/tab-1/drag", { source: { ref: "@e1" }, target: { selector: "#zone" } }],
-      [["scroll", "tab-1", "down"], "/tabs/tab-1/scroll", { direction: "down" }],
-      [["scroll", "tab-1", "down", "300"], "/tabs/tab-1/scroll", { direction: "down", pixels: 300 }],
-      [["scroll", "tab-1", "down", "300", "@e4"], "/tabs/tab-1/scroll", { direction: "down", pixels: 300, ref: "@e4" }],
-      [["scroll", "tab-1", "right", "#table"], "/tabs/tab-1/scroll", { direction: "right", selector: "#table" }],
-      [["scroll", "tab-1", "down", ".panel"], "/tabs/tab-1/scroll", { direction: "down", selector: ".panel" }],
-      [["scroll", "tab-1", "down", "600", ".panel"], "/tabs/tab-1/scroll", { direction: "down", pixels: 600, selector: ".panel" }],
+      [
+        ["drag", "tab-1", "@e1", "#zone"],
+        "/tabs/tab-1/drag",
+        { source: { ref: "@e1" }, target: { selector: "#zone" } },
+      ],
+      [
+        ["scroll", "tab-1", "down"],
+        "/tabs/tab-1/scroll",
+        { direction: "down" },
+      ],
+      [
+        ["scroll", "tab-1", "down", "300"],
+        "/tabs/tab-1/scroll",
+        { direction: "down", pixels: 300 },
+      ],
+      [
+        ["scroll", "tab-1", "down", "300", "@e4"],
+        "/tabs/tab-1/scroll",
+        { direction: "down", pixels: 300, ref: "@e4" },
+      ],
+      [
+        ["scroll", "tab-1", "right", "#table"],
+        "/tabs/tab-1/scroll",
+        { direction: "right", selector: "#table" },
+      ],
+      [
+        ["scroll", "tab-1", "down", ".panel"],
+        "/tabs/tab-1/scroll",
+        { direction: "down", selector: ".panel" },
+      ],
+      [
+        ["scroll", "tab-1", "down", "600", ".panel"],
+        "/tabs/tab-1/scroll",
+        { direction: "down", pixels: 600, selector: ".panel" },
+      ],
     ]) {
       const fetch = vi.fn(async () => Response.json({ ok: true }));
       expect(await runCli(args, { env, fetch, stdout: sink() })).toBe(0);
@@ -690,29 +935,58 @@ describe("standalone skill client", () => {
       ["scroll", "tab-1", "down", "-5"],
       ["scroll", "tab-1", "down", "1.5", "@e4"],
     ])
-      await expect(runCli(args, { env, fetch, stdout: sink() })).rejects.toThrow();
+      await expect(
+        runCli(args, { env, fetch, stdout: sink() }),
+      ).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
   it("says how an action was done, what scrolled and which refs moved to redrawn controls", async () => {
     for (const [result, text] of [
-      [{ ok: true, url: "https://example.test/", drag: "html5" }, "ok: dragged with HTML drag and drop"],
       [
-        { ok: true, url: "https://example.test/", drag: "mouse", rebound: ["@e3", "@e4"] },
+        { ok: true, url: "https://example.test/", drag: "html5" },
+        "ok: dragged with HTML drag and drop",
+      ],
+      [
+        {
+          ok: true,
+          url: "https://example.test/",
+          drag: "mouse",
+          rebound: ["@e3", "@e4"],
+        },
         "ok: dragged with the mouse; @e3, @e4 now point to the redrawn controls",
       ],
       [
-        { ok: true, url: "https://example.test/", fallback: "dom_click", rebound: ["@e2"] },
+        {
+          ok: true,
+          url: "https://example.test/",
+          fallback: "dom_click",
+          rebound: ["@e2"],
+        },
         "ok: clicked in the page because the control has no size; @e2 now points to the redrawn control",
       ],
       [
-        { ok: true, scrolled: "element", selector: "#content\n\u001b[31m", x: 0, y: 723.5, moved: true },
+        {
+          ok: true,
+          scrolled: "element",
+          selector: "#content\n\u001b[31m",
+          x: 0,
+          y: 723.5,
+          moved: true,
+        },
         "ok: scrolled panel #content [31m to 0,723.5",
       ],
-      [{ ok: true, scrolled: "page", x: 0, y: 0, moved: false }, "ok: page did not move"],
+      [
+        { ok: true, scrolled: "page", x: 0, y: 0, moved: false },
+        "ok: page did not move",
+      ],
       [{ ok: true, url: "https://example.test/" }, "ok"],
     ]) {
       const stdout = sink();
-      await runCli(["click", "tab-1", "@e1"], { env, fetch: vi.fn(async () => Response.json(result)), stdout });
+      await runCli(["click", "tab-1", "@e1"], {
+        env,
+        fetch: vi.fn(async () => Response.json(result)),
+        stdout,
+      });
       expect(stdout.text()).toBe(`${text}\n`);
     }
     const stdout = sink();
@@ -723,7 +997,11 @@ describe("standalone skill client", () => {
           ok: true,
           results: [
             { index: 0, type: "drag", result: { ok: true, drag: "html5" } },
-            { index: 1, type: "scroll", result: { ok: true, scrolled: "page", x: 0, y: 600, moved: true } },
+            {
+              index: 1,
+              type: "scroll",
+              result: { ok: true, scrolled: "page", x: 0, y: 600, moved: true },
+            },
             { index: 2, type: "fill", result: { ok: true, rebound: ["@e7"] } },
           ],
         }),
@@ -742,11 +1020,13 @@ describe("standalone skill client", () => {
   });
   it("checks the resume space ID before connecting", async () => {
     const fetch = vi.fn();
-    await expect(runCli(["resume"], { env, fetch, stdout: sink() })).rejects.toThrow("Missing ID");
+    await expect(
+      runCli(["resume"], { env, fetch, stdout: sink() }),
+    ).rejects.toThrow("Missing ID");
     for (const id of ["../space", "space/1", "x".repeat(129)])
-      await expect(runCli(["resume", id], { env, fetch, stdout: sink() })).rejects.toThrow(
-        "Invalid space or tab ID",
-      );
+      await expect(
+        runCli(["resume", id], { env, fetch, stdout: sink() }),
+      ).rejects.toThrow("Invalid space or tab ID");
     expect(fetch).not.toHaveBeenCalled();
   });
   it("never overwrites an existing screenshot", async () => {
@@ -766,19 +1046,38 @@ describe("standalone skill client", () => {
   it("uploads exact selected bytes with basenames and MIME types, without disclosing local paths", async () => {
     const prefix = await scratchFile();
     const paths = [`${prefix}.aab`, `${prefix}.PNG`];
-    const bytes = [Buffer.from([0, 255, 128, 65, 10]), Buffer.from([137, 80, 78, 71])];
-    await Promise.all(paths.map((path, index) => writeFile(path, bytes[index])));
+    const bytes = [
+      Buffer.from([0, 255, 128, 65, 10]),
+      Buffer.from([137, 80, 78, 71]),
+    ];
+    await Promise.all(
+      paths.map((path, index) => writeFile(path, bytes[index])),
+    );
     const fetch = vi.fn(async () => Response.json({ ok: true, selected: 2 }));
     const stdout = sink();
-    expect(await runCli(["upload", "tab-1", "@e3", ...paths], { env, fetch, stdout })).toBe(0);
+    expect(
+      await runCli(["upload", "tab-1", "@e3", ...paths], {
+        env,
+        fetch,
+        stdout,
+      }),
+    ).toBe(0);
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, options] = fetch.mock.calls[0];
     expect(url.pathname).toBe("/tabs/tab-1/upload");
     const payload = JSON.parse(options.body);
     expect(payload.ref).toBe("@e3");
     expect(payload.files).toEqual([
-      { name: "fixture.json.aab", type: "application/octet-stream", data: bytes[0].toString("base64") },
-      { name: "fixture.json.PNG", type: "image/png", data: bytes[1].toString("base64") },
+      {
+        name: "fixture.json.aab",
+        type: "application/octet-stream",
+        data: bytes[0].toString("base64"),
+      },
+      {
+        name: "fixture.json.PNG",
+        type: "image/png",
+        data: bytes[1].toString("base64"),
+      },
     ]);
     for (const [index, path] of paths.entries()) {
       expect(options.body).not.toContain(path);
@@ -789,7 +1088,9 @@ describe("standalone skill client", () => {
 
   it("rejects upload selectors, directories, excess file counts, and aggregate size before connecting", async () => {
     const file = await scratchFile();
-    const directory = await mkdtemp(join(tmpdir(), "kamapathy-upload-directory-"));
+    const directory = await mkdtemp(
+      join(tmpdir(), "kamapathy-upload-directory-"),
+    );
     directories.push(directory);
     const fetch = vi.fn();
     for (const args of [
@@ -799,29 +1100,44 @@ describe("standalone skill client", () => {
       ["upload", "tab-1", "@e1", ...Array(9).fill(file)],
       ["upload", "tab-1", "@e1", directory],
     ])
-      await expect(runCli(args, { env, fetch, stdout: sink() })).rejects.toThrow();
+      await expect(
+        runCli(args, { env, fetch, stdout: sink() }),
+      ).rejects.toThrow();
     const large = `${file}.aab`;
     const handle = await open(large, "w");
     await handle.truncate(16 * 1024 * 1024 + 1);
     await handle.close();
-    await expect(runCli(["upload", "tab-1", "@e1", large], { env, fetch, stdout: sink() })).rejects.toThrow("16 MiB");
+    await expect(
+      runCli(["upload", "tab-1", "@e1", large], { env, fetch, stdout: sink() }),
+    ).rejects.toThrow("16 MiB");
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it.skipIf(process.platform === "win32")("refuses symbolic links for selected upload files", async () => {
-    const file = await scratchFile();
-    const link = `${file}.png`;
-    await symlink(file, link);
-    const fetch = vi.fn();
-    await expect(runCli(["upload", "tab-1", "@e1", link], { env, fetch, stdout: sink() })).rejects.toThrow();
-    expect(fetch).not.toHaveBeenCalled();
-  });
+  it.skipIf(process.platform === "win32")(
+    "refuses symbolic links for selected upload files",
+    async () => {
+      const file = await scratchFile();
+      const link = `${file}.png`;
+      await symlink(file, link);
+      const fetch = vi.fn();
+      await expect(
+        runCli(["upload", "tab-1", "@e1", link], {
+          env,
+          fetch,
+          stdout: sink(),
+        }),
+      ).rejects.toThrow();
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not disclose selected local paths when a file cannot be read", async () => {
     const missing = `${await scratchFile()}.missing-private-bundle.aab`;
     const stderr = sink();
     const fetch = vi.fn();
-    expect(await main(["upload", "tab-1", "@e1", missing], { env, fetch, stderr })).toBe(1);
+    expect(
+      await main(["upload", "tab-1", "@e1", missing], { env, fetch, stderr }),
+    ).toBe(1);
     expect(stderr.text()).not.toContain(missing);
     expect(stderr.text()).not.toContain("missing-private-bundle");
     expect(fetch).not.toHaveBeenCalled();
@@ -829,8 +1145,19 @@ describe("standalone skill client", () => {
 });
 
 describe("scripted sessions", () => {
-  const space = { id: "space-1", name: "Research", kind: "agent", owner: "agent", signIns: "shared" };
-  const tab = { id: "tab-1", spaceId: "space-1", title: "Reserve", url: "https://example.test/reserve" };
+  const space = {
+    id: "space-1",
+    name: "Research",
+    kind: "agent",
+    owner: "agent",
+    signIns: "shared",
+  };
+  const tab = {
+    id: "tab-1",
+    spaceId: "space-1",
+    title: "Reserve",
+    url: "https://example.test/reserve",
+  };
   const snapshot = {
     tabId: "tab-1",
     url: "https://example.test/reserve",
@@ -848,12 +1175,18 @@ describe("scripted sessions", () => {
     const requests = [];
     const fetch = vi.fn(async (url, options = {}) => {
       const method = options.method || "GET";
-      const body = options.body === undefined ? undefined : JSON.parse(options.body);
+      const body =
+        options.body === undefined ? undefined : JSON.parse(options.body);
       requests.push({ method, path: url.pathname, body });
       const answer = routes[`${method} ${url.pathname}`];
       if (!answer)
-        return Response.json({ error: { code: "not_found", message: `No route ${url.pathname}` } }, { status: 404 });
-      return typeof answer === "function" ? answer(body, options) : Response.json(answer);
+        return Response.json(
+          { error: { code: "not_found", message: `No route ${url.pathname}` } },
+          { status: 404 },
+        );
+      return typeof answer === "function"
+        ? answer(body, options)
+        : Response.json(answer);
     });
     return { fetch, requests };
   }
@@ -865,18 +1198,31 @@ describe("scripted sessions", () => {
     "GET /spaces/space-1/tabs": { tabs: [tab] },
     "POST /spaces/space-1/handoff": { ok: true, owner: "human" },
     "POST /spaces/space-1/resume": { ok: true, owner: "agent" },
-    "POST /tabs/tab-1/navigate": { tab: { ...tab, url: "https://example.test/slots", title: "Slots" } },
+    "POST /tabs/tab-1/navigate": {
+      tab: { ...tab, url: "https://example.test/slots", title: "Slots" },
+    },
     "POST /tabs/tab-1/snapshot": snapshot,
     "POST /tabs/tab-1/click": { ok: true, url: tab.url, rebound: ["@e2"] },
     "POST /tabs/tab-1/fill": { ok: true },
     "POST /tabs/tab-1/press": { ok: true },
-    "POST /tabs/tab-1/scroll": { ok: true, scrolled: "page", x: 0, y: 300, moved: true },
+    "POST /tabs/tab-1/scroll": {
+      ok: true,
+      scrolled: "page",
+      x: 0,
+      y: 300,
+      moved: true,
+    },
     "POST /tabs/tab-1/drag": { ok: true, url: tab.url, drag: "mouse" },
     "POST /tabs/tab-1/wait": { ok: true },
-    "POST /tabs/tab-1/actions": { ok: true, results: [{ index: 0, type: "click", result: { ok: true } }] },
+    "POST /tabs/tab-1/actions": {
+      ok: true,
+      results: [{ index: 0, type: "click", result: { ok: true } }],
+    },
     "POST /tabs/tab-1/upload": { ok: true, selected: 1 },
     "GET /tabs/tab-1/screenshot": () =>
-      new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "Content-Type": "image/png" } }),
+      new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { "Content-Type": "image/png" },
+      }),
     "DELETE /tabs/tab-1": { ok: true },
   };
   async function scriptFile(name, source) {
@@ -894,13 +1240,34 @@ describe("scripted sessions", () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });
     const research = await client.createSpace("Research");
-    expect(research).toMatchObject({ id: "space-1", name: "Research", owner: "agent", signIns: "shared" });
+    expect(research).toMatchObject({
+      id: "space-1",
+      name: "Research",
+      owner: "agent",
+      signIns: "shared",
+    });
     const page = await research.open("https://example.test/reserve");
-    expect(page).toMatchObject({ id: "tab-1", spaceId: "space-1", url: tab.url, title: "Reserve" });
+    expect(page).toMatchObject({
+      id: "tab-1",
+      spaceId: "space-1",
+      url: tab.url,
+      title: "Reserve",
+    });
     expect(await page.snapshot()).toEqual(snapshot);
-    expect(await page.snapshot({ mode: "full", selector: "#slots", maxChars: 500, maxControls: 5 })).toEqual(snapshot);
+    expect(
+      await page.snapshot({
+        mode: "full",
+        selector: "#slots",
+        maxChars: 500,
+        maxControls: 5,
+      }),
+    ).toEqual(snapshot);
     expect(await page.text()).toBe(formatSnapshot(snapshot));
-    expect(await page.click("@e2")).toEqual({ ok: true, url: tab.url, rebound: ["@e2"] });
+    expect(await page.click("@e2")).toEqual({
+      ok: true,
+      url: tab.url,
+      rebound: ["@e2"],
+    });
     await page.click("#submit");
     await page.fill("@e1", "Avery Quinn");
     await page.press("Enter", "@e1");
@@ -913,7 +1280,10 @@ describe("scripted sessions", () => {
     const batch = await page.batch([{ type: "click", ref: "@e2" }]);
     expect(batch.results).toHaveLength(1);
     expect(await page.navigate("https://example.test/slots")).toBe(page);
-    expect([page.url, page.title]).toEqual(["https://example.test/slots", "Slots"]);
+    expect([page.url, page.title]).toEqual([
+      "https://example.test/slots",
+      "Slots",
+    ]);
     expect((await research.tabs()).map((item) => item.id)).toEqual(["tab-1"]);
     await page.close();
     expect(await research.handoff()).toEqual({ ok: true, owner: "human" });
@@ -921,27 +1291,86 @@ describe("scripted sessions", () => {
     await research.resume();
     expect(research.owner).toBe("agent");
     await research.close();
-    expect((await client.spaces()).map((item) => item.name)).toEqual(["Research"]);
+    expect((await client.spaces()).map((item) => item.name)).toEqual([
+      "Research",
+    ]);
     expect((await client.space("space-1")).id).toBe("space-1");
     expect(api.requests).toEqual([
       { method: "POST", path: "/spaces", body: { name: "Research" } },
-      { method: "POST", path: "/spaces/space-1/tabs", body: { url: "https://example.test/reserve" } },
-      { method: "POST", path: "/tabs/tab-1/snapshot", body: { mode: "compact" } },
-      { method: "POST", path: "/tabs/tab-1/snapshot", body: { mode: "full", selector: "#slots", maxChars: 500, maxControls: 5 } },
-      { method: "POST", path: "/tabs/tab-1/snapshot", body: { mode: "compact" } },
+      {
+        method: "POST",
+        path: "/spaces/space-1/tabs",
+        body: { url: "https://example.test/reserve" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/snapshot",
+        body: { mode: "compact" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/snapshot",
+        body: {
+          mode: "full",
+          selector: "#slots",
+          maxChars: 500,
+          maxControls: 5,
+        },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/snapshot",
+        body: { mode: "compact" },
+      },
       { method: "POST", path: "/tabs/tab-1/click", body: { ref: "@e2" } },
-      { method: "POST", path: "/tabs/tab-1/click", body: { selector: "#submit" } },
-      { method: "POST", path: "/tabs/tab-1/fill", body: { ref: "@e1", value: "Avery Quinn" } },
-      { method: "POST", path: "/tabs/tab-1/press", body: { key: "Enter", ref: "@e1" } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/click",
+        body: { selector: "#submit" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fill",
+        body: { ref: "@e1", value: "Avery Quinn" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/press",
+        body: { key: "Enter", ref: "@e1" },
+      },
       { method: "POST", path: "/tabs/tab-1/press", body: { key: "Escape" } },
-      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", pixels: 300, ref: "@e1" } },
-      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", selector: ".panel" } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/scroll",
+        body: { direction: "down", pixels: 300, ref: "@e1" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/scroll",
+        body: { direction: "down", selector: ".panel" },
+      },
       { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "up" } },
-      { method: "POST", path: "/tabs/tab-1/drag", body: { source: { ref: "@e1" }, target: { selector: "#zone" } } },
-      { method: "POST", path: "/tabs/tab-1/wait", body: { selector: "#slots", text: "Free", timeoutMs: 1000 } },
-      { method: "POST", path: "/tabs/tab-1/actions", body: { actions: [{ type: "click", ref: "@e2" }] } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/drag",
+        body: { source: { ref: "@e1" }, target: { selector: "#zone" } },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait",
+        body: { selector: "#slots", text: "Free", timeoutMs: 1000 },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/actions",
+        body: { actions: [{ type: "click", ref: "@e2" }] },
+      },
       // navigate waits for the new document to commit, so it sends waitUntil.
-      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/navigate",
+        body: { url: "https://example.test/slots", waitUntil: "commit" },
+      },
       { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
       { method: "DELETE", path: "/tabs/tab-1", body: undefined },
       { method: "POST", path: "/spaces/space-1/handoff", body: {} },
@@ -952,7 +1381,8 @@ describe("scripted sessions", () => {
     ]);
     for (const [, options] of api.fetch.mock.calls) {
       expect(options.headers.Authorization).toBeUndefined();
-      if (options.body !== undefined) expect(options.headers["Content-Type"]).toBe("application/json");
+      if (options.body !== undefined)
+        expect(options.headers["Content-Type"]).toBe("application/json");
     }
   });
 
@@ -967,7 +1397,9 @@ describe("scripted sessions", () => {
       },
     });
     const client = await connect({ env: profileEnv });
-    await expect(client.createSpace("Research", { isolatd: true })).rejects.toMatchObject({
+    await expect(
+      client.createSpace("Research", { isolatd: true }),
+    ).rejects.toMatchObject({
       code: "invalid_option",
       entry: "kamapathy.createSpace",
       option: "isolatd",
@@ -997,13 +1429,24 @@ describe("scripted sessions", () => {
     });
     const stdout = sink();
     const stderr = sink();
-    expect(await main(["health", "--json"], { env: profileEnv, stdout, stderr })).toBe(0);
-    expect(JSON.parse(stdout.text())).toMatchObject({ status: "ok", version: "0.9.0" });
+    expect(
+      await main(["health", "--json"], { env: profileEnv, stdout, stderr }),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "ok",
+      version: "0.9.0",
+    });
     expect(stderr.text()).toBe(
       `notice: This skill copy (${schema.CLIENT_VERSION}) is older than Kamapathy 0.9.0. Read /opt/kamapathy/skill/SKILL.md for the current API.\n`,
     );
     const again = sink();
-    expect(await main(["health"], { env: profileEnv, stdout: sink(), stderr: again })).toBe(0);
+    expect(
+      await main(["health"], {
+        env: profileEnv,
+        stdout: sink(),
+        stderr: again,
+      }),
+    ).toBe(0);
     expect(again.text()).toBe("");
   });
 
@@ -1025,12 +1468,20 @@ describe("scripted sessions", () => {
         ),
       "POST /tabs/tab-1/fill": () =>
         Response.json(
-          { error: { code: "element_obscured", message: "Covered.", dispatched: true } },
+          {
+            error: {
+              code: "element_obscured",
+              message: "Covered.",
+              dispatched: true,
+            },
+          },
           { status: 409 },
         ),
     });
     const client = await connect({ env, fetch: api.fetch });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
     const timedOut = await page.click("@e2").catch((error) => error);
     expect(timedOut).toBeInstanceOf(KamapathyError);
     expect(timedOut).toMatchObject({
@@ -1043,11 +1494,22 @@ describe("scripted sessions", () => {
     });
     expect(Object.hasOwn(timedOut, "retryable")).toBe(true);
     const reached = await page.fill("@e1", "A").catch((error) => error);
-    expect(reached).toMatchObject({ code: "element_obscured", dispatched: true, entry: "page.fill" });
+    expect(reached).toMatchObject({
+      code: "element_obscured",
+      dispatched: true,
+      entry: "page.fill",
+    });
     expect(reached).not.toHaveProperty("retryable");
     // Single commands add the same line after their status line.
     const retried = sink();
-    expect(await main(["click", "tab-1", "@e2"], { env, fetch: api.fetch, stdout: sink(), stderr: retried })).toBe(1);
+    expect(
+      await main(["click", "tab-1", "@e2"], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+        stderr: retried,
+      }),
+    ).toBe(1);
     expect(retried.text()).toBe(
       "Kamapathy: 504 action_timeout: The control never became actionable.\nKamapathy: Nothing reached the page, so the same command can be retried.\n",
     );
@@ -1071,13 +1533,24 @@ describe("scripted sessions", () => {
     const client = await connect({ env, fetch: api.fetch });
     expect(client.app).toEqual({ apiLevel: 1 });
     expect((await client.space("space-1")).id).toBe("space-1");
-    expect(api.requests).toEqual([{ method: "GET", path: "/spaces", body: undefined }]);
+    expect(api.requests).toEqual([
+      { method: "GET", path: "/spaces", body: undefined },
+    ]);
     const current = await connect({
       env,
       fetch: api.fetch,
-      health: { status: "ok", version: "0.2.0", apiLevel: 2, versions: { electron: "44.2.0" } },
+      health: {
+        status: "ok",
+        version: "0.2.0",
+        apiLevel: 2,
+        versions: { electron: "44.2.0" },
+      },
     });
-    expect(current.app).toEqual({ version: "0.2.0", apiLevel: 2, electron: "44.2.0" });
+    expect(current.app).toEqual({
+      version: "0.2.0",
+      apiLevel: 2,
+      electron: "44.2.0",
+    });
   });
 
   // Section 2's shapes: labeled tabs, the closed list and a boundary.
@@ -1120,7 +1593,13 @@ describe("scripted sessions", () => {
     "POST /tabs/tab-2/release": { tab: labeled[1] },
     "POST /tabs/tab-404/adopt": () =>
       Response.json(
-        { error: { code: "tab_not_found", message: "Agent tab was not found.", tabId: "tab-404" } },
+        {
+          error: {
+            code: "tab_not_found",
+            message: "Agent tab was not found.",
+            tabId: "tab-404",
+          },
+        },
         { status: 404 },
       ),
     "POST /spaces/space-1/finish": {
@@ -1132,23 +1611,71 @@ describe("scripted sessions", () => {
       protected: ["p5"],
     },
     "POST /space-requests": {
-      space: { id: "work", name: "Work", kind: "personal", owner: "agent", signIns: "shared" },
-      tabs: [{ id: "tab-w", spaceId: "work", title: "Mail", url: "https://mail.test/", label: "p1", openedBy: "person", managed: false, active: true }],
-      active: { id: "tab-w", spaceId: "work", title: "Mail", url: "https://mail.test/", label: "p1", openedBy: "person", managed: false, active: true },
+      space: {
+        id: "work",
+        name: "Work",
+        kind: "personal",
+        owner: "agent",
+        signIns: "shared",
+      },
+      tabs: [
+        {
+          id: "tab-w",
+          spaceId: "work",
+          title: "Mail",
+          url: "https://mail.test/",
+          label: "p1",
+          openedBy: "person",
+          managed: false,
+          active: true,
+        },
+      ],
+      active: {
+        id: "tab-w",
+        spaceId: "work",
+        title: "Mail",
+        url: "https://mail.test/",
+        label: "p1",
+        openedBy: "person",
+        managed: false,
+        active: true,
+      },
     },
   };
-  const paths = (api) => api.requests.map((item) => `${item.method} ${item.path}`);
+  const paths = (api) =>
+    api.requests.map((item) => `${item.method} ${item.path}`);
 
   it("<space-id>:<label> resolves with one tabs request", async () => {
     const api = fakeApi(sectionTwo);
-    expect(await runCli(["click", "space-1:p1", "@e2"], { env, fetch: api.fetch, stdout: sink() })).toBe(0);
-    expect(paths(api)).toEqual(["GET /spaces/space-1/tabs", "POST /tabs/tab-1/click"]);
+    expect(
+      await runCli(["click", "space-1:p1", "@e2"], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+      }),
+    ).toBe(0);
+    expect(paths(api)).toEqual([
+      "GET /spaces/space-1/tabs",
+      "POST /tabs/tab-1/click",
+    ]);
     await expect(
-      runCli(["click", "space-1:p4", "@e2"], { env, fetch: api.fetch, stdout: sink() }),
-    ).rejects.toMatchObject({ code: "page_not_found", label: "p4", closedBy: "page" });
+      runCli(["click", "space-1:p4", "@e2"], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({
+      code: "page_not_found",
+      label: "p4",
+      closedBy: "page",
+    });
     expect(paths(api).slice(2)).toEqual(["GET /spaces/space-1/tabs"]);
     await expect(
-      runCli(["click", "space-1:x1", "@e2"], { env, fetch: api.fetch, stdout: sink() }),
+      runCli(["click", "space-1:x1", "@e2"], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+      }),
     ).rejects.toThrow("Invalid space or tab ID.");
   });
 
@@ -1158,34 +1685,66 @@ describe("scripted sessions", () => {
     const research = await client.space("space-1");
     expect(paths(api)).toEqual(["GET /spaces/space-1"]);
     for (const options of [undefined, {}, { keep: "some" }, { keep: 3 }])
-      await expect(research.finish(options), JSON.stringify(options)).rejects.toMatchObject({
+      await expect(
+        research.finish(options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
         code: "invalid_argument",
         entry: "space.finish",
         expected: '{ keep: "all" | page[] }',
       });
     await expect(
-      runCli(["space", "finish", "space-1"], { env, fetch: api.fetch, health: level2, stdout: sink() }),
-    ).rejects.toThrow("Use space finish <space-id> --keep all|none|<tab-id>[,<tab-id>].");
+      runCli(["space", "finish", "space-1"], {
+        env,
+        fetch: api.fetch,
+        health: level2,
+        stdout: sink(),
+      }),
+    ).rejects.toThrow(
+      "Use space finish <space-id> --keep all|none|<tab-id>[,<tab-id>].",
+    );
     expect(paths(api)).toEqual(["GET /spaces/space-1"]);
     // Pages, labels and ids all become ids, with one tabs request for the labels.
     const page = research.page("p1");
-    expect(await research.finish({ keep: [page, "p2", "tab-3"] })).toEqual(sectionTwo["POST /spaces/space-1/finish"]);
+    expect(await research.finish({ keep: [page, "p2", "tab-3"] })).toEqual(
+      sectionTwo["POST /spaces/space-1/finish"],
+    );
     expect(api.requests.slice(1)).toEqual([
       { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
-      { method: "POST", path: "/spaces/space-1/finish", body: { keep: ["tab-1", "tab-2", "tab-3"] } },
+      {
+        method: "POST",
+        path: "/spaces/space-1/finish",
+        body: { keep: ["tab-1", "tab-2", "tab-3"] },
+      },
     ]);
     expect(await research.finish({ keep: "all" })).toMatchObject({ ok: true });
     expect(api.requests.at(-1).body).toEqual({ keep: "all" });
     const stdout = sink();
     expect(
-      await runCli(["space", "finish", "space-1", "--keep", "none"], { env, fetch: api.fetch, health: level2, stdout }),
+      await runCli(["space", "finish", "space-1", "--keep", "none"], {
+        env,
+        fetch: api.fetch,
+        health: level2,
+        stdout,
+      }),
     ).toBe(0);
     expect(api.requests.at(-1).body).toEqual({ keep: [] });
-    expect(stdout.text()).toBe("ok: space space-1 finished\nclosed p1 p3\nkept p2\nprotected p5\n");
-    await runCli(["space", "finish", "space-1", "--keep", "p2,tab-3"], { env, fetch: api.fetch, health: level2, stdout: sink() });
+    expect(stdout.text()).toBe(
+      "ok: space space-1 finished\nclosed p1 p3\nkept p2\nprotected p5\n",
+    );
+    await runCli(["space", "finish", "space-1", "--keep", "p2,tab-3"], {
+      env,
+      fetch: api.fetch,
+      health: level2,
+      stdout: sink(),
+    });
     expect(api.requests.slice(-2)).toEqual([
       { method: "GET", path: "/spaces/space-1/tabs", body: undefined },
-      { method: "POST", path: "/spaces/space-1/finish", body: { keep: ["tab-2", "tab-3"] } },
+      {
+        method: "POST",
+        path: "/spaces/space-1/finish",
+        body: { keep: ["tab-2", "tab-3"] },
+      },
     ]);
   });
 
@@ -1199,19 +1758,33 @@ describe("scripted sessions", () => {
     expect(paths(api)).toEqual(["GET /spaces/space-1"]);
     await page.click("@e2");
     await page.click("@e2");
-    expect(page).toMatchObject({ id: "tab-1", openedBy: "agent", managed: true });
-    expect(paths(api).slice(1)).toEqual(["GET /spaces/space-1/tabs", "POST /tabs/tab-1/click", "POST /tabs/tab-1/click"]);
+    expect(page).toMatchObject({
+      id: "tab-1",
+      openedBy: "agent",
+      managed: true,
+    });
+    expect(paths(api).slice(1)).toEqual([
+      "GET /spaces/space-1/tabs",
+      "POST /tabs/tab-1/click",
+      "POST /tabs/tab-1/click",
+    ]);
     await expect(research.page("p4").click("@e1")).rejects.toMatchObject({
       code: "page_not_found",
       label: "p4",
       closedBy: "page",
-      message: "Page p4 was closed by the page. Open another with space.newPage().",
+      message:
+        "Page p4 was closed by the page. Open another with space.newPage().",
       entry: "page.click",
     });
     expect(() => research.page("tab-1")).toThrow(KamapathyError);
     // A popup's opener is the open page that opened it.
     const [, popup] = await research.tabs();
-    expect(popup).toMatchObject({ label: "p2", openedBy: "page", openerId: "tab-1", managed: false });
+    expect(popup).toMatchObject({
+      label: "p2",
+      openedBy: "page",
+      openerId: "tab-1",
+      managed: false,
+    });
     expect(await popup.opener()).toMatchObject({ id: "tab-1", label: "p1" });
     expect(await (await research.tabs())[0].opener()).toBeNull();
   });
@@ -1230,7 +1803,12 @@ describe("scripted sessions", () => {
       expect(timeouts).toHaveBeenLastCalledWith(605000);
       await client.requestSpace({ reason: "Book a table", timeout: 10000 });
       expect(timeouts).toHaveBeenLastCalledWith(15000);
-      await runCli(["wait-for-control", "space-1", "--timeout", "2000"], { env, fetch: api.fetch, health: level2, stdout: sink() });
+      await runCli(["wait-for-control", "space-1", "--timeout", "2000"], {
+        env,
+        fetch: api.fetch,
+        health: level2,
+        stdout: sink(),
+      });
       expect(timeouts).toHaveBeenLastCalledWith(7000);
       await research.tabs();
       expect(timeouts).toHaveBeenLastCalledWith(45000);
@@ -1257,8 +1835,14 @@ describe("scripted sessions", () => {
       label: "p9",
       message: "No page in this space is labeled p9. space.pages() lists them.",
     });
-    await expect(research.adopt("p4")).rejects.toMatchObject({ code: "page_not_found", closedBy: "page" });
-    await expect(research.adopt("tab-404")).rejects.toMatchObject({ code: "tab_not_found", tabId: "tab-404" });
+    await expect(research.adopt("p4")).rejects.toMatchObject({
+      code: "page_not_found",
+      closedBy: "page",
+    });
+    await expect(research.adopt("tab-404")).rejects.toMatchObject({
+      code: "tab_not_found",
+      tabId: "tab-404",
+    });
     // A page handle sends its own id.
     const page = (await research.pages())[0];
     await research.adopt(page);
@@ -1268,7 +1852,11 @@ describe("scripted sessions", () => {
   it("openSpace reuses or creates, createSpace sends KAMAPATHY_PAGE_BUDGET, and requestSpace returns the granted space with its user page", async () => {
     const api = fakeApi(sectionTwo);
     const budgeted = { ...env, KAMAPATHY_PAGE_BUDGET: "5" };
-    const client = await connect({ env: budgeted, fetch: api.fetch, health: level2 });
+    const client = await connect({
+      env: budgeted,
+      fetch: api.fetch,
+      health: level2,
+    });
     await client.openSpace("Research");
     await client.openSpace("space-1", { isolated: false, pageBudget: 3 });
     await client.createSpace("Other");
@@ -1279,20 +1867,35 @@ describe("scripted sessions", () => {
       { name: "Other", pageBudget: 5 },
       { name: "Own", isolated: true, pageBudget: 2 },
     ]);
-    const wrong = await connect({ env: { ...env, KAMAPATHY_PAGE_BUDGET: "21" }, fetch: api.fetch, health: level2 });
+    const wrong = await connect({
+      env: { ...env, KAMAPATHY_PAGE_BUDGET: "21" },
+      fetch: api.fetch,
+      health: level2,
+    });
     await expect(wrong.createSpace("Other")).rejects.toMatchObject({
       code: "invalid_option",
       option: "KAMAPATHY_PAGE_BUDGET",
     });
     expect(api.requests).toHaveLength(4);
-    const work = await client.requestSpace({ reason: "Book a table", name: "Work" });
+    const work = await client.requestSpace({
+      reason: "Book a table",
+      name: "Work",
+    });
     expect(api.requests.at(-1)).toEqual({
       method: "POST",
       path: "/space-requests",
       body: { reason: "Book a table", name: "Work" },
     });
-    expect(work).toMatchObject({ id: "work", kind: "personal", owner: "agent" });
-    expect(work.userPage()).toMatchObject({ id: "tab-w", label: "p1", openedBy: "person" });
+    expect(work).toMatchObject({
+      id: "work",
+      kind: "personal",
+      owner: "agent",
+    });
+    expect(work.userPage()).toMatchObject({
+      id: "tab-w",
+      label: "p1",
+      openedBy: "person",
+    });
     // Taking control back reports the boundary and the page the person left.
     const research = await client.space("space-1");
     expect(research.userPage()).toBeNull();
@@ -1307,29 +1910,74 @@ describe("scripted sessions", () => {
     const api = fakeApi(sectionTwo);
     const run = async (args) => {
       const stdout = sink();
-      expect(await runCli(args, { env, fetch: api.fetch, health: level2, stdout }), args.join(" ")).toBe(0);
+      expect(
+        await runCli(args, { env, fetch: api.fetch, health: level2, stdout }),
+        args.join(" "),
+      ).toBe(0);
       return stdout.text();
     };
     expect(await run(["tabs", "space-1"])).toBe(
       'p1 tab-1 agent active https://example.test/reserve "Reserve"\np2 tab-2 page from p1 unmanaged new https://example.test/slots "Slots"\n',
     );
-    const lines = 'active p1 tab-1 https://example.test/reserve\nopened p2 tab-2 page from tab-1 unmanaged new https://example.test/slots "Slots"\nclosed p3\n';
-    expect(await run(["resume", "space-1"])).toBe(`ok: agent control resumed\n${lines}`);
-    expect(await run(["wait-for-control", "space-1"])).toBe(`ok: agent has control\n${lines}`);
-    expect(await run(["space", "request", "--reason", "Book a table", "--name", "Work", "--timeout", "60000"])).toBe(
+    const lines =
+      'active p1 tab-1 https://example.test/reserve\nopened p2 tab-2 page from tab-1 unmanaged new https://example.test/slots "Slots"\nclosed p3\n';
+    expect(await run(["resume", "space-1"])).toBe(
+      `ok: agent control resumed\n${lines}`,
+    );
+    expect(await run(["wait-for-control", "space-1"])).toBe(
+      `ok: agent has control\n${lines}`,
+    );
+    expect(
+      await run([
+        "space",
+        "request",
+        "--reason",
+        "Book a table",
+        "--name",
+        "Work",
+        "--timeout",
+        "60000",
+      ]),
+    ).toBe(
       'space work "Work" agent shared\np1 tab-w person unmanaged active https://mail.test/ "Mail"\nactive p1 tab-w https://mail.test/\n',
     );
-    expect(api.requests.at(-1).body).toEqual({ reason: "Book a table", name: "Work", timeoutMs: 60000 });
-    expect(await run(["space", "open", "Research", "--page-budget", "4"])).toBe('space space-1 "Research" agent shared\n');
-    expect(api.requests.at(-1).body).toEqual({ name: "Research", reuse: true, pageBudget: 4 });
-    expect(await run(["new-page", "space-1"])).toBe("tab tab-1 https://example.test/reserve\n");
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/spaces/space-1/tabs", body: {} });
-    expect(await run(["adopt", "space-1:p2"])).toBe("tab tab-2 https://example.test/slots\n");
-    expect(await run(["release", "tab-2"])).toBe("tab tab-2 https://example.test/slots\n");
+    expect(api.requests.at(-1).body).toEqual({
+      reason: "Book a table",
+      name: "Work",
+      timeoutMs: 60000,
+    });
+    expect(await run(["space", "open", "Research", "--page-budget", "4"])).toBe(
+      'space space-1 "Research" agent shared\n',
+    );
+    expect(api.requests.at(-1).body).toEqual({
+      name: "Research",
+      reuse: true,
+      pageBudget: 4,
+    });
+    expect(await run(["new-page", "space-1"])).toBe(
+      "tab tab-1 https://example.test/reserve\n",
+    );
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/spaces/space-1/tabs",
+      body: {},
+    });
+    expect(await run(["adopt", "space-1:p2"])).toBe(
+      "tab tab-2 https://example.test/slots\n",
+    );
+    expect(await run(["release", "tab-2"])).toBe(
+      "tab tab-2 https://example.test/slots\n",
+    );
     await expect(
-      runCli(["space", "open", "Research", "--page-budget", "21"], { env, fetch: api.fetch, stdout: sink() }),
+      runCli(["space", "open", "Research", "--page-budget", "21"], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+      }),
     ).rejects.toThrow("--page-budget must be an integer from 1 to 20.");
-    await expect(runCli(["space", "nope"], { env, fetch: api.fetch, stdout: sink() })).rejects.toThrow(
+    await expect(
+      runCli(["space", "nope"], { env, fetch: api.fetch, stdout: sink() }),
+    ).rejects.toThrow(
       "Use space create, space open, space finish, space request or space close.",
     );
   });
@@ -1349,12 +1997,19 @@ describe("scripted sessions", () => {
       message:
         "space.newPage needs Kamapathy API level 2, and Kamapathy 0.1.9 has level 1. Ask the person to update Kamapathy, then read the skill again.",
     });
-    await expect(client.createSpace("Research", { pageBudget: 3 })).rejects.toMatchObject({
+    await expect(
+      client.createSpace("Research", { pageBudget: 3 }),
+    ).rejects.toMatchObject({
       code: "app_outdated",
       option: "pageBudget",
     });
     await expect(
-      runCli(["new-page", "space-1"], { env, fetch: api.fetch, health: old, stdout: sink() }),
+      runCli(["new-page", "space-1"], {
+        env,
+        fetch: api.fetch,
+        health: old,
+        stdout: sink(),
+      }),
     ).rejects.toMatchObject({
       code: "app_outdated",
       message:
@@ -1364,7 +2019,11 @@ describe("scripted sessions", () => {
   });
 
   it("pdf-text reads a page range, prints each page, offers the next and refuses bad values before connecting", async () => {
-    const current = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL };
+    const current = {
+      status: "ok",
+      version: "0.2.0",
+      apiLevel: schema.API_LEVEL,
+    };
     const document = {
       url: "https://example.test/report.pdf",
       title: "Quarterly report",
@@ -1386,7 +2045,18 @@ describe("scripted sessions", () => {
     const stdout = sink();
     expect(
       await runCli(
-        ["pdf-text", "tab-1", "--from", "2", "--to", "3", "--max-chars", "100", "--timeout", "20000"],
+        [
+          "pdf-text",
+          "tab-1",
+          "--from",
+          "2",
+          "--to",
+          "3",
+          "--max-chars",
+          "100",
+          "--timeout",
+          "20000",
+        ],
         { env, fetch: api.fetch, health: current, stdout },
       ),
     ).toBe(0);
@@ -1409,37 +2079,70 @@ describe("scripted sessions", () => {
       truncated: false,
     };
     const both = sink();
-    expect(await runCli(["pdf-text", "tab-1"], { env, fetch: api.fetch, health: current, stdout: both })).toBe(0);
+    expect(
+      await runCli(["pdf-text", "tab-1"], {
+        env,
+        fetch: api.fetch,
+        health: current,
+        stdout: both,
+      }),
+    ).toBe(0);
     expect(api.requests.at(-1).body).toEqual({});
     expect(both.text()).toBe(
       "Quarterly report, 9 pages, https://example.test/report.pdf\n[page 2]\nPage two text\n[page 3]\nPage three text\n",
     );
-    answer = { ...document, pages: [{ number: 2, text: "" }], chars: 0, truncated: false, noText: true };
+    answer = {
+      ...document,
+      pages: [{ number: 2, text: "" }],
+      chars: 0,
+      truncated: false,
+      noText: true,
+    };
     const scan = sink();
-    await runCli(["pdf-text", "tab-1"], { env, fetch: api.fetch, health: current, stdout: scan });
+    await runCli(["pdf-text", "tab-1"], {
+      env,
+      fetch: api.fetch,
+      health: current,
+      stdout: scan,
+    });
     expect(scan.text()).toBe(
       "Quarterly report, 9 pages, https://example.test/report.pdf\n[page 2]\nNo text on these pages; they may be scans.\n",
     );
     const asJson = sink();
-    await runCli(["pdf-text", "tab-1", "--json"], { env, fetch: api.fetch, health: current, stdout: asJson });
+    await runCli(["pdf-text", "tab-1", "--json"], {
+      env,
+      fetch: api.fetch,
+      health: current,
+      stdout: asJson,
+    });
     expect(JSON.parse(asJson.text())).toEqual(answer);
     // Bad values never reach the socket.
     const sent = api.requests.length;
     for (const [args, message] of [
       [["--from", "0"], "--from must be an integer from 1 to 100000."],
       [["--to", "100001"], "--to must be an integer from 1 to 100000."],
-      [["--max-chars", "1000001"], "--max-chars must be an integer from 0 to 1000000."],
+      [
+        ["--max-chars", "1000001"],
+        "--max-chars must be an integer from 0 to 1000000.",
+      ],
       [["--timeout", "60001"], "--timeout must be an integer from 0 to 60000."],
       [["--pages", "2"], "Unknown option: --pages. Run help for usage."],
     ])
       await expect(
-        runCli(["pdf-text", "tab-1", ...args], { env, fetch: api.fetch, health: current, stdout: sink() }),
+        runCli(["pdf-text", "tab-1", ...args], {
+          env,
+          fetch: api.fetch,
+          health: current,
+          stdout: sink(),
+        }),
         args.join(" "),
       ).rejects.toThrow(message);
     expect(api.requests.length).toBe(sent);
     const help = sink();
     expect(await runCli(["help", "pdf-text"], { env, stdout: help })).toBe(0);
-    expect(help.text()).toContain("pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]");
+    expect(help.text()).toContain(
+      "pdf-text <tab-id> [--from <n>] [--to <n>] [--max-chars <n>] [--timeout <ms>]",
+    );
     expect(help.text()).toContain("Route: POST /tabs/:id/pdf/text");
     expect(help.text()).toContain("Since: API level 3");
     // A script sends timeout as the route's timeoutMs and refuses the field name.
@@ -1476,14 +2179,18 @@ describe("scripted sessions", () => {
     const client = await connect({ env, fetch: api.fetch, health: level2 });
     const page = (await client.space("space-1")).page("p1");
     const sent = api.requests.length;
-    await expect(page.waitForEvent("popup", { timeout: 0 })).rejects.toMatchObject({
+    await expect(
+      page.waitForEvent("popup", { timeout: 0 }),
+    ).rejects.toMatchObject({
       code: "invalid_option",
       entry: "page.waitForEvent",
       option: "timeout",
       message:
         "page.waitForEvent got an invalid option: timeout must be an integer from 1 to 60000. Expected page.waitForEvent(event, { timeout? }).",
     });
-    await expect(page.waitForEvent("popup", { timeoutMs: 1000 })).rejects.toMatchObject({
+    await expect(
+      page.waitForEvent("popup", { timeoutMs: 1000 }),
+    ).rejects.toMatchObject({
       code: "invalid_option",
       option: "timeoutMs",
       suggestion: "timeout",
@@ -1521,7 +2228,15 @@ describe("scripted sessions", () => {
       "POST /expectations/x1/wait": { popup: labeled[1] },
       "POST /expectations/x2/wait": { dialog: dialogRecord },
       "GET /tabs/tab-1/popups": {
-        popups: [{ id: "tab-2", label: "p2", url: "https://example.test/slots", openedAt: 10, unseen: true }],
+        popups: [
+          {
+            id: "tab-2",
+            label: "p2",
+            url: "https://example.test/slots",
+            openedAt: 10,
+            unseen: true,
+          },
+        ],
       },
     });
     const client = await connect({ env, fetch: api.fetch, health: level2 });
@@ -1549,7 +2264,9 @@ describe("scripted sessions", () => {
       "POST /tabs/tab-1/expectations",
     ]);
     expect(api.requests[sent].body).toEqual({ event: "popup" });
-    expect(api.requests.find((item) => item.path === "/expectations/x1/wait").body).toEqual({});
+    expect(
+      api.requests.find((item) => item.path === "/expectations/x1/wait").body,
+    ).toEqual({});
     expect(popup).toBeInstanceOf(Page);
     expect(popup).toMatchObject({
       id: "tab-2",
@@ -1560,23 +2277,43 @@ describe("scripted sessions", () => {
     });
     // A dialog wait answers with the record as it was sent, and the client's
     // timeout travels as the route's timeoutMs.
-    expect(await page.waitForEvent("dialog", { timeout: 5000 })).toEqual(dialogRecord);
-    expect(api.requests.at(-2).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    expect(await page.waitForEvent("dialog", { timeout: 5000 })).toEqual(
+      dialogRecord,
+    );
+    expect(api.requests.at(-2).body).toEqual({
+      event: "dialog",
+      timeoutMs: 5000,
+    });
     // With no arm live a call goes straight out, and popups lists the pages
     // this page opened without clearing them.
     const idle = api.requests.length;
     await page.click("@e2");
     const opened = await page.popups();
-    expect(paths(api).slice(idle)).toEqual(["POST /tabs/tab-1/click", "GET /tabs/tab-1/popups"]);
+    expect(paths(api).slice(idle)).toEqual([
+      "POST /tabs/tab-1/click",
+      "GET /tabs/tab-1/popups",
+    ]);
     expect(opened).toHaveLength(1);
     expect(opened[0]).toBeInstanceOf(Page);
-    expect(opened[0]).toMatchObject({ id: "tab-2", label: "p2", spaceId: "space-1", openerId: "tab-1" });
+    expect(opened[0]).toMatchObject({
+      id: "tab-2",
+      label: "p2",
+      spaceId: "space-1",
+      openerId: "tab-1",
+    });
   });
 
   it("a wait that times out throws expectation_timeout with awaited, event and timeoutMs, and a second wait for the same event throws expectation_pending", async () => {
     let arm = (body) =>
       Response.json(
-        { expectation: { id: "x9", event: body.event, tabId: "tab-1", expiresAt: 2000 } },
+        {
+          expectation: {
+            id: "x9",
+            event: body.event,
+            tabId: "tab-1",
+            expiresAt: 2000,
+          },
+        },
         { status: 201 },
       );
     const api = fakeApi({
@@ -1587,7 +2324,8 @@ describe("scripted sessions", () => {
           {
             error: {
               code: "expectation_timeout",
-              message: "No popup arrived within 5000 ms. Arm another wait before the action that causes it.",
+              message:
+                "No popup arrived within 5000 ms. Arm another wait before the action that causes it.",
               awaited: "event",
               event: "popup",
               timeoutMs: 5000,
@@ -1600,7 +2338,9 @@ describe("scripted sessions", () => {
     try {
       const client = await connect({ env, fetch: api.fetch, health: level2 });
       const page = (await client.space("space-1")).page("p1");
-      await expect(page.waitForEvent("popup", { timeout: 5000 })).rejects.toMatchObject({
+      await expect(
+        page.waitForEvent("popup", { timeout: 5000 }),
+      ).rejects.toMatchObject({
         code: "expectation_timeout",
         entry: "page.waitForEvent",
         awaited: "event",
@@ -1618,14 +2358,17 @@ describe("scripted sessions", () => {
           {
             error: {
               code: "expectation_pending",
-              message: "This page is already waiting for a popup. Wait for it, or cancel that wait before arming another.",
+              message:
+                "This page is already waiting for a popup. Wait for it, or cancel that wait before arming another.",
               event: "popup",
               expectationId: "x9",
             },
           },
           { status: 409 },
         );
-      const clicks = paths(api).filter((item) => item === "POST /tabs/tab-1/click").length;
+      const clicks = paths(api).filter(
+        (item) => item === "POST /tabs/tab-1/click",
+      ).length;
       const failing = page.waitForEvent("popup");
       const queued = page.click("@e2");
       await expect(failing).rejects.toMatchObject({
@@ -1633,8 +2376,12 @@ describe("scripted sessions", () => {
         event: "popup",
         expectationId: "x9",
       });
-      await expect(queued).rejects.toMatchObject({ code: "expectation_pending" });
-      expect(paths(api).filter((item) => item === "POST /tabs/tab-1/click").length).toBe(clicks);
+      await expect(queued).rejects.toMatchObject({
+        code: "expectation_pending",
+      });
+      expect(
+        paths(api).filter((item) => item === "POST /tabs/tab-1/click").length,
+      ).toBe(clicks);
       // The failed arm is cleared, so the next call sends as usual.
       expect(await page.click("@e2")).toMatchObject({ ok: true });
     } finally {
@@ -1649,52 +2396,92 @@ describe("scripted sessions", () => {
         Response.json({
           policy: {
             accept: body.accept,
-            ...(body.promptText === undefined ? {} : { promptText: body.promptText }),
+            ...(body.promptText === undefined
+              ? {}
+              : { promptText: body.promptText }),
             remaining: body.times ?? 1,
             expiresAt: 5000,
           },
         }),
       "DELETE /tabs/tab-1/dialog-policy": { policy: null },
-      "GET /tabs/tab-1/dialogs": { policy: { accept: true, remaining: 2, expiresAt: 5000 }, dialogs: [dialogRecord] },
+      "GET /tabs/tab-1/dialogs": {
+        policy: { accept: true, remaining: 2, expiresAt: 5000 },
+        dialogs: [dialogRecord],
+      },
     });
     const client = await connect({ env, fetch: api.fetch, health: level2 });
     const page = (await client.space("space-1")).page("p1");
     expect(
-      await page.setDialogPolicy({ accept: true, promptText: "Avery Quinn", times: 2, lifetime: 120000 }),
-    ).toEqual({ policy: { accept: true, promptText: "Avery Quinn", remaining: 2, expiresAt: 5000 } });
+      await page.setDialogPolicy({
+        accept: true,
+        promptText: "Avery Quinn",
+        times: 2,
+        lifetime: 120000,
+      }),
+    ).toEqual({
+      policy: {
+        accept: true,
+        promptText: "Avery Quinn",
+        remaining: 2,
+        expiresAt: 5000,
+      },
+    });
     expect(api.requests.at(-1)).toEqual({
       method: "POST",
       path: "/tabs/tab-1/dialog-policy",
-      body: { accept: true, promptText: "Avery Quinn", times: 2, lifetimeMs: 120000 },
+      body: {
+        accept: true,
+        promptText: "Avery Quinn",
+        times: 2,
+        lifetimeMs: 120000,
+      },
     });
     await page.setDialogPolicy({ accept: false });
     expect(api.requests.at(-1).body).toEqual({ accept: false });
     expect(await page.setDialogPolicy(null)).toEqual({ policy: null });
-    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    expect(api.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: "/tabs/tab-1/dialog-policy",
+      body: undefined,
+    });
     expect(await page.dialogs()).toEqual({
       policy: { accept: true, remaining: 2, expiresAt: 5000 },
       dialogs: [dialogRecord],
     });
-    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/tabs/tab-1/dialogs", body: undefined });
+    expect(api.requests.at(-1)).toEqual({
+      method: "GET",
+      path: "/tabs/tab-1/dialogs",
+      body: undefined,
+    });
     // A policy that is neither a plain object with an accept nor null, and a
     // field outside its range, are refused before anything is sent.
     const sent = api.requests.length;
     for (const policy of ["accept", 1, {}, { accept: "yes" }, [], undefined])
-      await expect(page.setDialogPolicy(policy), String(policy)).rejects.toMatchObject({
+      await expect(
+        page.setDialogPolicy(policy),
+        String(policy),
+      ).rejects.toMatchObject({
         code: "invalid_argument",
         entry: "page.setDialogPolicy",
-        expected: "page.setDialogPolicy({ accept, promptText?, times?, lifetime? }) or page.setDialogPolicy(null)",
+        expected:
+          "page.setDialogPolicy({ accept, promptText?, times?, lifetime? }) or page.setDialogPolicy(null)",
       });
-    await expect(page.setDialogPolicy({ accept: true, lifetime: 999 })).rejects.toMatchObject({
+    await expect(
+      page.setDialogPolicy({ accept: true, lifetime: 999 }),
+    ).rejects.toMatchObject({
       code: "invalid_field",
       field: "lifetimeMs",
       entry: "page.setDialogPolicy",
     });
-    await expect(page.setDialogPolicy({ accept: true, times: 21 })).rejects.toMatchObject({
+    await expect(
+      page.setDialogPolicy({ accept: true, times: 21 }),
+    ).rejects.toMatchObject({
       code: "invalid_field",
       field: "times",
     });
-    await expect(page.setDialogPolicy({ accept: true, promtText: "Avery" })).rejects.toMatchObject({
+    await expect(
+      page.setDialogPolicy({ accept: true, promtText: "Avery" }),
+    ).rejects.toMatchObject({
       code: "unknown_field",
       field: "promtText",
       suggestion: "promptText",
@@ -1709,13 +2496,29 @@ describe("scripted sessions", () => {
       popups: [{ id: "tab-3", label: "p3", url: "https://example.test/share" }],
       dialog: dialogRecord,
       moreDialogs: 2,
-      download: { id: "d1", suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" },
-      deniedRequests: [{ origin: "https://maps.example", permission: "location" }],
+      download: {
+        id: "d1",
+        suggestedFilename: "report.pdf",
+        url: "https://example.test/report.pdf",
+      },
+      deniedRequests: [
+        { origin: "https://maps.example", permission: "location" },
+      ],
     };
     const api = fakeApi({
       ...sectionTwo,
       "POST /tabs/tab-1/expectations": (body) =>
-        Response.json({ expectation: { id: "x1", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+        Response.json(
+          {
+            expectation: {
+              id: "x1",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 9,
+            },
+          },
+          { status: 201 },
+        ),
       "POST /expectations/x1/wait": { popup: labeled[1] },
       "POST /expectations/x2/wait": { dialog: dialogRecord },
       "POST /expectations/x3/wait": {
@@ -1731,9 +2534,22 @@ describe("scripted sessions", () => {
           failure: null,
         },
       },
-      "POST /expectations/x4/wait": { fileChooser: { id: "c1", tabId: "tab-1", multiple: true, accept: [".pdf"] } },
+      "POST /expectations/x4/wait": {
+        fileChooser: {
+          id: "c1",
+          tabId: "tab-1",
+          multiple: true,
+          accept: [".pdf"],
+        },
+      },
       "POST /tabs/tab-1/dialog-policy": (body) =>
-        Response.json({ policy: { accept: body.accept, remaining: body.times ?? 1, expiresAt: 9 } }),
+        Response.json({
+          policy: {
+            accept: body.accept,
+            remaining: body.times ?? 1,
+            expiresAt: 9,
+          },
+        }),
       "DELETE /tabs/tab-1/dialog-policy": { policy: null },
       "GET /tabs/tab-1/dialogs": {
         policy: { accept: false, remaining: 1, expiresAt: 9 },
@@ -1754,12 +2570,23 @@ describe("scripted sessions", () => {
     });
     const options = { env, fetch: api.fetch, health: level2 };
     const armed = sink();
-    expect(await runCli(["expect", "tab-1", "popup"], { ...options, stdout: armed })).toBe(0);
-    expect(api.requests.at(-1).body).toEqual({ event: "popup", timeoutMs: 60000 });
+    expect(
+      await runCli(["expect", "tab-1", "popup"], { ...options, stdout: armed }),
+    ).toBe(0);
+    expect(api.requests.at(-1).body).toEqual({
+      event: "popup",
+      timeoutMs: 60000,
+    });
     expect(armed.text()).toBe("expectation x1 popup tab-1\n");
     const timed = sink();
-    await runCli(["expect", "tab-1", "dialog", "--timeout", "5000"], { ...options, stdout: timed });
-    expect(api.requests.at(-1).body).toEqual({ event: "dialog", timeoutMs: 5000 });
+    await runCli(["expect", "tab-1", "dialog", "--timeout", "5000"], {
+      ...options,
+      stdout: timed,
+    });
+    expect(api.requests.at(-1).body).toEqual({
+      event: "dialog",
+      timeoutMs: 5000,
+    });
     expect(timed.text()).toBe("expectation x1 dialog tab-1\n");
     for (const [id, printed] of [
       ["x1", "popup p2 tab-2 https://example.test/slots\n"],
@@ -1768,39 +2595,85 @@ describe("scripted sessions", () => {
       ["x4", "file-chooser c1 multiple\n"],
     ]) {
       const stdout = sink();
-      expect(await runCli(["wait-expectation", id], { ...options, stdout }), id).toBe(0);
-      expect(api.requests.at(-1), id).toEqual({ method: "POST", path: `/expectations/${id}/wait`, body: {} });
+      expect(
+        await runCli(["wait-expectation", id], { ...options, stdout }),
+        id,
+      ).toBe(0);
+      expect(api.requests.at(-1), id).toEqual({
+        method: "POST",
+        path: `/expectations/${id}/wait`,
+        body: {},
+      });
       expect(stdout.text(), id).toBe(printed);
     }
     const policy = sink();
     expect(
-      await runCli(["dialog-policy", "tab-1", "accept", "--times", "2", "--lifetime", "120000", "--prompt-stdin"], {
-        ...options,
-        stdin: Readable.from(["Avery Quinn"]),
-        stdout: policy,
-      }),
+      await runCli(
+        [
+          "dialog-policy",
+          "tab-1",
+          "accept",
+          "--times",
+          "2",
+          "--lifetime",
+          "120000",
+          "--prompt-stdin",
+        ],
+        {
+          ...options,
+          stdin: Readable.from(["Avery Quinn"]),
+          stdout: policy,
+        },
+      ),
     ).toBe(0);
-    expect(api.requests.at(-1).body).toEqual({ accept: true, times: 2, lifetimeMs: 120000, promptText: "Avery Quinn" });
+    expect(api.requests.at(-1).body).toEqual({
+      accept: true,
+      times: 2,
+      lifetimeMs: 120000,
+      promptText: "Avery Quinn",
+    });
     expect(policy.text()).toBe("policy accept 2 left\n");
     const dismissed = sink();
-    await runCli(["dialog-policy", "tab-1", "dismiss"], { ...options, stdout: dismissed });
+    await runCli(["dialog-policy", "tab-1", "dismiss"], {
+      ...options,
+      stdout: dismissed,
+    });
     expect(api.requests.at(-1).body).toEqual({ accept: false });
     expect(dismissed.text()).toBe("policy dismiss 1 left\n");
     const cleared = sink();
-    await runCli(["dialog-policy", "tab-1", "reset"], { ...options, stdout: cleared });
-    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/tabs/tab-1/dialog-policy", body: undefined });
+    await runCli(["dialog-policy", "tab-1", "reset"], {
+      ...options,
+      stdout: cleared,
+    });
+    expect(api.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: "/tabs/tab-1/dialog-policy",
+      body: undefined,
+    });
     expect(cleared.text()).toBe("policy none\n");
     const logged = sink();
-    expect(await runCli(["dialogs", "tab-1"], { ...options, stdout: logged })).toBe(0);
+    expect(
+      await runCli(["dialogs", "tab-1"], { ...options, stdout: logged }),
+    ).toBe(0);
     expect(logged.text()).toBe(
-      ['policy dismiss 1 left', 'confirm "Delete this file?" dismissed', 'prompt "Your name?" accepted', ""].join("\n"),
+      [
+        "policy dismiss 1 left",
+        'confirm "Delete this file?" dismissed',
+        'prompt "Your name?" accepted',
+        "",
+      ].join("\n"),
     );
     const asJson = sink();
-    await runCli(["dialogs", "tab-1", "--json"], { ...options, stdout: asJson });
+    await runCli(["dialogs", "tab-1", "--json"], {
+      ...options,
+      stdout: asJson,
+    });
     expect(JSON.parse(asJson.text()).dialogs).toHaveLength(2);
     // An action prints its own line, then what it caused, in one order.
     const clicked = sink();
-    expect(await runCli(["click", "tab-1", "@e2"], { ...options, stdout: clicked })).toBe(0);
+    expect(
+      await runCli(["click", "tab-1", "@e2"], { ...options, stdout: clicked }),
+    ).toBe(0);
     expect(clicked.text()).toBe(
       [
         "ok",
@@ -1814,7 +2687,11 @@ describe("scripted sessions", () => {
     );
     // A blocked download says so, and one further dialog reads as one.
     const blocked = sink();
-    receipt.download = { blocked: true, suggestedFilename: "report.pdf", url: "https://example.test/report.pdf" };
+    receipt.download = {
+      blocked: true,
+      suggestedFilename: "report.pdf",
+      url: "https://example.test/report.pdf",
+    };
     receipt.moreDialogs = 1;
     receipt.popups = [{ id: "tab-3", url: "https://example.test/share" }];
     await runCli(["click", "tab-1", "@e2"], { ...options, stdout: blocked });
@@ -1832,14 +2709,35 @@ describe("scripted sessions", () => {
     // Bad arguments never reach the socket.
     const sent = api.requests.length;
     for (const [args, message] of [
-      [["expect", "tab-1", "popup", "--timeout", "0"], "--timeout must be an integer from 1 to 60000."],
-      [["expect", "tab-1", "pop"], "Use expect <tab-id> popup|download|filechooser|dialog."],
-      [["dialog-policy", "tab-1", "maybe"], "Use dialog-policy <tab-id> accept|dismiss|reset."],
-      [["dialog-policy", "tab-1", "reset", "--times", "2"], "dialog-policy reset takes no other options."],
-      [["dialog-policy", "tab-1", "accept", "--times", "21"], "--times must be an integer from 1 to 20."],
-      [["dialog-policy", "tab-1", "accept", "--lifetime", "999"], "--lifetime must be an integer from 1000 to 600000."],
+      [
+        ["expect", "tab-1", "popup", "--timeout", "0"],
+        "--timeout must be an integer from 1 to 60000.",
+      ],
+      [
+        ["expect", "tab-1", "pop"],
+        "Use expect <tab-id> popup|download|filechooser|dialog.",
+      ],
+      [
+        ["dialog-policy", "tab-1", "maybe"],
+        "Use dialog-policy <tab-id> accept|dismiss|reset.",
+      ],
+      [
+        ["dialog-policy", "tab-1", "reset", "--times", "2"],
+        "dialog-policy reset takes no other options.",
+      ],
+      [
+        ["dialog-policy", "tab-1", "accept", "--times", "21"],
+        "--times must be an integer from 1 to 20.",
+      ],
+      [
+        ["dialog-policy", "tab-1", "accept", "--lifetime", "999"],
+        "--lifetime must be an integer from 1000 to 600000.",
+      ],
     ])
-      await expect(runCli(args, { ...options, stdout: sink() }), args.join(" ")).rejects.toThrow(message);
+      await expect(
+        runCli(args, { ...options, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow(message);
     expect(api.requests.length).toBe(sent);
     const help = sink();
     expect(await runCli(["help", "expect"], { env, stdout: help })).toBe(0);
@@ -1867,7 +2765,12 @@ describe("scripted sessions", () => {
     totalBytes: 4,
     failure: null,
   };
-  const doneDownload = { ...heldDownload, state: "completed", receivedBytes: 4, totalBytes: 4 };
+  const doneDownload = {
+    ...heldDownload,
+    state: "completed",
+    receivedBytes: 4,
+    totalBytes: 4,
+  };
   const otherDownload = {
     ...heldDownload,
     id: "d2",
@@ -1876,10 +2779,15 @@ describe("scripted sessions", () => {
     totalBytes: 10,
   };
   const downloadBytes = Buffer.from([1, 2, 3, 4]);
-  const bytesRoute = (bytes = downloadBytes, length = bytes.length) => () =>
-    new Response(bytes, {
-      headers: { "Content-Type": "application/octet-stream", "Content-Length": String(length) },
-    });
+  const bytesRoute =
+    (bytes = downloadBytes, length = bytes.length) =>
+    () =>
+      new Response(bytes, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(length),
+        },
+      });
   const scratchDirectory = async () => {
     const directory = await mkdtemp(join(tmpdir(), "kamapathy-download-test-"));
     directories.push(directory);
@@ -1914,12 +2822,19 @@ describe("scripted sessions", () => {
     const space = await client.space("space-1");
     const [download] = await space.downloads();
     expect(download).toBeInstanceOf(Download);
-    expect([download.url(), download.suggestedFilename()]).toEqual([heldDownload.url, "report.pdf"]);
+    expect([download.url(), download.suggestedFilename()]).toEqual([
+      heldDownload.url,
+      "report.pdf",
+    ]);
     expect(download.page()).toBeInstanceOf(Page);
     expect(download.page().id).toBe("tab-1");
     // A record still progressing is refreshed before failure() answers.
     expect(await download.failure()).toBeNull();
-    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/downloads/d1", body: undefined });
+    expect(api.requests.at(-1)).toEqual({
+      method: "GET",
+      path: "/downloads/d1",
+      body: undefined,
+    });
     const directory = await scratchDirectory();
     const output = join(directory, "nested", "deep", "report.pdf");
     const mark = api.requests.length;
@@ -1932,13 +2847,15 @@ describe("scripted sessions", () => {
       "POST /downloads/d1/wait",
       "GET /downloads/d1/content",
     ]);
-    expect(api.requests.slice(mark, mark + 2).map((item) => item.body)).toEqual([
-      { timeoutMs: 30000 },
-      { timeoutMs: 30000 },
-    ]);
+    expect(api.requests.slice(mark, mark + 2).map((item) => item.body)).toEqual(
+      [{ timeoutMs: 30000 }, { timeoutMs: 30000 }],
+    );
     // The record is finished now, so nothing waits again, and the file stays.
     const written = api.requests.length;
-    await expect(download.saveAs(output)).rejects.toMatchObject({ code: "file_exists", path: output });
+    await expect(download.saveAs(output)).rejects.toMatchObject({
+      code: "file_exists",
+      path: output,
+    });
     expect(paths(api).slice(written)).toEqual([]);
     expect(await readFile(output)).toEqual(downloadBytes);
     expect(await download.failure()).toBeNull();
@@ -1952,13 +2869,21 @@ describe("scripted sessions", () => {
       expect((await stat(dirname(copy))).mode & 0o777).toBe(0o700);
     }
     expect(await download.delete()).toEqual({ ok: true });
-    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/downloads/d1", body: undefined });
+    expect(api.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: "/downloads/d1",
+      body: undefined,
+    });
     expect(existsSync(copy)).toBe(false);
     expect(existsSync(output)).toBe(true);
   });
 
   it("a Download that failed throws download_failed, and cancel reports the record", async () => {
-    const cancelled = { ...heldDownload, state: "cancelled", failure: "cancelled" };
+    const cancelled = {
+      ...heldDownload,
+      state: "cancelled",
+      failure: "cancelled",
+    };
     const api = fakeApi({
       ...sectionTwo,
       "GET /spaces/space-1/downloads": { downloads: [heldDownload] },
@@ -1969,7 +2894,9 @@ describe("scripted sessions", () => {
     expect(await download.cancel()).toEqual({ download: cancelled });
     expect(await download.failure()).toBe("cancelled");
     const directory = await scratchDirectory();
-    await expect(download.saveAs(join(directory, "report.pdf"))).rejects.toMatchObject({
+    await expect(
+      download.saveAs(join(directory, "report.pdf")),
+    ).rejects.toMatchObject({
       code: "download_failed",
       failure: "cancelled",
       entry: "download.saveAs",
@@ -1994,7 +2921,9 @@ describe("scripted sessions", () => {
     });
     expect(existsSync(output)).toBe(false);
     // The same goes for the private copy, and nothing is left behind.
-    await expect(download.path()).rejects.toMatchObject({ code: "download_interrupted" });
+    await expect(download.path()).rejects.toMatchObject({
+      code: "download_interrupted",
+    });
   });
 
   it("save-download never overwrites", async () => {
@@ -2006,63 +2935,121 @@ describe("scripted sessions", () => {
       "DELETE /downloads/d1": { ok: true },
     });
     const options = { env, fetch: api.fetch, health: level2 };
-    await expect(runCli(["save-download", "d1", existing], { ...options, stdout: sink() })).rejects.toMatchObject({
+    await expect(
+      runCli(["save-download", "d1", existing], { ...options, stdout: sink() }),
+    ).rejects.toMatchObject({
       code: "file_exists",
       path: existing,
     });
     expect(await readFile(existing)).toEqual(Buffer.from("{}"));
     const target = `${existing}.pdf`;
     const stdout = sink();
-    expect(await runCli(["save-download", "d1", target], { ...options, stdout })).toBe(0);
+    expect(
+      await runCli(["save-download", "d1", target], { ...options, stdout }),
+    ).toBe(0);
     expect(stdout.text()).toBe(`saved ${target} (4 bytes)\n`);
     expect(await readFile(target)).toEqual(downloadBytes);
     const deleted = sink();
-    expect(await runCli(["delete-download", "d1"], { ...options, stdout: deleted })).toBe(0);
-    expect(api.requests.at(-1)).toEqual({ method: "DELETE", path: "/downloads/d1", body: undefined });
+    expect(
+      await runCli(["delete-download", "d1"], { ...options, stdout: deleted }),
+    ).toBe(0);
+    expect(api.requests.at(-1)).toEqual({
+      method: "DELETE",
+      path: "/downloads/d1",
+      body: undefined,
+    });
     expect(deleted.text()).toBe("ok\n");
   });
 
   it("space.downloads lists Download objects and download arms, clicks and saves in one command", async () => {
     const api = fakeApi({
       ...sectionTwo,
-      "GET /spaces/space-1/downloads": { downloads: [doneDownload, otherDownload] },
+      "GET /spaces/space-1/downloads": {
+        downloads: [doneDownload, otherDownload],
+      },
       "POST /tabs/tab-1/expectations": (body) =>
-        Response.json({ expectation: { id: "x3", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+        Response.json(
+          {
+            expectation: {
+              id: "x3",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 9,
+            },
+          },
+          { status: 201 },
+        ),
       "POST /expectations/x3/wait": { download: doneDownload },
       "GET /downloads/d1/content": bytesRoute(),
-      "POST /downloads/d1/cancel": { download: { ...doneDownload, state: "cancelled", failure: "cancelled" } },
+      "POST /downloads/d1/cancel": {
+        download: { ...doneDownload, state: "cancelled", failure: "cancelled" },
+      },
       "DELETE /downloads/d1": { ok: true },
     });
     const options = { env, fetch: api.fetch, health: level2 };
     const client = await connect(options);
     const list = await (await client.space("space-1")).downloads();
     expect(list.map((item) => item instanceof Download)).toEqual([true, true]);
-    expect(list.map((item) => item.suggestedFilename())).toEqual(["report.pdf", "slides.pdf"]);
+    expect(list.map((item) => item.suggestedFilename())).toEqual([
+      "report.pdf",
+      "slides.pdf",
+    ]);
     const listed = sink();
-    expect(await runCli(["downloads", "space-1"], { ...options, stdout: listed })).toBe(0);
-    expect(listed.text()).toBe(["d1 completed 4/4 report.pdf", "d2 progressing 1/10 slides.pdf", ""].join("\n"));
+    expect(
+      await runCli(["downloads", "space-1"], { ...options, stdout: listed }),
+    ).toBe(0);
+    expect(listed.text()).toBe(
+      [
+        "d1 completed 4/4 report.pdf",
+        "d2 progressing 1/10 slides.pdf",
+        "",
+      ].join("\n"),
+    );
     const stopped = sink();
-    expect(await runCli(["cancel-download", "d1"], { ...options, stdout: stopped })).toBe(0);
+    expect(
+      await runCli(["cancel-download", "d1"], { ...options, stdout: stopped }),
+    ).toBe(0);
     expect(stopped.text()).toBe("d1 cancelled 4/4 report.pdf\n");
     // One command arms the wait, clicks, waits for the file and saves it.
     const directory = await scratchDirectory();
     const output = join(directory, "report.pdf");
     const mark = api.requests.length;
     const stdout = sink();
-    expect(await runCli(["download", "tab-1", "@e2", output], { ...options, stdout })).toBe(0);
+    expect(
+      await runCli(["download", "tab-1", "@e2", output], {
+        ...options,
+        stdout,
+      }),
+    ).toBe(0);
     expect(stdout.text()).toBe(`saved ${output} (4 bytes)\n`);
     expect(await readFile(output)).toEqual(downloadBytes);
     const after = paths(api).slice(mark);
     expect(after[0]).toBe("POST /tabs/tab-1/expectations");
-    expect([...after.slice(1, 3)].sort()).toEqual(["POST /expectations/x3/wait", "POST /tabs/tab-1/click"]);
+    expect([...after.slice(1, 3)].sort()).toEqual([
+      "POST /expectations/x3/wait",
+      "POST /tabs/tab-1/click",
+    ]);
     expect(after.slice(3)).toEqual(["GET /downloads/d1/content"]);
-    expect(api.requests[mark].body).toEqual({ event: "download", timeoutMs: 60000 });
+    expect(api.requests[mark].body).toEqual({
+      event: "download",
+      timeoutMs: 60000,
+    });
     // The arm follows --timeout, and nothing downloaded reads as the wait's
     // own error.
     const timed = fakeApi({
       ...sectionTwo,
       "POST /tabs/tab-1/expectations": (body) =>
-        Response.json({ expectation: { id: "x3", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
+        Response.json(
+          {
+            expectation: {
+              id: "x3",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 9,
+            },
+          },
+          { status: 201 },
+        ),
       "POST /expectations/x3/wait": refusal(504, {
         code: "expectation_timeout",
         message: "No download arrived within 5000 ms.",
@@ -2072,14 +3059,27 @@ describe("scripted sessions", () => {
       }),
     });
     await expect(
-      runCli(["download", "space-1:p1", "@e2", join(directory, "other.pdf"), "--timeout", "5000"], {
-        env,
-        fetch: timed.fetch,
-        health: level2,
-        stdout: sink(),
-      }),
+      runCli(
+        [
+          "download",
+          "space-1:p1",
+          "@e2",
+          join(directory, "other.pdf"),
+          "--timeout",
+          "5000",
+        ],
+        {
+          env,
+          fetch: timed.fetch,
+          health: level2,
+          stdout: sink(),
+        },
+      ),
     ).rejects.toMatchObject({ code: "expectation_timeout", event: "download" });
-    expect(timed.requests.find((item) => item.path === "/tabs/tab-1/expectations").body).toEqual({
+    expect(
+      timed.requests.find((item) => item.path === "/tabs/tab-1/expectations")
+        .body,
+    ).toEqual({
       event: "download",
       timeoutMs: 5000,
     });
@@ -2090,7 +3090,9 @@ describe("scripted sessions", () => {
     const prefix = await scratchFile();
     const files = [`${prefix}.png`, `${prefix}.csv`];
     const bytes = [Buffer.from([137, 80, 78, 71]), Buffer.from("a,b\n1,2\n")];
-    await Promise.all(files.map((path, index) => writeFile(path, bytes[index])));
+    await Promise.all(
+      files.map((path, index) => writeFile(path, bytes[index])),
+    );
     const api = fakeApi({
       ...sectionTwo,
       "POST /tabs/tab-1/set-input-files": (body) =>
@@ -2098,61 +3100,111 @@ describe("scripted sessions", () => {
           ok: true,
           selected: body.files.length,
           ...(body.files.length
-            ? { popups: [{ id: "tab-3", label: "p3", url: "https://example.test/share" }] }
+            ? {
+                popups: [
+                  {
+                    id: "tab-3",
+                    label: "p3",
+                    url: "https://example.test/share",
+                  },
+                ],
+              }
             : {}),
         }),
     });
     const options = { env, fetch: api.fetch, health: level2 };
     const client = await connect(options);
     const page = (await client.space("space-1")).page("p1");
-    expect(await page.setInputFiles("#resume", files)).toMatchObject({ ok: true, selected: 2 });
+    expect(await page.setInputFiles("#resume", files)).toMatchObject({
+      ok: true,
+      selected: 2,
+    });
     expect(api.requests.at(-1)).toEqual({
       method: "POST",
       path: "/tabs/tab-1/set-input-files",
       body: {
         selector: "#resume",
         files: [
-          { name: "fixture.json.png", type: "image/png", data: bytes[0].toString("base64") },
-          { name: "fixture.json.csv", type: "text/csv", data: bytes[1].toString("base64") },
+          {
+            name: "fixture.json.png",
+            type: "image/png",
+            data: bytes[0].toString("base64"),
+          },
+          {
+            name: "fixture.json.csv",
+            type: "text/csv",
+            data: bytes[1].toString("base64"),
+          },
         ],
       },
     });
     // A ref travels as ref, the timeout as timeoutMs, and an empty list clears.
-    expect(await page.setInputFiles("@e3", [], { timeout: 1000 })).toMatchObject({ ok: true, selected: 0 });
-    expect(api.requests.at(-1).body).toEqual({ ref: "@e3", files: [], timeoutMs: 1000 });
+    expect(
+      await page.setInputFiles("@e3", [], { timeout: 1000 }),
+    ).toMatchObject({ ok: true, selected: 0 });
+    expect(api.requests.at(-1).body).toEqual({
+      ref: "@e3",
+      files: [],
+      timeoutMs: 1000,
+    });
     // Nine files, a folder and a bad target never leave this computer.
     const folder = await scratchDirectory();
     const sent = api.requests.length;
-    await expect(page.setInputFiles("@e3", Array(9).fill(files[0]))).rejects.toMatchObject({
+    await expect(
+      page.setInputFiles("@e3", Array(9).fill(files[0])),
+    ).rejects.toMatchObject({
       code: "invalid_argument",
       entry: "page.setInputFiles",
-      expected: "page.setInputFiles(target, files, { timeout? }) with 0 to 8 file paths",
+      expected:
+        "page.setInputFiles(target, files, { timeout? }) with 0 to 8 file paths",
     });
     await expect(page.setInputFiles("@e3", [folder])).rejects.toMatchObject({
       code: "invalid_files",
       entry: "page.setInputFiles",
     });
-    await expect(page.setInputFiles("", files)).rejects.toMatchObject({ code: "invalid_argument" });
-    await expect(page.setInputFiles("@e3", files, { timeoutMs: 1000 })).rejects.toMatchObject({
+    await expect(page.setInputFiles("", files)).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    await expect(
+      page.setInputFiles("@e3", files, { timeoutMs: 1000 }),
+    ).rejects.toMatchObject({
       code: "invalid_option",
       option: "timeoutMs",
       suggestion: "timeout",
     });
     expect(api.requests.length).toBe(sent);
-    for (const [index, path] of files.entries()) expect(await readFile(path)).toEqual(bytes[index]);
+    for (const [index, path] of files.entries())
+      expect(await readFile(path)).toEqual(bytes[index]);
     // The CLI sends the same body and prints the receipt under its own line.
     const stdout = sink();
-    expect(await runCli(["set-input-files", "tab-1", "#resume", ...files], { ...options, stdout })).toBe(0);
-    expect(stdout.text()).toBe(["ok: selected 2", "opened p3 tab-3 https://example.test/share", ""].join("\n"));
+    expect(
+      await runCli(["set-input-files", "tab-1", "#resume", ...files], {
+        ...options,
+        stdout,
+      }),
+    ).toBe(0);
+    expect(stdout.text()).toBe(
+      ["ok: selected 2", "opened p3 tab-3 https://example.test/share", ""].join(
+        "\n",
+      ),
+    );
     expect(api.requests.at(-1).body.files).toHaveLength(2);
     expect(JSON.stringify(api.requests.at(-1).body)).not.toContain(prefix);
     const cleared = sink();
-    expect(await runCli(["set-input-files", "tab-1", "@e3"], { ...options, stdout: cleared })).toBe(0);
+    expect(
+      await runCli(["set-input-files", "tab-1", "@e3"], {
+        ...options,
+        stdout: cleared,
+      }),
+    ).toBe(0);
     expect(api.requests.at(-1).body).toEqual({ ref: "@e3", files: [] });
     expect(cleared.text()).toBe("ok: selected 0\n");
     const refused = sink();
     await expect(
-      runCli(["set-input-files", "tab-1", "@e3", ...Array(9).fill(files[0])], { ...options, stdout: refused }),
+      runCli(["set-input-files", "tab-1", "@e3", ...Array(9).fill(files[0])], {
+        ...options,
+        stdout: refused,
+      }),
     ).rejects.toThrow("Select at most 8 file paths.");
   });
 
@@ -2161,9 +3213,27 @@ describe("scripted sessions", () => {
     const api = fakeApi({
       ...sectionTwo,
       "POST /tabs/tab-1/expectations": (body) =>
-        Response.json({ expectation: { id: "x4", event: body.event, tabId: "tab-1", expiresAt: 9 } }, { status: 201 }),
-      "POST /expectations/x4/wait": { fileChooser: { id: "c1", tabId: "tab-1", multiple: true, accept: [".pdf"] } },
-      "POST /file-choosers/c1/files": (body) => Response.json({ ok: true, selected: body.files.length }),
+        Response.json(
+          {
+            expectation: {
+              id: "x4",
+              event: body.event,
+              tabId: "tab-1",
+              expiresAt: 9,
+            },
+          },
+          { status: 201 },
+        ),
+      "POST /expectations/x4/wait": {
+        fileChooser: {
+          id: "c1",
+          tabId: "tab-1",
+          multiple: true,
+          accept: [".pdf"],
+        },
+      },
+      "POST /file-choosers/c1/files": (body) =>
+        Response.json({ ok: true, selected: body.files.length }),
     });
     const options = { env, fetch: api.fetch, health: level2 };
     const client = await connect(options);
@@ -2178,7 +3248,13 @@ describe("scripted sessions", () => {
       method: "POST",
       path: "/file-choosers/c1/files",
       body: {
-        files: [{ name: "fixture.json", type: "application/json", data: Buffer.from("{}").toString("base64") }],
+        files: [
+          {
+            name: "fixture.json",
+            type: "application/json",
+            data: Buffer.from("{}").toString("base64"),
+          },
+        ],
       },
     });
     // An empty list cancels the chooser, and the same limits apply.
@@ -2190,14 +3266,20 @@ describe("scripted sessions", () => {
       entry: "fileChooser.setFiles",
       expected: "fileChooser.setFiles(files) with 0 to 8 file paths",
     });
-    await expect(chooser.setFiles("one")).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(chooser.setFiles("one")).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
     expect(api.requests.length).toBe(sent);
     const stdout = sink();
-    expect(await runCli(["set-files", "c1", file], { ...options, stdout })).toBe(0);
+    expect(
+      await runCli(["set-files", "c1", file], { ...options, stdout }),
+    ).toBe(0);
     expect(stdout.text()).toBe("ok: selected 1\n");
     expect(api.requests.at(-1).path).toBe("/file-choosers/c1/files");
     const cancelled = sink();
-    expect(await runCli(["set-files", "c1"], { ...options, stdout: cancelled })).toBe(0);
+    expect(
+      await runCli(["set-files", "c1"], { ...options, stdout: cancelled }),
+    ).toBe(0);
     expect(api.requests.at(-1).body).toEqual({ files: [] });
     expect(cancelled.text()).toBe("ok: selected 0\n");
   });
@@ -2205,19 +3287,28 @@ describe("scripted sessions", () => {
   it("http-credentials never echoes", async () => {
     const api = fakeApi({
       ...sectionTwo,
-      "POST /spaces/space-1/http-credentials": (body) => Response.json({ ok: true, origin: body.origin }),
+      "POST /spaces/space-1/http-credentials": (body) =>
+        Response.json({ ok: true, origin: body.origin }),
       "DELETE /spaces/space-1/http-credentials": { ok: true },
     });
     const options = { env, fetch: api.fetch, health: level2 };
     const client = await connect(options);
     const space = await client.space("space-1");
     expect(
-      await space.setHTTPCredentials({ origin: "https://example.test", username: "avery", password: "hunter2" }),
+      await space.setHTTPCredentials({
+        origin: "https://example.test",
+        username: "avery",
+        password: "hunter2",
+      }),
     ).toEqual({ ok: true, origin: "https://example.test" });
     expect(api.requests.at(-1)).toEqual({
       method: "POST",
       path: "/spaces/space-1/http-credentials",
-      body: { origin: "https://example.test", username: "avery", password: "hunter2" },
+      body: {
+        origin: "https://example.test",
+        username: "avery",
+        password: "hunter2",
+      },
     });
     expect(await space.setHTTPCredentials(null)).toEqual({ ok: true });
     expect(api.requests.at(-1)).toEqual({
@@ -2228,42 +3319,75 @@ describe("scripted sessions", () => {
     // A shape the route would refuse never leaves, and no message names a value.
     const sent = api.requests.length;
     for (const value of ["https://example.test", 5, [], undefined])
-      await expect(space.setHTTPCredentials(value), String(value)).rejects.toMatchObject({
+      await expect(
+        space.setHTTPCredentials(value),
+        String(value),
+      ).rejects.toMatchObject({
         code: "invalid_argument",
         entry: "space.setHTTPCredentials",
         expected:
           "space.setHTTPCredentials({ origin, username, password }) or space.setHTTPCredentials(null)",
       });
-    await expect(space.setHTTPCredentials({ origin: "https://example.test" })).rejects.toMatchObject({
+    await expect(
+      space.setHTTPCredentials({ origin: "https://example.test" }),
+    ).rejects.toMatchObject({
       code: "invalid_field",
       field: "username",
     });
     await expect(
-      space.setHTTPCredentials({ origin: "https://example.test", username: "avery", password: "x", extra: 1 }),
+      space.setHTTPCredentials({
+        origin: "https://example.test",
+        username: "avery",
+        password: "x",
+        extra: 1,
+      }),
     ).rejects.toMatchObject({ code: "unknown_field", field: "extra" });
     expect(api.requests.length).toBe(sent);
     // The CLI prints the origin only, as text and as JSON.
-    const credentials = () => Readable.from([JSON.stringify({ username: "avery", password: "hunter2" })]);
+    const credentials = () =>
+      Readable.from([
+        JSON.stringify({ username: "avery", password: "hunter2" }),
+      ]);
     const stdout = sink();
     const stderr = sink();
     expect(
-      await runCli(["http-credentials", "space-1", "https://example.test", "--stdin"], {
-        ...options,
-        stdin: credentials(),
-        stdout,
-        stderr,
-      }),
+      await runCli(
+        ["http-credentials", "space-1", "https://example.test", "--stdin"],
+        {
+          ...options,
+          stdin: credentials(),
+          stdout,
+          stderr,
+        },
+      ),
     ).toBe(0);
     expect(stdout.text()).toBe("ok: https://example.test\n");
     const asJson = sink();
-    await runCli(["http-credentials", "space-1", "https://example.test", "--stdin", "--json"], {
-      ...options,
-      stdin: credentials(),
-      stdout: asJson,
+    await runCli(
+      [
+        "http-credentials",
+        "space-1",
+        "https://example.test",
+        "--stdin",
+        "--json",
+      ],
+      {
+        ...options,
+        stdin: credentials(),
+        stdout: asJson,
+      },
+    );
+    expect(JSON.parse(asJson.text())).toEqual({
+      ok: true,
+      origin: "https://example.test",
     });
-    expect(JSON.parse(asJson.text())).toEqual({ ok: true, origin: "https://example.test" });
     const cleared = sink();
-    expect(await runCli(["http-credentials", "space-1", "clear"], { ...options, stdout: cleared })).toBe(0);
+    expect(
+      await runCli(["http-credentials", "space-1", "clear"], {
+        ...options,
+        stdout: cleared,
+      }),
+    ).toBe(0);
     expect(api.requests.at(-1).method).toBe("DELETE");
     expect(cleared.text()).toBe("ok: credentials cleared\n");
     // A refusal names the field, never the name or the password.
@@ -2288,7 +3412,14 @@ describe("scripted sessions", () => {
       }),
     ).toBe(1);
     expect(failed.text()).toContain("invalid_field");
-    for (const text of [stdout.text(), stderr.text(), asJson.text(), cleared.text(), out.text(), failed.text()]) {
+    for (const text of [
+      stdout.text(),
+      stderr.text(),
+      asJson.text(),
+      cleared.text(),
+      out.text(),
+      failed.text(),
+    ]) {
       expect(text).not.toContain("hunter2");
       expect(text).not.toContain("avery");
     }
@@ -2300,7 +3431,13 @@ describe("scripted sessions", () => {
       ["http-credentials", "space-1", "clear", "--stdin"],
     ])
       await expect(
-        runCli(args, { env, fetch: failing.fetch, health: level2, stdin: credentials(), stdout: sink() }),
+        runCli(args, {
+          env,
+          fetch: failing.fetch,
+          health: level2,
+          stdin: credentials(),
+          stdout: sink(),
+        }),
         args.join(" "),
       ).rejects.toThrow();
     expect(failing.requests.length).toBe(unsent);
@@ -2338,19 +3475,40 @@ describe("scripted sessions", () => {
     expect(await readFile(output)).toEqual(downloadBytes);
     const notices = run.stderr.split("\n").filter(Boolean);
     expect(notices).toHaveLength(21);
-    expect(notices[0]).toBe("notice: unused page p10 opened by p1: https://example.test/p10");
-    expect(notices.at(-1)).toBe("notice: and 2 more unused pages this run opened");
+    expect(notices[0]).toBe(
+      "notice: unused page p10 opened by p1: https://example.test/p10",
+    );
+    expect(notices.at(-1)).toBe(
+      "notice: and 2 more unused pages this run opened",
+    );
     // Both touched tabs are read, and what the run received is deleted.
-    const ending = paths(run.api).slice(paths(run.api).indexOf("GET /tabs/tab-1/popups"));
-    expect(ending).toEqual(["GET /tabs/tab-1/popups", "GET /tabs/tab-2/popups", "DELETE /downloads/d1"]);
+    const ending = paths(run.api).slice(
+      paths(run.api).indexOf("GET /tabs/tab-1/popups"),
+    );
+    expect(ending).toEqual([
+      "GET /tabs/tab-1/popups",
+      "GET /tabs/tab-2/popups",
+      "DELETE /downloads/d1",
+    ]);
   });
 
   it("the end-of-run hooks ignore what Kamapathy refuses and delete nothing the script already deleted", async () => {
     const table = {
       ...sectionTwo,
-      "GET /tabs/tab-1/popups": refusal(404, { code: "tab_not_found", message: "Agent tab was not found." }),
+      "GET /tabs/tab-1/popups": refusal(404, {
+        code: "tab_not_found",
+        message: "Agent tab was not found.",
+      }),
       "GET /tabs/tab-2/popups": {
-        popups: [{ id: "tab-9", label: "p9", url: "https://example.test/p9", openedAt: 1, unseen: true }],
+        popups: [
+          {
+            id: "tab-9",
+            label: "p9",
+            url: "https://example.test/p9",
+            openedAt: 1,
+            unseen: true,
+          },
+        ],
       },
       "GET /spaces/space-1/downloads": { downloads: [doneDownload] },
       "GET /downloads/d1/content": bytesRoute(),
@@ -2369,8 +3527,12 @@ describe("scripted sessions", () => {
     expect(run.status).toBe(0);
     // A tab that refuses the read does not stop the next one, and the run
     // deletes the download once.
-    expect(run.stderr).toBe("notice: unused page p9 opened by p2: https://example.test/p9\n");
-    expect(paths(run.api).filter((item) => item === "DELETE /downloads/d1")).toEqual(["DELETE /downloads/d1"]);
+    expect(run.stderr).toBe(
+      "notice: unused page p9 opened by p2: https://example.test/p9\n",
+    );
+    expect(
+      paths(run.api).filter((item) => item === "DELETE /downloads/d1"),
+    ).toEqual(["DELETE /downloads/d1"]);
     expect(existsSync(globalThis.__scripted.copy)).toBe(false);
   });
 
@@ -2395,8 +3557,14 @@ describe("scripted sessions", () => {
     const [page] = await (await client.space("space-1")).tabs();
     expect(`${await page.text()}\n`).toBe(stdout.text());
     const full = sink();
-    await runCli(["snapshot", "tab-1", "--full", "--selector", "main"], { env, fetch: api.fetch, stdout: full });
-    expect(`${await page.text({ mode: "full", selector: "main" })}\n`).toBe(full.text());
+    await runCli(["snapshot", "tab-1", "--full", "--selector", "main"], {
+      env,
+      fetch: api.fetch,
+      stdout: full,
+    });
+    expect(`${await page.text({ mode: "full", selector: "main" })}\n`).toBe(
+      full.text(),
+    );
     expect(api.requests.at(-1).body).toEqual(api.requests.at(-2).body);
   });
 
@@ -2405,7 +3573,12 @@ describe("scripted sessions", () => {
       ...routes,
       "POST /tabs/tab-1/click": () =>
         Response.json(
-          { error: { code: "human_control", message: "The person is using this space." } },
+          {
+            error: {
+              code: "human_control",
+              message: "The person is using this space.",
+            },
+          },
           { status: 409 },
         ),
       "POST /tabs/tab-1/actions": () =>
@@ -2424,12 +3597,21 @@ describe("scripted sessions", () => {
       "POST /tabs/tab-1/wait": () => new Response("not json", { status: 200 }),
     });
     const client = await connect({ env, fetch: api.fetch });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
     const refused = await page.click("@e2").catch((error) => error);
     expect(refused).toBeInstanceOf(KamapathyError);
-    expect(refused).toMatchObject({ code: "human_control", message: "The person is using this space.", status: 409 });
+    expect(refused).toMatchObject({
+      code: "human_control",
+      message: "The person is using this space.",
+      status: 409,
+    });
     const stopped = await page
-      .batch([{ type: "fill", ref: "@e1", value: "A" }, { type: "click", ref: "@e2" }])
+      .batch([
+        { type: "fill", ref: "@e1", value: "A" },
+        { type: "click", ref: "@e2" },
+      ])
       .catch((error) => error);
     expect(stopped).toMatchObject({
       code: "stale_ref",
@@ -2442,8 +3624,12 @@ describe("scripted sessions", () => {
       code: "timeout",
       message: expect.stringContaining("Inspect the page before retrying"),
     });
-    await expect(page.wait()).rejects.toMatchObject({ code: "invalid_response" });
-    await expect(client.space("space-9")).rejects.toMatchObject({ code: "space_not_found" });
+    await expect(page.wait()).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    await expect(client.space("space-9")).rejects.toMatchObject({
+      code: "space_not_found",
+    });
     // The identity check stays in place: a wrong instance never gets a command.
     const { paths, env: profileEnv } = await profile();
     await fakeKamapathy(paths, { answerAs: "f".repeat(32) });
@@ -2453,13 +3639,21 @@ describe("scripted sessions", () => {
   it("uploads and saves screenshots like the commands do", async () => {
     const api = fakeApi(routes);
     const client = await connect({ env, fetch: api.fetch });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
     const file = `${await scratchFile()}.pdf`;
     await writeFile(file, Buffer.from([1, 2, 3]));
     expect(await page.upload("@e3", [file])).toEqual({ ok: true, selected: 1 });
     expect(api.requests.at(-1).body).toEqual({
       ref: "@e3",
-      files: [{ name: "fixture.json.pdf", type: "application/pdf", data: Buffer.from([1, 2, 3]).toString("base64") }],
+      files: [
+        {
+          name: "fixture.json.pdf",
+          type: "application/pdf",
+          data: Buffer.from([1, 2, 3]).toString("base64"),
+        },
+      ],
     });
     await expect(page.upload("#file", [file])).rejects.toThrow("ref");
     await expect(page.upload("@e3", [])).rejects.toThrow("between 1 and 8");
@@ -2486,13 +3680,24 @@ describe("scripted sessions", () => {
       ].join("\n"),
     );
     const stderr = sink();
-    expect(await runCli(["run", path], { env, fetch: api.fetch, stdout: sink(), stderr })).toBe(0);
+    expect(
+      await runCli(["run", path], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+        stderr,
+      }),
+    ).toBe(0);
     expect(stderr.text()).toBe("");
     expect(globalThis.__scripted.text).toBe(formatSnapshot(snapshot));
     expect(globalThis.__scripted.names).toEqual(["Research"]);
     expect(globalThis.__scripted.found).toBe("space-1");
     expect(typeof globalThis.__scripted.client.createSpace).toBe("function");
-    expect(api.requests[0]).toEqual({ method: "POST", path: "/spaces", body: { name: "Research", isolated: true } });
+    expect(api.requests[0]).toEqual({
+      method: "POST",
+      path: "/spaces",
+      body: { name: "Research", isolated: true },
+    });
   });
 
   it("runs code from stdin or -e through a private temporary module it removes afterwards", async () => {
@@ -2504,14 +3709,29 @@ describe("scripted sessions", () => {
       "globalThis.__scripted = { path, mode: statSync(path).mode & 0o777, count: (await spaces()).length };",
     ].join("\n");
     expect(
-      await runCli(["run", "-"], { env, fetch: api.fetch, stdin: Readable.from([source]), stdout: sink(), stderr: sink() }),
+      await runCli(["run", "-"], {
+        env,
+        fetch: api.fetch,
+        stdin: Readable.from([source]),
+        stdout: sink(),
+        stderr: sink(),
+      }),
     ).toBe(0);
     const fromStdin = globalThis.__scripted;
     expect(fromStdin.count).toBe(1);
-    expect(basename(fromStdin.path)).toMatch(/^kamapathy-run-[a-f0-9]{16}\.mjs$/);
+    expect(basename(fromStdin.path)).toMatch(
+      /^kamapathy-run-[a-f0-9]{16}\.mjs$/,
+    );
     if (posix) expect(fromStdin.mode).toBe(0o600);
     expect(existsSync(fromStdin.path)).toBe(false);
-    expect(await runCli(["run", "-e", source], { env, fetch: api.fetch, stdout: sink(), stderr: sink() })).toBe(0);
+    expect(
+      await runCli(["run", "-e", source], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+        stderr: sink(),
+      }),
+    ).toBe(0);
     expect(globalThis.__scripted.path).not.toBe(fromStdin.path);
     expect(existsSync(globalThis.__scripted.path)).toBe(false);
   });
@@ -2520,25 +3740,54 @@ describe("scripted sessions", () => {
     const api = fakeApi({
       ...routes,
       "POST /tabs/tab-1/click": () =>
-        Response.json({ error: { code: "stale_ref", message: "Observe again." } }, { status: 422 }),
+        Response.json(
+          { error: { code: "stale_ref", message: "Observe again." } },
+          { status: 422 },
+        ),
     });
     const stale = sink();
     expect(
       await runCli(
-        ["run", "-e", 'const page = await (await space("space-1")).open("https://example.test/reserve"); await page.click("@e2");'],
+        [
+          "run",
+          "-e",
+          'const page = await (await space("space-1")).open("https://example.test/reserve"); await page.click("@e2");',
+        ],
         { env, fetch: api.fetch, stdout: sink(), stderr: stale },
       ),
     ).toBe(1);
-    expect(stale.text()).toMatch(/^error: stale_ref: Observe again\.\n  at -e:1:\d+\n$/);
+    expect(stale.text()).toMatch(
+      /^error: stale_ref: Observe again\.\n  at -e:1:\d+\n$/,
+    );
     const plain = sink();
-    expect(await runCli(["run", "-e", 'throw new Error("boom")'], { env, fetch: api.fetch, stdout: sink(), stderr: plain })).toBe(1);
+    expect(
+      await runCli(["run", "-e", 'throw new Error("boom")'], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+        stderr: plain,
+      }),
+    ).toBe(1);
     expect(plain.text()).toMatch(/^error: boom\n  at -e:1:\d+\n$/);
     const missing = sink();
-    expect(await runCli(["run", "-e", 'await space("space-9")'], { env, fetch: api.fetch, stdout: sink(), stderr: missing })).toBe(1);
+    expect(
+      await runCli(["run", "-e", 'await space("space-9")'], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+        stderr: missing,
+      }),
+    ).toBe(1);
     expect(missing.text()).toMatch(/^error: space_not_found: /);
-    await expect(runCli(["run"], { env, fetch: api.fetch, stdout: sink() })).rejects.toThrow("Missing");
     await expect(
-      runCli(["run", join(tmpdir(), "kamapathy-absent.mjs")], { env, fetch: api.fetch, stdout: sink() }),
+      runCli(["run"], { env, fetch: api.fetch, stdout: sink() }),
+    ).rejects.toThrow("Missing");
+    await expect(
+      runCli(["run", join(tmpdir(), "kamapathy-absent.mjs")], {
+        env,
+        fetch: api.fetch,
+        stdout: sink(),
+      }),
     ).rejects.toThrow("not found");
   });
 
@@ -2548,7 +3797,9 @@ describe("scripted sessions", () => {
     await fakeKamapathy(paths, {
       handler: (request, response) => {
         requests.push(`${request.method} ${request.url}`);
-        response.writeHead(request.method === "POST" ? 201 : 200, { "Content-Type": "application/json" });
+        response.writeHead(request.method === "POST" ? 201 : 200, {
+          "Content-Type": "application/json",
+        });
         response.end(
           JSON.stringify(
             request.url === "/health"
@@ -2562,10 +3813,18 @@ describe("scripted sessions", () => {
     });
     // A real process with Node's own module loader, started from either entry
     // point.
-    for (const entry of ["skills/kamapathy/scripts/kamapathy.mjs", "scripts/kamapathy.mjs"]) {
+    for (const entry of [
+      "skills/kamapathy/scripts/kamapathy.mjs",
+      "scripts/kamapathy.mjs",
+    ]) {
       const child = spawn(
         process.execPath,
-        [entry, "run", "-e", 'console.log((await createSpace("Research", { isolated: true })).signIns)'],
+        [
+          entry,
+          "run",
+          "-e",
+          'console.log((await createSpace("Research", { isolated: true })).signIns)',
+        ],
         { env: { ...process.env, ...profileEnv } },
       );
       let stdout = "";
@@ -2575,7 +3834,12 @@ describe("scripted sessions", () => {
       const code = await new Promise((done) => child.once("close", done));
       expect([code, stdout, stderr]).toEqual([0, "separate\n", ""]);
     }
-    expect(requests).toEqual(["GET /health", "POST /spaces", "GET /health", "POST /spaces"]);
+    expect(requests).toEqual([
+      "GET /health",
+      "POST /spaces",
+      "GET /health",
+      "POST /spaces",
+    ]);
   }, 20000);
 
   it("fails loudly when a script exits early, never settles or forgets an await, and always removes its file", async () => {
@@ -2593,14 +3857,22 @@ describe("scripted sessions", () => {
           response.end(JSON.stringify({ tabs: [tab] }));
         } else {
           response.writeHead(422, { "Content-Type": "application/json" });
-          response.end(JSON.stringify({ error: { code: "stale_ref", message: "Observe again." } }));
+          response.end(
+            JSON.stringify({
+              error: { code: "stale_ref", message: "Observe again." },
+            }),
+          );
         }
       },
     });
     const run = async (code) => {
-      const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", code], {
-        env: { ...process.env, ...profileEnv },
-      });
+      const child = spawn(
+        process.execPath,
+        ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", code],
+        {
+          env: { ...process.env, ...profileEnv },
+        },
+      );
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -2609,14 +3881,24 @@ describe("scripted sessions", () => {
       return { status, stdout, stderr };
     };
     const leftovers = async () =>
-      (await readdir(tmpdir())).filter((name) => name.startsWith("kamapathy-run-"));
+      (await readdir(tmpdir())).filter((name) =>
+        name.startsWith("kamapathy-run-"),
+      );
     const before = await leftovers();
-    expect(await run('await spaces(); console.log("waiting"); await new Promise(() => {})')).toEqual({
+    expect(
+      await run(
+        'await spaces(); console.log("waiting"); await new Promise(() => {})',
+      ),
+    ).toEqual({
       status: 1,
       stdout: "waiting\n",
-      stderr: "error: The script stopped with work still pending. Await every call.\n",
+      stderr:
+        "error: The script stopped with work still pending. Await every call.\n",
     });
-    expect(await run('await spaces(); process.exit(0)')).toMatchObject({ status: 0, stderr: "" });
+    expect(await run("await spaces(); process.exit(0)")).toMatchObject({
+      status: 0,
+      stderr: "",
+    });
     const unawaited = await run(
       'const page = (await (await space("space-1")).tabs())[0]; page.click("@e2"); console.log("done")',
     );
@@ -2654,7 +3936,8 @@ describe("scripted sessions", () => {
     "Kamapathy stopped this run: agent access is turned off.\nOutput from this run was withheld. Stop here and tell the person. Only they can turn agent access on, in Settings under Agents.\n";
 
   it("a caught human_control with reason manual withholds output, sends no later request and prints only the guidance", async () => {
-    const message = "The person took over this space. Stop, and resume only when they ask you to.";
+    const message =
+      "The person took over this space. Stop, and resume only when they ask you to.";
     const run = await runIn(
       `${firstPage}
       process.stdout.write("before\\n");
@@ -2664,27 +3947,58 @@ describe("scripted sessions", () => {
       process.stdout.write("after\\n");`,
       {
         ...sectionTwo,
-        "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message, reason: "manual", spaceId: "space-1" }),
+        "POST /tabs/tab-1/click": refusal(409, {
+          code: "human_control",
+          message,
+          reason: "manual",
+          spaceId: "space-1",
+        }),
       },
     );
-    expect(run).toMatchObject({ status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` });
-    expect(globalThis.__scripted).toEqual({ first: true, again: true, code: "human_control" });
-    expect(paths(run.api)).toEqual(["GET /spaces/space-1", "GET /spaces/space-1/tabs", "POST /tabs/tab-1/click"]);
+    expect(run).toMatchObject({
+      status: 3,
+      stdout: "",
+      stderr: `${takeover}${message}\n${withheld}`,
+    });
+    expect(globalThis.__scripted).toEqual({
+      first: true,
+      again: true,
+      code: "human_control",
+    });
+    expect(paths(run.api)).toEqual([
+      "GET /spaces/space-1",
+      "GET /spaces/space-1/tabs",
+      "POST /tabs/tab-1/click",
+    ]);
   });
 
   it("hard-stop guidance follows the human_control reason", async () => {
     const message = "Taken.";
-    const hold = "Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control space-1 and start a new run when it returns.\n";
+    const hold =
+      "Tell the person what is waiting for their answer in Kamapathy, then run kamapathy wait-for-control space-1 and start a new run when it returns.\n";
     for (const [reason, expected] of [
-      ["manual", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
-      ["handoff", { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
-      [undefined, { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` }],
+      [
+        "manual",
+        { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` },
+      ],
+      [
+        "handoff",
+        { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` },
+      ],
+      [
+        undefined,
+        { status: 3, stdout: "", stderr: `${takeover}${message}\n${withheld}` },
+      ],
       [
         "permission",
         {
           status: 1,
           stdout: "kept\n",
-          stderr: expect.stringMatching(new RegExp(`^error: human_control: ${message}\\n  at -e:1:\\d+\\n${hold}$`)),
+          stderr: expect.stringMatching(
+            new RegExp(
+              `^error: human_control: ${message}\\n  at -e:1:\\d+\\n${hold}$`,
+            ),
+          ),
         },
       ],
       [
@@ -2692,15 +4006,27 @@ describe("scripted sessions", () => {
         {
           status: 1,
           stdout: "kept\n",
-          stderr: expect.stringMatching(new RegExp(`^error: human_control: ${message}\\n  at -e:1:\\d+\\n$`)),
+          stderr: expect.stringMatching(
+            new RegExp(
+              `^error: human_control: ${message}\\n  at -e:1:\\d+\\n$`,
+            ),
+          ),
         },
       ],
     ])
       expect(
-        await runIn(`${firstPage} process.stdout.write("kept\\n"); await page.click("@e2");`, {
-          ...sectionTwo,
-          "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message, reason, spaceId: "space-1" }),
-        }),
+        await runIn(
+          `${firstPage} process.stdout.write("kept\\n"); await page.click("@e2");`,
+          {
+            ...sectionTwo,
+            "POST /tabs/tab-1/click": refusal(409, {
+              code: "human_control",
+              message,
+              reason,
+              spaceId: "space-1",
+            }),
+          },
+        ),
         String(reason),
       ).toMatchObject(expected);
   });
@@ -2715,67 +4041,110 @@ describe("scripted sessions", () => {
       process.stdout.write("done\\n");`,
       {
         ...sectionTwo,
-        "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message: "Asked.", reason: "permission", prompt: "camera", spaceId: "space-1" }),
+        "POST /tabs/tab-1/click": refusal(409, {
+          code: "human_control",
+          message: "Asked.",
+          reason: "permission",
+          prompt: "camera",
+          spaceId: "space-1",
+        }),
       },
     );
     expect(run).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
-    expect(paths(run.api).slice(-3, -1)).toEqual(["POST /spaces/space-1/wait-for-control", "POST /tabs/tab-1/fill"]);
+    expect(paths(run.api).slice(-3, -1)).toEqual([
+      "POST /spaces/space-1/wait-for-control",
+      "POST /tabs/tab-1/fill",
+    ]);
     expect(paths(run.api).at(-1)).toBe("GET /tabs/tab-1/popups");
   });
 
   it("the person's Stop is a hard stop with its own guidance, also when it ends a waitForControl; space_ended after the agent's own finish is an ordinary error", async () => {
-    const stopped = { code: "space_ended", message: "Stopped.", spaceId: "space-1", endedBy: "person", reason: "stopped" };
+    const stopped = {
+      code: "space_ended",
+      message: "Stopped.",
+      spaceId: "space-1",
+      endedBy: "person",
+      reason: "stopped",
+    };
     expect(
-      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2").catch(() => {});`, {
-        ...sectionTwo,
-        "POST /tabs/tab-1/click": refusal(409, stopped),
-      }),
+      await runIn(
+        `${firstPage} process.stdout.write("x\\n"); await page.click("@e2").catch(() => {});`,
+        {
+          ...sectionTwo,
+          "POST /tabs/tab-1/click": refusal(409, stopped),
+        },
+      ),
     ).toMatchObject({ status: 3, stdout: "", stderr: stopGuidance });
     expect(
-      await runIn('process.stdout.write("x\\n"); await (await space("space-1")).waitForControl();', {
-        ...sectionTwo,
-        "POST /spaces/space-1/wait-for-control": refusal(409, stopped),
-      }),
+      await runIn(
+        'process.stdout.write("x\\n"); await (await space("space-1")).waitForControl();',
+        {
+          ...sectionTwo,
+          "POST /spaces/space-1/wait-for-control": refusal(409, stopped),
+        },
+      ),
     ).toMatchObject({ status: 3, stdout: "", stderr: stopGuidance });
     expect(
-      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`, {
-        ...sectionTwo,
-        "POST /tabs/tab-1/click": refusal(409, { ...stopped, endedBy: "agent", reason: "finished", message: "Finished." }),
-      }),
+      await runIn(
+        `${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`,
+        {
+          ...sectionTwo,
+          "POST /tabs/tab-1/click": refusal(409, {
+            ...stopped,
+            endedBy: "agent",
+            reason: "finished",
+            message: "Finished.",
+          }),
+        },
+      ),
     ).toMatchObject({
       status: 1,
       stdout: "x\n",
-      stderr: expect.stringMatching(/^error: space_ended: Finished\.\n  at -e:1:\d+\n$/),
+      stderr: expect.stringMatching(
+        /^error: space_ended: Finished\.\n  at -e:1:\d+\n$/,
+      ),
     });
   });
 
   it("automation_stopped and an off marker at the first call are hard stops; a delayed waitForControl answer is not", async () => {
     expect(
-      await runIn(`${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`, {
-        ...sectionTwo,
-        "POST /tabs/tab-1/click": refusal(503, { code: "automation_stopped", message: "Automation is disabled." }),
-      }),
+      await runIn(
+        `${firstPage} process.stdout.write("x\\n"); await page.click("@e2");`,
+        {
+          ...sectionTwo,
+          "POST /tabs/tab-1/click": refusal(503, {
+            code: "automation_stopped",
+            message: "Automation is disabled.",
+          }),
+        },
+      ),
     ).toMatchObject({ status: 3, stdout: "", stderr: accessGuidance });
     const { paths: agent, userData } = await profile();
     await writeFile(agent.off, "", { mode: 0o600 });
     const stdout = sink();
     const stderr = sink();
     expect(
-      await runCli(["run", "-e", 'process.stdout.write("x\\n"); await spaces();'], {
-        env: { KAMAPATHY_USER_DATA: userData },
-        stdout,
-        stderr,
-      }),
+      await runCli(
+        ["run", "-e", 'process.stdout.write("x\\n"); await spaces();'],
+        {
+          env: { KAMAPATHY_USER_DATA: userData },
+          stdout,
+          stderr,
+        },
+      ),
     ).toBe(3);
     expect([stdout.text(), stderr.text()]).toEqual(["", accessGuidance]);
     expect(
-      await runIn('const result = await (await space("space-1")).waitForControl(); process.stdout.write(`${result.owner}\\n`);', {
-        ...sectionTwo,
-        "POST /spaces/space-1/wait-for-control": async () => {
-          await new Promise((done) => setTimeout(done, 100));
-          return Response.json(boundary);
+      await runIn(
+        'const result = await (await space("space-1")).waitForControl(); process.stdout.write(`${result.owner}\\n`);',
+        {
+          ...sectionTwo,
+          "POST /spaces/space-1/wait-for-control": async () => {
+            await new Promise((done) => setTimeout(done, 100));
+            return Response.json(boundary);
+          },
         },
-      }),
+      ),
     ).toMatchObject({ status: 0, stdout: "agent\n", stderr: "" });
   });
 
@@ -2791,19 +4160,41 @@ describe("scripted sessions", () => {
       },
     ];
     expect(
-      await runIn(`${firstPage} await page.click("@e2"); process.stdout.write("ok\\n");`, sectionTwo, { options: { endHooks: hooks } }),
+      await runIn(
+        `${firstPage} await page.click("@e2"); process.stdout.write("ok\\n");`,
+        sectionTwo,
+        { options: { endHooks: hooks } },
+      ),
     ).toMatchObject({ status: 0, stdout: "ok\n", stderr: "" });
-    expect(calls).toEqual([["first", ["tab-1"], true], ["second", ["tab-1"]]]);
+    expect(calls).toEqual([
+      ["first", ["tab-1"], true],
+      ["second", ["tab-1"]],
+    ]);
     calls.length = 0;
     expect(
-      await runIn(`${firstPage} await page.click("@e2"); throw new Error("boom");`, sectionTwo, { options: { endHooks: hooks } }),
-    ).toMatchObject({ status: 1, stderr: expect.stringMatching(/^error: boom\n  at -e:1:\d+\n$/) });
+      await runIn(
+        `${firstPage} await page.click("@e2"); throw new Error("boom");`,
+        sectionTwo,
+        { options: { endHooks: hooks } },
+      ),
+    ).toMatchObject({
+      status: 1,
+      stderr: expect.stringMatching(/^error: boom\n  at -e:1:\d+\n$/),
+    });
     expect(calls.map(([name]) => name)).toEqual(["first", "second"]);
     calls.length = 0;
-    await runIn(`${firstPage} await page.click("@e2").catch(() => {});`, {
-      ...sectionTwo,
-      "POST /tabs/tab-1/click": refusal(409, { code: "human_control", message: "Taken.", reason: "manual" }),
-    }, { options: { endHooks: hooks } });
+    await runIn(
+      `${firstPage} await page.click("@e2").catch(() => {});`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/click": refusal(409, {
+          code: "human_control",
+          message: "Taken.",
+          reason: "manual",
+        }),
+      },
+      { options: { endHooks: hooks } },
+    );
     expect(calls).toEqual([]);
     // The cap ends the step, and later hooks never start.
     const started = Date.now();
@@ -2811,7 +4202,8 @@ describe("scripted sessions", () => {
       options: {
         endCapMs: 100,
         endHooks: [
-          ({ signal }) => new Promise((done) => signal.addEventListener("abort", done)),
+          ({ signal }) =>
+            new Promise((done) => signal.addEventListener("abort", done)),
           async () => calls.push(["late"]),
         ],
       },
@@ -2839,21 +4231,28 @@ describe("scripted sessions", () => {
     let output = "";
     child.stderr.on("data", (chunk) => (output += chunk));
     const status = await new Promise((done) => child.once("close", done));
-    expect([status, output]).toEqual([1, "hook\nerror: The script stopped with work still pending. Await every call.\n"]);
+    expect([status, output]).toEqual([
+      1,
+      "hook\nerror: The script stopped with work still pending. Await every call.\n",
+    ]);
   }, 20000);
 
   it("the deadline aborts the call in progress, flushes and exits 1 with run_timeout", async () => {
     let aborted = false;
-    const run = await runIn(`process.stdout.write("started\\n"); await spaces();`, {
-      ...sectionTwo,
-      "GET /spaces": (_body, options) =>
-        new Promise((_done, reject) =>
-          options.signal.addEventListener("abort", () => {
-            aborted = true;
-            reject(options.signal.reason);
-          }),
-        ),
-    }, { args: ["--timeout", "1000"] });
+    const run = await runIn(
+      `process.stdout.write("started\\n"); await spaces();`,
+      {
+        ...sectionTwo,
+        "GET /spaces": (_body, options) =>
+          new Promise((_done, reject) =>
+            options.signal.addEventListener("abort", () => {
+              aborted = true;
+              reject(options.signal.reason);
+            }),
+          ),
+      },
+      { args: ["--timeout", "1000"] },
+    );
     expect(aborted).toBe(true);
     expect(run).toMatchObject({
       status: 1,
@@ -2872,7 +4271,9 @@ describe("scripted sessions", () => {
       handler: (incoming, response) => {
         if (incoming.url === "/health") {
           response.writeHead(200, { "Content-Type": "application/json" });
-          return response.end(JSON.stringify({ status: "ok", version: "test", apiLevel: 2 }));
+          return response.end(
+            JSON.stringify({ status: "ok", version: "test", apiLevel: 2 }),
+          );
         }
         response.once("close", () => (closed = true));
         arrived();
@@ -2880,7 +4281,12 @@ describe("scripted sessions", () => {
     });
     const child = spawn(
       process.execPath,
-      ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", 'process.stdout.write("started\\n"); await spaces();'],
+      [
+        "skills/kamapathy/scripts/kamapathy.mjs",
+        "run",
+        "-e",
+        'process.stdout.write("started\\n"); await spaces();',
+      ],
       { env: { ...process.env, ...profileEnv } },
     );
     let stdout = "";
@@ -2906,16 +4312,24 @@ describe("scripted sessions", () => {
         response.end(
           JSON.stringify(
             incoming.url === "/health"
-              ? { status: "ok", version: "9.0.0", apiLevel: schema.API_LEVEL + 1 }
+              ? {
+                  status: "ok",
+                  version: "9.0.0",
+                  apiLevel: schema.API_LEVEL + 1,
+                }
               : { spaces: [] },
           ),
         );
       },
     });
     const run = async (code) => {
-      const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", code], {
-        env: { ...process.env, ...profileEnv },
-      });
+      const child = spawn(
+        process.execPath,
+        ["skills/kamapathy/scripts/kamapathy.mjs", "run", "-e", code],
+        {
+          env: { ...process.env, ...profileEnv },
+        },
+      );
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -2950,7 +4364,11 @@ describe("scripted sessions", () => {
         "",
       ].join("\n"),
     });
-    expect(await run('process.stdout.write("a\\n"); console.error("b"); process.exit(5);')).toEqual({
+    expect(
+      await run(
+        'process.stdout.write("a\\n"); console.error("b"); process.exit(5);',
+      ),
+    ).toEqual({
       status: 5,
       stdout: "a\n",
       stderr: "b\n",
@@ -2962,7 +4380,14 @@ describe("scripted sessions", () => {
     const started = Date.now();
     const child = spawn(
       process.execPath,
-      ["skills/kamapathy/scripts/kamapathy.mjs", "run", "--timeout", "60000", "-e", 'process.stdout.write("idle\\n")'],
+      [
+        "skills/kamapathy/scripts/kamapathy.mjs",
+        "run",
+        "--timeout",
+        "60000",
+        "-e",
+        'process.stdout.write("idle\\n")',
+      ],
       { env: { ...process.env, ...profileEnv } },
     );
     let stdout = "";
@@ -2972,13 +4397,30 @@ describe("scripted sessions", () => {
     expect(Date.now() - started).toBeLessThan(10000);
     const fetch = vi.fn();
     for (const [args, runEnv, message] of [
-      [["--timeout", "999"], env, "--timeout must be an integer from 1000 to 3600000 milliseconds."],
-      [["--timeout", "3600001"], env, "--timeout must be an integer from 1000 to 3600000 milliseconds."],
-      [[], { ...env, KAMAPATHY_RUN_TIMEOUT_MS: "soon" }, "KAMAPATHY_RUN_TIMEOUT_MS must be an integer from 1000 to 3600000 milliseconds."],
+      [
+        ["--timeout", "999"],
+        env,
+        "--timeout must be an integer from 1000 to 3600000 milliseconds.",
+      ],
+      [
+        ["--timeout", "3600001"],
+        env,
+        "--timeout must be an integer from 1000 to 3600000 milliseconds.",
+      ],
+      [
+        [],
+        { ...env, KAMAPATHY_RUN_TIMEOUT_MS: "soon" },
+        "KAMAPATHY_RUN_TIMEOUT_MS must be an integer from 1000 to 3600000 milliseconds.",
+      ],
       [["--fast"], env, "Unknown run option: --fast. Run help for usage."],
     ])
       await expect(
-        runCli(["run", ...args, "-e", "1"], { env: runEnv, fetch, stdout: sink(), stderr: sink() }),
+        runCli(["run", ...args, "-e", "1"], {
+          env: runEnv,
+          fetch,
+          stdout: sink(),
+          stderr: sink(),
+        }),
       ).rejects.toThrow(message);
     expect(fetch).not.toHaveBeenCalled();
   }, 20000);
@@ -2994,9 +4436,18 @@ describe("scripted sessions", () => {
       const stdin = new PassThrough();
       stdin.write("{");
       await expect(
-        runCli(args, { env, fetch, stdin, stdinTimeoutMs: 200, stdout: sink(), stderr: sink() }),
+        runCli(args, {
+          env,
+          fetch,
+          stdin,
+          stdinTimeoutMs: 200,
+          stdout: sink(),
+          stderr: sink(),
+        }),
         args.join(" "),
-      ).rejects.toThrow("Standard input did not end within 0.2 seconds. Pipe the complete value and close the input.");
+      ).rejects.toThrow(
+        "Standard input did not end within 0.2 seconds. Pipe the complete value and close the input.",
+      );
     }
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -3030,33 +4481,77 @@ describe("scripted sessions", () => {
     );
     expect(run.status).toBe(0);
     expect(globalThis.__scripted).toEqual(
-      ["kamapathy", "createSpace", "openSpace", "space", "spaces", "requestSpace"].map((name) => [name, false, true, true, false]),
+      [
+        "kamapathy",
+        "createSpace",
+        "openSpace",
+        "space",
+        "spaces",
+        "requestSpace",
+      ].map((name) => [name, false, true, true, false]),
     );
     expect(run.api.requests).toEqual([
-      { method: "POST", path: "/spaces", body: { name: "Research", reuse: true } },
-      { method: "POST", path: "/space-requests", body: { reason: "Book a table" } },
+      {
+        method: "POST",
+        path: "/spaces",
+        body: { name: "Research", reuse: true },
+      },
+      {
+        method: "POST",
+        path: "/space-requests",
+        body: { reason: "Book a table" },
+      },
     ]);
   });
 
   it("the CLI refuses Node older than 22.13 for every command but help, --help, -h, --version and -v", async () => {
     const fetch = vi.fn(async () => Response.json({ status: "ok" }));
     const stderr = sink();
-    expect(await main(["health"], { env, fetch, stderr, nodeVersion: "22.12.0" })).toBe(1);
-    expect(stderr.text()).toBe("Kamapathy: Kamapathy's client needs Node.js 22.13 or later. This is Node.js 22.12.0.\n");
+    expect(
+      await main(["health"], { env, fetch, stderr, nodeVersion: "22.12.0" }),
+    ).toBe(1);
+    expect(stderr.text()).toBe(
+      "Kamapathy: Kamapathy's client needs Node.js 22.13 or later. This is Node.js 22.12.0.\n",
+    );
     expect(fetch).not.toHaveBeenCalled();
-    for (const argv of [["help"], ["--help"], ["-h"], ["tabs", "--help"], ["--version"], ["-v"]]) {
+    for (const argv of [
+      ["help"],
+      ["--help"],
+      ["-h"],
+      ["tabs", "--help"],
+      ["--version"],
+      ["-v"],
+    ]) {
       const output = sink();
-      await main(argv, { env, fetch, stdout: sink(), stderr: output, nodeVersion: "20.0.0" });
+      await main(argv, {
+        env,
+        fetch,
+        stdout: sink(),
+        stderr: output,
+        nodeVersion: "20.0.0",
+      });
       expect(output.text(), argv.join(" ")).not.toContain("needs Node.js");
     }
-    expect(await main(["health"], { env, fetch, stdout: sink(), stderr: sink(), nodeVersion: "22.13.0" })).toBe(0);
+    expect(
+      await main(["health"], {
+        env,
+        fetch,
+        stdout: sink(),
+        stderr: sink(),
+        nodeVersion: "22.13.0",
+      }),
+    ).toBe(0);
   });
 
   // Runs the CLI as its own process with this profile.
   const spawnCli = async (args, extraEnv, input) => {
-    const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", ...args], {
-      env: { ...process.env, ...extraEnv },
-    });
+    const child = spawn(
+      process.execPath,
+      ["skills/kamapathy/scripts/kamapathy.mjs", ...args],
+      {
+        env: { ...process.env, ...extraEnv },
+      },
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -3069,31 +4564,62 @@ describe("scripted sessions", () => {
   it("TypeScript runs from .mts, .ts and --ts sources, refuses --ts with a .mjs file, and re-runs once with the flags when stripping is missing", async () => {
     const { env: profileEnv } = await profile();
     const typed = "const count: number = 2; console.log(`typed ${count}`);";
-    expect(await spawnCli(["run", await scriptFile("task.mts", typed)], profileEnv)).toEqual({
+    expect(
+      await spawnCli(["run", await scriptFile("task.mts", typed)], profileEnv),
+    ).toEqual({
       status: 0,
       stdout: "typed 2\n",
       stderr: "",
     });
-    expect((await spawnCli(["run", await scriptFile("task.ts", typed)], profileEnv)).stdout).toBe("typed 2\n");
-    expect((await spawnCli(["run", "--ts", "-e", typed], profileEnv)).stdout).toBe("typed 2\n");
-    expect((await spawnCli(["run", "--ts", "-"], profileEnv, typed)).stdout).toBe("typed 2\n");
+    expect(
+      (await spawnCli(["run", await scriptFile("task.ts", typed)], profileEnv))
+        .stdout,
+    ).toBe("typed 2\n");
+    expect(
+      (await spawnCli(["run", "--ts", "-e", typed], profileEnv)).stdout,
+    ).toBe("typed 2\n");
+    expect(
+      (await spawnCli(["run", "--ts", "-"], profileEnv, typed)).stdout,
+    ).toBe("typed 2\n");
     await expect(
-      runCli(["run", "--ts", await scriptFile("task.mjs", "1")], { env, stdout: sink(), stderr: sink() }),
-    ).rejects.toThrow("--ts applies to run - and run -e. Name a TypeScript file .ts, .mts or .cts.");
+      runCli(["run", "--ts", await scriptFile("task.mjs", "1")], {
+        env,
+        stdout: sink(),
+        stderr: sink(),
+      }),
+    ).rejects.toThrow(
+      "--ts applies to run - and run -e. Name a TypeScript file .ts, .mts or .cts.",
+    );
     // Without type stripping, run starts itself once more with Node's flag.
     const calls = [];
     const fakeSpawn = (command, args, options) => {
-      calls.push({ command, args, options, file: args.at(-1), existed: existsSync(args.at(-1)) });
+      calls.push({
+        command,
+        args,
+        options,
+        file: args.at(-1),
+        existed: existsSync(args.at(-1)),
+      });
       const child = new EventEmitter();
       child.kill = vi.fn();
       setTimeout(() => child.emit("exit", 4, null), 10);
       return child;
     };
-    const stripping = { features: { typescript: false }, execArgv: [], spawn: fakeSpawn, execPath: "/bin/node" };
+    const stripping = {
+      features: { typescript: false },
+      execArgv: [],
+      spawn: fakeSpawn,
+      execPath: "/bin/node",
+    };
     const file = await scriptFile("task.mts", typed);
     const envFile = await scratchFile();
     expect(
-      await runCli(["run", "--timeout", "5000", "--env-file", envFile, file], { env, stdout: sink(), stderr: sink(), ...stripping }),
+      await runCli(["run", "--timeout", "5000", "--env-file", envFile, file], {
+        env,
+        stdout: sink(),
+        stderr: sink(),
+        ...stripping,
+      }),
     ).toBe(4);
     expect(calls[0]).toMatchObject({
       command: "/bin/node",
@@ -3110,33 +4636,66 @@ describe("scripted sessions", () => {
       ],
       options: { stdio: "inherit" },
     });
-    expect(await runCli(["run", "--ts", "-e", typed], { env, stdout: sink(), stderr: sink(), ...stripping })).toBe(4);
+    expect(
+      await runCli(["run", "--ts", "-e", typed], {
+        env,
+        stdout: sink(),
+        stderr: sink(),
+        ...stripping,
+      }),
+    ).toBe(4);
     expect(calls[1].file).toMatch(/kamapathy-run-[a-f0-9]{16}\.mts$/);
     expect(calls[1].existed).toBe(true);
     expect(calls[1].options.env.KAMAPATHY_RUN_SOURCE).toBe("-e");
     expect(existsSync(calls[1].file)).toBe(false);
     await expect(
-      runCli(["run", file], { env, stdout: sink(), stderr: sink(), ...stripping, execArgv: ["--experimental-strip-types"] }),
-    ).rejects.toThrow("This Node.js cannot run TypeScript. Use Node.js 22.18 or later, or write the script in JavaScript.");
+      runCli(["run", file], {
+        env,
+        stdout: sink(),
+        stderr: sink(),
+        ...stripping,
+        execArgv: ["--experimental-strip-types"],
+      }),
+    ).rejects.toThrow(
+      "This Node.js cannot run TypeScript. Use Node.js 22.18 or later, or write the script in JavaScript.",
+    );
     expect(calls).toHaveLength(2);
   }, 30000);
 
   it("the workspace follows the profile or KAMAPATHY_WORKSPACE; env files fill only unset variables, later files win, profile and workspace names are skipped, unsafe files are refused without printing values", async () => {
     const { userData } = await profile();
-    expect(workspacePath({ KAMAPATHY_USER_DATA: userData })).toBe(join(userData, "workspace"));
-    expect(workspacePath({ KAMAPATHY_USER_DATA: userData, KAMAPATHY_WORKSPACE: "tasks" }, "/home/me")).toBe(
-      join("/home/me", "tasks"),
+    expect(workspacePath({ KAMAPATHY_USER_DATA: userData })).toBe(
+      join(userData, "workspace"),
     );
+    expect(
+      workspacePath(
+        { KAMAPATHY_USER_DATA: userData, KAMAPATHY_WORKSPACE: "tasks" },
+        "/home/me",
+      ),
+    ).toBe(join("/home/me", "tasks"));
     const workspace = join(userData, "workspace");
     await mkdir(workspace, { mode: 0o700 });
     const dotEnv = join(workspace, ".env");
-    await writeFile(dotEnv, "FROM_ENV=first\nLATER=workspace\nSTART=changed\nKAMAPATHY_USER_DATA=/elsewhere\n", { mode: 0o600 });
+    await writeFile(
+      dotEnv,
+      "FROM_ENV=first\nLATER=workspace\nSTART=changed\nKAMAPATHY_USER_DATA=/elsewhere\n",
+      { mode: 0o600 },
+    );
     const extra = join(userData, "extra.env");
     await writeFile(extra, "LATER=extra-file\nADDED=3\n", { mode: 0o600 });
-    const runEnv = { KAMAPATHY_USER_DATA: userData, KAMAPATHY_NO_LAUNCH: "1", START: "kept" };
+    const runEnv = {
+      KAMAPATHY_USER_DATA: userData,
+      KAMAPATHY_NO_LAUNCH: "1",
+      START: "kept",
+    };
     const stderr = sink();
     expect(
-      await runCli(["run", "--env-file", extra, "-e", "1"], { env: runEnv, fetch: vi.fn(), stdout: sink(), stderr }),
+      await runCli(["run", "--env-file", extra, "-e", "1"], {
+        env: runEnv,
+        fetch: vi.fn(),
+        stdout: sink(),
+        stderr,
+      }),
     ).toBe(0);
     expect(runEnv).toMatchObject({
       FROM_ENV: "first",
@@ -3164,12 +4723,24 @@ describe("scripted sessions", () => {
       const link = join(userData, "link.env");
       await symlink(dotEnv, link);
       await expect(
-        runCli(["run", "--env-file", link, "-e", "1"], { env: { ...runEnv }, fetch: vi.fn(), stdout: sink(), stderr: sink() }),
+        runCli(["run", "--env-file", link, "-e", "1"], {
+          env: { ...runEnv },
+          fetch: vi.fn(),
+          stdout: sink(),
+          stderr: sink(),
+        }),
       ).rejects.toThrow(`Kamapathy will not load ${link}`);
       await chmod(workspace, 0o777);
       await expect(
-        runCli(["run", "-e", "1"], { env: { ...runEnv }, fetch: vi.fn(), stdout: sink(), stderr: sink() }),
-      ).rejects.toThrow(`Kamapathy's workspace ${workspace} must be a folder your account owns that others cannot change.`);
+        runCli(["run", "-e", "1"], {
+          env: { ...runEnv },
+          fetch: vi.fn(),
+          stdout: sink(),
+          stderr: sink(),
+        }),
+      ).rejects.toThrow(
+        `Kamapathy's workspace ${workspace} must be a folder your account owns that others cannot change.`,
+      );
       await chmod(workspace, 0o700);
     }
   });
@@ -3182,14 +4753,41 @@ describe("scripted sessions", () => {
     await mkdir(workspace, { recursive: true, mode: 0o700 });
     const dotEnv = join(workspace, ".env");
     // util.parseEnv returns names sorted, so the lines report them in that order.
-    const names = ["APPDATA", "HOME", "LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME"];
-    await writeFile(dotEnv, names.map((name) => `${name}=${join(home, "elsewhere")}\n`).join(""), { mode: 0o600 });
+    const names = [
+      "APPDATA",
+      "HOME",
+      "LOCALAPPDATA",
+      "USERPROFILE",
+      "XDG_CONFIG_HOME",
+    ];
+    await writeFile(
+      dotEnv,
+      names.map((name) => `${name}=${join(home, "elsewhere")}\n`).join(""),
+      { mode: 0o600 },
+    );
     const stderr = sink();
-    expect(await runCli(["run", "-e", "1"], { env: runEnv, fetch: vi.fn(), stdout: sink(), stderr })).toBe(0);
-    expect(runEnv).toEqual({ HOME: home, USERPROFILE: home, KAMAPATHY_NO_LAUNCH: "1", KAMAPATHY_WORKSPACE: workspace });
+    expect(
+      await runCli(["run", "-e", "1"], {
+        env: runEnv,
+        fetch: vi.fn(),
+        stdout: sink(),
+        stderr,
+      }),
+    ).toBe(0);
+    expect(runEnv).toEqual({
+      HOME: home,
+      USERPROFILE: home,
+      KAMAPATHY_NO_LAUNCH: "1",
+      KAMAPATHY_WORKSPACE: workspace,
+    });
     expect(agentPaths(runEnv).userData).toBe(userData);
     expect(stderr.text()).toBe(
-      names.map((name) => `Kamapathy: ${dotEnv} cannot set ${name}. Set it in the environment instead.\n`).join(""),
+      names
+        .map(
+          (name) =>
+            `Kamapathy: ${dotEnv} cannot set ${name}. Set it in the environment instead.\n`,
+        )
+        .join(""),
     );
   });
 
@@ -3198,32 +4796,58 @@ describe("scripted sessions", () => {
       const { userData, paths } = await profile();
       const workspace = join(userData, "workspace");
       await mkdir(workspace, { mode: 0o700 });
-      await writeFile(join(workspace, ".env"), "SCRIPT_SECRET=s3cret\nHTTPS_PROXY=http://127.0.0.1:9\n", { mode: 0o600 });
+      await writeFile(
+        join(workspace, ".env"),
+        "SCRIPT_SECRET=s3cret\nHTTPS_PROXY=http://127.0.0.1:9\n",
+        { mode: 0o600 },
+      );
       const runEnv = { KAMAPATHY_USER_DATA: userData, FROM_SHELL: "kept" };
       const launch = vi.fn(() =>
         fakeKamapathy(paths, {
           handler: (request, response) => {
             response.writeHead(200, { "Content-Type": "application/json" });
-            response.end(JSON.stringify(request.url === "/health" ? { status: "ok", version: "test" } : { spaces: [] }));
+            response.end(
+              JSON.stringify(
+                request.url === "/health"
+                  ? { status: "ok", version: "test" }
+                  : { spaces: [] },
+              ),
+            );
           },
         }),
       );
       const connect = { launch, intervalMs: 10, timeoutMs: 5000 };
       if (command === "run")
-        expect(await runCli(["run", "-e", "await spaces()"], { env: runEnv, connect, stdout: sink(), stderr: sink() })).toBe(0);
+        expect(
+          await runCli(["run", "-e", "await spaces()"], {
+            env: runEnv,
+            connect,
+            stdout: sink(),
+            stderr: sink(),
+          }),
+        ).toBe(0);
       else {
         const input = new PassThrough();
         const output = new PassThrough();
         let text = "";
         output.on("data", (chunk) => (text += chunk));
-        const ended = runCli(["repl"], { env: runEnv, connect, stdin: input, stdout: output, terminal: true });
+        const ended = runCli(["repl"], {
+          env: runEnv,
+          connect,
+          stdin: input,
+          stdout: output,
+          terminal: true,
+        });
         await expect.poll(() => text).toContain("kamapathy> ");
         input.write("(await spaces()).length\n");
         await expect.poll(() => text).toContain("0");
         input.write(".exit\n");
         expect(await ended).toBe(0);
       }
-      expect(runEnv, command).toMatchObject({ SCRIPT_SECRET: "s3cret", HTTPS_PROXY: "http://127.0.0.1:9" });
+      expect(runEnv, command).toMatchObject({
+        SCRIPT_SECRET: "s3cret",
+        HTTPS_PROXY: "http://127.0.0.1:9",
+      });
       expect(launch, command).toHaveBeenCalledTimes(1);
       expect(launch.mock.calls[0][1], command).toEqual({
         KAMAPATHY_USER_DATA: userData,
@@ -3233,16 +4857,28 @@ describe("scripted sessions", () => {
     }
   }, 20000);
 
-  it("workspace prints and creates the folder with mode 0700, and --json prints {\"workspace\": path}", async () => {
+  it('workspace prints and creates the folder with mode 0700, and --json prints {"workspace": path}', async () => {
     const { userData } = await profile();
     const fetch = vi.fn();
     const stdout = sink();
-    expect(await runCli(["workspace"], { env: { KAMAPATHY_USER_DATA: userData }, fetch, stdout })).toBe(0);
+    expect(
+      await runCli(["workspace"], {
+        env: { KAMAPATHY_USER_DATA: userData },
+        fetch,
+        stdout,
+      }),
+    ).toBe(0);
     const workspace = join(userData, "workspace");
     expect(stdout.text()).toBe(`${workspace}\n`);
     if (posix) expect((await stat(workspace)).mode & 0o777).toBe(0o700);
     const json = sink();
-    expect(await runCli(["workspace", "--json"], { env: { KAMAPATHY_USER_DATA: userData }, fetch, stdout: json })).toBe(0);
+    expect(
+      await runCli(["workspace", "--json"], {
+        env: { KAMAPATHY_USER_DATA: userData },
+        fetch,
+        stdout: json,
+      }),
+    ).toBe(0);
     expect(JSON.parse(json.text())).toEqual({ workspace });
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -3260,7 +4896,9 @@ describe("scripted sessions", () => {
   async function writeSitePack(root, id, manifest, files = {}) {
     const dir = join(root, id);
     await mkdir(dir, { mode: 0o700 });
-    await writeFile(join(dir, "pack.json"), JSON.stringify(manifest), { mode: 0o600 });
+    await writeFile(join(dir, "pack.json"), JSON.stringify(manifest), {
+      mode: 0o600,
+    });
     for (const [relative, text] of Object.entries(files)) {
       const path = join(dir, relative);
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -3274,7 +4912,12 @@ describe("scripted sessions", () => {
     try {
       const root = new URL("../skills/kamapathy/sites/", import.meta.url);
       return (await readdir(root, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("_") && !entry.name.startsWith("."))
+        .filter(
+          (entry) =>
+            entry.isDirectory() &&
+            !entry.name.startsWith("_") &&
+            !entry.name.startsWith("."),
+        )
         .map((entry) => entry.name)
         .sort();
     } catch {
@@ -3294,7 +4937,12 @@ describe("scripted sessions", () => {
         description: "List the products the lab page shows.",
         file: "tools/list-products.mjs",
         export: "listProducts",
-        args: { limit: { type: "integer", description: "How many products to read, 1 to 20." } },
+        args: {
+          limit: {
+            type: "integer",
+            description: "How many products to read, 1 to 20.",
+          },
+        },
         returns: { type: "array", description: "[{ name, price }]" },
       },
     },
@@ -3311,14 +4959,20 @@ describe("scripted sessions", () => {
     "tools/list-products.mjs": "export const listProducts = async () => [];\n",
     "page-tools/cart-total.js": "() => 0\n",
   };
-  const noConnection = () => vi.fn(() => {
-    throw new Error("sites answers from this computer's files.");
-  });
+  const noConnection = () =>
+    vi.fn(() => {
+      throw new Error("sites answers from this computer's files.");
+    });
 
   it("sites lists both roots without connecting or starting Kamapathy", async () => {
     const { sites, env: siteEnv } = await siteWorkspace();
     await writeSitePack(sites, "local-lab", labPack, labFiles);
-    const broken = await writeSitePack(sites, "broken", { ...labPack, format: 2, id: "broken", name: "Broken" });
+    const broken = await writeSitePack(sites, "broken", {
+      ...labPack,
+      format: 2,
+      id: "broken",
+      name: "Broken",
+    });
     const fetch = noConnection();
     // KAMAPATHY_NO_LAUNCH is unset, so a parser that built a session would go
     // looking for Kamapathy; allowLaunch keeps such a regression from starting
@@ -3327,13 +4981,21 @@ describe("scripted sessions", () => {
     const stdout = sink();
     expect(await runCli(["sites"], { ...options, stdout })).toBe(0);
     const lines = stdout.text().trimEnd().split("\n");
-    expect(lines).toContain('local-lab "Local lab" workspace 127.0.0.1; tools list_products; page tools cart_total');
+    expect(lines).toContain(
+      'local-lab "Local lab" workspace 127.0.0.1; tools list_products; page tools cart_total',
+    );
     expect(lines.at(-1)).toBe(`Skipped ${broken}: format: format must be 1.`);
     const bundled = await bundledPackIds();
-    for (const id of bundled) expect(lines.some((text) => text.startsWith(`${id} "`)), id).toBe(true);
+    for (const id of bundled)
+      expect(
+        lines.some((text) => text.startsWith(`${id} "`)),
+        id,
+      ).toBe(true);
     expect(lines.length).toBe(bundled.length + 2);
     const json = sink();
-    expect(await runCli(["sites", "--json"], { ...options, stdout: json })).toBe(0);
+    expect(
+      await runCli(["sites", "--json"], { ...options, stdout: json }),
+    ).toBe(0);
     const data = JSON.parse(json.text());
     expect(Object.keys(data).sort()).toEqual(["packs", "skipped"]);
     expect(data.packs.find((pack) => pack.id === "local-lab")).toEqual({
@@ -3344,11 +5006,25 @@ describe("scripted sessions", () => {
       domains: ["127.0.0.1"],
       notes: ["notes/overview.md"],
       tools: [
-        { name: "list_products", kind: "node", description: "List the products the lab page shows." },
-        { name: "cart_total", kind: "page", description: "Read the total the cart page shows." },
+        {
+          name: "list_products",
+          kind: "node",
+          description: "List the products the lab page shows.",
+        },
+        {
+          name: "cart_total",
+          kind: "page",
+          description: "Read the total the cart page shows.",
+        },
       ],
     });
-    expect(data.skipped).toEqual([{ path: broken, source: "workspace", problem: "format: format must be 1." }]);
+    expect(data.skipped).toEqual([
+      {
+        path: broken,
+        source: "workspace",
+        problem: "format: format must be 1.",
+      },
+    ]);
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -3369,30 +5045,50 @@ describe("scripted sessions", () => {
             file: "tools/search-repositories.mjs",
             export: "searchRepositories",
             args: {
-              query: { type: "string", required: true, description: "Words to search for." },
-              limit: { type: "integer", description: "How many results to read, 1 to 50." },
+              query: {
+                type: "string",
+                required: true,
+                description: "Words to search for.",
+              },
+              limit: {
+                type: "integer",
+                description: "How many results to read, 1 to 50.",
+              },
             },
-            returns: { type: "array", description: "[{ fullName, url, description, stars, language }]" },
+            returns: {
+              type: "array",
+              description: "[{ fullName, url, description, stars, language }]",
+            },
           },
         },
         pageTools: {
           repository_stats: {
             description: "Read the stars, forks and topics the page shows.",
             file: "page-tools/repository-stats.js",
-            returns: { type: "object", description: "{ fullName, stars, forks } or null" },
+            returns: {
+              type: "object",
+              description: "{ fullName, stars, forks } or null",
+            },
           },
         },
       },
       {
-        "notes/overview.md": "Gists live on gist.github.com.\nA search page lists repositories.\n",
-        "tools/search-repositories.mjs": "export const searchRepositories = async () => [];\n",
+        "notes/overview.md":
+          "Gists live on gist.github.com.\nA search page lists repositories.\n",
+        "tools/search-repositories.mjs":
+          "export const searchRepositories = async () => [];\n",
         "page-tools/repository-stats.js": "() => null\n",
       },
     );
     const fetch = noConnection();
     const options = { env: siteEnv, fetch, connect: { allowLaunch: false } };
     const stdout = sink();
-    expect(await runCli(["sites", "https://gist.github.com/x"], { ...options, stdout })).toBe(0);
+    expect(
+      await runCli(["sites", "https://gist.github.com/x"], {
+        ...options,
+        stdout,
+      }),
+    ).toBe(0);
     expect(stdout.text()).toBe(
       [
         'github "GitHub" (workspace, matches *.github.com)',
@@ -3412,21 +5108,53 @@ describe("scripted sessions", () => {
       ].join("\n"),
     );
     const empty = sink();
-    expect(await runCli(["sites", "https://example.invalid/"], { ...options, stdout: empty })).toBe(0);
+    expect(
+      await runCli(["sites", "https://example.invalid/"], {
+        ...options,
+        stdout: empty,
+      }),
+    ).toBe(0);
     expect(empty.text()).toBe("No site pack matches example.invalid.\n");
     const blank = sink();
-    expect(await runCli(["sites", "about:blank"], { ...options, stdout: blank })).toBe(0);
+    expect(
+      await runCli(["sites", "about:blank"], { ...options, stdout: blank }),
+    ).toBe(0);
     expect(blank.text()).toBe("No site pack matches about:blank.\n");
     const json = sink();
-    expect(await runCli(["sites", "gist.github.com", "--json"], { ...options, stdout: json })).toBe(0);
+    expect(
+      await runCli(["sites", "gist.github.com", "--json"], {
+        ...options,
+        stdout: json,
+      }),
+    ).toBe(0);
     const data = JSON.parse(json.text());
-    expect(data).toMatchObject({ url: "https://gist.github.com/", host: "gist.github.com", skipped: [] });
-    expect(data.packs[0]).toMatchObject({ id: "github", source: "workspace", dir, matchedBy: "*.github.com" });
+    expect(data).toMatchObject({
+      url: "https://gist.github.com/",
+      host: "gist.github.com",
+      skipped: [],
+    });
+    expect(data.packs[0]).toMatchObject({
+      id: "github",
+      source: "workspace",
+      dir,
+      matchedBy: "*.github.com",
+    });
     expect(data.packs[0].notes).toEqual([
-      { file: "notes/overview.md", text: "Gists live on gist.github.com.\nA search page lists repositories.\n" },
+      {
+        file: "notes/overview.md",
+        text: "Gists live on gist.github.com.\nA search page lists repositories.\n",
+      },
     ]);
-    await expect(runCli(["sites", "not a host"], options)).rejects.toMatchObject({ code: "invalid_argument" });
-    expect(await main(["sites", "not a host"], { ...options, stdout: sink(), stderr: sink() })).toBe(1);
+    await expect(
+      runCli(["sites", "not a host"], options),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(
+      await main(["sites", "not a host"], {
+        ...options,
+        stdout: sink(),
+        stderr: sink(),
+      }),
+    ).toBe(1);
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -3437,7 +5165,11 @@ describe("scripted sessions", () => {
       sites,
       "broken",
       { ...labPack, id: "broken", name: "Broken" },
-      { ...labFiles, "notes/overview.md": "The lab serves /packs/products.\nOpen @e3 to buy.\n" },
+      {
+        ...labFiles,
+        "notes/overview.md":
+          "The lab serves /packs/products.\nOpen @e3 to buy.\n",
+      },
     );
     const refusal =
       'holds the temporary ref @e3. Refs change with every snapshot; use a locator such as role=button[name="Save"].';
@@ -3450,12 +5182,24 @@ describe("scripted sessions", () => {
     const lines = stdout.text().trimEnd().split("\n");
     expect(lines).toContain("ok local-lab (workspace)");
     expect(lines).toContain(`broken: notes/overview.md:2: ${refusal}`);
-    expect(lines.at(-1)).toBe(`${passed} pack${passed === 1 ? "" : "s"} passed and 1 failed.`);
+    expect(lines.at(-1)).toBe(
+      `${passed} pack${passed === 1 ? "" : "s"} passed and 1 failed.`,
+    );
     const one = sink();
-    expect(await runCli(["sites", "check", "local-lab"], { ...options, stdout: one })).toBe(0);
+    expect(
+      await runCli(["sites", "check", "local-lab"], {
+        ...options,
+        stdout: one,
+      }),
+    ).toBe(0);
     expect(one.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
     const folder = sink();
-    expect(await runCli(["sites", "check", join(sites, "local-lab")], { ...options, stdout: folder })).toBe(0);
+    expect(
+      await runCli(["sites", "check", join(sites, "local-lab")], {
+        ...options,
+        stdout: folder,
+      }),
+    ).toBe(0);
     expect(folder.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
     // A pack outside both roots is checked where it sits, so it can be read
     // before it is moved into the workspace.
@@ -3463,13 +5207,24 @@ describe("scripted sessions", () => {
     directories.push(elsewhere);
     const away = await writeSitePack(elsewhere, "local-lab", labPack, labFiles);
     const apart = sink();
-    expect(await runCli(["sites", "check", away], { ...options, stdout: apart })).toBe(0);
+    expect(
+      await runCli(["sites", "check", away], { ...options, stdout: apart }),
+    ).toBe(0);
     expect(apart.text()).toBe("ok local-lab (workspace)\n1 pack passed.\n");
     const unknown = sink();
-    expect(await runCli(["sites", "check", "nope"], { ...options, stdout: unknown })).toBe(1);
-    expect(unknown.text()).toBe('No site pack named "nope".\n0 packs passed.\n');
+    expect(
+      await runCli(["sites", "check", "nope"], { ...options, stdout: unknown }),
+    ).toBe(1);
+    expect(unknown.text()).toBe(
+      'No site pack named "nope".\n0 packs passed.\n',
+    );
     const json = sink();
-    expect(await runCli(["sites", "check", "broken", "--json"], { ...options, stdout: json })).toBe(1);
+    expect(
+      await runCli(["sites", "check", "broken", "--json"], {
+        ...options,
+        stdout: json,
+      }),
+    ).toBe(1);
     const data = JSON.parse(json.text());
     expect(Object.keys(data).sort()).toEqual(["ok", "packs"]);
     expect(data).toEqual({
@@ -3489,38 +5244,62 @@ describe("scripted sessions", () => {
 
   it("repl runs top-level await with the globals, prints queued notices once before the next prompt, aborts in-flight calls on SIGINT and needs a terminal", async () => {
     await expect(
-      runCli(["repl"], { env, fetch: vi.fn(), stdin: new PassThrough(), stdout: sink() }),
+      runCli(["repl"], {
+        env,
+        fetch: vi.fn(),
+        stdin: new PassThrough(),
+        stdout: sink(),
+      }),
     ).rejects.toThrow("repl needs a terminal. Pipe a script to run - instead.");
     const api = fakeApi({
       ...sectionTwo,
       "GET /spaces": (_body, options) =>
         new Promise((_done, reject) =>
-          options.signal.addEventListener("abort", () => reject(options.signal.reason)),
+          options.signal.addEventListener("abort", () =>
+            reject(options.signal.reason),
+          ),
         ),
     });
     const input = new PassThrough();
     const output = new PassThrough();
     let text = "";
     output.on("data", (chunk) => (text += chunk));
-    const ended = runCli(["repl"], { env, fetch: api.fetch, health: level2, stdin: input, stdout: output, terminal: true });
+    const ended = runCli(["repl"], {
+      env,
+      fetch: api.fetch,
+      health: level2,
+      stdin: input,
+      stdout: output,
+      terminal: true,
+    });
     const entry = async (code, expected) => {
       input.write(`${code}\n`);
       await expect.poll(() => text).toContain(expected);
     };
-    await expect.poll(() => text).toContain("Kamapathy scripting session. Type help() for the API and .exit to leave.");
+    await expect
+      .poll(() => text)
+      .toContain(
+        "Kamapathy scripting session. Type help() for the API and .exit to leave.",
+      );
     await entry('const replSpace = await space("space-1")', "kamapathy> ");
     await entry("replSpace.name", "'Research'");
     queueNotice("repl-test", "A notice for this session.");
     await entry("1 + 1", "2");
     await entry("2 + 2", "4");
     expect(text.split("notice: A notice for this session.").length).toBe(2);
-    expect(text.indexOf("notice: A notice for this session.")).toBeGreaterThan(text.indexOf("\n2"));
-    input.write("await spaces()\n");
-    await expect.poll(() => api.requests.some((request) => request.path === "/spaces")).toBe(true);
-    input.write("\u0003");
-    await expect.poll(() => text).toContain(
-      "error: interrupted: The entry was stopped by Ctrl+C. A call in progress may still have taken effect, so inspect the page before retrying.",
+    expect(text.indexOf("notice: A notice for this session.")).toBeGreaterThan(
+      text.indexOf("\n2"),
     );
+    input.write("await spaces()\n");
+    await expect
+      .poll(() => api.requests.some((request) => request.path === "/spaces"))
+      .toBe(true);
+    input.write("\u0003");
+    await expect
+      .poll(() => text)
+      .toContain(
+        "error: interrupted: The entry was stopped by Ctrl+C. A call in progress may still have taken effect, so inspect the page before retrying.",
+      );
     await entry("typeof openSpace", "'function'");
     input.write(".exit\n");
     expect(await ended).toBe(0);
@@ -3532,7 +5311,10 @@ describe("scripted sessions", () => {
     const stdin = new PassThrough();
     const help = async (args) => {
       const stdout = sink();
-      expect(await runCli(args, { env, fetch, connect: { launch }, stdin, stdout }), args.join(" ")).toBe(0);
+      expect(
+        await runCli(args, { env, fetch, connect: { launch }, stdin, stdout }),
+        args.join(" "),
+      ).toBe(0);
       return stdout.text();
     };
     for (const command of schema.COMMANDS) {
@@ -3545,7 +5327,9 @@ describe("scripted sessions", () => {
       }
     }
     expect(await help(["help", "api"])).toContain("Kamapathy script API");
-    expect(await help(["help", "api", "page.click"])).toContain("page.click(target, options?)");
+    expect(await help(["help", "api", "page.click"])).toContain(
+      "page.click(target, options?)",
+    );
     expect(await help(["help", "errors"])).toContain("human_control");
     expect(await help(["help", "routes"])).toContain("POST /tabs/:id/click");
     expect(await help(["help", "page.wait"])).toContain("page.wait(options?)");
@@ -3558,19 +5342,38 @@ describe("scripted sessions", () => {
   it("ends general help with this client's SKILL.md", async () => {
     const stdout = sink();
     await runCli(["help"], { env, stdout });
-    const skill = await realpathOf(join(process.cwd(), "skills/kamapathy/SKILL.md"));
-    expect(stdout.text().endsWith(
-      `Agents: read the Kamapathy skill before using these commands.\n  ${skill}\nIn run scripts, help() lists the API and help("page.click") shows one entry.\n`,
-    )).toBe(true);
+    const skill = await realpathOf(
+      join(process.cwd(), "skills/kamapathy/SKILL.md"),
+    );
+    expect(
+      stdout
+        .text()
+        .endsWith(
+          `Agents: read the Kamapathy skill before using these commands.\n  ${skill}\nIn run scripts, help() lists the API and help("page.click") shows one entry.\n`,
+        ),
+    ).toBe(true);
     expect(stdout.text()).toContain("Requires Node.js 22.13 or later.");
-    for (const name of ["KAMAPATHY_USER_DATA", "KAMAPATHY_NO_LAUNCH", "KAMAPATHY_WORKSPACE", "KAMAPATHY_RUN_TIMEOUT_MS", "KAMAPATHY_PAGE_BUDGET", "KAMAPATHY_PROGRAM", "--version"])
+    for (const name of [
+      "KAMAPATHY_USER_DATA",
+      "KAMAPATHY_NO_LAUNCH",
+      "KAMAPATHY_WORKSPACE",
+      "KAMAPATHY_RUN_TIMEOUT_MS",
+      "KAMAPATHY_PAGE_BUDGET",
+      "KAMAPATHY_PROGRAM",
+      "--version",
+    ])
       expect(stdout.text(), name).toContain(name);
   });
 
   it("names the program kamapathy only when KAMAPATHY_PROGRAM is set", async () => {
     const named = sink();
-    await runCli(["help", "click"], { env: { ...env, KAMAPATHY_PROGRAM: "launcher-secret" }, stdout: named });
-    expect(named.text()).toContain("Usage: kamapathy click <tab-id> <ref-or-selector>");
+    await runCli(["help", "click"], {
+      env: { ...env, KAMAPATHY_PROGRAM: "launcher-secret" },
+      stdout: named,
+    });
+    expect(named.text()).toContain(
+      "Usage: kamapathy click <tab-id> <ref-or-selector>",
+    );
     expect(named.text()).not.toContain("launcher-secret");
     const plain = sink();
     await runCli(["help", "click"], { env, stdout: plain });
@@ -3581,35 +5384,66 @@ describe("scripted sessions", () => {
 
   it("reports unknown topics with close matches and status 1", async () => {
     const stderr = sink();
-    expect(await main(["help", "snapshto"], { env, stdout: sink(), stderr })).toBe(1);
-    expect(stderr.text()).toBe('Kamapathy: No help topic "snapshto". Close matches: snapshot.\n');
+    expect(
+      await main(["help", "snapshto"], { env, stdout: sink(), stderr }),
+    ).toBe(1);
+    expect(stderr.text()).toBe(
+      'Kamapathy: No help topic "snapshto". Close matches: snapshot.\n',
+    );
     const none = sink();
-    expect(await main(["help", "zzzzzz"], { env, stdout: sink(), stderr: none })).toBe(1);
+    expect(
+      await main(["help", "zzzzzz"], { env, stdout: sink(), stderr: none }),
+    ).toBe(1);
     expect(none.text()).toBe('Kamapathy: No help topic "zzzzzz".\n');
   });
 
   it("reads arguments after -- literally", async () => {
     const fetch = vi.fn(async () => Response.json({ space }));
     const stdout = sink();
-    expect(await runCli(["space", "create", "--", "--help"], { env, fetch, stdout })).toBe(0);
+    expect(
+      await runCli(["space", "create", "--", "--help"], { env, fetch, stdout }),
+    ).toBe(0);
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ name: "--help" });
     expect(stdout.text()).toBe('space space-1 "Research" agent shared\n');
-    await runCli(["space", "create", "--", "--json"], { env, fetch, stdout: sink() });
+    await runCli(["space", "create", "--", "--json"], {
+      env,
+      fetch,
+      stdout: sink(),
+    });
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ name: "--json" });
   });
 
   it("prints versions without starting Kamapathy", async () => {
     const launch = vi.fn();
-    const skillFolder = await realpathOf(join(process.cwd(), "skills/kamapathy"));
+    const skillFolder = await realpathOf(
+      join(process.cwd(), "skills/kamapathy"),
+    );
     const client = `Kamapathy client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}, Node ${process.versions.node}\nSkill ${skillFolder}\n`;
     const version = async (argv, profileEnv) => {
       const stdout = sink();
-      expect(await main(argv, { env: profileEnv, connect: { launch }, stdout, stderr: sink() })).toBe(0);
+      expect(
+        await main(argv, {
+          env: profileEnv,
+          connect: { launch },
+          stdout,
+          stderr: sink(),
+        }),
+      ).toBe(0);
       return stdout.text();
     };
     const running = await profile();
     // An app at this client's own level, so the plain lines are all it prints.
-    const health = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL, versions: { electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0", v8: "x" } };
+    const health = {
+      status: "ok",
+      version: "0.2.0",
+      apiLevel: schema.API_LEVEL,
+      versions: {
+        electron: "44.2.0",
+        chromium: "152.0.7977.76",
+        node: "24.20.0",
+        v8: "x",
+      },
+    };
     await fakeKamapathy(running.paths, {
       handler: (_request, response) => {
         response.writeHead(200, { "Content-Type": "application/json" });
@@ -3620,20 +5454,45 @@ describe("scripted sessions", () => {
     expect(await version(["--version"], runningEnv)).toBe(
       `${client}Kamapathy 0.2.0, API level ${schema.API_LEVEL}, Electron 44.2.0, Chromium 152.0.7977.76, Node 24.20.0\n`,
     );
-    expect(await version(["-v"], runningEnv)).toBe(await version(["--version"], runningEnv));
-    expect(JSON.parse(await version(["--version", "--json"], runningEnv))).toEqual({
-      client: { version: schema.CLIENT_VERSION, apiLevel: schema.API_LEVEL, node: process.versions.node, skill: skillFolder },
-      app: { version: "0.2.0", apiLevel: schema.API_LEVEL, electron: "44.2.0", chromium: "152.0.7977.76", node: "24.20.0" },
+    expect(await version(["-v"], runningEnv)).toBe(
+      await version(["--version"], runningEnv),
+    );
+    expect(
+      JSON.parse(await version(["--version", "--json"], runningEnv)),
+    ).toEqual({
+      client: {
+        version: schema.CLIENT_VERSION,
+        apiLevel: schema.API_LEVEL,
+        node: process.versions.node,
+        skill: skillFolder,
+      },
+      app: {
+        version: "0.2.0",
+        apiLevel: schema.API_LEVEL,
+        electron: "44.2.0",
+        chromium: "152.0.7977.76",
+        node: "24.20.0",
+      },
       appStatus: "running",
     });
     const idle = await profile();
-    expect(await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData })).toBe(`${client}Kamapathy is not running.\n`);
-    expect(JSON.parse(await version(["--version", "--json"], { KAMAPATHY_USER_DATA: idle.userData }))).toMatchObject({
+    expect(
+      await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData }),
+    ).toBe(`${client}Kamapathy is not running.\n`);
+    expect(
+      JSON.parse(
+        await version(["--version", "--json"], {
+          KAMAPATHY_USER_DATA: idle.userData,
+        }),
+      ),
+    ).toMatchObject({
       app: null,
       appStatus: "not_running",
     });
     await writeFile(idle.paths.off, "", { mode: 0o600 });
-    expect(await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData })).toBe(`${client}Agent access is off in Kamapathy.\n`);
+    expect(
+      await version(["--version"], { KAMAPATHY_USER_DATA: idle.userData }),
+    ).toBe(`${client}Agent access is off in Kamapathy.\n`);
     const older = await profile();
     await fakeKamapathy(older.paths, {
       handler: (_request, response) => {
@@ -3641,7 +5500,9 @@ describe("scripted sessions", () => {
         response.end(JSON.stringify({ status: "ok", version: "0.1.9" }));
       },
     });
-    expect(await version(["--version"], { KAMAPATHY_USER_DATA: older.userData })).toBe(
+    expect(
+      await version(["--version"], { KAMAPATHY_USER_DATA: older.userData }),
+    ).toBe(
       `${client}Kamapathy 0.1.9, API level 1\nKamapathy 0.1.9 has API level 1 and this client uses ${schema.API_LEVEL}. Calls added after level 1 fail until the person updates Kamapathy.\n`,
     );
     expect(launch).not.toHaveBeenCalled();
@@ -3649,12 +5510,21 @@ describe("scripted sessions", () => {
 
   it("help() in a run prints the index and one entry", async () => {
     const { env: profileEnv } = await profile();
-    const run = await spawnCli(["run", "-e", 'help(); help("page.click"); help("clik"); help("close");'], profileEnv);
+    const run = await spawnCli(
+      ["run", "-e", 'help(); help("page.click"); help("clik"); help("close");'],
+      profileEnv,
+    );
     expect(run.status).toBe(0);
-    expect(run.stdout).toContain(`Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`);
-    expect(run.stdout).toContain('help("page.click") shows one entry; help("errors") lists error codes.');
+    expect(run.stdout).toContain(
+      `Kamapathy script API, client ${schema.CLIENT_VERSION}, API level ${schema.API_LEVEL}`,
+    );
+    expect(run.stdout).toContain(
+      'help("page.click") shows one entry; help("errors") lists error codes.',
+    );
     expect(run.stdout).toContain("page.click(target, options?)\n");
-    expect(run.stdout).toContain('No help entry named "clik". Close matches: page.click, page.mouse.click.');
+    expect(run.stdout).toContain(
+      'No help entry named "clik". Close matches: page.click, page.mouse.click.',
+    );
     expect(run.stdout).toContain("space.close()\n");
     expect(run.stdout).toContain("page.close()\n");
   }, 20000);
@@ -3662,25 +5532,39 @@ describe("scripted sessions", () => {
   it("creates isolated spaces from the command line and says how each space signs in", async () => {
     for (const [args, body] of [
       [["space", "create", "Research"], { name: "Research" }],
-      [["space", "create", "Research", "--isolated"], { name: "Research", isolated: true }],
-      [["space", "create", "--isolated", "Research"], { name: "Research", isolated: true }],
+      [
+        ["space", "create", "Research", "--isolated"],
+        { name: "Research", isolated: true },
+      ],
+      [
+        ["space", "create", "--isolated", "Research"],
+        { name: "Research", isolated: true },
+      ],
     ]) {
       const fetch = vi.fn(async () => Response.json({ space }));
       expect(await runCli(args, { env, fetch, stdout: sink() })).toBe(0);
       expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual(body);
     }
-    for (const [signIns, suffix] of [["separate", " isolated"], ["shared", " shared"], [undefined, ""]]) {
+    for (const [signIns, suffix] of [
+      ["separate", " isolated"],
+      ["shared", " shared"],
+      [undefined, ""],
+    ]) {
       const created = sink();
       await runCli(["space", "create", "Research"], {
         env,
-        fetch: vi.fn(async () => Response.json({ space: { ...space, signIns } })),
+        fetch: vi.fn(async () =>
+          Response.json({ space: { ...space, signIns } }),
+        ),
         stdout: created,
       });
       expect(created.text()).toBe(`space space-1 "Research" agent${suffix}\n`);
       const listed = sink();
       await runCli(["spaces"], {
         env,
-        fetch: vi.fn(async () => Response.json({ spaces: [{ ...space, signIns }] })),
+        fetch: vi.fn(async () =>
+          Response.json({ spaces: [{ ...space, signIns }] }),
+        ),
         stdout: listed,
       });
       expect(listed.text()).toBe(`space-1 "Research" agent${suffix}\n`);
@@ -3706,12 +5590,40 @@ describe("scripted sessions", () => {
   };
   const header = {
     page: { id: "tab-1", label: "p2", title: "Checkout" },
-    space: { id: "6f1c9a2e-3b0d-4c55-9e1a-2d7b8c4f0a11", name: "Reserve a table" },
+    space: {
+      id: "6f1c9a2e-3b0d-4c55-9e1a-2d7b8c4f0a11",
+      name: "Reserve a table",
+    },
     tabs: [
-      { id: "tab-0", label: "p1", title: "Home", openedBy: "agent", managed: true },
-      { id: "tab-1", label: "p2", title: "Checkout", openedBy: "agent", managed: true, current: true },
-      { id: "tab-2", label: "p3", title: "Receipt", openedBy: "page", managed: true },
-      { id: "tab-3", label: "p4", title: "Menu", openedBy: "person", managed: false },
+      {
+        id: "tab-0",
+        label: "p1",
+        title: "Home",
+        openedBy: "agent",
+        managed: true,
+      },
+      {
+        id: "tab-1",
+        label: "p2",
+        title: "Checkout",
+        openedBy: "agent",
+        managed: true,
+        current: true,
+      },
+      {
+        id: "tab-2",
+        label: "p3",
+        title: "Receipt",
+        openedBy: "page",
+        managed: true,
+      },
+      {
+        id: "tab-3",
+        label: "p4",
+        title: "Menu",
+        openedBy: "person",
+        managed: false,
+      },
     ],
     budget: { used: 3, limit: 4 },
   };
@@ -3721,7 +5633,9 @@ describe("scripted sessions", () => {
   it("page.screenshot checks options before sending", async () => {
     const api = fakeApi(level3Routes);
     const client = await connect({ env, fetch: api.fetch, health: level3 });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
     const sent = api.requests.length;
     await expect(page.screenshot({ timeoutMs: 5000 })).rejects.toMatchObject({
       code: "invalid_option",
@@ -3756,7 +5670,9 @@ describe("scripted sessions", () => {
         }),
     });
     const client = await connect({ env, fetch: api.fetch, health: level3 });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
     const captured = await page.screenshot({
       fullPage: true,
       clip: { x: 0, y: 0, width: 640, height: 400 },
@@ -3768,22 +5684,37 @@ describe("scripted sessions", () => {
     expect(api.requests.at(-1)).toEqual({
       method: "POST",
       path: "/tabs/tab-1/screenshot",
-      body: { fullPage: true, clip: { x: 0, y: 0, width: 640, height: 400 }, scale: "device", timeoutMs: 3000 },
+      body: {
+        fullPage: true,
+        clip: { x: 0, y: 0, width: 640, height: 400 },
+        scale: "device",
+        timeoutMs: 3000,
+      },
     });
     // The route's own field budget sets the HTTP timeout: timeout plus 5000 ms.
-    const route = schema.ROUTES.find((item) => schema.routeKey(item) === "POST /tabs/:id/screenshot");
-    expect(httpTimeout(schema.requestBudget(route, { timeoutMs: 3000 }), route)).toBe(8000);
+    const route = schema.ROUTES.find(
+      (item) => schema.routeKey(item) === "POST /tabs/:id/screenshot",
+    );
+    expect(
+      httpTimeout(schema.requestBudget(route, { timeoutMs: 3000 }), route),
+    ).toBe(8000);
     expect(httpTimeout(schema.requestBudget(route, {}), route)).toBe(20000);
     const png = `${await scratchFile()}.png`;
     expect([...(await page.screenshot({ path: png }))]).toEqual([...bytes]);
     expect([...(await readFile(png))]).toEqual([...bytes]);
     expect(api.requests.at(-1).body).toEqual({});
     await expect(page.screenshot({ path: png })).rejects.toThrow("EEXIST");
-    await expect(page.screenshot({ path: `${png}.jpg` })).rejects.toThrow(".png");
+    await expect(page.screenshot({ path: `${png}.jpg` })).rejects.toThrow(
+      ".png",
+    );
     // A path string keeps today's GET flow and answer.
     const saved = `${await scratchFile()}.png`;
     expect(await page.screenshot(saved)).toBe(saved);
-    expect(api.requests.at(-1)).toEqual({ method: "GET", path: "/tabs/tab-1/screenshot", body: undefined });
+    expect(api.requests.at(-1)).toEqual({
+      method: "GET",
+      path: "/tabs/tab-1/screenshot",
+      body: undefined,
+    });
     // The options form needs level 3; the path form does not.
     const older = fakeApi(level3Routes);
     const old = await connect({ env, fetch: older.fetch, health: level2 });
@@ -3795,16 +5726,32 @@ describe("scripted sessions", () => {
       required: 3,
       available: 2,
     });
-    await expect(page2.screenshot()).rejects.toMatchObject({ code: "app_outdated", required: 3 });
+    await expect(page2.screenshot()).rejects.toMatchObject({
+      code: "app_outdated",
+      required: 3,
+    });
     expect(older.requests.length).toBe(requests);
-    expect(await page2.screenshot(`${await scratchFile()}.png`)).toMatch(/\.png$/);
+    expect(await page2.screenshot(`${await scratchFile()}.png`)).toMatch(
+      /\.png$/,
+    );
   });
 
   it("snapshot flags send scope, root, format, locators, header and cursor", async () => {
     const api = fakeApi(level3Routes);
     expect(
       await runCli(
-        ["snapshot", "tab-1", "--viewport", "--root", "@e5", "--outline", "--locators", "--no-header", "--cursor", "c1.x"],
+        [
+          "snapshot",
+          "tab-1",
+          "--viewport",
+          "--root",
+          "@e5",
+          "--outline",
+          "--locators",
+          "--no-header",
+          "--cursor",
+          "c1.x",
+        ],
         { env, fetch: api.fetch, health: level3, stdout: sink() },
       ),
     ).toBe(0);
@@ -3819,7 +5766,12 @@ describe("scripted sessions", () => {
     });
     const older = fakeApi(routes);
     await expect(
-      runCli(["snapshot", "tab-1", "--viewport", "--outline"], { env, fetch: older.fetch, health: level2, stdout: sink() }),
+      runCli(["snapshot", "tab-1", "--viewport", "--outline"], {
+        env,
+        fetch: older.fetch,
+        health: level2,
+        stdout: sink(),
+      }),
     ).rejects.toMatchObject({
       code: "app_outdated",
       option: "scope",
@@ -3835,7 +5787,10 @@ describe("scripted sessions", () => {
       ["snapshot", "tab-1", "--cursor"],
       ["snapshot", "tab-1", "--scope", "viewport"],
     ])
-      await expect(runCli(args, { env, fetch, stdout: sink() }), args.join(" ")).rejects.toThrow();
+      await expect(
+        runCli(args, { env, fetch, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -3854,17 +5809,30 @@ describe("scripted sessions", () => {
         '  button "Save" @e4 locator: css=#save',
       ].join("\n"),
       interactables: [
-        { ref: "@e3", role: "link", label: "Help", href: "https://example.test/help" },
+        {
+          ref: "@e3",
+          role: "link",
+          label: "Help",
+          href: "https://example.test/help",
+        },
         { ref: "@e4", role: "button", label: "Save", locator: "css=#save" },
       ],
       omittedControls: 0,
       truncated: true,
       next: "c1.eyJlIjoxfQ",
     };
-    const api = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": outlined });
+    const api = fakeApi({
+      ...level3Routes,
+      "POST /tabs/tab-1/snapshot": outlined,
+    });
     const stdout = sink();
     expect(
-      await runCli(["snapshot", "tab-1", "--outline", "--locators"], { env, fetch: api.fetch, health: level3, stdout }),
+      await runCli(["snapshot", "tab-1", "--outline", "--locators"], {
+        env,
+        fetch: api.fetch,
+        health: level3,
+        stdout,
+      }),
     ).toBe(0);
     expect(stdout.text()).toBe(
       [
@@ -3883,8 +5851,12 @@ describe("scripted sessions", () => {
       ].join("\n"),
     );
     const client = await connect({ env, fetch: api.fetch, health: level3 });
-    const page = await (await client.space("space-1")).open("https://example.test/reserve");
-    expect(`${await page.text({ format: "outline", locators: true })}\n`).toBe(stdout.text());
+    const page = await (
+      await client.space("space-1")
+    ).open("https://example.test/reserve");
+    expect(`${await page.text({ format: "outline", locators: true })}\n`).toBe(
+      stdout.text(),
+    );
     // A list snapshot: locator suffixes, the unchecked-locator note, a PDF
     // header, and no Truncated line while a cursor continues it.
     const listed = {
@@ -3895,7 +5867,10 @@ describe("scripted sessions", () => {
       omittedControls: 2,
       header: { ...header, budget: undefined, pdf: true },
     };
-    const parts = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": listed });
+    const parts = fakeApi({
+      ...level3Routes,
+      "POST /tabs/tab-1/snapshot": listed,
+    });
     const second = sink();
     await runCli(["snapshot", "tab-1", "--locators", "--cursor", "c1.x"], {
       env,
@@ -3929,11 +5904,21 @@ describe("scripted sessions", () => {
       locatorsIncomplete: undefined,
       omittedControls: 0,
     };
-    const bare = fakeApi({ ...level3Routes, "POST /tabs/tab-1/snapshot": last });
+    const bare = fakeApi({
+      ...level3Routes,
+      "POST /tabs/tab-1/snapshot": last,
+    });
     const third = sink();
-    await runCli(["snapshot", "tab-1", "--no-header"], { env, fetch: bare.fetch, health: level3, stdout: third });
+    await runCli(["snapshot", "tab-1", "--no-header"], {
+      env,
+      fetch: bare.fetch,
+      health: level3,
+      stdout: third,
+    });
     expect(third.text().split("\n")[0]).toBe("Checkout");
-    expect(third.text()).toContain("Truncated. Scope with --selector or request --full if needed.");
+    expect(third.text()).toContain(
+      "Truncated. Scope with --selector or request --full if needed.",
+    );
   });
 
   it("screenshot flags post the options and print the saved size", async () => {
@@ -3951,26 +5936,40 @@ describe("scripted sessions", () => {
     );
     const stdout = sink();
     expect(
-      await runCli(["screenshot", "tab-1", png, "--full-page", "--scale", "device"], {
-        env,
-        fetch,
-        health: level3,
-        stdout,
-      }),
+      await runCli(
+        ["screenshot", "tab-1", png, "--full-page", "--scale", "device"],
+        {
+          env,
+          fetch,
+          health: level3,
+          stdout,
+        },
+      ),
     ).toBe(0);
     const [url, options] = fetch.mock.calls[0];
-    expect([url.pathname, options.method]).toEqual(["/tabs/tab-1/screenshot", "POST"]);
-    expect(JSON.parse(options.body)).toEqual({ fullPage: true, scale: "device" });
+    expect([url.pathname, options.method]).toEqual([
+      "/tabs/tab-1/screenshot",
+      "POST",
+    ]);
+    expect(JSON.parse(options.body)).toEqual({
+      fullPage: true,
+      scale: "device",
+    });
     expect(stdout.text()).toBe(`saved ${png} (1280x3200)\n`);
     const clipped = `${await scratchFile()}.png`;
     const json = sink();
-    await runCli(["screenshot", "tab-1", clipped, "--clip", "10,20,30.5,40", "--json"], {
-      env,
-      fetch,
-      health: level3,
-      stdout: json,
+    await runCli(
+      ["screenshot", "tab-1", clipped, "--clip", "10,20,30.5,40", "--json"],
+      {
+        env,
+        fetch,
+        health: level3,
+        stdout: json,
+      },
+    );
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({
+      clip: { x: 10, y: 20, width: 30.5, height: 40 },
     });
-    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ clip: { x: 10, y: 20, width: 30.5, height: 40 } });
     expect(JSON.parse(json.text())).toEqual({
       saved: clipped,
       width: 1280,
@@ -3980,11 +5979,20 @@ describe("scripted sessions", () => {
     });
     // Without flags it stays a GET, and bytes without an IHDR print no size.
     const plainFetch = vi.fn(
-      async () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "Content-Type": "image/png" } }),
+      async () =>
+        new Response(new Uint8Array([137, 80, 78, 71]), {
+          headers: { "Content-Type": "image/png" },
+        }),
     );
     const small = `${await scratchFile()}.png`;
     const plain = sink();
-    expect(await runCli(["screenshot", "tab-1", small], { env, fetch: plainFetch, stdout: plain })).toBe(0);
+    expect(
+      await runCli(["screenshot", "tab-1", small], {
+        env,
+        fetch: plainFetch,
+        stdout: plain,
+      }),
+    ).toBe(0);
     expect(plainFetch.mock.calls[0][1].method).toBe("GET");
     expect(plain.text()).toBe(`saved ${small}\n`);
     // Flags are checked before anything connects.
@@ -3998,10 +6006,22 @@ describe("scripted sessions", () => {
       ["screenshot", "tab-1", unwritten, "--scale", "retina"],
       ["screenshot", "tab-1", unwritten, "--crop"],
     ])
-      await expect(runCli(args, { env, fetch: refused, stdout: sink() }), args.join(" ")).rejects.toThrow();
+      await expect(
+        runCli(args, { env, fetch: refused, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
     await expect(
-      runCli(["screenshot", "tab-1", unwritten, "--full-page"], { env, fetch: refused, health: level2, stdout: sink() }),
-    ).rejects.toMatchObject({ code: "app_outdated", required: 3, available: 2 });
+      runCli(["screenshot", "tab-1", unwritten, "--full-page"], {
+        env,
+        fetch: refused,
+        health: level2,
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      required: 3,
+      available: 2,
+    });
     expect(refused).not.toHaveBeenCalled();
     expect(existsSync(unwritten)).toBe(false);
   });
@@ -4023,7 +6043,14 @@ describe("scripted sessions", () => {
         { status: 400 },
       ),
     );
-    expect(await main(["click", "tab-1", "@21"], { env, fetch: hinted, stdout: sink(), stderr })).toBe(1);
+    expect(
+      await main(["click", "tab-1", "@21"], {
+        env,
+        fetch: hinted,
+        stdout: sink(),
+        stderr,
+      }),
+    ).toBe(1);
     expect(stderr.text()).toBe(
       [
         "Kamapathy: 400 invalid_selector: Refs are written @e12.",
@@ -4045,16 +6072,47 @@ describe("scripted sessions", () => {
             hidden: 1,
             actionable: 2,
             candidates: [
-              { ref: "@e7", tag: "button", role: "button", name: "Save", context: "Order form", visible: true, disabled: false },
-              { ref: "@e8", tag: "button", role: "button", name: "Save\ndraft", context: "", visible: true, disabled: true, frame: "#checkout" },
-              { tag: "button", role: "button", name: "Save", context: "", visible: false, disabled: false },
+              {
+                ref: "@e7",
+                tag: "button",
+                role: "button",
+                name: "Save",
+                context: "Order form",
+                visible: true,
+                disabled: false,
+              },
+              {
+                ref: "@e8",
+                tag: "button",
+                role: "button",
+                name: "Save\ndraft",
+                context: "",
+                visible: true,
+                disabled: true,
+                frame: "#checkout",
+              },
+              {
+                tag: "button",
+                role: "button",
+                name: "Save",
+                context: "",
+                visible: false,
+                disabled: false,
+              },
             ],
           },
         },
         { status: 422 },
       ),
     );
-    expect(await main(["click", "tab-1", "button"], { env, fetch: many, stdout: sink(), stderr: ambiguous })).toBe(1);
+    expect(
+      await main(["click", "tab-1", "button"], {
+        env,
+        fetch: many,
+        stdout: sink(),
+        stderr: ambiguous,
+      }),
+    ).toBe(1);
     expect(ambiguous.text()).toBe(
       [
         "Kamapathy: 422 ambiguous_match: Selector matched 3 elements (2 visible, 1 hidden). Use a ref from candidates or a more specific selector.",
@@ -4072,7 +6130,8 @@ describe("scripted sessions", () => {
     expect(await runCli(["help", "selectors"], { env, fetch, stdout })).toBe(0);
     const text = stdout.text();
     expect(text.split("\n")[0]).toBe("Selectors");
-    for (const form of schema.SELECTOR_FORMS) expect(text, form.form).toContain(form.example);
+    for (const form of schema.SELECTOR_FORMS)
+      expect(text, form.form).toContain(form.example);
     expect(text).toContain(
       "Refs skip the search. Docs and help show only the css=, text=, role=, href= and xpath= spellings.",
     );
@@ -4082,33 +6141,80 @@ describe("scripted sessions", () => {
   it("status, --clear, fail and --label anywhere reach their routes, and spaces prints state and status", async () => {
     const level3 = { status: "ok", version: "0.2.0", apiLevel: 3 };
     const set = sink();
-    const status = vi.fn(async () => Response.json({ ok: true, status: "Comparing prices" }));
-    expect(await runCli(["status", "space-1", "Comparing prices"], { env, fetch: status, health: level3, stdout: set })).toBe(0);
+    const status = vi.fn(async () =>
+      Response.json({ ok: true, status: "Comparing prices" }),
+    );
+    expect(
+      await runCli(["status", "space-1", "Comparing prices"], {
+        env,
+        fetch: status,
+        health: level3,
+        stdout: set,
+      }),
+    ).toBe(0);
     expect(status).toHaveBeenCalledTimes(1);
     const [url, options] = status.mock.calls[0];
-    expect([url.pathname, options.method]).toEqual(["/spaces/space-1/status", "POST"]);
+    expect([url.pathname, options.method]).toEqual([
+      "/spaces/space-1/status",
+      "POST",
+    ]);
     expect(JSON.parse(options.body)).toEqual({ text: "Comparing prices" });
     expect(set.text()).toBe('ok: status "Comparing prices"\n');
     const cleared = sink();
     const clear = vi.fn(async () => Response.json({ ok: true }));
-    expect(await runCli(["status", "space-1", "--clear"], { env, fetch: clear, health: level3, stdout: cleared })).toBe(0);
+    expect(
+      await runCli(["status", "space-1", "--clear"], {
+        env,
+        fetch: clear,
+        health: level3,
+        stdout: cleared,
+      }),
+    ).toBe(0);
     expect(JSON.parse(clear.mock.calls[0][1].body)).toEqual({ text: "" });
     expect(cleared.text()).toBe("ok: status cleared\n");
     const failed = sink();
-    const reported = { ok: true, owner: "human", state: "failed", status: "The site needs a phone number" };
+    const reported = {
+      ok: true,
+      owner: "human",
+      state: "failed",
+      status: "The site needs a phone number",
+    };
     const fail = vi.fn(async () => Response.json(reported));
-    expect(await runCli(["fail", "space-1", "The site needs a phone number"], { env, fetch: fail, health: level3, stdout: failed })).toBe(0);
+    expect(
+      await runCli(["fail", "space-1", "The site needs a phone number"], {
+        env,
+        fetch: fail,
+        health: level3,
+        stdout: failed,
+      }),
+    ).toBe(0);
     expect(fail.mock.calls[0][0].pathname).toBe("/spaces/space-1/fail");
-    expect(JSON.parse(fail.mock.calls[0][1].body)).toEqual({ message: "The site needs a phone number" });
-    expect(failed.text()).toBe("ok: failure reported, the person has control\n");
+    expect(JSON.parse(fail.mock.calls[0][1].body)).toEqual({
+      message: "The site needs a phone number",
+    });
+    expect(failed.text()).toBe(
+      "ok: failure reported, the person has control\n",
+    );
     const json = sink();
-    await runCli(["fail", "space-1", "No number", "--json"], { env, fetch: fail, health: level3, stdout: json });
+    await runCli(["fail", "space-1", "No number", "--json"], {
+      env,
+      fetch: fail,
+      health: level3,
+      stdout: json,
+    });
     expect(JSON.parse(json.text())).toEqual(reported);
     // A status needs either a text or --clear, never both and never neither.
     const unused = vi.fn();
-    for (const args of [["status", "space-1", "Later", "--clear"], ["status", "space-1"], ["fail", "space-1"]]) {
+    for (const args of [
+      ["status", "space-1", "Later", "--clear"],
+      ["status", "space-1"],
+      ["fail", "space-1"],
+    ]) {
       const stderr = sink();
-      expect(await main(args, { env, fetch: unused, health: level3, stderr }), args.join(" ")).toBe(1);
+      expect(
+        await main(args, { env, fetch: unused, health: level3, stderr }),
+        args.join(" "),
+      ).toBe(1);
       expect(stderr.text(), args.join(" ")).toContain("Kamapathy: ");
     }
     expect(unused).not.toHaveBeenCalled();
@@ -4118,33 +6224,95 @@ describe("scripted sessions", () => {
       ["click", "tab-1", "--label", "Add to cart", "@e2"],
       ["click", "tab-1", "@e2", "--label", "Add to cart"],
     ]) {
-      const labeled = vi.fn(async () => Response.json({ ok: true, url: tab.url }));
-      expect(await runCli(args, { env, fetch: labeled, health: level3, stdout: sink() }), args.join(" ")).toBe(0);
-      expect(labeled.mock.calls[0][0].pathname).toBe("/tabs/tab-1/click");
-      expect(JSON.parse(labeled.mock.calls[0][1].body)).toEqual({ ref: "@e2", label: "Add to cart" });
-    }
-    for (const [args, body] of [
-      [["fill", "tab-1", "@e1", "--label", "Name the guest", "--stdin"], { ref: "@e1", value: "Avery Quinn", label: "Name the guest" }],
-      [["press", "--label", "Submit the form", "tab-1", "Enter"], { key: "Enter", label: "Submit the form" }],
-      [["press", "tab-1", "Enter", "@e1", "--label", "Submit the form"], { key: "Enter", ref: "@e1", label: "Submit the form" }],
-      [["scroll", "tab-1", "down", "--label", "Read the terms"], { direction: "down", label: "Read the terms" }],
-      [["scroll", "tab-1", "down", "300", "@e1", "--label", "Read the terms"], { direction: "down", pixels: 300, ref: "@e1", label: "Read the terms" }],
-      [["scroll", "--label", "Read the panel", "tab-1", "down", ".panel"], { direction: "down", selector: ".panel", label: "Read the panel" }],
-      [["drag", "tab-1", "@e1", "--label", "Reorder the list", "#zone"], { source: { ref: "@e1" }, target: { selector: "#zone" }, label: "Reorder the list" }],
-    ]) {
-      const labeled = vi.fn(async () => Response.json({ ok: true, url: tab.url }));
+      const labeled = vi.fn(async () =>
+        Response.json({ ok: true, url: tab.url }),
+      );
       expect(
-        await runCli(args, { env, fetch: labeled, health: level3, stdin: Readable.from(["Avery Quinn"]), stdout: sink() }),
+        await runCli(args, {
+          env,
+          fetch: labeled,
+          health: level3,
+          stdout: sink(),
+        }),
         args.join(" "),
       ).toBe(0);
-      expect(JSON.parse(labeled.mock.calls[0][1].body), args.join(" ")).toEqual(body);
+      expect(labeled.mock.calls[0][0].pathname).toBe("/tabs/tab-1/click");
+      expect(JSON.parse(labeled.mock.calls[0][1].body)).toEqual({
+        ref: "@e2",
+        label: "Add to cart",
+      });
+    }
+    for (const [args, body] of [
+      [
+        ["fill", "tab-1", "@e1", "--label", "Name the guest", "--stdin"],
+        { ref: "@e1", value: "Avery Quinn", label: "Name the guest" },
+      ],
+      [
+        ["press", "--label", "Submit the form", "tab-1", "Enter"],
+        { key: "Enter", label: "Submit the form" },
+      ],
+      [
+        ["press", "tab-1", "Enter", "@e1", "--label", "Submit the form"],
+        { key: "Enter", ref: "@e1", label: "Submit the form" },
+      ],
+      [
+        ["scroll", "tab-1", "down", "--label", "Read the terms"],
+        { direction: "down", label: "Read the terms" },
+      ],
+      [
+        ["scroll", "tab-1", "down", "300", "@e1", "--label", "Read the terms"],
+        { direction: "down", pixels: 300, ref: "@e1", label: "Read the terms" },
+      ],
+      [
+        ["scroll", "--label", "Read the panel", "tab-1", "down", ".panel"],
+        { direction: "down", selector: ".panel", label: "Read the panel" },
+      ],
+      [
+        ["drag", "tab-1", "@e1", "--label", "Reorder the list", "#zone"],
+        {
+          source: { ref: "@e1" },
+          target: { selector: "#zone" },
+          label: "Reorder the list",
+        },
+      ],
+    ]) {
+      const labeled = vi.fn(async () =>
+        Response.json({ ok: true, url: tab.url }),
+      );
+      expect(
+        await runCli(args, {
+          env,
+          fetch: labeled,
+          health: level3,
+          stdin: Readable.from(["Avery Quinn"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).toBe(0);
+      expect(JSON.parse(labeled.mock.calls[0][1].body), args.join(" ")).toEqual(
+        body,
+      );
     }
     // Commands without a label keep today's unknown-option error.
     const refused = sink();
-    expect(await main(["wait-for-control", "space-1", "--label", "Waiting"], { env, fetch: unused, health: level3, stderr: refused })).toBe(1);
-    expect(refused.text()).toBe("Kamapathy: Unknown option: --label. Run help for usage.\n");
+    expect(
+      await main(["wait-for-control", "space-1", "--label", "Waiting"], {
+        env,
+        fetch: unused,
+        health: level3,
+        stderr: refused,
+      }),
+    ).toBe(1);
+    expect(refused.text()).toBe(
+      "Kamapathy: Unknown option: --label. Run help for usage.\n",
+    );
     const twice = sink();
-    expect(await main(["click", "tab-1", "@e2", "--label", "One", "--label", "Two"], { env, fetch: unused, health: level3, stderr: twice })).toBe(1);
+    expect(
+      await main(
+        ["click", "tab-1", "@e2", "--label", "One", "--label", "Two"],
+        { env, fetch: unused, health: level3, stderr: twice },
+      ),
+    ).toBe(1);
     expect(twice.text()).toContain("--label");
     expect(unused).not.toHaveBeenCalled();
     // Each listed space shows its state and the status the person reads.
@@ -4155,7 +6323,11 @@ describe("scripted sessions", () => {
       fetch: vi.fn(async () =>
         Response.json({
           spaces: [
-            { ...space, state: "failed", status: "The site needs a phone number" },
+            {
+              ...space,
+              state: "failed",
+              status: "The site needs a phone number",
+            },
             { ...space, id: "space-2", state: "needs-you" },
             { ...space, id: "space-3", status: "Comparing prices" },
             { ...space, id: "space-4" },
@@ -4175,7 +6347,9 @@ describe("scripted sessions", () => {
     );
     const help = sink();
     await runCli(["help"], { env, fetch: vi.fn(), stdout: help });
-    expect(help.text()).toContain("status <space-id> <text> | status <space-id> --clear");
+    expect(help.text()).toContain(
+      "status <space-id> <text> | status <space-id> --clear",
+    );
     expect(help.text()).toContain("fail <space-id> <message>");
   });
 
@@ -4183,9 +6357,14 @@ describe("scripted sessions", () => {
     const level3 = { status: "ok", version: "0.2.0", apiLevel: 3 };
     const api = fakeApi({
       ...routes,
-      "GET /spaces": { spaces: [{ ...space, status: "Comparing prices", state: "needs-you" }] },
+      "GET /spaces": {
+        spaces: [{ ...space, status: "Comparing prices", state: "needs-you" }],
+      },
       "POST /spaces/space-1/status": (body) =>
-        Response.json({ ok: true, ...(body.text ? { status: body.text } : {}) }),
+        Response.json({
+          ok: true,
+          ...(body.text ? { status: body.text } : {}),
+        }),
       "POST /spaces/space-1/fail": {
         ok: true,
         owner: "human",
@@ -4195,11 +6374,19 @@ describe("scripted sessions", () => {
     });
     const client = await connect({ env, fetch: api.fetch, health: level3 });
     const [research] = await client.spaces();
-    expect([research.status, research.state]).toEqual(["Comparing prices", "needs-you"]);
-    expect(await research.setStatus("Checking three sites")).toEqual({ ok: true, status: "Checking three sites" });
+    expect([research.status, research.state]).toEqual([
+      "Comparing prices",
+      "needs-you",
+    ]);
+    expect(await research.setStatus("Checking three sites")).toEqual({
+      ok: true,
+      status: "Checking three sites",
+    });
     expect(research.status).toBe("Checking three sites");
     for (const text of [null, ""]) {
-      expect(await research.setStatus(text), String(text)).toEqual({ ok: true });
+      expect(await research.setStatus(text), String(text)).toEqual({
+        ok: true,
+      });
       expect(research.status, String(text)).toBeUndefined();
     }
     expect(await research.fail("The site needs a phone number")).toEqual({
@@ -4225,18 +6412,71 @@ describe("scripted sessions", () => {
     await page.click("@e2");
     expect(api.requests).toEqual([
       { method: "GET", path: "/spaces", body: undefined },
-      { method: "POST", path: "/spaces/space-1/status", body: { text: "Checking three sites" } },
+      {
+        method: "POST",
+        path: "/spaces/space-1/status",
+        body: { text: "Checking three sites" },
+      },
       { method: "POST", path: "/spaces/space-1/status", body: { text: "" } },
       { method: "POST", path: "/spaces/space-1/status", body: { text: "" } },
-      { method: "POST", path: "/spaces/space-1/fail", body: { message: "The site needs a phone number" } },
-      { method: "POST", path: "/spaces/space-1/tabs", body: { url: "https://example.test/reserve" } },
-      { method: "POST", path: "/tabs/tab-1/click", body: { ref: "@e2", label: "Check availability" } },
-      { method: "POST", path: "/tabs/tab-1/fill", body: { ref: "@e1", value: "Avery Quinn", label: "Name the guest" } },
-      { method: "POST", path: "/tabs/tab-1/press", body: { key: "Enter", ref: "@e1", label: "Submit the form" } },
-      { method: "POST", path: "/tabs/tab-1/press", body: { key: "Escape", label: "Close the dialog" } },
-      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", pixels: 300, ref: "@e1", label: "Read the terms" } },
-      { method: "POST", path: "/tabs/tab-1/scroll", body: { direction: "down", selector: ".panel", label: "Read the panel" } },
-      { method: "POST", path: "/tabs/tab-1/drag", body: { source: { ref: "@e1" }, target: { selector: "#zone" }, label: "Reorder the list" } },
+      {
+        method: "POST",
+        path: "/spaces/space-1/fail",
+        body: { message: "The site needs a phone number" },
+      },
+      {
+        method: "POST",
+        path: "/spaces/space-1/tabs",
+        body: { url: "https://example.test/reserve" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/click",
+        body: { ref: "@e2", label: "Check availability" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fill",
+        body: { ref: "@e1", value: "Avery Quinn", label: "Name the guest" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/press",
+        body: { key: "Enter", ref: "@e1", label: "Submit the form" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/press",
+        body: { key: "Escape", label: "Close the dialog" },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/scroll",
+        body: {
+          direction: "down",
+          pixels: 300,
+          ref: "@e1",
+          label: "Read the terms",
+        },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/scroll",
+        body: {
+          direction: "down",
+          selector: ".panel",
+          label: "Read the panel",
+        },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/drag",
+        body: {
+          source: { ref: "@e1" },
+          target: { selector: "#zone" },
+          label: "Reorder the list",
+        },
+      },
       { method: "POST", path: "/tabs/tab-1/click", body: { ref: "@e2" } },
     ]);
     // Bad arguments never reach the socket.
@@ -4245,16 +6485,33 @@ describe("scripted sessions", () => {
       code: "invalid_argument",
       entry: "space.setStatus",
     });
-    await expect(research.setStatus(5)).rejects.toMatchObject({ code: "invalid_argument" });
-    await expect(research.fail("")).rejects.toMatchObject({ code: "invalid_argument", entry: "space.fail" });
-    await expect(page.click("@e2", { label: "x".repeat(61) })).rejects.toMatchObject({ code: "invalid_option" });
+    await expect(research.setStatus(5)).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    await expect(research.fail("")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "space.fail",
+    });
+    await expect(
+      page.click("@e2", { label: "x".repeat(61) }),
+    ).rejects.toMatchObject({ code: "invalid_option" });
     expect(api.requests).toHaveLength(sent);
-    expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { label: "x".repeat(61) }])).toMatchObject({
+    expect(
+      schema.checkCall(schema.findEntry("Page.click"), [
+        "@e1",
+        { label: "x".repeat(61) },
+      ]),
+    ).toMatchObject({
       code: "invalid_option",
       message:
         "page.click got an invalid option: label must be a nonempty string of at most 60 characters. Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }).",
     });
-    expect(schema.checkCall(schema.findEntry("Page.click"), ["@e1", { labl: "Add to cart" }])).toMatchObject({
+    expect(
+      schema.checkCall(schema.findEntry("Page.click"), [
+        "@e1",
+        { labl: "Add to cart" },
+      ]),
+    ).toMatchObject({
       message:
         'page.click got unknown option "labl". Expected page.click(target, { button?, clickCount?, delay?, position?, force?, timeout?, label? }). Did you mean "label"?',
     });
@@ -4273,13 +6530,36 @@ describe("scripted sessions", () => {
   };
   const navigationRoutes = {
     ...level3Routes,
-    "POST /tabs/tab-1/navigate": { ok: true, tab: slots, httpStatus: 200, waitUntil: "load" },
-    "POST /tabs/tab-1/reload": { ok: true, tab: slots, httpStatus: 200, waitUntil: "load" },
+    "POST /tabs/tab-1/navigate": {
+      ok: true,
+      tab: slots,
+      httpStatus: 200,
+      waitUntil: "load",
+    },
+    "POST /tabs/tab-1/reload": {
+      ok: true,
+      tab: slots,
+      httpStatus: 200,
+      waitUntil: "load",
+    },
     "GET /tabs/tab-1/info": infoAnswer,
     "POST /tabs/tab-1/wait-for-url": { ok: true, tab: slots, url: slots.url },
-    "POST /tabs/tab-1/wait-for-load-state": { ok: true, tab: slots, state: "load" },
-    "POST /tabs/tab-1/wait-for-selector": { ok: true, tab: slots, state: "visible", matched: 1 },
-    "POST /tabs/tab-1/wait-for-function": { ok: true, tab: slots, value: { slots: 3 } },
+    "POST /tabs/tab-1/wait-for-load-state": {
+      ok: true,
+      tab: slots,
+      state: "load",
+    },
+    "POST /tabs/tab-1/wait-for-selector": {
+      ok: true,
+      tab: slots,
+      state: "visible",
+      matched: 1,
+    },
+    "POST /tabs/tab-1/wait-for-function": {
+      ok: true,
+      tab: slots,
+      value: { slots: 3 },
+    },
   };
   // The page the navigation tests drive. Finding the space and opening the
   // page are the two requests before each test's own.
@@ -4296,26 +6576,79 @@ describe("scripted sessions", () => {
   it("goto, reload and the waits map their options", async () => {
     const api = fakeApi(navigationRoutes);
     const page = await navigationPage(api);
-    expect(await page.goto("https://example.test/slots", { waitUntil: "domcontentloaded", timeout: 3000, referer: "https://example.test/" })).toEqual({
+    expect(
+      await page.goto("https://example.test/slots", {
+        waitUntil: "domcontentloaded",
+        timeout: 3000,
+        referer: "https://example.test/",
+      }),
+    ).toEqual({
       ok: true,
       tab: slots,
       httpStatus: 200,
       waitUntil: "load",
     });
-    await page.reload({ waitUntil: "networkidle", timeout: 2000, ignoreCache: true });
+    await page.reload({
+      waitUntil: "networkidle",
+      timeout: 2000,
+      ignoreCache: true,
+    });
     expect(await page.info()).toEqual(infoAnswer);
-    await page.waitForURL("https://example.test/**/done", { waitUntil: "commit", timeout: 4000 });
+    await page.waitForURL("https://example.test/**/done", {
+      waitUntil: "commit",
+      timeout: 4000,
+    });
     await page.waitForLoadState("networkidle", { timeout: 5000, idleMs: 750 });
     await page.waitForSelector("@e2", { state: "hidden", timeout: 6000 });
-    await page.waitForFunction("window.slots > 0", undefined, { timeout: 7000, interval: 250 });
+    await page.waitForFunction("window.slots > 0", undefined, {
+      timeout: 7000,
+      interval: 250,
+    });
     expect(api.requests.slice(2)).toEqual([
-      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "domcontentloaded", timeoutMs: 3000, referer: "https://example.test/" } },
-      { method: "POST", path: "/tabs/tab-1/reload", body: { waitUntil: "networkidle", timeoutMs: 2000, ignoreCache: true } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/navigate",
+        body: {
+          url: "https://example.test/slots",
+          waitUntil: "domcontentloaded",
+          timeoutMs: 3000,
+          referer: "https://example.test/",
+        },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/reload",
+        body: { waitUntil: "networkidle", timeoutMs: 2000, ignoreCache: true },
+      },
       { method: "GET", path: "/tabs/tab-1/info", body: undefined },
-      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { url: "https://example.test/**/done", waitUntil: "commit", timeoutMs: 4000 } },
-      { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "networkidle", idleMs: 750, timeoutMs: 5000 } },
-      { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { ref: "@e2", state: "hidden", timeoutMs: 6000 } },
-      { method: "POST", path: "/tabs/tab-1/wait-for-function", body: { expression: "window.slots > 0", intervalMs: 250, timeoutMs: 7000 } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-url",
+        body: {
+          url: "https://example.test/**/done",
+          waitUntil: "commit",
+          timeoutMs: 4000,
+        },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-load-state",
+        body: { state: "networkidle", idleMs: 750, timeoutMs: 5000 },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-selector",
+        body: { ref: "@e2", state: "hidden", timeoutMs: 6000 },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-function",
+        body: {
+          expression: "window.slots > 0",
+          intervalMs: 250,
+          timeoutMs: 7000,
+        },
+      },
     ]);
     // Each call's HTTP timeout is its operation timeout plus 5000 ms, from
     // the route's own field budget.
@@ -4340,7 +6673,11 @@ describe("scripted sessions", () => {
     await plain.waitForSelector("#slots");
     await plain.waitForFunction("window.slots > 0");
     expect(defaults.requests.slice(2).map((item) => item.body)).toEqual([
-      { url: "https://example.test/slots", waitUntil: "load", timeoutMs: 15000 },
+      {
+        url: "https://example.test/slots",
+        waitUntil: "load",
+        timeoutMs: 15000,
+      },
       { waitUntil: "load", timeoutMs: 15000, ignoreCache: false },
       { state: "load", idleMs: 500, timeoutMs: 10000 },
       { selector: "#slots", state: "visible", timeoutMs: 10000 },
@@ -4355,22 +6692,50 @@ describe("scripted sessions", () => {
     await page.goto("https://example.test/slots");
     expect(api.requests.slice(2).map((item) => item.body)).toEqual([
       { url: "https://example.test/slots", waitUntil: "commit" },
-      { url: "https://example.test/slots", waitUntil: "load", timeoutMs: 15000 },
+      {
+        url: "https://example.test/slots",
+        waitUntil: "load",
+        timeoutMs: 15000,
+      },
     ]);
     // The command without --wait-until returns at commit too.
     const cli = fakeApi(navigationRoutes);
-    expect(await runCli(["navigate", "tab-1", "https://example.test/slots"], { env, fetch: cli.fetch, health: level4, stdout: sink() })).toBe(0);
-    expect(cli.requests).toEqual([
-      { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } },
-    ]);
-    const flagged = fakeApi(navigationRoutes);
     expect(
-      await runCli(["navigate", "tab-1", "https://example.test/slots", "--wait-until", "networkidle", "--timeout", "30000", "--referer", "https://example.test/"], {
+      await runCli(["navigate", "tab-1", "https://example.test/slots"], {
         env,
-        fetch: flagged.fetch,
+        fetch: cli.fetch,
         health: level4,
         stdout: sink(),
       }),
+    ).toBe(0);
+    expect(cli.requests).toEqual([
+      {
+        method: "POST",
+        path: "/tabs/tab-1/navigate",
+        body: { url: "https://example.test/slots", waitUntil: "commit" },
+      },
+    ]);
+    const flagged = fakeApi(navigationRoutes);
+    expect(
+      await runCli(
+        [
+          "navigate",
+          "tab-1",
+          "https://example.test/slots",
+          "--wait-until",
+          "networkidle",
+          "--timeout",
+          "30000",
+          "--referer",
+          "https://example.test/",
+        ],
+        {
+          env,
+          fetch: flagged.fetch,
+          health: level4,
+          stdout: sink(),
+        },
+      ),
     ).toBe(0);
     expect(flagged.requests.at(-1).body).toEqual({
       url: "https://example.test/slots",
@@ -4380,19 +6745,40 @@ describe("scripted sessions", () => {
     });
     // --ignore-cache refetches past the cache.
     const cached = fakeApi(navigationRoutes);
-    expect(await runCli(["reload", "tab-1", "--ignore-cache"], { env, fetch: cached.fetch, health: level4, stdout: sink() })).toBe(0);
+    expect(
+      await runCli(["reload", "tab-1", "--ignore-cache"], {
+        env,
+        fetch: cached.fetch,
+        health: level4,
+        stdout: sink(),
+      }),
+    ).toBe(0);
     expect(cached.requests.at(-1).body).toEqual({ ignoreCache: true });
     // A Kamapathy that predates the field is told which one, before anything
     // is sent.
     const older = fakeApi(navigationRoutes);
     await expect(
-      runCli(["navigate", "tab-1", "https://example.test/slots", "--wait-until", "load"], {
-        env,
-        fetch: older.fetch,
-        health: { status: "ok", version: "0.1.9", apiLevel: 1 },
-        stdout: sink(),
-      }),
-    ).rejects.toMatchObject({ code: "app_outdated", entry: "navigate", option: "waitUntil", required: 4 });
+      runCli(
+        [
+          "navigate",
+          "tab-1",
+          "https://example.test/slots",
+          "--wait-until",
+          "load",
+        ],
+        {
+          env,
+          fetch: older.fetch,
+          health: { status: "ok", version: "0.1.9", apiLevel: 1 },
+          stdout: sink(),
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      entry: "navigate",
+      option: "waitUntil",
+      required: 4,
+    });
     expect(older.requests).toEqual([]);
   });
 
@@ -4403,10 +6789,27 @@ describe("scripted sessions", () => {
       { navigation: 7, url: "https://example.test/done" },
     ];
     const watched = [
-      { ok: true, tab: slots, url: "https://example.test/slots", navigation: 4, committed: [], popups: [] },
-      { ok: true, tab: slots, url: "https://example.test/done", navigation: 7, committed, popups: [] },
+      {
+        ok: true,
+        tab: slots,
+        url: "https://example.test/slots",
+        navigation: 4,
+        committed: [],
+        popups: [],
+      },
+      {
+        ok: true,
+        tab: slots,
+        url: "https://example.test/done",
+        navigation: 7,
+        committed,
+        popups: [],
+      },
     ];
-    const api = fakeApi({ ...navigationRoutes, "POST /tabs/tab-1/wait-for-url": () => Response.json(watched.shift()) });
+    const api = fakeApi({
+      ...navigationRoutes,
+      "POST /tabs/tab-1/wait-for-url": () => Response.json(watched.shift()),
+    });
     const page = await navigationPage(api);
     const seen = [];
     const result = await page.waitForURL(
@@ -4416,35 +6819,77 @@ describe("scripted sessions", () => {
       },
       { timeout: 5000 },
     );
-    expect(result).toMatchObject({ ok: true, url: "https://example.test/done" });
+    expect(result).toMatchObject({
+      ok: true,
+      url: "https://example.test/done",
+    });
     // The predicate saw the URL at entry and every commit, oldest first, as
     // URL objects, and never an address that does not parse.
-    expect(seen.map(String)).toEqual(["https://example.test/slots", "https://example.test/step", "https://example.test/done"]);
+    expect(seen.map(String)).toEqual([
+      "https://example.test/slots",
+      "https://example.test/step",
+      "https://example.test/done",
+    ]);
     expect(seen.every((address) => address instanceof URL)).toBe(true);
     expect(api.requests.slice(2)).toEqual([
-      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { timeoutMs: expect.any(Number) } },
-      { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { after: 4, timeoutMs: expect.any(Number) } },
-      { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "load", timeoutMs: expect.any(Number) } },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-url",
+        body: { timeoutMs: expect.any(Number) },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-url",
+        body: { after: 4, timeoutMs: expect.any(Number) },
+      },
+      {
+        method: "POST",
+        path: "/tabs/tab-1/wait-for-load-state",
+        body: { state: "load", timeoutMs: expect.any(Number) },
+      },
     ]);
     // A RegExp is reset before each test, so one matcher works twice.
     const repeated = fakeApi({
       ...navigationRoutes,
       "POST /tabs/tab-1/wait-for-url": () =>
-        Response.json({ ok: true, tab: slots, url: "https://example.test/done", navigation: 2, committed: [], popups: [] }),
+        Response.json({
+          ok: true,
+          tab: slots,
+          url: "https://example.test/done",
+          navigation: 2,
+          committed: [],
+          popups: [],
+        }),
     });
     const twice = await navigationPage(repeated);
     const pattern = /example\.test\/done/g;
     for (const attempt of [1, 2])
-      expect((await twice.waitForURL(pattern, { timeout: 1000 })).url, String(attempt)).toBe("https://example.test/done");
+      expect(
+        (await twice.waitForURL(pattern, { timeout: 1000 })).url,
+        String(attempt),
+      ).toBe("https://example.test/done");
     // A popup that reached the URL ends the wait: the action already happened.
-    const popup = { id: "tab-9", label: "p3", url: "https://example.test/done" };
+    const popup = {
+      id: "tab-9",
+      label: "p3",
+      url: "https://example.test/done",
+    };
     const opened = fakeApi({
       ...navigationRoutes,
       "POST /tabs/tab-1/wait-for-url": () =>
-        Response.json({ ok: true, tab: slots, url: "https://example.test/slots", navigation: 3, committed: [], popups: [popup] }),
+        Response.json({
+          ok: true,
+          tab: slots,
+          url: "https://example.test/slots",
+          navigation: 3,
+          committed: [],
+          popups: [popup],
+        }),
     });
     const popped = await navigationPage(opened);
-    await expect(popped.waitForURL(/\/done$/, { timeout: 1000 })).rejects.toMatchObject({
+    await expect(
+      popped.waitForURL(/\/done$/, { timeout: 1000 }),
+    ).rejects.toMatchObject({
       code: "url_opened_in_popup",
       entry: "page.waitForURL",
       lastUrl: "https://example.test/slots",
@@ -4460,7 +6905,8 @@ describe("scripted sessions", () => {
           {
             error: {
               code: "wait_timeout",
-              message: "The page did not commit another URL within 200 ms. It is at https://example.test/slots.",
+              message:
+                "The page did not commit another URL within 200 ms. It is at https://example.test/slots.",
               awaited: "url",
               timeoutMs: 200,
               lastUrl: "https://example.test/slots",
@@ -4470,16 +6916,23 @@ describe("scripted sessions", () => {
         ),
     });
     const waiting = await navigationPage(stalled);
-    await expect(waiting.waitForURL(/\/done$/, { timeout: 200 })).rejects.toMatchObject({
+    await expect(
+      waiting.waitForURL(/\/done$/, { timeout: 200 }),
+    ).rejects.toMatchObject({
       code: "wait_timeout",
       entry: "page.waitForURL",
       awaited: "url",
       expected: "\\/done$",
       lastUrl: "https://example.test/slots",
       timeoutMs: 200,
-      message: "The page did not reach a URL matching \\/done$ within 200 ms. It is at https://example.test/slots.",
+      message:
+        "The page did not reach a URL matching \\/done$ within 200 ms. It is at https://example.test/slots.",
     });
-    await expect(waiting.waitForURL((address) => address.pathname === "/done", { timeout: 200 })).rejects.toMatchObject({
+    await expect(
+      waiting.waitForURL((address) => address.pathname === "/done", {
+        timeout: 200,
+      }),
+    ).rejects.toMatchObject({
       code: "wait_timeout",
       expected: "a URL predicate",
     });
@@ -4489,18 +6942,36 @@ describe("scripted sessions", () => {
     const api = fakeApi(navigationRoutes);
     const page = await navigationPage(api);
     const sent = api.requests.length;
-    for (const options of [{ timeout: 5000 }, { interval: 250 }, { timeout: 5000, interval: 250 }])
-      await expect(page.waitForFunction(() => true, options), JSON.stringify(options)).rejects.toMatchObject({
+    for (const options of [
+      { timeout: 5000 },
+      { interval: 250 },
+      { timeout: 5000, interval: 250 },
+    ])
+      await expect(
+        page.waitForFunction(() => true, options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
         code: "invalid_argument",
         entry: "page.waitForFunction",
-        expected: "page.waitForFunction(pageFunction, arg?, { timeout?, interval? })",
+        expected:
+          "page.waitForFunction(pageFunction, arg?, { timeout?, interval? })",
       });
     expect(api.requests).toHaveLength(sent);
     // An argument of its own still reaches the page, options and all.
     await page.waitForFunction((rows) => rows > 0, 3, { interval: 250 });
-    expect(api.requests.at(-1).body).toEqual({ function: "(rows) => rows > 0", arg: 3, intervalMs: 250, timeoutMs: 10000 });
+    expect(api.requests.at(-1).body).toEqual({
+      function: "(rows) => rows > 0",
+      arg: 3,
+      intervalMs: 250,
+      timeoutMs: 10000,
+    });
     await page.waitForFunction((data) => data.rows > 0, { rows: 3 });
-    expect(api.requests.at(-1).body).toEqual({ function: "(data) => data.rows > 0", arg: { rows: 3 }, intervalMs: 100, timeoutMs: 10000 });
+    expect(api.requests.at(-1).body).toEqual({
+      function: "(data) => data.rows > 0",
+      arg: { rows: 3 },
+      intervalMs: 100,
+      timeoutMs: 10000,
+    });
   });
 
   it("waitForTimeout validates and sends nothing", async () => {
@@ -4511,7 +6982,9 @@ describe("scripted sessions", () => {
     const started = Date.now();
     await page.waitForTimeout(20);
     expect(Date.now() - started).toBeGreaterThanOrEqual(15);
-    expect(schema.checkCall(schema.findEntry("Page.waitForTimeout"), [600000])).toBeNull();
+    expect(
+      schema.checkCall(schema.findEntry("Page.waitForTimeout"), [600000]),
+    ).toBeNull();
     for (const ms of [-1, 600001, 1.5, "1000", null])
       await expect(page.waitForTimeout(ms), String(ms)).rejects.toMatchObject({
         code: "invalid_argument",
@@ -4522,15 +6995,106 @@ describe("scripted sessions", () => {
 
   it("each new command sends one request", async () => {
     const cases = [
-      [["navigate", "tab-1", "https://example.test/slots"], { method: "POST", path: "/tabs/tab-1/navigate", body: { url: "https://example.test/slots", waitUntil: "commit" } }],
-      [["reload", "tab-1", "--wait-until", "domcontentloaded", "--timeout", "9000"], { method: "POST", path: "/tabs/tab-1/reload", body: { waitUntil: "domcontentloaded", timeoutMs: 9000 } }],
-      [["info", "tab-1"], { method: "GET", path: "/tabs/tab-1/info", body: undefined }],
-      [["wait-for-url", "tab-1", "https://example.test/**/done", "--wait-until", "commit", "--timeout", "8000"], { method: "POST", path: "/tabs/tab-1/wait-for-url", body: { url: "https://example.test/**/done", waitUntil: "commit", timeoutMs: 8000 } }],
-      [["wait-for-load-state", "tab-1", "networkidle", "--idle", "750"], { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { state: "networkidle", idleMs: 750 } }],
-      [["wait-for-load-state", "tab-1", "--timeout", "0"], { method: "POST", path: "/tabs/tab-1/wait-for-load-state", body: { timeoutMs: 0 } }],
-      [["wait-for-selector", "tab-1", "#slots", "--state", "attached"], { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { selector: "#slots", state: "attached" } }],
-      [["wait-for-selector", "tab-1", "@e2"], { method: "POST", path: "/tabs/tab-1/wait-for-selector", body: { ref: "@e2" } }],
-      [["wait-for-function", "tab-1", "--stdin", "--interval", "250", "--timeout", "8000"], { method: "POST", path: "/tabs/tab-1/wait-for-function", body: { expression: "window.slots > 0", intervalMs: 250, timeoutMs: 8000 } }, "window.slots > 0\n"],
+      [
+        ["navigate", "tab-1", "https://example.test/slots"],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/navigate",
+          body: { url: "https://example.test/slots", waitUntil: "commit" },
+        },
+      ],
+      [
+        [
+          "reload",
+          "tab-1",
+          "--wait-until",
+          "domcontentloaded",
+          "--timeout",
+          "9000",
+        ],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/reload",
+          body: { waitUntil: "domcontentloaded", timeoutMs: 9000 },
+        },
+      ],
+      [
+        ["info", "tab-1"],
+        { method: "GET", path: "/tabs/tab-1/info", body: undefined },
+      ],
+      [
+        [
+          "wait-for-url",
+          "tab-1",
+          "https://example.test/**/done",
+          "--wait-until",
+          "commit",
+          "--timeout",
+          "8000",
+        ],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-url",
+          body: {
+            url: "https://example.test/**/done",
+            waitUntil: "commit",
+            timeoutMs: 8000,
+          },
+        },
+      ],
+      [
+        ["wait-for-load-state", "tab-1", "networkidle", "--idle", "750"],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-load-state",
+          body: { state: "networkidle", idleMs: 750 },
+        },
+      ],
+      [
+        ["wait-for-load-state", "tab-1", "--timeout", "0"],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-load-state",
+          body: { timeoutMs: 0 },
+        },
+      ],
+      [
+        ["wait-for-selector", "tab-1", "#slots", "--state", "attached"],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-selector",
+          body: { selector: "#slots", state: "attached" },
+        },
+      ],
+      [
+        ["wait-for-selector", "tab-1", "@e2"],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-selector",
+          body: { ref: "@e2" },
+        },
+      ],
+      [
+        [
+          "wait-for-function",
+          "tab-1",
+          "--stdin",
+          "--interval",
+          "250",
+          "--timeout",
+          "8000",
+        ],
+        {
+          method: "POST",
+          path: "/tabs/tab-1/wait-for-function",
+          body: {
+            expression: "window.slots > 0",
+            intervalMs: 250,
+            timeoutMs: 8000,
+          },
+        },
+        "window.slots > 0\n",
+      ],
     ];
     for (const [args, expected, stdin] of cases) {
       const api = fakeApi(navigationRoutes);
@@ -4547,7 +7111,14 @@ describe("scripted sessions", () => {
       expect(api.requests, args.join(" ")).toEqual([expected]);
     }
     const unused = vi.fn();
-    await expect(runCli(["wait-for-function", "tab-1"], { env, fetch: unused, health: level4, stdout: sink() })).rejects.toThrow(/--stdin/);
+    await expect(
+      runCli(["wait-for-function", "tab-1"], {
+        env,
+        fetch: unused,
+        health: level4,
+        stdout: sink(),
+      }),
+    ).rejects.toThrow(/--stdin/);
     // Each new command is refused by name against a Kamapathy that predates it.
     for (const args of [
       ["reload", "tab-1"],
@@ -4556,7 +7127,10 @@ describe("scripted sessions", () => {
       ["wait-for-load-state", "tab-1"],
       ["wait-for-selector", "tab-1", "#slots"],
     ])
-      await expect(runCli(args, { env, fetch: unused, health: level3, stdout: sink() }), args.join(" ")).rejects.toMatchObject({
+      await expect(
+        runCli(args, { env, fetch: unused, health: level3, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toMatchObject({
         code: "app_outdated",
         required: 4,
         available: 3,
@@ -4568,18 +7142,66 @@ describe("scripted sessions", () => {
     const cases = [
       [
         ["navigate", "tab-1", "https://example.test/slots"],
-        { ok: true, tab: slots, httpStatus: 200, waitUntil: "commit", dialog: { type: "beforeunload", message: "", answer: "accepted" } },
-        ["tab tab-1 https://example.test/slots 200", "dialog beforeunload accepted"],
+        {
+          ok: true,
+          tab: slots,
+          httpStatus: 200,
+          waitUntil: "commit",
+          dialog: { type: "beforeunload", message: "", answer: "accepted" },
+        },
+        [
+          "tab tab-1 https://example.test/slots 200",
+          "dialog beforeunload accepted",
+        ],
       ],
-      [["reload", "tab-1"], { ok: true, tab: slots, waitUntil: "load" }, ["tab tab-1 https://example.test/slots"]],
-      [["info", "tab-1"], infoAnswer, ["tab tab-1 https://example.test/slots", "viewport 1200x800 scroll 0,640 document 1200x5400 complete"]],
-      [["wait-for-url", "tab-1", "https://example.test/**/done"], { ok: true, tab: slots, url: "https://example.test/done" }, ["ok: url https://example.test/done"]],
-      [["wait-for-load-state", "tab-1", "networkidle"], { ok: true, tab: slots, state: "networkidle" }, ["ok: networkidle https://example.test/slots"]],
-      [["wait-for-selector", "tab-1", "#slots"], { ok: true, tab: slots, state: "visible", matched: 1 }, ["ok: visible 1 match"]],
-      [["wait-for-selector", "tab-1", "#slots", "--state", "hidden"], { ok: true, tab: slots, state: "hidden", matched: 3 }, ["ok: hidden 3 matches"]],
-      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots, value: { slots: 3 } }, ['ok: value {"slots":3}']],
-      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots }, ["ok: value undefined"]],
-      [["wait-for-function", "tab-1", "--stdin"], { ok: true, tab: slots, unserializable: "Infinity" }, ["ok: value Infinity"]],
+      [
+        ["reload", "tab-1"],
+        { ok: true, tab: slots, waitUntil: "load" },
+        ["tab tab-1 https://example.test/slots"],
+      ],
+      [
+        ["info", "tab-1"],
+        infoAnswer,
+        [
+          "tab tab-1 https://example.test/slots",
+          "viewport 1200x800 scroll 0,640 document 1200x5400 complete",
+        ],
+      ],
+      [
+        ["wait-for-url", "tab-1", "https://example.test/**/done"],
+        { ok: true, tab: slots, url: "https://example.test/done" },
+        ["ok: url https://example.test/done"],
+      ],
+      [
+        ["wait-for-load-state", "tab-1", "networkidle"],
+        { ok: true, tab: slots, state: "networkidle" },
+        ["ok: networkidle https://example.test/slots"],
+      ],
+      [
+        ["wait-for-selector", "tab-1", "#slots"],
+        { ok: true, tab: slots, state: "visible", matched: 1 },
+        ["ok: visible 1 match"],
+      ],
+      [
+        ["wait-for-selector", "tab-1", "#slots", "--state", "hidden"],
+        { ok: true, tab: slots, state: "hidden", matched: 3 },
+        ["ok: hidden 3 matches"],
+      ],
+      [
+        ["wait-for-function", "tab-1", "--stdin"],
+        { ok: true, tab: slots, value: { slots: 3 } },
+        ['ok: value {"slots":3}'],
+      ],
+      [
+        ["wait-for-function", "tab-1", "--stdin"],
+        { ok: true, tab: slots },
+        ["ok: value undefined"],
+      ],
+      [
+        ["wait-for-function", "tab-1", "--stdin"],
+        { ok: true, tab: slots, unserializable: "Infinity" },
+        ["ok: value Infinity"],
+      ],
     ];
     for (const [args, answer, lines] of cases) {
       const stdout = sink();
@@ -4599,14 +7221,23 @@ describe("scripted sessions", () => {
     const cutoff = sink();
     await runCli(["wait-for-function", "tab-1", "--stdin"], {
       env,
-      fetch: vi.fn(async () => Response.json({ ok: true, tab: slots, value: "x".repeat(400) })),
+      fetch: vi.fn(async () =>
+        Response.json({ ok: true, tab: slots, value: "x".repeat(400) }),
+      ),
       health: level4,
       stdin: Readable.from(["window.slots"]),
       stdout: cutoff,
     });
-    expect(cutoff.text()).toBe(`ok: value ${`"${"x".repeat(400)}"`.slice(0, 200)}\n`);
+    expect(cutoff.text()).toBe(
+      `ok: value ${`"${"x".repeat(400)}"`.slice(0, 200)}\n`,
+    );
     const json = sink();
-    await runCli(["info", "tab-1", "--json"], { env, fetch: vi.fn(async () => Response.json(infoAnswer)), health: level4, stdout: json });
+    await runCli(["info", "tab-1", "--json"], {
+      env,
+      fetch: vi.fn(async () => Response.json(infoAnswer)),
+      health: level4,
+      stdout: json,
+    });
     expect(JSON.parse(json.text())).toEqual(infoAnswer);
   });
 
@@ -4624,67 +7255,131 @@ describe("scripted sessions", () => {
       entry: "page.batch",
       index: 1,
       field: "state",
-      message: expect.stringContaining("state must be attached, visible, hidden, or detached."),
+      message: expect.stringContaining(
+        "state must be attached, visible, hidden, or detached.",
+      ),
     });
     // A URL step watches nothing: the after field belongs to the route only.
-    await expect(page.batch([{ type: "wait-for-url", after: 3 }])).rejects.toMatchObject({
+    await expect(
+      page.batch([{ type: "wait-for-url", after: 3 }]),
+    ).rejects.toMatchObject({
       code: "invalid_argument",
       field: "after",
-      message: expect.stringContaining('Batch step 1 (wait-for-url) has no field "after"'),
+      message: expect.stringContaining(
+        'Batch step 1 (wait-for-url) has no field "after"',
+      ),
     });
     expect(api.requests).toHaveLength(sent);
     // A plan the schema accepts reaches the route as one request.
     expect(
       await page.batch([
-        { type: "navigate", url: "https://example.test/slots", waitUntil: "commit" },
+        {
+          type: "navigate",
+          url: "https://example.test/slots",
+          waitUntil: "commit",
+        },
         { type: "wait-for-load-state", state: "networkidle", idleMs: 750 },
         { type: "wait-for-selector", ref: "@e2", state: "visible" },
         { type: "reload", ignoreCache: true },
-        { type: "wait-for-function", expression: "window.slots > 0", intervalMs: 250 },
+        {
+          type: "wait-for-function",
+          expression: "window.slots > 0",
+          intervalMs: 250,
+        },
       ]),
     ).toMatchObject({ ok: true });
-    expect(api.requests.at(-1)).toMatchObject({ method: "POST", path: "/tabs/tab-1/actions" });
+    expect(api.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/tabs/tab-1/actions",
+    });
   });
 
   it("page.url and page.title follow every answer", async () => {
     const done = { ...tab, url: "https://example.test/done", title: "Done" };
     const api = fakeApi({
       ...navigationRoutes,
-      "POST /tabs/tab-1/reload": { ok: true, tab: { ...slots, title: "Slots again" }, waitUntil: "load" },
-      "POST /tabs/tab-1/wait-for-selector": { ok: true, tab: done, state: "visible", matched: 2 },
-      "GET /tabs/tab-1/info": { ...infoAnswer, tab: { ...done, title: "Done page" } },
+      "POST /tabs/tab-1/reload": {
+        ok: true,
+        tab: { ...slots, title: "Slots again" },
+        waitUntil: "load",
+      },
+      "POST /tabs/tab-1/wait-for-selector": {
+        ok: true,
+        tab: done,
+        state: "visible",
+        matched: 2,
+      },
+      "GET /tabs/tab-1/info": {
+        ...infoAnswer,
+        tab: { ...done, title: "Done page" },
+      },
     });
     const page = await navigationPage(api);
-    expect([page.url, page.title]).toEqual(["https://example.test/reserve", "Reserve"]);
+    expect([page.url, page.title]).toEqual([
+      "https://example.test/reserve",
+      "Reserve",
+    ]);
     await page.goto("https://example.test/slots");
-    expect([page.url, page.title]).toEqual(["https://example.test/slots", "Slots"]);
+    expect([page.url, page.title]).toEqual([
+      "https://example.test/slots",
+      "Slots",
+    ]);
     await page.reload();
-    expect([page.url, page.title]).toEqual(["https://example.test/slots", "Slots again"]);
-    expect(await page.waitForSelector("#slots")).toEqual({ ok: true, tab: done, state: "visible", matched: 2 });
-    expect([page.url, page.title]).toEqual(["https://example.test/done", "Done"]);
+    expect([page.url, page.title]).toEqual([
+      "https://example.test/slots",
+      "Slots again",
+    ]);
+    expect(await page.waitForSelector("#slots")).toEqual({
+      ok: true,
+      tab: done,
+      state: "visible",
+      matched: 2,
+    });
+    expect([page.url, page.title]).toEqual([
+      "https://example.test/done",
+      "Done",
+    ]);
     await page.info();
     expect(page.title).toBe("Done page");
   });
 
   // Section 5's client surface: the element options, both press orders, the
   // mouse and keyboard controllers, and the release at the end of a run.
-  const current = { status: "ok", version: "0.2.0", apiLevel: schema.API_LEVEL };
+  const current = {
+    status: "ok",
+    version: "0.2.0",
+    apiLevel: schema.API_LEVEL,
+  };
   const pointer = { x: 40, y: 60, buttons: 0, keys: [], modifiers: 0 };
   const inputAnswers = {
     ...level3Routes,
-    "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
-    "POST /tabs/tab-1/dblclick": { ok: true, url: tab.url, point: { x: 40, y: 60 } },
+    "POST /tabs/tab-1/click": {
+      ok: true,
+      url: tab.url,
+      point: { x: 40, y: 60 },
+    },
+    "POST /tabs/tab-1/dblclick": {
+      ok: true,
+      url: tab.url,
+      point: { x: 40, y: 60 },
+    },
     "POST /tabs/tab-1/hover": { ok: true, point: { x: 40, y: 60 } },
     "POST /tabs/tab-1/fill": { ok: true, match: "equivalent", value: "12.50" },
     "POST /tabs/tab-1/select": { ok: true, values: ["pro", "team"] },
     "POST /tabs/tab-1/focus": { ok: true },
     "POST /tabs/tab-1/press": { ok: true, url: tab.url },
     "POST /tabs/tab-1/mouse/move": { ok: true, input: pointer },
-    "POST /tabs/tab-1/mouse/down": { ok: true, input: { ...pointer, buttons: 1 } },
+    "POST /tabs/tab-1/mouse/down": {
+      ok: true,
+      input: { ...pointer, buttons: 1 },
+    },
     "POST /tabs/tab-1/mouse/up": { ok: true, input: pointer },
     "POST /tabs/tab-1/mouse/click": { ok: true, url: tab.url, input: pointer },
     "POST /tabs/tab-1/mouse/wheel": { ok: true, input: pointer },
-    "POST /tabs/tab-1/keyboard/down": { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } },
+    "POST /tabs/tab-1/keyboard/down": {
+      ok: true,
+      input: { ...pointer, keys: ["Shift"], modifiers: 8 },
+    },
     "POST /tabs/tab-1/keyboard/up": { ok: true, input: pointer },
     "POST /tabs/tab-1/keyboard/type": { ok: true, input: pointer },
     "POST /tabs/tab-1/keyboard/insert-text": { ok: true },
@@ -4696,7 +7391,8 @@ describe("scripted sessions", () => {
     const client = await connect({ env, fetch: api.fetch, health });
     return (await client.space("space-1")).open("https://example.test/reserve");
   };
-  const routeOf = (key) => schema.ROUTES.find((item) => schema.routeKey(item) === key);
+  const routeOf = (key) =>
+    schema.ROUTES.find((item) => schema.routeKey(item) === key);
 
   it("takes press in both argument orders", async () => {
     const api = fakeApi(inputAnswers);
@@ -4711,11 +7407,22 @@ describe("scripted sessions", () => {
     await page.press("#search", "Shift+KeyA");
     expect(body()).toEqual({ key: "Shift+KeyA", selector: "#search" });
     await page.press("ControlOrMeta+KeyS", "@e3", { delay: 50, timeout: 1000 });
-    expect(body()).toEqual({ key: "ControlOrMeta+KeyS", ref: "@e3", delayMs: 50, timeoutMs: 1000 });
+    expect(body()).toEqual({
+      key: "ControlOrMeta+KeyS",
+      ref: "@e3",
+      delayMs: 50,
+      timeoutMs: 1000,
+    });
     // A lone argument that is no chord is not guessed at.
     const sent = api.requests.length;
-    await expect(page.press("@e3")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
-    await expect(page.press("#search")).rejects.toMatchObject({ code: "invalid_argument", entry: "page.press" });
+    await expect(page.press("@e3")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.press",
+    });
+    await expect(page.press("#search")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.press",
+    });
     expect(api.requests).toHaveLength(sent);
     // keyboard.press is the same route with no target.
     await page.keyboard.press("Shift+Tab", { delay: 20 });
@@ -4745,11 +7452,13 @@ describe("scripted sessions", () => {
       option: "delayMs",
       suggestion: "delay",
     });
-    await expect(page.dblclick("@e1", { clickCount: 2 })).rejects.toMatchObject({
-      code: "invalid_option",
-      entry: "page.dblclick",
-      option: "clickCount",
-    });
+    await expect(page.dblclick("@e1", { clickCount: 2 })).rejects.toMatchObject(
+      {
+        code: "invalid_option",
+        entry: "page.dblclick",
+        option: "clickCount",
+      },
+    );
     await expect(page.hover("@e1", { position: "10" })).rejects.toMatchObject({
       code: "invalid_option",
       option: "position",
@@ -4762,7 +7471,9 @@ describe("scripted sessions", () => {
       code: "invalid_argument",
       entry: "page.mouse.move",
     });
-    await expect(page.mouse.wheel(0, 20000)).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(page.mouse.wheel(0, 20000)).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
     expect(api.requests).toHaveLength(sent);
     // A lone choice, an object and null all reach the route as its array.
     for (const [values, chosen] of [
@@ -4770,14 +7481,23 @@ describe("scripted sessions", () => {
       [{ label: "Pro" }, [{ label: "Pro" }]],
       [null, []],
       [[], []],
-      [["pro", "team"], ["pro", "team"]],
+      [
+        ["pro", "team"],
+        ["pro", "team"],
+      ],
     ]) {
       await page.selectOption("@e1", values);
-      expect(api.requests.at(-1).body, JSON.stringify(values)).toEqual({ ref: "@e1", values: chosen });
+      expect(api.requests.at(-1).body, JSON.stringify(values)).toEqual({
+        ref: "@e1",
+        values: chosen,
+      });
     }
     // Both position spellings reach the route as { x, y }.
     await page.click("@e1", { position: "10,20" });
-    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", position: { x: 10, y: 20 } });
+    expect(api.requests.at(-1).body).toEqual({
+      ref: "@e1",
+      position: { x: 10, y: 20 },
+    });
     await page.dragAndDrop("@e1", "#zone", {
       sourcePosition: { x: 1, y: 2 },
       targetPosition: "3,4",
@@ -4795,52 +7515,108 @@ describe("scripted sessions", () => {
     // page.drag keeps its own signature, and fill, focus and the raw routes
     // send what their options name.
     await page.drag("@e1", "#zone");
-    expect(api.requests.at(-1).body).toEqual({ source: { ref: "@e1" }, target: { selector: "#zone" } });
+    expect(api.requests.at(-1).body).toEqual({
+      source: { ref: "@e1" },
+      target: { selector: "#zone" },
+    });
     await page.fill("@e1", "Avery", { append: true, timeout: 1000 });
-    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", value: "Avery", append: true, timeoutMs: 1000 });
+    expect(api.requests.at(-1).body).toEqual({
+      ref: "@e1",
+      value: "Avery",
+      append: true,
+      timeoutMs: 1000,
+    });
     await page.focus("@e1", { timeout: 0 });
     expect(api.requests.at(-1).body).toEqual({ ref: "@e1", timeoutMs: 0 });
     await page.mouse.move(40, 60, { steps: 10 });
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/move", body: { x: 40, y: 60, steps: 10 } });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/mouse/move",
+      body: { x: 40, y: 60, steps: 10 },
+    });
     await page.mouse.down({ button: "right" });
     expect(api.requests.at(-1).body).toEqual({ button: "right" });
     await page.mouse.up();
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/up", body: {} });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/mouse/up",
+      body: {},
+    });
     await page.mouse.click(5, 6, { clickCount: 2, delay: 30 });
-    expect(api.requests.at(-1).body).toEqual({ x: 5, y: 6, clickCount: 2, delayMs: 30 });
+    expect(api.requests.at(-1).body).toEqual({
+      x: 5,
+      y: 6,
+      clickCount: 2,
+      delayMs: 30,
+    });
     await page.mouse.dblclick(5, 6, { delay: 30 });
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/mouse/click", body: { x: 5, y: 6, clickCount: 2, delayMs: 30 } });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/mouse/click",
+      body: { x: 5, y: 6, clickCount: 2, delayMs: 30 },
+    });
     await page.mouse.wheel(0, 120);
     expect(api.requests.at(-1).body).toEqual({ deltaX: 0, deltaY: 120 });
     await page.keyboard.down("Shift");
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/down", body: { key: "Shift" } });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/keyboard/down",
+      body: { key: "Shift" },
+    });
     await page.keyboard.up("Shift");
     expect(api.requests.at(-1).body).toEqual({ key: "Shift" });
     await page.keyboard.type("hello", { delay: 10 });
     expect(api.requests.at(-1).body).toEqual({ text: "hello", delayMs: 10 });
     await page.keyboard.insertText("hello");
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/keyboard/insert-text", body: { text: "hello" } });
-    expect(await page.keyboard.paste("hello")).toEqual({ ok: true, handled: "page" });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/keyboard/insert-text",
+      body: { text: "hello" },
+    });
+    expect(await page.keyboard.paste("hello")).toEqual({
+      ok: true,
+      handled: "page",
+    });
     expect(api.requests.at(-1).body).toEqual({ text: "hello" });
     await page.keyboard.paste({ text: "hello", html: "<b>hello</b>" });
-    expect(api.requests.at(-1).body).toEqual({ text: "hello", html: "<b>hello</b>" });
+    expect(api.requests.at(-1).body).toEqual({
+      text: "hello",
+      html: "<b>hello</b>",
+    });
     // The paste body may hold the whole text and HTML the route takes.
-    await page.keyboard.paste({ text: "é".repeat(16384), html: "é".repeat(32768) });
+    await page.keyboard.paste({
+      text: "é".repeat(16384),
+      html: "é".repeat(32768),
+    });
     expect(api.requests.at(-1).body.text).toHaveLength(16384);
-    await expect(page.keyboard.paste({ text: 5 })).rejects.toMatchObject({ code: "invalid_option", option: "text" });
+    await expect(page.keyboard.paste({ text: 5 })).rejects.toMatchObject({
+      code: "invalid_option",
+      option: "text",
+    });
   });
 
   it("sends the HTTP timeouts the spec lists", async () => {
     const api = fakeApi(inputAnswers);
     const page = await inputPage(api);
-    const timeoutOf = (key, body) => httpTimeout(schema.requestBudget(routeOf(key), body), routeOf(key));
+    const timeoutOf = (key, body) =>
+      httpTimeout(schema.requestBudget(routeOf(key), body), routeOf(key));
     // A delayed triple click: the wait for an actionable target, one delay
     // per gap, the settle and load wait, and the client's own 5000 ms.
     await page.click("@e1", { clickCount: 3, delay: 500, timeout: 3000 });
-    expect(api.requests.at(-1).body).toEqual({ ref: "@e1", clickCount: 3, delayMs: 500, timeoutMs: 3000 });
-    expect(timeoutOf("POST /tabs/:id/click", api.requests.at(-1).body)).toBe(3000 + 2500 + 15100 + 5000);
+    expect(api.requests.at(-1).body).toEqual({
+      ref: "@e1",
+      clickCount: 3,
+      delayMs: 500,
+      timeoutMs: 3000,
+    });
+    expect(timeoutOf("POST /tabs/:id/click", api.requests.at(-1).body)).toBe(
+      3000 + 2500 + 15100 + 5000,
+    );
     for (const name of ["hover", "fill", "select", "focus"])
-      expect(timeoutOf(`POST /tabs/:id/${name}`, { timeoutMs: 4000 }), name).toBe(4000 + 15000);
+      expect(
+        timeoutOf(`POST /tabs/:id/${name}`, { timeoutMs: 4000 }),
+        name,
+      ).toBe(4000 + 15000);
     for (const name of [
       "mouse/move",
       "mouse/down",
@@ -4852,48 +7628,225 @@ describe("scripted sessions", () => {
       "keyboard/paste",
     ])
       expect(timeoutOf(`POST /tabs/:id/${name}`, {}), name).toBe(15000);
-    expect(timeoutOf("POST /tabs/:id/keyboard/type", { text: "hello", delayMs: 100 })).toBe(10000 + 500 + 5000);
+    expect(
+      timeoutOf("POST /tabs/:id/keyboard/type", {
+        text: "hello",
+        delayMs: 100,
+      }),
+    ).toBe(10000 + 500 + 5000);
     // input/release declares a plain budget, which the client passes itself.
     const release = routeOf("POST /tabs/:id/input/release");
     expect(httpTimeout(schema.requestBudget(release), release)).toBe(15000);
     await page.releaseInput();
-    expect(api.requests.at(-1)).toEqual({ method: "POST", path: "/tabs/tab-1/input/release", body: {} });
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/input/release",
+      body: {},
+    });
   });
 
   it("runs every new command", async () => {
     for (const [args, path, body, piped] of [
       [
-        ["click", "tab-1", "@e2", "--button", "right", "--click-count", "2", "--delay", "100", "--position", "10,20", "--force", "--timeout", "5000", "--label", "Add"],
+        [
+          "click",
+          "tab-1",
+          "@e2",
+          "--button",
+          "right",
+          "--click-count",
+          "2",
+          "--delay",
+          "100",
+          "--position",
+          "10,20",
+          "--force",
+          "--timeout",
+          "5000",
+          "--label",
+          "Add",
+        ],
         "/tabs/tab-1/click",
-        { ref: "@e2", button: "right", clickCount: 2, delayMs: 100, position: { x: 10, y: 20 }, force: true, timeoutMs: 5000, label: "Add" },
+        {
+          ref: "@e2",
+          button: "right",
+          clickCount: 2,
+          delayMs: 100,
+          position: { x: 10, y: 20 },
+          force: true,
+          timeoutMs: 5000,
+          label: "Add",
+        },
       ],
       [
-        ["dblclick", "tab-1", "#row", "--button", "left", "--delay", "0", "--position", "-5,2.5", "--timeout", "0"],
+        [
+          "dblclick",
+          "tab-1",
+          "#row",
+          "--button",
+          "left",
+          "--delay",
+          "0",
+          "--position",
+          "-5,2.5",
+          "--timeout",
+          "0",
+        ],
         "/tabs/tab-1/dblclick",
-        { selector: "#row", button: "left", delayMs: 0, position: { x: -5, y: 2.5 }, timeoutMs: 0 },
+        {
+          selector: "#row",
+          button: "left",
+          delayMs: 0,
+          position: { x: -5, y: 2.5 },
+          timeoutMs: 0,
+        },
       ],
-      [["hover", "tab-1", "@e2", "--position", "4,5", "--force", "--timeout", "1000"], "/tabs/tab-1/hover", { ref: "@e2", position: { x: 4, y: 5 }, force: true, timeoutMs: 1000 }],
       [
-        ["drag", "tab-1", "@e1", "#zone", "--source-position", "1,2", "--target-position", "3,4", "--button", "left", "--force", "--timeout", "9000"],
-        "/tabs/tab-1/drag",
-        { source: { ref: "@e1" }, target: { selector: "#zone" }, sourcePosition: { x: 1, y: 2 }, targetPosition: { x: 3, y: 4 }, button: "left", force: true, timeoutMs: 9000 },
+        [
+          "hover",
+          "tab-1",
+          "@e2",
+          "--position",
+          "4,5",
+          "--force",
+          "--timeout",
+          "1000",
+        ],
+        "/tabs/tab-1/hover",
+        { ref: "@e2", position: { x: 4, y: 5 }, force: true, timeoutMs: 1000 },
       ],
-      [["fill", "tab-1", "@e1", "--stdin", "--append", "--timeout", "2000"], "/tabs/tab-1/fill", { ref: "@e1", value: "Avery Quinn", append: true, timeoutMs: 2000 }, "Avery Quinn"],
-      [["select", "tab-1", "@e1", "pro", "team", "max", "--timeout", "3000"], "/tabs/tab-1/select", { ref: "@e1", values: ["pro", "team", "max"], timeoutMs: 3000 }],
-      [["select", "tab-1", "@e1"], "/tabs/tab-1/select", { ref: "@e1", values: [] }],
-      [["focus", "tab-1", "@e1", "--timeout", "1500"], "/tabs/tab-1/focus", { ref: "@e1", timeoutMs: 1500 }],
-      [["press", "tab-1", "Shift+KeyA", "@e1", "--delay", "40", "--timeout", "2500"], "/tabs/tab-1/press", { key: "Shift+KeyA", ref: "@e1", delayMs: 40, timeoutMs: 2500 }],
-      [["mouse-move", "tab-1", "40", "60", "--steps", "20"], "/tabs/tab-1/mouse/move", { x: 40, y: 60, steps: 20 }],
-      [["mouse-down", "tab-1", "--button", "middle", "--click-count", "2"], "/tabs/tab-1/mouse/down", { button: "middle", clickCount: 2 }],
-      [["mouse-up", "tab-1", "--button", "middle"], "/tabs/tab-1/mouse/up", { button: "middle" }],
-      [["mouse-click", "tab-1", "-1.5", "60", "--button", "right", "--click-count", "3", "--delay", "20"], "/tabs/tab-1/mouse/click", { x: -1.5, y: 60, button: "right", clickCount: 3, delayMs: 20 }],
-      [["mouse-wheel", "tab-1", "0", "-120"], "/tabs/tab-1/mouse/wheel", { deltaX: 0, deltaY: -120 }],
-      [["key-down", "tab-1", "Shift"], "/tabs/tab-1/keyboard/down", { key: "Shift" }],
-      [["key-up", "tab-1", "Shift"], "/tabs/tab-1/keyboard/up", { key: "Shift" }],
-      [["type", "tab-1", "--stdin", "--delay", "15"], "/tabs/tab-1/keyboard/type", { text: "Avery Quinn", delayMs: 15 }, "Avery Quinn"],
-      [["insert-text", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/insert-text", { text: "Avery Quinn" }, "Avery Quinn"],
-      [["paste", "tab-1", "--stdin"], "/tabs/tab-1/keyboard/paste", { text: "Avery Quinn" }, "Avery Quinn"],
-      [["paste", "tab-1", "--stdin", "--html"], "/tabs/tab-1/keyboard/paste", { text: "Avery", html: "<b>Avery</b>" }, '{"text":"Avery","html":"<b>Avery</b>"}'],
+      [
+        [
+          "drag",
+          "tab-1",
+          "@e1",
+          "#zone",
+          "--source-position",
+          "1,2",
+          "--target-position",
+          "3,4",
+          "--button",
+          "left",
+          "--force",
+          "--timeout",
+          "9000",
+        ],
+        "/tabs/tab-1/drag",
+        {
+          source: { ref: "@e1" },
+          target: { selector: "#zone" },
+          sourcePosition: { x: 1, y: 2 },
+          targetPosition: { x: 3, y: 4 },
+          button: "left",
+          force: true,
+          timeoutMs: 9000,
+        },
+      ],
+      [
+        ["fill", "tab-1", "@e1", "--stdin", "--append", "--timeout", "2000"],
+        "/tabs/tab-1/fill",
+        { ref: "@e1", value: "Avery Quinn", append: true, timeoutMs: 2000 },
+        "Avery Quinn",
+      ],
+      [
+        ["select", "tab-1", "@e1", "pro", "team", "max", "--timeout", "3000"],
+        "/tabs/tab-1/select",
+        { ref: "@e1", values: ["pro", "team", "max"], timeoutMs: 3000 },
+      ],
+      [
+        ["select", "tab-1", "@e1"],
+        "/tabs/tab-1/select",
+        { ref: "@e1", values: [] },
+      ],
+      [
+        ["focus", "tab-1", "@e1", "--timeout", "1500"],
+        "/tabs/tab-1/focus",
+        { ref: "@e1", timeoutMs: 1500 },
+      ],
+      [
+        [
+          "press",
+          "tab-1",
+          "Shift+KeyA",
+          "@e1",
+          "--delay",
+          "40",
+          "--timeout",
+          "2500",
+        ],
+        "/tabs/tab-1/press",
+        { key: "Shift+KeyA", ref: "@e1", delayMs: 40, timeoutMs: 2500 },
+      ],
+      [
+        ["mouse-move", "tab-1", "40", "60", "--steps", "20"],
+        "/tabs/tab-1/mouse/move",
+        { x: 40, y: 60, steps: 20 },
+      ],
+      [
+        ["mouse-down", "tab-1", "--button", "middle", "--click-count", "2"],
+        "/tabs/tab-1/mouse/down",
+        { button: "middle", clickCount: 2 },
+      ],
+      [
+        ["mouse-up", "tab-1", "--button", "middle"],
+        "/tabs/tab-1/mouse/up",
+        { button: "middle" },
+      ],
+      [
+        [
+          "mouse-click",
+          "tab-1",
+          "-1.5",
+          "60",
+          "--button",
+          "right",
+          "--click-count",
+          "3",
+          "--delay",
+          "20",
+        ],
+        "/tabs/tab-1/mouse/click",
+        { x: -1.5, y: 60, button: "right", clickCount: 3, delayMs: 20 },
+      ],
+      [
+        ["mouse-wheel", "tab-1", "0", "-120"],
+        "/tabs/tab-1/mouse/wheel",
+        { deltaX: 0, deltaY: -120 },
+      ],
+      [
+        ["key-down", "tab-1", "Shift"],
+        "/tabs/tab-1/keyboard/down",
+        { key: "Shift" },
+      ],
+      [
+        ["key-up", "tab-1", "Shift"],
+        "/tabs/tab-1/keyboard/up",
+        { key: "Shift" },
+      ],
+      [
+        ["type", "tab-1", "--stdin", "--delay", "15"],
+        "/tabs/tab-1/keyboard/type",
+        { text: "Avery Quinn", delayMs: 15 },
+        "Avery Quinn",
+      ],
+      [
+        ["insert-text", "tab-1", "--stdin"],
+        "/tabs/tab-1/keyboard/insert-text",
+        { text: "Avery Quinn" },
+        "Avery Quinn",
+      ],
+      [
+        ["paste", "tab-1", "--stdin"],
+        "/tabs/tab-1/keyboard/paste",
+        { text: "Avery Quinn" },
+        "Avery Quinn",
+      ],
+      [
+        ["paste", "tab-1", "--stdin", "--html"],
+        "/tabs/tab-1/keyboard/paste",
+        { text: "Avery", html: "<b>Avery</b>" },
+        '{"text":"Avery","html":"<b>Avery</b>"}',
+      ],
       [["release-input", "tab-1"], "/tabs/tab-1/input/release", {}],
     ]) {
       const fetch = vi.fn(async () => Response.json({ ok: true }));
@@ -4941,7 +7894,13 @@ describe("scripted sessions", () => {
       ["release-input", "tab-1", "tab-2"],
     ])
       await expect(
-        runCli(args, { env, fetch: unused, health: current, stdin: Readable.from(["x"]), stdout: sink() }),
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from(["x"]),
+          stdout: sink(),
+        }),
         args.join(" "),
       ).rejects.toThrow();
     expect(unused).not.toHaveBeenCalled();
@@ -4963,20 +7922,74 @@ describe("scripted sessions", () => {
       return stdout.text();
     };
     const clicked = { ok: true, url: tab.url, point: { x: 40, y: 60 } };
-    expect(await print(["click", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
-    expect(await print(["click", "tab-1", "@e2"], { ...clicked, loading: true })).toBe("ok: clicked at 40,60 (page loading)\n");
-    expect(await print(["dblclick", "tab-1", "@e2"], clicked)).toBe("ok: clicked at 40,60\n");
-    expect(await print(["hover", "tab-1", "@e2"], { ok: true, point: { x: 12, y: 8 } })).toBe("ok: moved to 12,8\n");
-    expect(await print(["fill", "tab-1", "@e1", "--stdin"], { ok: true, match: "equivalent", value: "12.50" }, "12.5")).toBe("ok: filled (equivalent)\n");
-    expect(await print(["select", "tab-1", "@e1", "pro", "team"], { ok: true, values: ["pro", "team"] })).toBe("ok: selected pro, team\n");
-    expect(await print(["select", "tab-1", "@e1"], { ok: true, values: [] })).toBe("ok: selection cleared\n");
-    expect(await print(["mouse-move", "tab-1", "40", "60"], { ok: true, input: pointer })).toBe("ok: mouse at 40,60 buttons 0\n");
-    expect(await print(["mouse-down", "tab-1"], { ok: true, input: { ...pointer, buttons: 1 } })).toBe("ok: mouse at 40,60 buttons 1\n");
-    expect(await print(["key-down", "tab-1", "Shift"], { ok: true, input: { ...pointer, keys: ["Shift"], modifiers: 8 } })).toBe("ok: keys Shift\n");
-    expect(await print(["key-up", "tab-1", "Shift"], { ok: true, input: pointer })).toBe("ok: no keys held\n");
-    expect(await print(["release-input", "tab-1"], { ok: true, released: ["Shift", "left"] })).toBe("ok: released Shift, left\n");
-    expect(await print(["release-input", "tab-1"], { ok: true, released: [] })).toBe("ok: nothing held\n");
-    expect(await print(["paste", "tab-1", "--stdin"], { ok: true, handled: "page" }, "hello")).toBe("ok\n");
+    expect(await print(["click", "tab-1", "@e2"], clicked)).toBe(
+      "ok: clicked at 40,60\n",
+    );
+    expect(
+      await print(["click", "tab-1", "@e2"], { ...clicked, loading: true }),
+    ).toBe("ok: clicked at 40,60 (page loading)\n");
+    expect(await print(["dblclick", "tab-1", "@e2"], clicked)).toBe(
+      "ok: clicked at 40,60\n",
+    );
+    expect(
+      await print(["hover", "tab-1", "@e2"], {
+        ok: true,
+        point: { x: 12, y: 8 },
+      }),
+    ).toBe("ok: moved to 12,8\n");
+    expect(
+      await print(
+        ["fill", "tab-1", "@e1", "--stdin"],
+        { ok: true, match: "equivalent", value: "12.50" },
+        "12.5",
+      ),
+    ).toBe("ok: filled (equivalent)\n");
+    expect(
+      await print(["select", "tab-1", "@e1", "pro", "team"], {
+        ok: true,
+        values: ["pro", "team"],
+      }),
+    ).toBe("ok: selected pro, team\n");
+    expect(
+      await print(["select", "tab-1", "@e1"], { ok: true, values: [] }),
+    ).toBe("ok: selection cleared\n");
+    expect(
+      await print(["mouse-move", "tab-1", "40", "60"], {
+        ok: true,
+        input: pointer,
+      }),
+    ).toBe("ok: mouse at 40,60 buttons 0\n");
+    expect(
+      await print(["mouse-down", "tab-1"], {
+        ok: true,
+        input: { ...pointer, buttons: 1 },
+      }),
+    ).toBe("ok: mouse at 40,60 buttons 1\n");
+    expect(
+      await print(["key-down", "tab-1", "Shift"], {
+        ok: true,
+        input: { ...pointer, keys: ["Shift"], modifiers: 8 },
+      }),
+    ).toBe("ok: keys Shift\n");
+    expect(
+      await print(["key-up", "tab-1", "Shift"], { ok: true, input: pointer }),
+    ).toBe("ok: no keys held\n");
+    expect(
+      await print(["release-input", "tab-1"], {
+        ok: true,
+        released: ["Shift", "left"],
+      }),
+    ).toBe("ok: released Shift, left\n");
+    expect(
+      await print(["release-input", "tab-1"], { ok: true, released: [] }),
+    ).toBe("ok: nothing held\n");
+    expect(
+      await print(
+        ["paste", "tab-1", "--stdin"],
+        { ok: true, handled: "page" },
+        "hello",
+      ),
+    ).toBe("ok\n");
     // --json prints the body unchanged.
     const json = sink();
     await runCli(["mouse-wheel", "tab-1", "0", "120", "--json"], {
@@ -5001,21 +8014,55 @@ describe("scripted sessions", () => {
       [() => page.releaseInput(), { entry: "page.releaseInput" }],
       [() => page.mouse.move(10, 10), { entry: "page.mouse.move" }],
       [() => page.keyboard.type("hi"), { entry: "page.keyboard.type" }],
-      [() => page.click("@e1", { force: true }), { entry: "page.click", option: "force" }],
-      [() => page.fill("@e1", "x", { append: true }), { entry: "page.fill", option: "append" }],
-      [() => page.press("Enter", "@e1", { delay: 10 }), { entry: "page.press", option: "delay" }],
+      [
+        () => page.click("@e1", { force: true }),
+        { entry: "page.click", option: "force" },
+      ],
+      [
+        () => page.fill("@e1", "x", { append: true }),
+        { entry: "page.fill", option: "append" },
+      ],
+      [
+        () => page.press("Enter", "@e1", { delay: 10 }),
+        { entry: "page.press", option: "delay" },
+      ],
     ])
-      await expect(call()).rejects.toMatchObject({ code: "app_outdated", required: 4, available: 3, ...fields });
+      await expect(call()).rejects.toMatchObject({
+        code: "app_outdated",
+        required: 4,
+        available: 3,
+        ...fields,
+      });
     expect(api.requests).toHaveLength(sent);
     // The CLI makes the same check after its health check and before the
     // route, for a new command and for a level 4 flag on an old one.
     const older = fakeApi(inputAnswers);
     await expect(
-      runCli(["hover", "tab-1", "@e1"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
-    ).rejects.toMatchObject({ code: "app_outdated", entry: "hover", required: 4, available: 3 });
+      runCli(["hover", "tab-1", "@e1"], {
+        env,
+        fetch: older.fetch,
+        health: level3,
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      entry: "hover",
+      required: 4,
+      available: 3,
+    });
     await expect(
-      runCli(["click", "tab-1", "@e1", "--force"], { env, fetch: older.fetch, health: level3, stdout: sink() }),
-    ).rejects.toMatchObject({ code: "app_outdated", entry: "click", option: "force", required: 4 });
+      runCli(["click", "tab-1", "@e1", "--force"], {
+        env,
+        fetch: older.fetch,
+        health: level3,
+        stdout: sink(),
+      }),
+    ).rejects.toMatchObject({
+      code: "app_outdated",
+      entry: "click",
+      option: "force",
+      required: 4,
+    });
     expect(older.requests).toEqual([]);
   });
 
@@ -5023,8 +8070,16 @@ describe("scripted sessions", () => {
     const released = [];
     const table = {
       ...sectionTwo,
-      "POST /tabs/tab-1/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
-      "POST /tabs/tab-2/click": { ok: true, url: tab.url, point: { x: 1, y: 2 } },
+      "POST /tabs/tab-1/click": {
+        ok: true,
+        url: tab.url,
+        point: { x: 1, y: 2 },
+      },
+      "POST /tabs/tab-2/click": {
+        ok: true,
+        url: tab.url,
+        point: { x: 1, y: 2 },
+      },
       "POST /tabs/tab-1/input/release": () => {
         released.push("tab-1");
         return Response.json({ ok: true, released: ["Shift"] });
@@ -5032,7 +8087,10 @@ describe("scripted sessions", () => {
       // A failed release is not the script's business.
       "POST /tabs/tab-2/input/release": () => {
         released.push("tab-2");
-        return Response.json({ error: { code: "tab_not_found", message: "Gone." } }, { status: 404 });
+        return Response.json(
+          { error: { code: "tab_not_found", message: "Gone." } },
+          { status: 404 },
+        );
       },
     };
     const clicked = await runIn(
@@ -5042,7 +8100,11 @@ describe("scripted sessions", () => {
     );
     expect(clicked).toMatchObject({ status: 0, stdout: "done\n", stderr: "" });
     expect(released).toEqual(["tab-1", "tab-2"]);
-    expect(clicked.api.requests.filter((item) => item.path.endsWith("/input/release"))).toHaveLength(2);
+    expect(
+      clicked.api.requests.filter((item) =>
+        item.path.endsWith("/input/release"),
+      ),
+    ).toHaveLength(2);
     // A page the run only listed holds nothing to let go of.
     released.length = 0;
     const listed = await runIn(
@@ -5052,6 +8114,24 @@ describe("scripted sessions", () => {
     );
     expect(listed).toMatchObject({ status: 0, stdout: "listed\n", stderr: "" });
     expect(released).toEqual([]);
+  });
+
+  it("registers the end-of-run release once when a run and the REPL share a session", async () => {
+    const api = fakeApi({
+      ...sectionTwo,
+      "POST /tabs/tab-1/input/release": { ok: true, released: ["Shift"] },
+    });
+    const shared = new Session({ env, fetch: api.fetch, health: current });
+    // run and the REPL hand connect a session they already hold, so its end
+    // hooks must not stack up on a second connect.
+    await connect({ session: shared });
+    await connect({ session: shared });
+    const { signal } = new AbortController();
+    for (const hook of shared.endHooks)
+      await hook({ touched: ["tab-1"], signal });
+    expect(
+      api.requests.filter((item) => item.path.endsWith("/input/release")),
+    ).toHaveLength(1);
   });
 });
 
@@ -5076,14 +8156,22 @@ describe("client errors and timeouts", () => {
     expect(error.stack).not.toBe("replaced");
     expect(Object.hasOwn(error, "cause")).toBe(false);
     // The client's own codes take retryable from the registry.
-    expect(new KamapathyError("not_connected", "Busy.", { reason: "busy" }).retryable).toBe(true);
+    expect(
+      new KamapathyError("not_connected", "Busy.", { reason: "busy" })
+        .retryable,
+    ).toBe(true);
     expect(
       new KamapathyError("not_connected", "Off.", { reason: "access_off" }),
     ).not.toHaveProperty("retryable");
-    const route = (key) => schema.ROUTES.find((item) => schema.routeKey(item) === key);
-    expect(httpTimeout(600000, route("POST /spaces/:id/wait-for-control"))).toBe(605000);
+    const route = (key) =>
+      schema.ROUTES.find((item) => schema.routeKey(item) === key);
+    expect(
+      httpTimeout(600000, route("POST /spaces/:id/wait-for-control")),
+    ).toBe(605000);
     expect(httpTimeout(undefined, route("POST /tabs/:id/click"))).toBe(45000);
-    expect(httpTimeout(undefined, route("POST /tabs/:id/actions"))).toBe(180000);
+    expect(httpTimeout(undefined, route("POST /tabs/:id/actions"))).toBe(
+      180000,
+    );
     expect(httpTimeout(undefined, undefined)).toBe(45000);
   });
 });
@@ -5138,7 +8226,12 @@ describe("updates", () => {
       if (key === "GET /update") return answer(polls.shift());
       if (routes[key]) return Response.json(routes[key]);
       return Response.json(
-        { error: { code: "route_not_found", message: `No route ${url.pathname}` } },
+        {
+          error: {
+            code: "route_not_found",
+            message: `No route ${url.pathname}`,
+          },
+        },
         { status: 404 },
       );
     });
@@ -5146,9 +8239,13 @@ describe("updates", () => {
   }
   // The client as an agent runs it: its own process, over the profile's socket.
   async function cli(args, profileEnv) {
-    const child = spawn(process.execPath, ["skills/kamapathy/scripts/kamapathy.mjs", ...args], {
-      env: { ...process.env, ...profileEnv },
-    });
+    const child = spawn(
+      process.execPath,
+      ["skills/kamapathy/scripts/kamapathy.mjs", ...args],
+      {
+        env: { ...process.env, ...profileEnv },
+      },
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -5165,7 +8262,15 @@ describe("updates", () => {
     });
     const stdout = sink();
     const stderr = sink();
-    expect(await main(["upgrade"], { env, fetch: api.fetch, health: level3, stdout, stderr })).toBe(0);
+    expect(
+      await main(["upgrade"], {
+        env,
+        fetch: api.fetch,
+        health: level3,
+        stdout,
+        stderr,
+      }),
+    ).toBe(0);
     expect(stdout.text()).toBe(
       [
         "Kamapathy 0.3.0 is downloaded and checked (this is 0.2.0).",
@@ -5185,9 +8290,18 @@ describe("updates", () => {
     ]);
     // --json prints the status the command ends with.
     const json = sink();
-    const jsonApi = updateApi({ check: { body: ready }, download: { body: ready } });
+    const jsonApi = updateApi({
+      check: { body: ready },
+      download: { body: ready },
+    });
     expect(
-      await main(["upgrade", "--json"], { env, fetch: jsonApi.fetch, health: level3, stdout: json, stderr: sink() }),
+      await main(["upgrade", "--json"], {
+        env,
+        fetch: jsonApi.fetch,
+        health: level3,
+        stdout: json,
+        stderr: sink(),
+      }),
     ).toBe(0);
     expect(JSON.parse(json.text())).toEqual(ready);
     // Each install kind names the step the person takes.
@@ -5206,7 +8320,13 @@ describe("updates", () => {
       const kindApi = updateApi({ check: { body }, download: { body } });
       const out = sink();
       expect(
-        await main(["upgrade"], { env, fetch: kindApi.fetch, health: level3, stdout: out, stderr: sink() }),
+        await main(["upgrade"], {
+          env,
+          fetch: kindApi.fetch,
+          health: level3,
+          stdout: out,
+          stderr: sink(),
+        }),
         kind,
       ).toBe(0);
       expect(out.text().split("\n")[2], kind).toBe(step);
@@ -5222,7 +8342,8 @@ describe("updates", () => {
             latest,
             error: {
               code: "update_verify_failed",
-              message: "The downloaded installer did not match its checksum, so it was deleted.",
+              message:
+                "The downloaded installer did not match its checksum, so it was deleted.",
               reason: "sums_mismatch",
               retryable: false,
               file: INSTALLER,
@@ -5233,7 +8354,13 @@ describe("updates", () => {
     });
     const failed = sink();
     expect(
-      await main(["upgrade"], { env, fetch: failedApi.fetch, health: level3, stdout: sink(), stderr: failed }),
+      await main(["upgrade"], {
+        env,
+        fetch: failedApi.fetch,
+        health: level3,
+        stdout: sink(),
+        stderr: failed,
+      }),
     ).toBe(1);
     expect(failed.text()).toBe(
       [
@@ -5248,7 +8375,8 @@ describe("updates", () => {
         body: {
           error: {
             code: "update_unsupported",
-            message: "This copy runs from source. Pull the latest code to update it.",
+            message:
+              "This copy runs from source. Pull the latest code to update it.",
             reason: "source",
             platform: "darwin",
             arch: "arm64",
@@ -5258,7 +8386,13 @@ describe("updates", () => {
     });
     const refused = sink();
     expect(
-      await main(["upgrade"], { env, fetch: refusedApi.fetch, health: level3, stdout: sink(), stderr: refused }),
+      await main(["upgrade"], {
+        env,
+        fetch: refusedApi.fetch,
+        health: level3,
+        stdout: sink(),
+        stderr: refused,
+      }),
     ).toBe(1);
     expect(refused.text()).toBe(
       "Kamapathy: 409 update_unsupported: This copy runs from source. Pull the latest code to update it.\n",
@@ -5270,7 +8404,13 @@ describe("updates", () => {
     const stdout = sink();
     const stderr = sink();
     expect(
-      await main(["upgrade", "--check"], { env, fetch: api.fetch, health: level3, stdout, stderr }),
+      await main(["upgrade", "--check"], {
+        env,
+        fetch: api.fetch,
+        health: level3,
+        stdout,
+        stderr,
+      }),
     ).toBe(0);
     expect(stdout.text()).toBe(
       "Kamapathy 0.3.0 is available (this is 0.2.0). Run kamapathy upgrade, with the person's approval, to download it.\n",
@@ -5280,28 +8420,54 @@ describe("updates", () => {
     const current = updateApi({ check: { body: state({ state: "current" }) } });
     const up = sink();
     expect(
-      await main(["upgrade", "--check"], { env, fetch: current.fetch, health: level3, stdout: up, stderr: sink() }),
+      await main(["upgrade", "--check"], {
+        env,
+        fetch: current.fetch,
+        health: level3,
+        stdout: up,
+        stderr: sink(),
+      }),
     ).toBe(0);
     expect(up.text()).toBe("Kamapathy 0.2.0 is up to date.\n");
     expect(current.requests).toEqual(["POST /update/check"]);
     // --timeout 0 returns as soon as the download is under way.
-    const zero = updateApi({ check: { body: available }, download: { status: 202, body: downloading } });
+    const zero = updateApi({
+      check: { body: available },
+      download: { status: 202, body: downloading },
+    });
     const started = sink();
     expect(
-      await main(["upgrade", "--timeout", "0"], { env, fetch: zero.fetch, health: level3, stdout: started, stderr: sink() }),
+      await main(["upgrade", "--timeout", "0"], {
+        env,
+        fetch: zero.fetch,
+        health: level3,
+        stdout: started,
+        stderr: sink(),
+      }),
     ).toBe(0);
     expect(started.text()).toBe(
       "Kamapathy is downloading 0.3.0. Run kamapathy upgrade again to wait for it.\n",
     );
-    expect(zero.requests).toEqual(["POST /update/check", "POST /update/download"]);
+    expect(zero.requests).toEqual([
+      "POST /update/check",
+      "POST /update/download",
+    ]);
     const unused = vi.fn();
     for (const value of ["1800001", "x"]) {
       const bad = sink();
       expect(
-        await main(["upgrade", "--timeout", value], { env, fetch: unused, health: level3, stdout: sink(), stderr: bad }),
+        await main(["upgrade", "--timeout", value], {
+          env,
+          fetch: unused,
+          health: level3,
+          stdout: sink(),
+          stderr: bad,
+        }),
         value,
       ).toBe(1);
-      expect(bad.text()).toBe("Kamapathy: --timeout must be an integer from 0 to 1800000.\n");
+      expect(bad.text()).toBe(
+        "Kamapathy: --timeout must be an integer from 0 to 1800000.\n",
+      );
     }
     expect(unused).not.toHaveBeenCalled();
   });
@@ -5314,7 +8480,12 @@ describe("updates", () => {
         response.end(
           JSON.stringify(
             request.url === "/health"
-              ? { status: "ok", version: "0.2.0", apiLevel: 3, update: { version: "0.3.0", state: "available" } }
+              ? {
+                  status: "ok",
+                  version: "0.2.0",
+                  apiLevel: 3,
+                  update: { version: "0.3.0", state: "available" },
+                }
               : request.url === "/spaces"
                 ? { spaces: [] }
                 : request.url === "/update/check"
@@ -5331,7 +8502,11 @@ describe("updates", () => {
         );
       },
     });
-    for (const args of [["spaces"], ["snapshot", "tab-1"], ["upgrade", "--check"]]) {
+    for (const args of [
+      ["spaces"],
+      ["snapshot", "tab-1"],
+      ["upgrade", "--check"],
+    ]) {
       const { status, stderr } = await cli(args, profileEnv);
       expect([args.join(" "), status, stderr]).toEqual([args.join(" "), 0, ""]);
     }
@@ -5351,7 +8526,12 @@ describe("updates", () => {
         response.end(
           JSON.stringify(
             request.url === "/health"
-              ? { status: "ok", version: "0.2.0", apiLevel: 3, ...(update ? { update } : {}) }
+              ? {
+                  status: "ok",
+                  version: "0.2.0",
+                  apiLevel: 3,
+                  ...(update ? { update } : {}),
+                }
               : { spaces: [] },
           ),
         );
@@ -5363,7 +8543,14 @@ describe("updates", () => {
       stderr: NOTICE,
     });
     expect(
-      await cli(["run", "-e", 'process.stdout.write("from the script\\n"); await spaces();'], profileEnv),
+      await cli(
+        [
+          "run",
+          "-e",
+          'process.stdout.write("from the script\\n"); await spaces();',
+        ],
+        profileEnv,
+      ),
     ).toEqual({ status: 0, stdout: "from the script\n", stderr: NOTICE });
     update = { version: "0.3.0", state: "ready" };
     expect((await cli(["health"], profileEnv)).stderr).toBe(
@@ -5379,7 +8566,10 @@ describe("updates", () => {
     const fetch = vi.fn(async (url) =>
       url.pathname === "/spaces"
         ? Response.json({ spaces: [] })
-        : Response.json({ error: { code: "route_not_found", message: "no route" } }, { status: 404 }),
+        : Response.json(
+            { error: { code: "route_not_found", message: "no route" } },
+            { status: 404 },
+          ),
     );
     const input = new PassThrough();
     const output = new PassThrough();
