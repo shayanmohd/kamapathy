@@ -439,6 +439,13 @@ export interface InputActions {
   ): Promise<Record<string, unknown>>;
 }
 
+// The key a built command names, by its code. The table is keyed by the
+// lowercased name, which every key a typed text sends spells the same as its
+// code.
+const keyByCode = (code: string): KeyDef | undefined => {
+  const name = code.toLowerCase();
+  return Object.hasOwn(KEYS, name) ? KEYS[name] : undefined;
+};
 // The characters a typed text sends as a key that could open a focused
 // control's picker, with the key each one types.
 const TYPED_PICKER_KEYS: readonly (readonly [string, KeyDef])[] = [
@@ -1442,6 +1449,9 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       const own = key.modifier ? MODIFIER_BITS[key.modifier] : 0;
       if (action.kind === "down") {
         const mask = state.modifiers | chord.mask | own;
+        // Holding a modifier is how a chord is built by hand, so the key
+        // that completes a copy, cut or paste is refused here too.
+        checkClipboardChord(chordOf(key, mask), [], platformName);
         checkKeyTarget(await look(), chordOf(key, mask), platformName);
         // A key already held repeats, as a person's keyboard repeats it.
         const repeat = state
@@ -1507,6 +1517,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       if (text.includes(character))
         checkKeyTarget(focused, chordOf(key, state.modifiers), platformName);
     const groups = textCommands(text, platformName, { mask: state.modifiers });
+    // A held modifier turns a typed character into a chord, which may be a
+    // clipboard one.
+    for (const group of groups) {
+      const { code, modifiers } = group[0].params;
+      const typed = typeof code === "string" ? keyByCode(code) : undefined;
+      if (typed)
+        checkClipboardChord(
+          chordOf(typed, typeof modifiers === "number" ? modifiers : 0),
+          [],
+          platformName,
+        );
+    }
     for (const [index, group] of groups.entries()) {
       if (index > 0 && action.delayMs) await pause(action.delayMs);
       const insertion = group[0].method === "Input.insertText";

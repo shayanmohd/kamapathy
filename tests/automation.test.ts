@@ -5647,6 +5647,35 @@ describe("local automation socket", () => {
     expect(clipboard.status).toBe(403);
     expect(clipboard.error.code).toBe("clipboard_blocked");
     expect(page.inputs).toEqual([]);
+    // A held modifier makes the same chord, whichever route sends the key.
+    expect(
+      (
+        await request(`/tabs/${tab.id}/keyboard/down`, "POST", {
+          key: "ControlOrMeta",
+        })
+      ).status,
+    ).toBe(200);
+    page.inputs = [];
+    for (const [route, body] of [
+      ["press", { key: "KeyV" }],
+      ["keyboard/down", { key: "KeyV" }],
+      ["keyboard/type", { text: "av" }],
+    ] as const) {
+      const refused = await failure(
+        await request(`/tabs/${tab.id}/${route}`, "POST", body),
+      );
+      expect(refused.status, route).toBe(403);
+      expect(refused.error.code, route).toBe("clipboard_blocked");
+    }
+    expect(page.inputs).toEqual([]);
+    expect(
+      (
+        await request(`/tabs/${tab.id}/keyboard/up`, "POST", {
+          key: "ControlOrMeta",
+        })
+      ).status,
+    ).toBe(200);
+    page.inputs = [];
     // A dropdown select with focus answers for the keys that would open it.
     page.pageActions.focusedKind = { ok: true, kind: "select" };
     const picker = await refuse({ key: "Space" });
