@@ -87,6 +87,7 @@ Signing and publishing are disabled in the development configuration. macOS also
 | `electron/agent/`                    | Agent socket server, per-space lanes, routes and tab sessions            |
 | `electron/agent/selectors.ts`        | Selector grammar parser and the role words role= and outlines share      |
 | `electron/agent/dom/`                | Self-contained page-side selector engine and outline builder             |
+| `electron/agent/input/`              | Agent input: keys, chords, per-tab state, dispatch, waits, guards        |
 | `electron/capture-host.ts`           | Lends a hidden tab's view to a never-shown window for one capture        |
 | `electron/agent/setup/`              | Skill copies, agent links, the kamapathy command                         |
 | `electron/updates.ts`                | Daily release check, verified download, the person's install             |
