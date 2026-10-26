@@ -340,6 +340,13 @@ const FIELDS = {
   mouseMove: { x: coordinate("x"), y: coordinate("y"), steps },
   mouseButton: { button, clickCount },
   mouseWheel: { deltaX: delta("right"), deltaY: delta("down") },
+  mouseClick: {
+    x: coordinate("x"),
+    y: coordinate("y"),
+    button,
+    clickCount,
+    delayMs: pressDelay,
+  },
   keyboardKey: { key: keyboardKey },
   keyboardType: {
     text: {
@@ -981,6 +988,18 @@ export const ROUTES = [
   ),
   route(
     "POST",
+    "/tabs/:id/mouse/click",
+    "Clicks at a point with native mouse input, without resolving a target.",
+    "{ ok: true, url, input, loading?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseClick,
+    {
+      budget: { compute: "mouseClickBudget", maxMs: 40100 },
+      follow: true,
+      since: 4,
+    },
+  ),
+  route(
+    "POST",
     "/tabs/:id/mouse/wheel",
     "Scrolls with the wheel where the pointer stands.",
     "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
@@ -1351,6 +1370,12 @@ export const ACTIONS = [
     summary: "Drags one element onto another.",
     fields: FIELDS.drag,
     since: 1,
+  },
+  {
+    type: "mouse-click",
+    summary: "Clicks at a point, without resolving a target.",
+    fields: FIELDS.mouseClick,
+    since: 4,
   },
   {
     type: "wait",

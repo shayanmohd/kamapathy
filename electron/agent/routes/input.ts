@@ -80,6 +80,9 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
         tool(type),
       ]),
     ),
+    // A raw click presses, so it keeps the receipt tail and the step's own
+    // activity line rather than the throttled one the raw routes write.
+    "POST /tabs/:id/mouse/click": tool("mouse-click"),
     ...Object.fromEntries(
       (["down", "up", "type", "insert-text"] as const).map((kind) => [
         `POST /tabs/:id/keyboard/${kind}`,

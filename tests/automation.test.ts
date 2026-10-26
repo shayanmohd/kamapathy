@@ -6050,7 +6050,7 @@ describe("local automation socket", () => {
   it("refuses a point outside the viewport", async () => {
     const { tab } = await createPage();
     const page = mousePage();
-    for (const path of ["mouse/move"]) {
+    for (const path of ["mouse/move", "mouse/click"]) {
       const refused = await failure(
         await request(`/tabs/${tab.id}/${path}`, "POST", { x: 1300, y: 100 }),
       );
@@ -6081,6 +6081,132 @@ describe("local automation socket", () => {
         })
       ).status,
     ).toBe(200);
+  });
+
+  it("clicks at a point with the settle and the load wait", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    const started = Date.now();
+    const click = await request(`/tabs/${tab.id}/mouse/click`, "POST", {
+      x: 80,
+      y: 120,
+      button: "right",
+      clickCount: 2,
+      delayMs: 20,
+    });
+    expect(click.status).toBe(200);
+    expect(await click.json()).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      input: { x: 80, y: 120, buttons: 0, keys: [], modifiers: 0 },
+    });
+    // One move, then a press and a release per click, with a delay in each
+    // of the gesture's three gaps and the 100 ms settle after it.
+    expect(mouseOf(page)).toEqual([
+      ["mouseMoved", 80, 120, "none", 0, undefined, 0],
+      ["mousePressed", 80, 120, "right", 2, 1, 0],
+      ["mouseReleased", 80, 120, "right", 0, 1, 0],
+      ["mousePressed", 80, 120, "right", 2, 2, 0],
+      ["mouseReleased", 80, 120, "right", 0, 2, 0],
+    ]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(160);
+    // Nothing resolves a target: the page is asked for its viewport and the
+    // delivery counters, never for a point.
+    expect(payloads("actionPoint")).toEqual([]);
+    expect(payloads("stableBox")).toEqual([]);
+    expect(payloads("viewport")).toHaveLength(1);
+    // A load the click started is waited out before the answer.
+    page.inputs = [];
+    page.afterInput = () => {
+      if (page.inputs.at(-1)!.parameters.type === "mouseReleased")
+        page.isLoadingMainFrame = () => true;
+    };
+    const answering = request(`/tabs/${tab.id}/mouse/click`, "POST", {
+      x: 10,
+      y: 10,
+    });
+    await expect
+      .poll(() => page.listenerCount("did-stop-loading"))
+      .toBeGreaterThan(0);
+    page.isLoadingMainFrame = () => false;
+    page.emit("did-stop-loading");
+    const loaded = await answering;
+    expect(loaded.status).toBe(200);
+    expect((await loaded.json()).loading).toBeUndefined();
+    // The route budgets on its own body, follows its page and takes no
+    // label, and the budget counts one delay per gap.
+    const route = ROUTES.find(
+      (item) => routeKey(item) === "POST /tabs/:id/mouse/click",
+    )!;
+    expect(route.budget).toEqual({
+      compute: "mouseClickBudget",
+      maxMs: 40100,
+    });
+    expect(route.lane).toBe("space");
+    expect(route.follow).toBe(true);
+    expect(route.label).toBe(false);
+    expect(route.since).toBe(4);
+    expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 20 })).toBe(
+      15160,
+    );
+  });
+
+  it("runs mouse-click as a batch step", async () => {
+    const { tab } = await createPage();
+    const page = mousePage();
+    const results = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "mouse-click", x: 30, y: 40 },
+          { type: "mouse-click", x: 50, y: 60, button: "middle" },
+        ],
+      })
+    ).json();
+    expect(results.ok).toBe(true);
+    expect(results.results.map((entry: any) => entry.type)).toEqual([
+      "mouse-click",
+      "mouse-click",
+    ]);
+    expect(results.results[1].result).toEqual({
+      ok: true,
+      url: "https://example.com/",
+      input: { x: 50, y: 60, buttons: 0, keys: [], modifiers: 0 },
+    });
+    expect(mouseOf(page).map((event) => [event[0], event[1], event[3]])).toEqual(
+      [
+        ["mouseMoved", 30, "none"],
+        ["mousePressed", 30, "left"],
+        ["mouseReleased", 30, "left"],
+        ["mouseMoved", 50, "none"],
+        ["mousePressed", 50, "middle"],
+        ["mouseReleased", 50, "middle"],
+      ],
+    );
+    expect(controller.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining(["Agent clicked a point"]),
+    );
+    // Each step keeps its own dispatch record, so a step that sent nothing
+    // stays retryable after one that pressed.
+    page.result = (code: string) =>
+      code.includes(')("actionPoint",')
+        ? { ok: true, blocked: { blocker: "covered" } }
+        : { ok: true };
+    const failed = await (
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "mouse-click", x: 30, y: 40 },
+          { type: "click", ref: "@e1", timeoutMs: 0 },
+        ],
+      })
+    ).json();
+    expect(failed.ok).toBe(false);
+    expect(failed.failedIndex).toBe(1);
+    expect(failed.error).toMatchObject({
+      code: "action_timeout",
+      blocker: "covered",
+      retryable: true,
+    });
+    expect(failed.error.dispatched).toBeUndefined();
   });
 
   it("sends wheel events at the stored position", async () => {
@@ -7274,6 +7400,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/mouse/down": {},
       "POST /tabs/:id/mouse/up": {},
       "POST /tabs/:id/mouse/wheel": { deltaX: 0, deltaY: 60 },
+      "POST /tabs/:id/mouse/click": { x: 10, y: 10 },
       "POST /tabs/:id/scroll": { direction: "down" },
       "POST /tabs/:id/drag": { source: { ref: "@e1" }, target: { ref: "@e2" } },
       "POST /tabs/:id/wait": { text: "Done" },

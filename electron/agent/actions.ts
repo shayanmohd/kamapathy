@@ -10,6 +10,7 @@ import {
   type DragAction,
   type FieldAction,
   type InputActions,
+  type MouseAction,
   type PointerAction,
   type PointerKind,
   type PressAction,
@@ -325,6 +326,10 @@ export function createActions(deps: {
       // Both ends wait for a layout that can take the drag, then today's
       // engine runs in input/actions.ts.
       result = await input.drag(id, payload as unknown as DragAction, run);
+    } else if (action.type === "mouse-click") {
+      // A raw click at a point: no target is resolved, so the runner moves,
+      // presses and waits out what the page does next.
+      result = await input.mouse(id, payload as unknown as MouseAction, run);
     } else if (action.type === "press") {
       // One chord on the key path: the optional target is focused first,
       // then the modifiers, the key and the releases go out.
@@ -391,6 +396,7 @@ export function createActions(deps: {
       press: "Agent pressed a key",
       scroll: "Agent scrolled a page",
       drag: "Agent dragged an element",
+      "mouse-click": "Agent clicked a point",
       wait: "Agent observed a page condition",
     };
     controller.addActivity(tab.spaceId, descriptions[action.type], "info");

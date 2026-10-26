@@ -704,6 +704,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/mouse/move` | `x`, `y`, `steps?` | Moves the mouse to a point, interpolating from where it stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/mouse/down` | `button?`, `clickCount?` | Presses a mouse button where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/mouse/up` | `button?`, `clickCount?` | Lets a held mouse button go where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/click` | `x`, `y`, `button?`, `clickCount?`, `delayMs?` | Clicks at a point with native mouse input, without resolving a target. Returns `{ ok: true, url, input, loading?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/mouse/wheel` | `deltaX`, `deltaY` | Scrolls with the wheel where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/down` | `key` | Holds one key down and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/up` | `key` | Lets one held key go and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |

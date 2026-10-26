@@ -54,6 +54,7 @@ export type ToolAction = {
     | "press"
     | "scroll"
     | "drag"
+    | "mouse-click"
     | "wait"
     | "navigate"
     | "reload"
@@ -397,10 +398,10 @@ export function mouseFields(
   body: Record<string, unknown>,
   kind: MouseKind,
 ): MouseAction {
-  const press = kind === "down" || kind === "up";
+  const press = kind !== "move" && kind !== "wheel";
   return {
     kind,
-    ...(kind === "move"
+    ...(kind === "move" || kind === "click"
       ? { x: pixelField(body, "x"), y: pixelField(body, "y") }
       : {}),
     ...(kind === "wheel"
@@ -412,6 +413,7 @@ export function mouseFields(
     steps: kind === "move" ? integerField(body, "steps", 1, 1, 100) : 1,
     button: press ? enumField(body, "button", BUTTONS, "left") : "left",
     clickCount: press ? integerField(body, "clickCount", 1, 1, 3) : 1,
+    delayMs: kind === "click" ? integerField(body, "delayMs", 0, 0, 5000) : 0,
   };
 }
 
@@ -608,6 +610,14 @@ function parseAction(
     return {
       type,
       payload: dragFields(body) as unknown as Record<string, unknown>,
+    };
+  if (type === "mouse-click")
+    return {
+      type,
+      payload: mouseFields(body, "click") as unknown as Record<
+        string,
+        unknown
+      >,
     };
   if (type === "navigate") return { type, payload: navigationFields(body) };
   if (type === "reload") return { type, payload: reloadFields(body) };

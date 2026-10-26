@@ -403,7 +403,7 @@ export interface PressAction {
   delayMs: number;
   timeoutMs: number;
 }
-export type MouseKind = "move" | "down" | "up" | "wheel";
+export type MouseKind = "move" | "down" | "up" | "click" | "wheel";
 /** One raw mouse request as its route parsed it. */
 export interface MouseAction {
   kind: MouseKind;
@@ -412,6 +412,7 @@ export interface MouseAction {
   steps: number;
   button: Button;
   clickCount: number;
+  delayMs: number;
   deltaX?: number;
   deltaY?: number;
 }
@@ -1575,7 +1576,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       guard,
       dispatch: run.dispatch,
     };
-    const { session } = await actions.readyContents(
+    const { contents, session } = await actions.readyContents(
       id,
       remaining(run.deadline),
       false,
@@ -1665,6 +1666,85 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         gesture,
       );
       return withState();
+    }
+    if (action.kind === "click") {
+      const to = { x: action.x ?? 0, y: action.y ?? 0 };
+      await inViewport(to);
+      await aim(to, true);
+      const bit = BUTTON_BITS[action.button];
+      // One move, then a press and a release per click, with a delay in
+      // each gap, exactly as an element click sends them.
+      const send = async () => {
+        await dispatcher.pointer(
+          pointerCommands({
+            type: "moved",
+            point: to,
+            button: state.buttons ? action.button : "none",
+            buttons: state.buttons,
+            modifiers: state.modifiers,
+          }),
+          gesture,
+        );
+        for (let click = 1; click <= action.clickCount; click += 1) {
+          if (click > 1 && action.delayMs) await pause(action.delayMs);
+          guard();
+          await dispatcher.pointer(
+            pointerCommands({
+              type: "pressed",
+              point: to,
+              button: action.button,
+              buttons: state.buttons | bit,
+              clickCount: click,
+              modifiers: state.modifiers,
+            }),
+            gesture,
+          );
+          if (action.delayMs) await pause(action.delayMs);
+          await dispatcher.pointer(
+            pointerCommands({
+              type: "released",
+              point: to,
+              button: action.button,
+              buttons: state.buttons & ~bit,
+              clickCount: click,
+              modifiers: state.modifiers,
+            }),
+            gesture,
+          );
+        }
+      };
+      // Section 5's delivery check, as every route that presses runs it.
+      await confirmDelivery({
+        kind: "mouse",
+        counters: () =>
+          actions.evaluatePage(id, session, "input", {}, step.deadline, step),
+        frames: async () => {
+          await actions.evaluatePage(
+            id,
+            session,
+            "frame",
+            {},
+            Math.min(step.deadline, Date.now() + 2000),
+            step,
+          );
+        },
+        epoch: () => session.epoch,
+        budget: step.deadline,
+        deliver: send,
+      });
+      // The page's own handlers, then a load the click started.
+      const settled = await settleAfterInput({
+        contents,
+        park: run.park,
+        budget: run.deadline,
+        guard,
+      });
+      return {
+        ok: true,
+        url: contents.getURL(),
+        input: state.view(),
+        ...settled,
+      };
     }
     const point = here();
     await aim(point, false);

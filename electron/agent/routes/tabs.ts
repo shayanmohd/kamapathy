@@ -24,6 +24,7 @@ const RECEIPT_ACTIONS = [
   "press",
   "scroll",
   "drag",
+  "mouse-click",
 ];
 
 export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
