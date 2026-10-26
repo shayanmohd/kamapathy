@@ -1,4 +1,5 @@
 import { isWebUrl } from "../../shared/url";
+import { extensionOrigin } from "./extension-frames";
 import { WORLD_NAME } from "./session/operations";
 import type { CdpEvent } from "./session/types";
 
@@ -437,9 +438,26 @@ export function redactEvent(
     ctx.owns(domain)
   )
     return null;
+  if (namesExtensionWorld(event)) return null;
   if (namesUnknownContext(event, ctx.delivered)) return null;
   const params = hide(event.params);
   return params === event.params ? event : { ...event, params };
+}
+// A world one of the person's extensions runs in: a content script's own
+// world, or an extension page's. Section 17 keeps agents out of them, so the
+// context is never recorded and so never delivered, which leaves every
+// command naming it out of scope and drops its end with it.
+function namesExtensionWorld(event: CdpEvent): boolean {
+  if (event.method !== "Runtime.executionContextCreated") return false;
+  const context = (
+    event.params as {
+      context?: { origin?: unknown; auxData?: { origin?: unknown } };
+    }
+  )?.context;
+  const origins = [context?.origin, context?.auxData?.origin];
+  return origins.some(
+    (origin) => typeof origin === "string" && extensionOrigin(origin),
+  );
 }
 // An event about a context the agent cannot address at all.
 function namesUnknownContext(
