@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import { Script } from "node:vm";
 import { domainToASCII, fileURLToPath, pathToFileURL } from "node:url";
 import { KamapathyError } from "./errors.mjs";
 import { line } from "./format.mjs";
@@ -1107,5 +1108,118 @@ export async function runToolIn(
       throw error;
     }
     throw toolFailed(pack, declared, error);
+  }
+}
+
+// A page tool's arguments as JSON, with the line separators JSON leaves raw
+// escaped the way electron/agent/evaluate.ts escapes them, so the expression
+// is always valid JavaScript.
+const argsJson = (args) =>
+  JSON.stringify(args)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+
+// The line a compile failure sits on: a Script's stack opens with
+// "<file>:<line>", and the wrapper below adds no line of its own.
+function compileLine(error) {
+  const first = String(error?.stack ?? "").split("\n")[0] ?? "";
+  const found = /:(\d+)$/.exec(first);
+  return found ? Number(found[1]) : undefined;
+}
+
+// The file as text, compiled the way the page will wrap it and dropped: a
+// page tool never runs on this computer.
+function pageToolSource(buffer, file) {
+  let source;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch {
+    throw new PackProblem(`${file} must be UTF-8 text.`, { file });
+  }
+  try {
+    new Script(`(${source}\n)`, { filename: file });
+  } catch (error) {
+    throw new PackProblem(
+      `does not compile (${toolText(error?.message ?? error, 200)}).`,
+      { file, line: compileLine(error) },
+    );
+  }
+  return source;
+}
+
+/** The pack, its page tool and the one expression that runs it. Sends nothing. */
+export async function pageToolExpression(
+  env,
+  { packId, tool, args, entry = "runPageTool", roots },
+) {
+  const name = checkName(tool, {
+    pattern: TOOL_NAME,
+    label: "tool",
+    expected: TOOL_EXPECTED,
+    entry,
+  });
+  const pack = await findPack(env, packId, { entry, roots });
+  const declared = toolNamed(pack, name, "page");
+  const checked = checkToolArgs(pack, declared, args);
+  let source;
+  try {
+    source = pageToolSource(
+      await readTrustedFile(
+        { path: pack.dir, source: pack.source },
+        declared.file,
+        { owner: pack.source === "workspace", kind: "pageTool" },
+      ),
+      declared.file,
+    );
+  } catch (error) {
+    if (error instanceof PackProblem) throw packInvalid(pack, [error]);
+    throw error;
+  }
+  const json = argsJson(checked);
+  if (Buffer.byteLength(json) > LIMITS.pageToolArgs) {
+    const problem = `the arguments are larger than ${LIMITS.pageToolArgs / 1024} KiB.`;
+    throw new KamapathyError(
+      "invalid_tool_args",
+      `${declared.name} in the ${pack.id} pack got invalid arguments: ${problem}`,
+      {
+        packId: pack.id,
+        tool: declared.name,
+        problems: [problem],
+        expected: argsShape(declared),
+      },
+    );
+  }
+  // The leading parenthesis keeps line 1 of the file where it was, one column
+  // over, and the newline before the closing one means a trailing line
+  // comment in the file cannot swallow the call.
+  return { pack, tool: declared, expression: `(${source}\n)(${json})` };
+}
+
+/** pageToolExpression, then one evaluate, with the pack and the tool added to anything it throws. */
+export async function runPageToolIn(
+  env,
+  { packId, tool, args, evaluate, entry = "runPageTool", roots },
+) {
+  const {
+    pack,
+    tool: declared,
+    expression,
+  } = await pageToolExpression(env, {
+    packId,
+    tool,
+    args,
+    entry,
+    roots,
+  });
+  try {
+    return await evaluate(expression);
+  } catch (error) {
+    // A page script's own failure is tagged in place, so an agent_scripts_off
+    // stays the ordinary error a script can catch.
+    if (error instanceof KamapathyError) {
+      error.packId ??= pack.id;
+      error.tool ??= declared.name;
+    }
+    throw error;
   }
 }

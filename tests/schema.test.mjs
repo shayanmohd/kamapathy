@@ -1240,6 +1240,65 @@ describe("API schema", () => {
       kind: "method",
       signature: "kamapathy.runSiteTool(packId, tool, args, options)",
     });
+    // runPageTool: the same arguments and option, with the page script codes
+    // beside the pack's own and nothing of its own to send.
+    for (const item of [entry("runPageTool"), entry("Client.runPageTool")]) {
+      expect(item, item.name).toMatchObject({
+        summary:
+          "Runs a site pack's page tool in the page, through one evaluate.",
+        returns: "Promise<unknown>",
+        // The hint about page functions not seeing script variables belongs
+        // to this call too.
+        pageFunction: true,
+        errors: [
+          "invalid_argument",
+          "site_pack_not_found",
+          "site_tool_not_found",
+          "site_pack_invalid",
+          "invalid_tool_args",
+          "agent_scripts_off",
+          "script_error",
+          "result_too_large",
+          "evaluation_timeout",
+          "request_too_large",
+        ],
+        since: 4,
+      });
+      expect(item.route, item.name).toBeUndefined();
+      expect(item.args, item.name).toEqual(entry("runSiteTool").args);
+      expect(item.options, item.name).toEqual(entry("runSiteTool").options);
+      expect(
+        checkCall(item, ["github", "repository_stats", {}, { page }]),
+        item.name,
+      ).toBeNull();
+      expect(
+        checkCall(item, ["github", "repository_stats", undefined, { page }]),
+        item.name,
+      ).toBeNull();
+      for (const options of [{}, { page: "p1" }, { page: null }])
+        expect(
+          checkCall(item, ["github", "repository_stats", {}, options])?.code,
+          `${item.name} ${JSON.stringify(options)}`,
+        ).toBe("invalid_option");
+    }
+    expect(entry("runPageTool")).toMatchObject({
+      kind: "global",
+      signature: "runPageTool(packId, tool, args, options)",
+    });
+    expect(entry("Client.runPageTool")).toMatchObject({
+      kind: "method",
+      signature: "kamapathy.runPageTool(packId, tool, args, options)",
+    });
+    // The four codes a page script raises are the ones section 8 declares,
+    // so runPageTool adds none of its own.
+    for (const code of [
+      "agent_scripts_off",
+      "script_error",
+      "result_too_large",
+      "evaluation_timeout",
+      "request_too_large",
+    ])
+      expect(Object.hasOwn(ERRORS, code), code).toBe(true);
     // Every code it raises is client side and stays as it is on a retry.
     for (const [code, fields] of [
       ["site_pack_not_found", ["packId", "roots"]],
@@ -1299,9 +1358,11 @@ describe("API schema", () => {
       "`sitePacks(target?)`",
       "`siteContext(target)`",
       "`runSiteTool(packId, tool, args, options)`",
+      "`runPageTool(packId, tool, args, options)`",
       "`kamapathy.sitePacks(target?)`",
       "`kamapathy.siteContext(target)`",
       "`kamapathy.runSiteTool(packId, tool, args, options)`",
+      "`kamapathy.runPageTool(packId, tool, args, options)`",
       "`sites [<url-or-host>] [--json]`",
       "`sites check [<pack-id-or-folder>]... [--json]`",
     ])

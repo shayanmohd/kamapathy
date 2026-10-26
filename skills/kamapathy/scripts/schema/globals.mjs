@@ -163,6 +163,41 @@ const runTool = (name, signature, kind) => ({
   since: 4,
 });
 
+const runPage = (name, signature, kind) => ({
+  name,
+  kind,
+  signature,
+  summary: "Runs a site pack's page tool in the page, through one evaluate.",
+  args: [
+    { name: "packId", kind: "string" },
+    { name: "tool", kind: "string" },
+    { name: "args", kind: "json", optional: true },
+    { name: "options", kind: "options" },
+  ],
+  options: {
+    page: {
+      kind: "page",
+      required: true,
+      description: "The agent page the tool works in.",
+    },
+  },
+  returns: "Promise<unknown>",
+  pageFunction: true,
+  errors: [
+    "invalid_argument",
+    "site_pack_not_found",
+    "site_tool_not_found",
+    "site_pack_invalid",
+    "invalid_tool_args",
+    "agent_scripts_off",
+    "script_error",
+    "result_too_large",
+    "evaluation_timeout",
+    "request_too_large",
+  ],
+  since: 4,
+});
+
 export const GLOBALS = [
   {
     name: "kamapathy",
@@ -183,6 +218,7 @@ export const GLOBALS = [
   packs("sitePacks", "sitePacks(target?)", "global"),
   context("siteContext", "siteContext(target)", "global"),
   runTool("runSiteTool", "runSiteTool(packId, tool, args, options)", "global"),
+  runPage("runPageTool", "runPageTool(packId, tool, args, options)", "global"),
   {
     name: "help",
     kind: "global",
@@ -280,6 +316,11 @@ export const CLIENT = [
   runTool(
     "Client.runSiteTool",
     "kamapathy.runSiteTool(packId, tool, args, options)",
+    "method",
+  ),
+  runPage(
+    "Client.runPageTool",
+    "kamapathy.runPageTool(packId, tool, args, options)",
     "method",
   ),
 ];
