@@ -3,8 +3,13 @@
 // the route and the batch can never drift apart. A route with no batch step
 // of its own runs the same element action directly.
 import { send, type RouteDeps, type RouteImpl } from "../http";
-import type { KeyboardKind } from "../input/actions";
-import { fieldFields, keyboardFields, parseToolAction } from "../validate";
+import type { KeyboardKind, MouseKind } from "../input/actions";
+import {
+  fieldFields,
+  keyboardFields,
+  mouseFields,
+  parseToolAction,
+} from "../validate";
 
 // How often a stroke of raw input names itself in the space's activity, so a
 // run of key or mouse requests on one tab is one line.
@@ -55,6 +60,19 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       send(response, 200, result);
     },
   });
+  // The raw mouse routes: like the keyboard's, they add no settle, no load
+  // wait and no receipt tail.
+  const mouse = (kind: MouseKind): RouteImpl => ({
+    handler: async ({ response, body, tab, run }) => {
+      const result = await receipts.with(
+        tab!.id,
+        () => input.mouse(tab!.id, mouseFields(body!, kind), run),
+        { settleMs: 0 },
+      );
+      nameRawInput(tab!.id, "mouse");
+      send(response, 200, result);
+    },
+  });
   return {
     ...Object.fromEntries(
       ["dblclick", "hover", "select"].map((type) => [
@@ -66,6 +84,12 @@ export function inputRoutes(deps: RouteDeps): Record<string, RouteImpl> {
       (["down", "up", "type", "insert-text"] as const).map((kind) => [
         `POST /tabs/:id/keyboard/${kind}`,
         keyboard(kind),
+      ]),
+    ),
+    ...Object.fromEntries(
+      (["move", "down", "up", "wheel"] as const).map((kind) => [
+        `POST /tabs/:id/mouse/${kind}`,
+        mouse(kind),
       ]),
     ),
     // Focus is no batch step: a plan that focuses a field fills or presses

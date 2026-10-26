@@ -48,7 +48,7 @@ import {
   type Modifier,
 } from "./keys";
 import { macCommands } from "./mac-commands";
-import { BUTTON_BITS, type Button } from "./state";
+import { BUTTON_BITS, interpolate, type Button } from "./state";
 import {
   ACTION_LEVELS,
   MAX_SCROLL_GESTURES,
@@ -403,6 +403,18 @@ export interface PressAction {
   delayMs: number;
   timeoutMs: number;
 }
+export type MouseKind = "move" | "down" | "up" | "wheel";
+/** One raw mouse request as its route parsed it. */
+export interface MouseAction {
+  kind: MouseKind;
+  x?: number;
+  y?: number;
+  steps: number;
+  button: Button;
+  clickCount: number;
+  deltaX?: number;
+  deltaY?: number;
+}
 export type KeyboardKind = "down" | "up" | "type" | "insert-text";
 /** One raw keyboard request as its route parsed it. */
 export interface KeyboardAction {
@@ -425,6 +437,11 @@ export interface InputActions {
   keyboard(
     id: string,
     action: KeyboardAction,
+    run: Run,
+  ): Promise<Record<string, unknown>>;
+  mouse(
+    id: string,
+    action: MouseAction,
     run: Run,
   ): Promise<Record<string, unknown>>;
   drag(
@@ -1538,5 +1555,128 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     }
     return withState();
   };
-  return { pointer, drag, field, press, keyboard };
+  // The raw mouse routes: the pointer moves where it is told, presses and
+  // releases where it stands, or scrolls there. None of them resolves a
+  // target or waits for actionability, as section 5 says, and each answers
+  // with the tab's stored input state.
+  const mouse = async (id: string, action: MouseAction, run: Run) => {
+    const guard = () => {
+      authorizeTab(id);
+    };
+    const step: Step = {
+      deadline: run.deadline,
+      signal: run.signal,
+      guard,
+      dispatch: run.dispatch,
+    };
+    // A gesture runs to its end even if the client goes away.
+    const gesture: Step = {
+      deadline: run.deadline,
+      guard,
+      dispatch: run.dispatch,
+    };
+    const { session } = await actions.readyContents(
+      id,
+      remaining(run.deadline),
+      false,
+      run.park,
+    );
+    const dispatcher = actions.dispatcher(id, session);
+    const state = dispatcher.state;
+    const here = () => ({ x: state.x, y: state.y });
+    const withState = () => ({ ok: true, input: state.view() });
+    // The point an agent names has to lie inside the page's own viewport,
+    // which a tab that was never shown answers for its content area, so
+    // nothing here assumes a size.
+    const inViewport = async (point: Point) => {
+      const view = await actions.evaluatePage(
+        id,
+        session,
+        "viewport",
+        {},
+        run.deadline,
+        step,
+      );
+      const width = typeof view.width === "number" ? view.width : 0;
+      const height = typeof view.height === "number" ? view.height : 0;
+      if (
+        point.x >= 0 &&
+        point.x <= width &&
+        point.y >= 0 &&
+        point.y <= height
+      )
+        return;
+      fail(
+        "point_outside_viewport",
+        `The point ${point.x},${point.y} lies outside this page's viewport of ${width} by ${height} pixels. Take a snapshot or a screenshot to measure the page.`,
+        { width, height },
+      );
+    };
+    const aim = (point: Point, press: boolean) =>
+      checkPointerTarget(session, point, step, {
+        button: action.button,
+        press,
+        ...platform,
+      });
+    if (action.kind === "move") {
+      const to = { x: action.x ?? 0, y: action.y ?? 0 };
+      await inViewport(to);
+      await aim(to, false);
+      // A move while a button is held drags, so the held button travels
+      // with each event, as a person's would.
+      const held = state.heldButtons()[0];
+      for (const point of interpolate(here(), to, action.steps))
+        await dispatcher.pointer(
+          pointerCommands({
+            type: "moved",
+            point,
+            button: held ?? "none",
+            buttons: state.buttons,
+            modifiers: state.modifiers,
+          }),
+          gesture,
+        );
+      return withState();
+    }
+    if (action.kind === "down" || action.kind === "up") {
+      const bit = BUTTON_BITS[action.button];
+      // Only a button the tab holds can be released, so the stored state
+      // and the page's never drift apart. A release runs no guard: the
+      // press that put it there passed one, and refusing it would leave the
+      // button held with no way to let it go.
+      if (action.kind === "up" && !state.heldButtons().includes(action.button))
+        return fail(
+          "invalid_field",
+          "The button is not held. Press it with mouse/down first.",
+          { field: "button", expected: "a button this tab holds" },
+        );
+      const point = here();
+      if (action.kind === "down") await aim(point, true);
+      await dispatcher.pointer(
+        pointerCommands({
+          type: action.kind === "down" ? "pressed" : "released",
+          point,
+          button: action.button,
+          buttons:
+            action.kind === "down" ? state.buttons | bit : state.buttons & ~bit,
+          clickCount: action.clickCount,
+          modifiers: state.modifiers,
+        }),
+        gesture,
+      );
+      return withState();
+    }
+    const point = here();
+    await aim(point, false);
+    const events = wheelEvents(action.deltaX ?? 0, action.deltaY ?? 0);
+    for (const [index, event] of events.entries()) {
+      if (index) await pause(WHEEL_GAP_MS);
+      await dispatcher.pointer(
+        wheelCommands(point, event, state.modifiers),
+        gesture,
+      );
+    }
+    return withState();
+  };
+  return { pointer, drag, field, press, keyboard, mouse };
 }

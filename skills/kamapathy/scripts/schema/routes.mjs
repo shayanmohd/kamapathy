@@ -138,6 +138,33 @@ const keyboardKey = {
   description:
     "One key: a name such as Shift, Enter or KeyA, or a printable character. Not a chord.",
 };
+// Where a raw mouse route acts, in the top frame's viewport pixels.
+const coordinate = (axis) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `The ${axis} of the point, in the page's own viewport pixels.`,
+});
+// A wheel delta, in pixels of the page's own viewport.
+const delta = (way) => ({
+  kind: "number",
+  min: -10000,
+  max: 10000,
+  required: true,
+  since: 4,
+  description: `How far to scroll ${way}.`,
+});
+// How many events a move is interpolated into.
+const steps = {
+  kind: "integer",
+  min: 1,
+  max: 100,
+  default: 1,
+  since: 4,
+  description: "How many moves to send from the pointer's stored position.",
+};
 // The options selectOption chooses, as strings or objects.
 const choices = {
   kind: "array",
@@ -310,6 +337,9 @@ const FIELDS = {
     timeoutMs: actionTimeout,
     label,
   },
+  mouseMove: { x: coordinate("x"), y: coordinate("y"), steps },
+  mouseButton: { button, clickCount },
+  mouseWheel: { deltaX: delta("right"), deltaY: delta("down") },
   keyboardKey: { key: keyboardKey },
   keyboardType: {
     text: {
@@ -925,6 +955,38 @@ export const ROUTES = [
     { budget: { compute: "dragBudget", maxMs: 75100 } },
   ),
   action("wait", "Waits for a visible element, text, or both.", "{ ok: true }"),
+  route(
+    "POST",
+    "/tabs/:id/mouse/move",
+    "Moves the mouse to a point, interpolating from where it stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseMove,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/down",
+    "Presses a mouse button where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseButton,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/up",
+    "Lets a held mouse button go where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseButton,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/mouse/wheel",
+    "Scrolls with the wheel where the pointer stands.",
+    "{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
+    FIELDS.mouseWheel,
+    { budget: { compute: "rawBudget", maxMs: 10000 }, follow: true, since: 4 },
+  ),
   route(
     "POST",
     "/tabs/:id/keyboard/down",

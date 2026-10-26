@@ -21,6 +21,8 @@ import type {
   FieldKind,
   KeyboardAction,
   KeyboardKind,
+  MouseAction,
+  MouseKind,
   PointerAction,
   PointerKind,
   PressAction,
@@ -369,6 +371,50 @@ export function pressFields(body: Record<string, unknown>): PressAction {
     timeoutMs: integerField(body, "timeoutMs", 3000, 0, 60000),
   };
 }
+// The farthest a point or a wheel delta may lie from the origin. The page's
+// own viewport decides whether a point is inside it; this only keeps a
+// nonsense number out of the page.
+const MAX_PIXELS = 10000;
+// A point or a delta as a number, which may be fractional. The schema has
+// already refused a wrong shape; this reads it back.
+function pixelField(body: Record<string, unknown>, name: string): number {
+  const value = body[name];
+  const expected = `a number from -${MAX_PIXELS} to ${MAX_PIXELS}`;
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    Math.abs(value) > MAX_PIXELS
+  )
+    return fail("invalid_field", `${name} must be ${expected}.`, {
+      field: name,
+      expected,
+    });
+  return value;
+}
+// The fields the raw mouse routes take. Each kind reads only the ones its
+// route declares, so the schema and this never disagree.
+export function mouseFields(
+  body: Record<string, unknown>,
+  kind: MouseKind,
+): MouseAction {
+  const press = kind === "down" || kind === "up";
+  return {
+    kind,
+    ...(kind === "move"
+      ? { x: pixelField(body, "x"), y: pixelField(body, "y") }
+      : {}),
+    ...(kind === "wheel"
+      ? {
+          deltaX: pixelField(body, "deltaX"),
+          deltaY: pixelField(body, "deltaY"),
+        }
+      : {}),
+    steps: kind === "move" ? integerField(body, "steps", 1, 1, 100) : 1,
+    button: press ? enumField(body, "button", BUTTONS, "left") : "left",
+    clickCount: press ? integerField(body, "clickCount", 1, 1, 3) : 1,
+  };
+}
+
 // The most text one type route sends, one insertion takes, and the gaps a
 // type may spend in all.
 const MAX_TYPE_TEXT = 2000;

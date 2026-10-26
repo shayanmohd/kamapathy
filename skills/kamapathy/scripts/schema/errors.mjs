@@ -429,6 +429,13 @@ export const ERRORS = {
     ["match"],
     4,
   ),
+  point_outside_viewport: code(
+    422,
+    false,
+    "The point lies outside the page's viewport.",
+    ["width", "height"],
+    4,
+  ),
   clip_outside_page: code(
     422,
     false,

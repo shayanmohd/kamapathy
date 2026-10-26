@@ -701,6 +701,10 @@ Show the commands, or help on one
 | POST | `/tabs/:id/scroll` | `direction`, `pixels?`, `ref?`, `selector?`, `label?` | Scrolls the page, the panel holding a control, or the panel in the middle. Returns `{ ok: true, scrolled, selector?, x, y, moved, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/drag` | `source`, `target`, `sourcePosition?`, `targetPosition?`, `button?`, `force?`, `timeoutMs?`, `label?` | Drags one element onto another, waiting until both ends can take the gesture. Returns `{ ok: true, url, drag, loading?, rebound?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/wait` | `selector?`, `text?`, `timeoutMs?` | Waits for a visible element, text, or both. Returns `{ ok: true }`. |
+| POST | `/tabs/:id/mouse/move` | `x`, `y`, `steps?` | Moves the mouse to a point, interpolating from where it stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/down` | `button?`, `clickCount?` | Presses a mouse button where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/up` | `button?`, `clickCount?` | Lets a held mouse button go where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
+| POST | `/tabs/:id/mouse/wheel` | `deltaX`, `deltaY` | Scrolls with the wheel where the pointer stands. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/down` | `key` | Holds one key down and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/up` | `key` | Lets one held key go and reports the tab's input state. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
 | POST | `/tabs/:id/keyboard/type` | `text`, `delayMs?` | Types text as key events, character by character. Returns `{ ok: true, input, popups?, dialog?, moreDialogs?, download?, deniedRequests? }`. |
@@ -806,6 +810,7 @@ Show the commands, or help on one
 | `not_focusable` | 422 | not retryable |  | Nothing focusable at, around or inside the target. |
 | `ambiguous_field` | 422 | not retryable | `candidates` | Retargeting found several candidates. |
 | `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry. |
+| `point_outside_viewport` | 422 | not retryable | `width`, `height` | The point lies outside the page's viewport. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
 | `pdf_too_large` | 422 | not retryable | `limitBytes` | The PDF is over the byte cap. |
