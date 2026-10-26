@@ -2485,6 +2485,42 @@ describe("local automation socket", () => {
     );
   });
 
+  it("a frame that moved between presses ends the action where it stands", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The owner moves 40 px down once the first press has gone out, so the
+    // point the gesture was aimed at is no longer the control's.
+    let moved = 0;
+    page.result = (code: string) =>
+      code.includes(')("frameBox",')
+        ? {
+            ok: true,
+            box: { ...OWNER_BOX.box, y: 60 + moved },
+            area: { ...OWNER_BOX.area, top: 60 + moved, bottom: 260 + moved },
+            point: { x: 65, y: 105 + moved },
+          }
+        : { ok: true, x: 25, y: 45 };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type === "mousePressed") moved = 40;
+    };
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+      clickCount: 2,
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+      dispatched: true,
+    });
+    // One press went out, at the point the frame held when it was measured.
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
+  });
+
   it("a frame that loads another document after input started answers page_changed with frame", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });

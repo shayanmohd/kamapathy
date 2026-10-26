@@ -1149,12 +1149,25 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         ? { targetPosition: action.targetPosition }
         : {}),
     };
+    // The frame both ends were measured in, which the two points travel
+    // out of together.
+    const ran: RanIn = {};
     const evaluate = (
       operation: "actionPoint" | "stableBox" | "input" | "frame",
       body: Record<string, unknown>,
       at: Step = step,
       deadline = run.deadline,
-    ) => actions.evaluatePage(id, session, operation, body, deadline, at);
+    ) =>
+      actions.evaluatePage(
+        id,
+        session,
+        operation,
+        body,
+        deadline,
+        at,
+        undefined,
+        ran,
+      );
     // The two points, with a selector that matched nothing folded into the
     // blocker the loop waits out. Either end's selector may be the one.
     const look = async (
@@ -1255,8 +1268,31 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         if (found.blocked) return stop(found.blocked);
         if (!measured(found)) return { done: false };
       }
-      const from = found.from as Point;
-      const to = found.to as Point;
+      // Section 9: both ends were measured in one world, so both points
+      // travel out through the same owners.
+      const place = await framePlace(id, session, ran, step);
+      if (place.blocked) return stop(place.blocked);
+      if (place.target)
+        noteFrame(run, frameNote(place.target, contents.getURL()));
+      const outward = async (point: Point) => {
+        if (!place.target) return point;
+        const placed = await translatePoint(
+          session,
+          place.target,
+          point,
+          step,
+        );
+        if (placed.covered || !inArea(placed.point, placed.area))
+          return undefined;
+        return placed.point;
+      };
+      const from = await outward(found.from as Point);
+      const to = await outward(found.to as Point);
+      if (!from || !to)
+        return stop({
+          blocker: "outside_viewport",
+          ...(place.target?.path ? { frame: place.target.path } : {}),
+        });
       // The press lands on the source and the drop on the target, so both
       // points go through section 5's guards.
       await aim(from, true);
