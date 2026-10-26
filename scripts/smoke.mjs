@@ -2875,8 +2875,9 @@ try {
       url,
     });
   // The page behind a Playwright page object, which keeps its identity
-  // across a navigation, so its URL says where that page really is.
-  const pageAt = (url) =>
+  // across a navigation, so its URL says where that page really is. The
+  // first of them, not the module's pageAt, which takes the last.
+  const firstPageAt = (url) =>
     poll(
       () =>
         app
@@ -2892,7 +2893,7 @@ try {
     personalTab,
   );
   await navigateTab(personalTab, guardedUrl);
-  const guardedPage = await pageAt(guardedUrl);
+  const guardedPage = await firstPageAt(guardedUrl);
   // The guard only asks once the page has had a gesture, which the click
   // gives it.
   await guardedPage.click("#touch");
@@ -2932,7 +2933,7 @@ try {
     waitUntil: "load",
   });
   assert.equal(toGuarded.status, 200, await toGuarded.text());
-  const agentGuarded = await pageAt(guardedUrl);
+  const agentGuarded = await firstPageAt(guardedUrl);
   const touch = await api(`/tabs/${agentTab}/click`, "POST", {
     selector: "#touch",
   });
