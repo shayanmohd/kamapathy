@@ -309,6 +309,7 @@ export async function startAutomation(
     authority,
     actions,
     sessions,
+    frames,
     refs,
     pageScripts,
     events,

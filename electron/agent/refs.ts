@@ -17,6 +17,8 @@ export interface RefHome {
   loaderId: string;
   /** The frame path of the group whose world holds the element. */
   group: string;
+  /** The frame an `iframe` entry's ref opens, for a call that names it. */
+  opens?: string;
 }
 
 // API restarts in the same app process must not recycle an old element ref.

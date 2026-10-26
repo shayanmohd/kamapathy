@@ -5,6 +5,7 @@ import { classify, type PolicyContext, type Verdict } from "./cdp-policy";
 import { ApiError, fail, toApiError } from "./errors";
 import { recoverFromTimeout } from "./evaluate";
 import type { EventRecording } from "./events";
+import type { FrameGroupsByTab } from "./frames/groups";
 import type { Run } from "./http";
 import type { PageScripts } from "./page-scripts";
 import type { RefBook } from "./refs";
@@ -78,6 +79,7 @@ export function createSpaceCdp(deps: {
   authority: Authority;
   actions: Pick<Actions, "readyContents">;
   sessions: TabSessions;
+  frames: FrameGroupsByTab;
   refs: RefBook;
   pageScripts: PageScripts;
   events: Pick<EventRecording, "pause">;
@@ -87,6 +89,7 @@ export function createSpaceCdp(deps: {
     authority,
     actions,
     sessions,
+    frames,
     refs,
     pageScripts,
     events,
@@ -147,6 +150,39 @@ export function createSpaceCdp(deps: {
       worlds: cdp?.worlds() ?? NO_WORLDS,
       platform: process.platform,
     };
+  };
+  // The frame a command names, by its section 9 path or by the ref of the
+  // `iframe` entry that opens it. A frame in the page's own process has no
+  // session of its own to send on.
+  const frameTarget = async (
+    tabId: string,
+    frame: string,
+    step: Step,
+  ): Promise<string> => {
+    const groups = frames.for(tabId);
+    const missing = () =>
+      fail(
+        "frame_not_found",
+        `This tab has no frame at ${frame}. Take a snapshot: each iframe entry carries the contentFrame path of the frame it opens.`,
+        { frame },
+      );
+    if (!groups) return missing();
+    await groups.bind(step);
+    let frameId: string | undefined;
+    if (frame.startsWith("@")) {
+      refs.check(tabId, frame);
+      const home = groups.homeFrame(frame);
+      frameId = home?.opens ?? home?.frameId;
+    } else frameId = groups.frameAt(frame)?.frameId;
+    const path = frameId === undefined ? undefined : groups.pathOf(frameId);
+    if (frameId === undefined || path === undefined) return missing();
+    if (groups.frameAt(path)?.ownSession !== true)
+      return fail(
+        "invalid_field",
+        "This frame runs in the page's process. Leave frame out and pass this frameId, or a context id, in params instead.",
+        { field: "frame", frameId },
+      );
+    return frameId;
   };
   // What Chromium's refusal, or its silence, means to the agent.
   const mapped = async (
@@ -225,7 +261,14 @@ export function createSpaceCdp(deps: {
         timeoutMs: call.timeoutMs,
       };
       try {
-        const sending = cdp.send(call.method, call.params, step);
+        const frameId =
+          call.frame === undefined
+            ? undefined
+            : await frameTarget(call.tabId, call.frame, step);
+        const sending = cdp.send(call.method, call.params, {
+          ...step,
+          ...(frameId === undefined ? {} : { frameId }),
+        });
         void sending.catch(() => {});
         const { result, newSession } = await Promise.race([sending, aborted]);
         guard();

@@ -6790,6 +6790,79 @@ describe("local automation socket", () => {
     expect(timed.error.retryable).toBeUndefined();
   });
 
+  it("a frame path reaches that frame's own session", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.debugger.reply("DOM.getDocument", () => ({ root: { nodeId: 2 } }));
+    const document = { ok: true, result: { root: { nodeId: 2 } } };
+    // The ref of the iframe entry that opens the frame. It goes first: a
+    // call that reaches Chromium expires the refs the snapshot gave out.
+    const byRef = await cdp(tab.id, {
+      method: "DOM.getDocument",
+      frame: "@e1",
+    });
+    expect(byRef.status).toBe(200);
+    expect(await byRef.json()).toEqual({ ...document, newSession: true });
+    expect(attached(page)).toEqual(["card"]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual(["agent-1"]);
+    expect(refs.classify(tab.id, "@e2")).toBe("retired");
+    // The path that entry's contentFrame carries, on the session it opened.
+    expect(
+      await (
+        await cdp(tab.id, { method: "DOM.getDocument", frame: "0" })
+      ).json(),
+    ).toEqual(document);
+    expect(attached(page)).toEqual(["card"]);
+    // The tab's own page keeps a session of its own.
+    const top = await cdp(tab.id, { method: "DOM.getDocument" });
+    expect(await top.json()).toEqual({ ...document, newSession: true });
+    expect(attached(page)).toEqual(["card", "main"]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual([
+      "agent-1",
+      "agent-1",
+      "agent-2",
+    ]);
+  });
+
+  it("a frame in the page's own process, an unknown path and an unknown ref are refused", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    const refusal = {
+      code: "invalid_field",
+      message:
+        "This frame runs in the page's process. Leave frame out and pass this frameId, or a context id, in params instead.",
+      field: "frame",
+      frameId: "card",
+    };
+    // The frame runs in the page's process, so it has no session to send on.
+    for (const frame of ["0", "@e1", "@e2"]) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "DOM.getDocument", frame }),
+      );
+      expect(status, frame).toBe(400);
+      expect(error, frame).toEqual(refusal);
+    }
+    const unknownPath = await failure(
+      await cdp(tab.id, { method: "DOM.getDocument", frame: "7/2" }),
+    );
+    expect(unknownPath.status).toBe(404);
+    expect(unknownPath.error).toMatchObject({
+      code: "frame_not_found",
+      frame: "7/2",
+    });
+    const unknownRef = await failure(
+      await cdp(tab.id, { method: "DOM.getDocument", frame: "@e9" }),
+    );
+    expect(unknownRef.status).toBe(404);
+    expect(unknownRef.error).toMatchObject({
+      code: "unknown_ref",
+      ref: "@e9",
+    });
+    // No session was opened and nothing was sent on one.
+    expect(attached(page)).toEqual([]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual([]);
+  });
+
   it("sessions close when control or the switch changes", async () => {
     const { space, tab } = await createPage();
     const page = controller.contents;

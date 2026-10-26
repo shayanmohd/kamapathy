@@ -115,15 +115,15 @@ export interface FrameGroups {
     path: string,
   ): { frameId: string; sessionId?: string; ownSession: boolean } | undefined;
   groupOf(frameId: string): GroupInfo | undefined;
-  setHome(ref: string, frameId: string): void;
+  setHome(ref: string, frameId: string, opens?: string): void;
   /**
-   * The frame a ref was issued in, with the path it carries now and the one
-   * it was given in. Throws stale_ref with the frame path once the home
-   * moved on.
+   * The frame a ref was issued in, with the path it carries now, the one it
+   * was given in and the frame an `iframe` entry's ref opens. Throws
+   * stale_ref with the frame path once the home moved on.
    */
-  homeFrame(
-    ref: string,
-  ): { frameId: string; path?: string; group: string } | undefined;
+  homeFrame(ref: string):
+    | { frameId: string; path?: string; group: string; opens?: string }
+    | undefined;
   dispose(): void;
 }
 
@@ -604,11 +604,16 @@ export function createFrameGroups(
       };
     },
     groupOf: (frameId) => groupOfFrame.get(frameId),
-    setHome(ref, frameId) {
+    setHome(ref, frameId, opens) {
       const loaderId = loaders.get(frameId);
       const group = groupOfFrame.get(frameId);
       if (loaderId === undefined || !group) return;
-      refs.setHome(tabId, ref, { frameId, loaderId, group: group.path });
+      refs.setHome(tabId, ref, {
+        frameId,
+        loaderId,
+        group: group.path,
+        ...(opens === undefined ? {} : { opens }),
+      });
     },
     homeFrame(ref) {
       const home = refs.home(tabId, ref);
@@ -626,6 +631,7 @@ export function createFrameGroups(
         frameId: home.frameId,
         ...(path === undefined ? {} : { path }),
         group: home.group,
+        ...(home.opens === undefined ? {} : { opens: home.opens }),
       };
     },
     dispose() {
