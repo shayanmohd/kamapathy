@@ -50,8 +50,9 @@ export async function searchPeople({ page }, { query, limit = 20 }) {
   return [...accounts.values()];
 }
 
-// The address X sends a space to when it wants the person to sign in. A bare
-// 403 is the other refusal: X answers some spaces an empty page.
+// The address X sends a space to when it wants the person to sign in. The
+// other refusal is read beside this one, from the navigation's own status: X
+// answers some spaces a bare 403 with an empty page.
 function walled(url) {
   let where;
   try {

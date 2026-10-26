@@ -237,7 +237,7 @@ ${endless(
   // The sign in flow, at the path the live wall uses.
   "/x/i/flow/login": `${head("X. It's what's happening / X")}
 <main role="main"><h1>Sign in to X</h1>
-<button type="button">Sign in with Google</button>
+<button type="button">Sign in</button>
 ${trap}
 </main>`,
   // One post with its replies, where the second one takes focus.
