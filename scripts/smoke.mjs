@@ -1603,6 +1603,81 @@ try {
   checked(
     "developer tools on an agent tab leave its requests working, and snapshots work after they close",
   );
+  // Section 5 in the window: an agent's chords reach its own page and
+  // nothing of the person's. The tab the person is on carries history, so a
+  // back shortcut would have somewhere to go if one reached the shell.
+  const chordTab = (
+    await page.evaluate(
+      (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
+      origin,
+    )
+  ).activeTabId;
+  const settled = (predicate) =>
+    waitForState(
+      page,
+      (state, id) =>
+        state.tabs.some(
+          (tab) =>
+            tab.id === id && !tab.loading && !tab.error && predicate(tab),
+        ),
+      chordTab,
+    );
+  await settled((tab) => tab.url.startsWith(origin));
+  await page.evaluate(
+    ([id, url]) => window.kamapathy.dispatch({ type: "tab:navigate", id, url }),
+    [chordTab, `${origin}/second`],
+  );
+  await settled((tab) => tab.canGoBack);
+  const personalTabs = async () =>
+    (await page.evaluate(() => window.kamapathy.getState())).tabs
+      .filter((tab) => tab.spaceId === "personal")
+      .map((tab) => `${tab.id} ${tab.url}`);
+  const anyDevTools = () =>
+    app.evaluate(({ webContents }) =>
+      webContents.getAllWebContents().some((item) => item.isDevToolsOpened()),
+    );
+  const tabsBeforeChords = await personalTabs();
+  assert.ok(tabsBeforeChords.length >= 2, JSON.stringify(tabsBeforeChords));
+  assert.equal(await anyDevTools(), false);
+  for (const key of [
+    "ControlOrMeta+KeyW",
+    "ControlOrMeta+KeyT",
+    "F12",
+    "Alt+ArrowLeft",
+  ]) {
+    const pressed = await api(`/tabs/${agentTab}/press`, "POST", { key });
+    assert.equal(pressed.status, 200, await pressed.text());
+  }
+  assert.deepEqual(await personalTabs(), tabsBeforeChords);
+  assert.equal(await anyDevTools(), false);
+  state = await page.evaluate(() => window.kamapathy.getState());
+  assert.deepEqual(
+    [state.activeSpaceId, state.activeTabId],
+    ["personal", chordTab],
+  );
+  // The person's own new-tab shortcut still works in the same window.
+  await page.keyboard.press("ControlOrMeta+T");
+  state = await waitForState(
+    page,
+    (state, count) =>
+      state.tabs.filter((tab) => tab.spaceId === "personal").length ===
+      count + 1,
+    tabsBeforeChords.length,
+  );
+  for (const id of [state.activeTabId, chordTab])
+    await page.evaluate(
+      (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+      id,
+    );
+  await waitForState(
+    page,
+    (state, count) =>
+      state.tabs.filter((tab) => tab.spaceId === "personal").length === count,
+    tabsBeforeChords.length - 1,
+  );
+  checked(
+    "agent chords leave the person's tabs and developer tools alone while the person's own shortcuts still work",
+  );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 409);
   await poll(
