@@ -6790,6 +6790,149 @@ describe("local automation socket", () => {
     expect(timed.error.retryable).toBeUndefined();
   });
 
+  it("sessions close when control or the switch changes", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const closed = () =>
+      page.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId);
+    // Each command answers whether it had to open a session of its own.
+    const opened = async () => {
+      const answered = await cdp(tab.id, { method: "Page.enable" });
+      expect(answered.status).toBe(200);
+      return (await answered.json()).newSession === true;
+    };
+    expect(await opened()).toBe(true);
+    expect(await opened()).toBe(false);
+    // The person takes the space.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(closed()).toEqual(["agent-1"]);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+    expect(await opened()).toBe(true);
+    // A hold for the person, such as one a site asks for.
+    const hold = controller.holdForPerson(
+      space.id,
+      "approval",
+      "clear data for example.com",
+    );
+    expect(closed()).toEqual(["agent-1", "agent-2"]);
+    controller.releaseHold(hold);
+    expect(await opened()).toBe(true);
+    // The Page scripts switch.
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    expect(closed()).toEqual(["agent-1", "agent-2", "agent-3"]);
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    expect(await opened()).toBe(true);
+    // The person's Stop ends the space's access.
+    controller.endAccess(space.id, { by: "person", reason: "stopped" });
+    expect(closed()).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+      "agent-4",
+    ]);
+    // A grant from the app, and the page adopted again, give the agent a
+    // session of its own.
+    api.grantSpace(space.id);
+    controller.setManaged(tab.id, true);
+    expect(await opened()).toBe(true);
+  });
+
+  it("a released tab, a closed tab and a closed space keep no session", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const closed = () =>
+      page.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId);
+    const opened = async (tabId: string) => {
+      const answered = await cdp(tabId, { method: "Page.enable" });
+      expect(answered.status).toBe(200);
+      return (await answered.json()).newSession === true;
+    };
+    expect(await opened(tab.id)).toBe(true);
+    // The agent lets the page go.
+    controller.setManaged(tab.id, false);
+    expect(closed()).toEqual(["agent-1"]);
+    controller.setManaged(tab.id, true);
+    expect(await opened(tab.id)).toBe(true);
+    // The page closes.
+    controller.closeTab(tab.id, "agent");
+    expect(closed()).toEqual(["agent-1", "agent-2"]);
+    // The space closes, with a page of its own open in it.
+    const second = (
+      await (
+        await request(`/spaces/${space.id}/tabs`, "POST", {
+          url: "https://example.com/second",
+        })
+      ).json()
+    ).tab as BrowserState["tabs"][number];
+    const secondPage = controller.contents;
+    expect(await opened(second.id)).toBe(true);
+    await controller.dispatch({ type: "space:delete", id: space.id });
+    expect(
+      secondPage.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId),
+    ).toEqual(["agent-1"]);
+  });
+
+  it("developer tools detaching closes the agent sessions too", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect(
+      (await (await cdp(tab.id, { method: "Page.enable" })).json()).newSession,
+    ).toBe(true);
+    const closes = page.debugger.sent.filter(
+      (command) => command.method === "Target.detachFromTarget",
+    ).length;
+    // Developer tools take the debugger: the agent's session went with it,
+    // and Kamapathy never asks Chromium to close one that is already gone.
+    page.devtools = true;
+    page.debugger.attachError = new Error(
+      "Another debugger is already attached",
+    );
+    page.debugger.lose("devtools");
+    // The loss is reported before Kamapathy finds out who holds the
+    // debugger, so the reason settles on the next attempt to attach.
+    let busy = await failure(await cdp(tab.id, { method: "Page.enable" }));
+    await expect
+      .poll(async () => {
+        busy = await failure(await cdp(tab.id, { method: "Page.enable" }));
+        return busy.error.reason;
+      })
+      .toBe("devtools");
+    expect(busy.status).toBe(409);
+    expect(busy.error).toMatchObject({
+      code: "debugger_busy",
+      reason: "devtools",
+    });
+    expect(
+      page.debugger.sent.filter(
+        (command) => command.method === "Target.detachFromTarget",
+      ),
+    ).toHaveLength(closes);
+    // Once they let go, the next command opens a session of its own.
+    page.devtools = false;
+    page.debugger.attachError = undefined;
+    page.emit("devtools-closed");
+    await expect.poll(() => page.debugger.attached).toBe(true);
+    expect(
+      (await (await cdp(tab.id, { method: "Page.enable" })).json()).newSession,
+    ).toBe(true);
+  });
+
   it("an Input command never goes out on an agent session", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

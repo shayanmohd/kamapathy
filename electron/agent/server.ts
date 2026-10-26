@@ -311,6 +311,7 @@ export async function startAutomation(
     sessions,
     refs,
     pageScripts,
+    events,
   });
   // What the agent holds on each tab, which the event redactor reads.
   events.setAgentDomains({

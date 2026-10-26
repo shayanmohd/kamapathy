@@ -4,6 +4,7 @@ import type { Authority } from "./authority";
 import { classify, type PolicyContext, type Verdict } from "./cdp-policy";
 import { ApiError, fail, toApiError } from "./errors";
 import { recoverFromTimeout } from "./evaluate";
+import type { EventRecording } from "./events";
 import type { Run } from "./http";
 import type { PageScripts } from "./page-scripts";
 import type { RefBook } from "./refs";
@@ -79,8 +80,17 @@ export function createSpaceCdp(deps: {
   sessions: TabSessions;
   refs: RefBook;
   pageScripts: PageScripts;
+  events: Pick<EventRecording, "pause">;
 }): SpaceCdpFilter {
-  const { controller, authority, actions, sessions, refs, pageScripts } = deps;
+  const {
+    controller,
+    authority,
+    actions,
+    sessions,
+    refs,
+    pageScripts,
+    events,
+  } = deps;
   // One AgentCdp per live tab session, made on the tab's first command.
   const held = new Map<string, { session: TabSession; cdp: AgentCdp }>();
   const named = new Map<string, number>();
@@ -100,6 +110,36 @@ export function createSpaceCdp(deps: {
     held.set(tabId, { session, cdp });
     return cdp;
   };
+  // Everything a tab's agent holds, closed and forgotten. A session whose
+  // debugger has gone is forgotten without an error.
+  const closeFor = async (tabId: string) => {
+    const entry = held.get(tabId);
+    if (!entry) return;
+    held.delete(tabId);
+    named.delete(tabId);
+    await entry.cdp.close();
+    entry.cdp.dispose();
+  };
+  // A tab keeps its agent sessions only while the agent has the tab: a
+  // takeover, a hold, access ending, the tab released or closed and the
+  // space closing all end them.
+  const stopState = controller.subscribe(() => {
+    for (const tabId of [...held.keys()]) {
+      if (controller.agentControlled(tabId)) continue;
+      const tab = controller.state.tabs.find((item) => item.id === tabId);
+      const space = controller.state.spaces.find(
+        (item) => item.id === tab?.spaceId,
+      );
+      void closeFor(tabId);
+      // The log pauses with the sessions, so nothing the person does next
+      // is recorded.
+      if (space?.owner === "human") events.pause(space.id, "human_control");
+    }
+  });
+  // The switch off ends them too, in flight commands included.
+  const stopSwitch = pageScripts.onOff(() => {
+    for (const tabId of [...held.keys()]) void closeFor(tabId);
+  });
   const context = (tabId: string): PolicyContext => {
     const cdp = cdpFor(tabId);
     return {
@@ -209,6 +249,8 @@ export function createSpaceCdp(deps: {
     },
     cdpFor,
     dispose() {
+      stopState();
+      stopSwitch();
       stopSessions();
       for (const entry of held.values()) entry.cdp.dispose();
       held.clear();
