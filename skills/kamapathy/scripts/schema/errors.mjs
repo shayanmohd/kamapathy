@@ -165,6 +165,13 @@ export const ERRORS = {
     [],
     2,
   ),
+  frame_not_found: code(
+    404,
+    false,
+    "No current frame of this tab has that path.",
+    ["frame"],
+    4,
+  ),
   body_timeout: code(408, true, "The request body did not arrive in time."),
   human_control: code(409, false, "The person controls this space.", [
     "spaceId",
@@ -393,6 +400,13 @@ export const ERRORS = {
     ],
     4,
   ),
+  cdp_error: code(
+    422,
+    false,
+    "Chromium refused the protocol command.",
+    ["method", "protocolCode", "protocolMessage"],
+    4,
+  ),
   no_match: code(
     422,
     true,
@@ -579,6 +593,13 @@ export const ERRORS = {
     false,
     "The fetch did not answer within the timeout.",
     ["awaited", "timeoutMs"],
+    4,
+  ),
+  cdp_timeout: code(
+    504,
+    false,
+    "The protocol command did not answer within the timeout.",
+    ["awaited", "method", "timeoutMs", "executionStopped", "pageResponsive"],
     4,
   ),
   pdf_timeout: code(

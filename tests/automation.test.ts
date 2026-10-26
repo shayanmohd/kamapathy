@@ -6491,6 +6491,324 @@ describe("local automation socket", () => {
     });
   });
 
+  // Section 8's cdp route: one protocol command on the agent's own session,
+  // which never reaches the browser, another tab or Kamapathy's own session.
+  const cdp = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/cdp`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // Every command of one method, with the session it went out on.
+  const sentOn = (page: FakeContents, method: string) =>
+    page.debugger.sent
+      .filter((command) => command.method === method)
+      .map((command) => command.sessionId);
+  const attached = (page: FakeContents) =>
+    page.debugger.sent
+      .filter((command) => command.method === "Target.attachToTarget")
+      .map((command) => command.params.targetId);
+
+  it("the first command opens an agent session and says so", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Page.getNavigationHistory", () => ({
+      currentIndex: 0,
+      entries: [{ id: 1, url: "https://example.com/" }],
+    }));
+    const first = await cdp(tab.id, { method: "Page.getNavigationHistory" });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({
+      ok: true,
+      result: {
+        currentIndex: 0,
+        entries: [{ id: 1, url: "https://example.com/" }],
+      },
+      newSession: true,
+    });
+    // The session is the tab's own target, opened once, and the command
+    // went out on it rather than on Kamapathy's own session.
+    expect(attached(page)).toEqual(["main"]);
+    expect(sentOn(page, "Page.getNavigationHistory")).toEqual(["agent-1"]);
+    // The second command reuses it and says nothing about a session.
+    const second = await cdp(tab.id, { method: "Page.getNavigationHistory" });
+    expect(await second.json()).toEqual({
+      ok: true,
+      result: {
+        currentIndex: 0,
+        entries: [{ id: 1, url: "https://example.com/" }],
+      },
+    });
+    expect(attached(page)).toEqual(["main"]);
+    expect(sentOn(page, "Page.getNavigationHistory")).toEqual([
+      "agent-1",
+      "agent-1",
+    ]);
+    // No session id ever reaches the agent.
+    expect(JSON.stringify(await (await cdp(tab.id, { method: "Page.enable" })).json())).not.toContain("agent-1");
+  });
+
+  it("commands on an agent session never touch Kamapathy's tracking", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const drained = async () =>
+      ((await (await drainEvents(tab.id)).json()).events as {
+        method: string;
+        params: { requestId?: string };
+      }[]).map((event) => [event.method, event.params.requestId]);
+    const finished = (requestId: string, sessionId?: string) =>
+      page.debugger.event(
+        "Network.loadingFinished",
+        { requestId, encodedDataLength: 5 },
+        sessionId,
+      );
+    // While the agent holds no domain, Kamapathy's own copy is the log's.
+    finished("1");
+    expect(await drained()).toEqual([["Network.loadingFinished", "1"]]);
+    // The agent turns Network on for itself: its copy replaces Kamapathy's,
+    // and the command went out on its own session alone. Kamapathy's own
+    // enable, from the session's setup, is the one before it.
+    const enables = sentOn(page, "Network.enable").length;
+    expect(sentOn(page, "Network.enable")).toEqual([undefined]);
+    expect((await cdp(tab.id, { method: "Network.enable" })).status).toBe(200);
+    expect(sentOn(page, "Network.enable").slice(enables)).toEqual(["agent-1"]);
+    finished("2");
+    finished("3", "agent-1");
+    expect(await drained()).toEqual([["Network.loadingFinished", "3"]]);
+    // Its disable reaches only its own session, so Kamapathy's tracking
+    // and its copy of the log come straight back.
+    expect((await cdp(tab.id, { method: "Network.disable" })).status).toBe(200);
+    expect(sentOn(page, "Network.disable")).toEqual(["agent-1"]);
+    expect(sentOn(page, "Network.enable").slice(enables)).toEqual(["agent-1"]);
+    finished("4");
+    expect(await drained()).toEqual([["Network.loadingFinished", "4"]]);
+  });
+
+  it("the policy refuses before anything is sent", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const blocked = [
+      ["Target.getTargets", "browser"],
+      ["Network.getAllCookies", "session"],
+      ["Page.close", "managed"],
+      ["Runtime.terminateExecution", "process"],
+      ["Storage.clearDataForOrigin", "session"],
+    ] as const;
+    for (const [method, reason] of blocked) {
+      const { status, error } = await failure(await cdp(tab.id, { method }));
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason,
+      });
+      expect(error.param, method).toBeUndefined();
+    }
+    // Nothing was sent on any session, and no session was opened.
+    expect(attached(page)).toEqual([]);
+    for (const [method] of blocked) expect(sentOn(page, method)).toEqual([]);
+  });
+
+  it("a parameter refusal names the parameter", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const refused = [
+      ["Page.navigate", { url: "file:///etc/passwd" }, "url"],
+      ["Page.createIsolatedWorld", { worldName: "kamapathy-2" }, "worldName"],
+      [
+        "Page.createIsolatedWorld",
+        { frameId: "main", grantUniveralAccess: true },
+        "grantUniveralAccess",
+      ],
+      ["Runtime.getProperties", { objectId: "never-given" }, "objectId"],
+      ["Fetch.enable", { handleAuthRequests: true }, "handleAuthRequests"],
+    ] as const;
+    for (const [method, params, param] of refused) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, `${method} ${param}`).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        param,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("ids the tab delivered are accepted", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Runtime.evaluate", () => ({
+      result: { type: "object", objectId: "obj-7" },
+    }));
+    expect((await cdp(tab.id, { method: "Runtime.evaluate", params: { expression: "window" } })).status).toBe(200);
+    // An object id from a reply, and a context id from an event of the
+    // agent's own session.
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 9,
+          name: "",
+          origin: "https://example.com",
+          uniqueId: "9.1",
+          auxData: { frameId: "main", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    page.debugger.reply("Runtime.getProperties", () => ({ result: [] }));
+    expect((await cdp(tab.id, { method: "Runtime.getProperties", params: { objectId: "obj-7" } })).status).toBe(200);
+    expect((await cdp(tab.id, { method: "Runtime.evaluate", params: { expression: "1", contextId: 9 } })).status).toBe(200);
+    // Another tab never gave them out, so they are out of its scope.
+    const other = (
+      await (
+        await request(`/spaces/${space.id}/tabs`, "POST", {
+          url: "https://example.com/other",
+        })
+      ).json()
+    ).tab as BrowserState["tabs"][number];
+    for (const params of [{ objectId: "obj-7" }, { expression: "1", contextId: 9 }]) {
+      const { status, error } = await failure(
+        await cdp(other.id, {
+          method: "objectId" in params ? "Runtime.getProperties" : "Runtime.evaluate",
+          params,
+        }),
+      );
+      expect(status).toBe(403);
+      expect(error).toMatchObject({ code: "cdp_method_blocked", reason: "scope" });
+    }
+  });
+
+  it("every call that reached Chromium expires the tab's refs", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A refusal never reached Chromium, so the page's refs stand.
+    expect((await failure(await cdp(tab.id, { method: "Target.getTargets" }))).status).toBe(403);
+    expect(refs.classify(tab.id, "@e1")).toBe("live");
+    page.debugger.reply("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    expect((await cdp(tab.id, { method: "DOM.getDocument" })).status).toBe(200);
+    expect(refs.classify(tab.id, "@e1")).toBe("retired");
+    const stale = await failure(
+      await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+    );
+    expect(stale.status).toBe(409);
+    expect(stale.error).toMatchObject({ code: "stale_ref", ref: "@e1" });
+    // A command that failed in Chromium reached it all the same.
+    refs.record(tab.id, [11]);
+    page.debugger.reply("DOM.getDocument", () => {
+      throw new Error("Could not find node with given id");
+    });
+    expect((await failure(await cdp(tab.id, { method: "DOM.getDocument" }))).status).toBe(422);
+    expect(refs.classify(tab.id, "@e11")).toBe("retired");
+  });
+
+  it("method and params are validated before the lane", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const bodies = [
+      [{ method: "page.enable" }, "method"],
+      [{ method: "Page" }, "method"],
+      [{ method: "Page.enable", params: [] }, "params"],
+      [{ method: "Page.enable", params: 7 }, "params"],
+      [{ method: "Page.enable", timeoutMs: 999 }, "timeoutMs"],
+      [{ method: "Page.enable", timeoutMs: 60001 }, "timeoutMs"],
+      [{ method: "Page.enable", frame: "" }, "frame"],
+    ] as const;
+    for (const [body, field] of bodies) {
+      const { status, error } = await failure(await cdp(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    expect(attached(page)).toEqual([]);
+    expect(page.debugger.sent.some((command) => command.sessionId)).toBe(false);
+    // The route takes a mebibyte of params, and refuses the byte past it.
+    expect(await declaredSize(`/tabs/${tab.id}/cdp`, 1048577)).toBe(413);
+    const large = {
+      method: "Runtime.evaluate",
+      params: { expression: "x".repeat(1000000) },
+    };
+    expect(Buffer.byteLength(JSON.stringify(large))).toBeLessThan(1048576);
+    expect((await cdp(tab.id, large)).status).toBe(200);
+  });
+
+  it("protocol errors and timeouts are mapped", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Chromium's own dispatcher names a method or parameters it has not got.
+    page.debugger.reply("Page.setFontFamilies", () => {
+      throw new Error("'Page.setFontFamilies' wasn't found");
+    });
+    const missing = await failure(
+      await cdp(tab.id, { method: "Page.setFontFamilies" }),
+    );
+    expect(missing.status).toBe(422);
+    expect(missing.error).toEqual({
+      code: "cdp_error",
+      message: expect.stringContaining("Page.setFontFamilies"),
+      method: "Page.setFontFamilies",
+      protocolCode: -32601,
+      protocolMessage: "'Page.setFontFamilies' wasn't found",
+      dispatched: true,
+    });
+    // A domain's own refusal carries its text, with no code to read.
+    page.debugger.reply("DOM.describeNode", () => {
+      throw new Error("Could not find node with given id");
+    });
+    const refused = await failure(
+      await cdp(tab.id, { method: "DOM.describeNode", params: { nodeId: 1 } }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "cdp_error",
+      method: "DOM.describeNode",
+      protocolMessage: "Could not find node with given id",
+    });
+    expect(refused.error.protocolCode).toBeUndefined();
+    // A command Chromium never answers ends as the timeout, with what the
+    // shared probe found out about the page.
+    page.debugger.reply("Page.getLayoutMetrics", () => new Promise(() => {}));
+    const started = Date.now();
+    const timed = await failure(
+      await cdp(tab.id, { method: "Page.getLayoutMetrics", timeoutMs: 1000 }),
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(timed.status).toBe(504);
+    expect(timed.error).toMatchObject({
+      code: "cdp_timeout",
+      awaited: "cdp",
+      method: "Page.getLayoutMetrics",
+      timeoutMs: 1000,
+      executionStopped: false,
+      pageResponsive: true,
+    });
+    expect(timed.error.retryable).toBeUndefined();
+  });
+
+  it("an Input command never goes out on an agent session", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Input.dispatchKeyEvent",
+        params: { type: "keyDown", key: "a" },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Input.dispatchKeyEvent",
+      reason: "managed",
+    });
+    expect(sentOn(page, "Input.dispatchKeyEvent")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -10669,6 +10987,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/evaluate": { expression: "true" },
       "POST /tabs/:id/fetch": { url: "/api/cart" },
       "POST /tabs/:id/events": { max: 10 },
+      "POST /tabs/:id/cdp": { method: "Page.enable" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

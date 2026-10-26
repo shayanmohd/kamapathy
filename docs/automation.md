@@ -617,6 +617,7 @@ A capture reaching past the current visual viewport, which is any full page and 
 | POST | `/tabs/:id/evaluate` | `expression?`, `function?`, `arg?`, `timeoutMs?` | Runs the agent's own expression or function in the page's main frame. Returns `{ ok: true, tab: TabView, value?: json } or { ok: true, tab: TabView, unserializable } or { ok: true, tab: TabView }`. |
 | POST | `/tabs/:id/fetch` | `url`, `method?`, `headers?`, `body?`, `cache?`, `credentials?`, `integrity?`, `keepalive?`, `mode?`, `redirect?`, `referrer?`, `referrerPolicy?`, `stream?`, `timeoutMs?` | Fetches a URL from the page, with its cookies, origin and CORS. Returns `{ ok: true, tab: TabView, response: { ok, status, statusText, url, redirected, type, headers, body } }, or NDJSON head, data and end lines with stream`. |
 | POST | `/tabs/:id/events` | `max?` | Drains the protocol events recorded for this tab. Returns `{ ok: true, events, dropped, gaps, remaining }`. |
+| POST | `/tabs/:id/cdp` | `method`, `params?`, `frame?`, `timeoutMs?` | Sends one protocol command to the tab's own page or one of its frames. Returns `{ ok: true, result, newSession? }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
@@ -712,6 +713,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `download_not_found` | 404 | not retryable |  | No held download has this ID: it was deleted, its space closed, or an hour passed since it finished. |
 | `file_chooser_not_found` | 404 | not retryable |  | No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out. |
+| `frame_not_found` | 404 | not retryable | `frame` | No current frame of this tab has that path. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -754,6 +756,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
 | `result_too_large` | 422 | not retryable | `bytes`, `limit`, `status`, `url`, `headers` | The result is larger than the route returns. |
 | `fetch_failed` | 422 | not retryable | `url`, `pageOrigin`, `crossOrigin`, `mode`, `name`, `corsError`, `blockedReason`, `netError` | The page could not fetch the URL. |
+| `cdp_error` | 422 | not retryable | `method`, `protocolCode`, `protocolMessage` | Chromium refused the protocol command. |
 | `no_match` | 422 | retryable | `selector`, `waitedMs`, `unreadFrames` | Nothing matched the selector by the deadline. |
 | `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates`, `unreadFrames` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
@@ -785,6 +788,7 @@ Every code, its status, whether it can be retried, and its fields:
 | `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor`, `frame`, `unreadFrames` | The request did not start in time, or its target never became ready for input. |
 | `evaluation_timeout` | 504 | not retryable | `awaited`, `timeoutMs`, `executionStopped`, `mayHaveLateEffects`, `pageResponsive` | The page script did not finish within the timeout. |
 | `fetch_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The fetch did not answer within the timeout. |
+| `cdp_timeout` | 504 | not retryable | `awaited`, `method`, `timeoutMs`, `executionStopped`, `pageResponsive` | The protocol command did not answer within the timeout. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |

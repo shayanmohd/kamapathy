@@ -14,6 +14,7 @@ import {
   API_LEVEL,
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import { METHOD_PATTERN } from "./cdp-policy";
 import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
 import type { FetchStart } from "./dom/fetch";
 import { MAX_INPUT_FILES } from "./dom/files";
@@ -1062,6 +1063,34 @@ export function urlField(body: Record<string, unknown>): string {
 // How many of a tab's recorded events one drain takes.
 export function eventFields(body: Record<string, unknown>): { max: number } {
   return { max: integerField(body, "max", 10000, 1, 10000) };
+}
+/** One protocol command: its method, its own parameters and where it goes. */
+export function cdpFields(body: Record<string, unknown>): {
+  method: string;
+  params: Record<string, unknown>;
+  frame?: string;
+  timeoutMs: number;
+} {
+  const method = stringField(body, "method", 64);
+  if (!METHOD_PATTERN.test(method))
+    return fail(
+      "invalid_field",
+      "method must be a protocol domain and command, such as Page.getNavigationHistory.",
+      { field: "method" },
+    );
+  const params = body.params === undefined ? {} : body.params;
+  if (typeof params !== "object" || params === null || Array.isArray(params))
+    return fail("invalid_field", "params must be a JSON object.", {
+      field: "params",
+    });
+  return {
+    method,
+    params: params as Record<string, unknown>,
+    ...(body.frame === undefined
+      ? {}
+      : { frame: stringField(body, "frame", 160) }),
+    timeoutMs: integerField(body, "timeoutMs", 15000, 1000, 60000),
+  };
 }
 export function expectationFields(body: Record<string, unknown>): {
   event: ExpectationEvent;
