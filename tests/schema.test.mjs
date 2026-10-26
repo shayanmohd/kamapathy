@@ -1118,6 +1118,31 @@ describe("hand written docs", () => {
       ],
       ["skills/kamapathy/references/scripting.md", "unminimized window"],
       ["skills/kamapathy/references/scripting.md", "screenshot_unavailable"],
+      [
+        "docs/automation.md",
+        "Modifier combinations, shell shortcuts, and arbitrary key sequences",
+      ],
+      ["docs/automation.md", "Clicks require a visible, enabled element"],
+      ["docs/SECURITY.md", "trusted clicks, keys and drags"],
+      ["skills/kamapathy/SKILL.md", "canvas controls"],
+      ["skills/kamapathy/references/actions.md", "Supported keys:"],
+      [
+        "skills/kamapathy/references/actions.md",
+        "Modifier combinations are unsupported",
+      ],
+      ["skills/kamapathy/references/actions.md", "Press a supported key"],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "Home, End, PageUp, PageDown, Space",
+      ],
+      [
+        "README.md",
+        "canvas editors and JavaScript dialogs still need a handoff",
+      ],
+      [
+        "site/index.html",
+        "Canvas editors and JavaScript dialogs are out of reach too",
+      ],
     ];
     for (const [path, sentence] of retired)
       expect(read(path), `${path} still says ${sentence}`).not.toContain(

@@ -1394,7 +1394,7 @@ export const ACTIONS = [
   },
   {
     type: "press",
-    summary: "Presses a supported key.",
+    summary: "Presses a key or a chord.",
     fields: FIELDS.press,
     since: 1,
   },
