@@ -69,12 +69,17 @@ describe("what the docs say about extensions", () => {
 
   it("the site offers them and discloses the update check", () => {
     const html = read("site/index.html");
-    expect(html).toContain(
-      "Chrome Web Store extensions, brought over from your browser",
-    );
+    expect(html).toContain("Chrome Web Store extensions come over");
+    // Two phases each rewrote the import paragraph and the import answer, so
+    // the page carried both versions, and each denied what the other offered.
+    // One sentence each now, and neither denial can come back.
+    expect(html).toContain("saved passwords from the Chrome-based browsers");
+    expect(html).toContain("Your extensions come over without their data");
     expect(html).toContain(UPDATES);
     expect(html).not.toContain("Not there yet: browser extensions");
     expect(html).not.toContain("Browser extensions, sync, a password manager");
     expect(html).not.toContain("passwords and extensions do not come over");
+    expect(html).not.toContain("passwords do not come over yet");
+    expect(html).not.toContain("Extensions do not come over yet");
   });
 });

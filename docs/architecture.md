@@ -108,8 +108,7 @@ Signing and publishing are disabled in the development configuration. macOS also
 | `electron/update-release.ts`         | Install kinds, installer names, release picking, checksums               |
 | `electron/agent/presence.ts`         | A space's task state: status, labels, outcomes and cursor points         |
 | `electron/agent/cursor.ts`           | The cursor view over an agent's page, its placement and its motion       |
-| `electron/import.ts`                 | Reads bookmarks and history from other browsers, without Electron        |
-| `electron/import.ts`                 | Reads bookmarks, history and sign-ins from other browsers                |
+| `electron/import.ts`                 | Reads bookmarks and history, carries sign-ins and passwords across       |
 | `electron/identity.ts`               | Chrome's reduced user agent for every session                            |
 | `electron/default-browser.ts`        | Reads and sets the default browser per platform                          |
 | `electron/incoming.ts`               | Links and files other applications hand over                             |
