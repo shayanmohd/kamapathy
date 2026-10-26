@@ -11,9 +11,12 @@ import type { Authority } from "./authority";
 import type { Dialogs } from "./dialogs";
 import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
+import type { EventRecording } from "./events";
 import type { FileChoosers } from "./file-choosers";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
+import type { FrameGroupsByTab } from "./frames/groups";
+import type { PageScripts } from "./page-scripts";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
 import type { RefBook } from "./refs";
@@ -143,6 +146,12 @@ export interface RouteDeps {
   // The ref numbers a route may hand out, for the file routes, which name
   // the input they picked between two page steps.
   refs: RefBook;
+  /** Section 8's Page scripts gate, shared by every call it gates. */
+  pageScripts: PageScripts;
+  /** Section 8's recording control, which the events route drains. */
+  events: EventRecording;
+  /** Section 9's frame groups, one per live tab session. */
+  frames: FrameGroupsByTab;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

@@ -64,7 +64,9 @@ const frame = (
   input: Partial<KnownFrame> & { frameId: string },
 ): KnownFrame => ({
   origin: "https://example.com",
+  loaderId: "loader-1",
   crossOrigin: false,
+  ownSession: false,
   blocked: false,
   unavailable: false,
   ...input,

@@ -1,7 +1,7 @@
 import type { WaitState } from "../dom/select";
 import { ApiError, fail } from "../errors";
 import {
-  evaluateScript,
+  evaluateOnce,
   isTruthy,
   requireScripts,
   type ScriptSource,
@@ -498,7 +498,10 @@ export function createWaits(deps: WaitsDeps) {
         tab = authorizeTab(tabId);
         requireScripts(controller);
         const limit = pageDeadline();
-        const result = await evaluateScript(session, body.source, {
+        // A check reads the page without stopping its own scripts, so it
+        // sends no execution limit and keeps its exceptions out of the
+        // page's console.
+        const result = await evaluateOnce(session, body.source, {
           deadline: limit,
           signal: run.signal,
           guard: () => {
@@ -506,6 +509,7 @@ export function createWaits(deps: WaitsDeps) {
           },
           dispatch: run.dispatch,
           timeoutMs: Math.max(1, limit - Date.now()),
+          silent: true,
         }).catch((error: unknown) => {
           // A navigation ended the context, or the page was still busy at
           // the deadline: the next check runs in the document it shows now.

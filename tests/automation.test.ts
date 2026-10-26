@@ -2,16 +2,21 @@ import { statSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ApiError } from "../electron/agent/errors";
 import { takeWaitSlot } from "../electron/agent/expectations";
 import { WHEEL_GAP_MS } from "../electron/agent/input/actions";
 import { inputMarker } from "../electron/agent/input/marker";
+import {
+  createPageScripts,
+  SCRIPTS_OFF_MESSAGE,
+} from "../electron/agent/page-scripts";
 import {
   createExtractor,
   type Extractor,
   type PdfChild,
 } from "../electron/agent/pdf/extract";
 import type { PdfPages } from "../electron/agent/pdf/worker";
-import { RefBook } from "../electron/agent/refs";
+import { MAX_HOMES, RefBook } from "../electron/agent/refs";
 import { watchLeaveGuard } from "../electron/agent/routes/navigation";
 import { LIMITS, Scheduler } from "../electron/agent/scheduler";
 import { FORMS, REF_HINT } from "../electron/agent/selectors";
@@ -46,7 +51,7 @@ import {
   socketFetch,
   testSocket,
 } from "./fake-automation";
-import { frameNavigated } from "./fake-cdp";
+import { attachedTarget, frameNavigated, frameOwners } from "./fake-cdp";
 
 // The size a PNG's header reports.
 const pngSize = (image: ArrayBuffer): number[] => {
@@ -802,7 +807,7 @@ describe("local automation socket", () => {
     expect(controller.calls).toEqual([]);
   });
 
-  it("serializes selectors as data and exposes no evaluate endpoint", async () => {
+  it("serializes selectors as data and reads no code from a field it never declared", async () => {
     const { tab } = await createPage();
     const selector = '#field"); process.exit(); //';
     controller.contents.result = { ok: true };
@@ -831,13 +836,16 @@ describe("local automation socket", () => {
       ),
     ).toBe(true);
     expect(executed.world).toBe("kamapathy");
-    expect(
-      (
-        await request(`/tabs/${tab.id}/evaluate`, "POST", {
-          code: "process.exit()",
-        })
-      ).status,
-    ).toBe(404);
+    // Section 8's evaluate runs the agent's own expression or function, and
+    // nothing it never declared.
+    const undeclared = await request(`/tabs/${tab.id}/evaluate`, "POST", {
+      code: "process.exit()",
+    });
+    expect(undeclared.status).toBe(400);
+    expect((await undeclared.json()).error).toMatchObject({
+      code: "unknown_field",
+      field: "code",
+    });
     expect(
       (await request(`/tabs/${tab.id}/snapshot?token=secret`)).status,
     ).toBe(400);
@@ -1197,6 +1205,392 @@ describe("local automation socket", () => {
     }
   });
 
+  // A page with frames: each child reported on the page session, the ones
+  // Chromium moved to their own process announced as their own target, and
+  // the owner binding each frame's world answers.
+  type FrameSpec = {
+    frameId: string;
+    parent?: string;
+    url: string;
+    local: string;
+    readable?: boolean;
+    sessionId?: string;
+  };
+  const addFrames = async (specs: FrameSpec[]) => {
+    const page = controller.contents;
+    frameOwners(
+      page.debugger,
+      Object.fromEntries(
+        specs.map(({ frameId, local, readable }) => [
+          frameId,
+          { local, readable: readable === true },
+        ]),
+      ),
+    );
+    for (const spec of specs) {
+      page.emitProtocol("Page.frameAttached", {
+        frameId: spec.frameId,
+        parentFrameId: spec.parent ?? "main",
+      });
+      if (spec.sessionId === undefined) {
+        page.emitProtocol("Page.frameNavigated", {
+          frame: {
+            id: spec.frameId,
+            parentId: spec.parent ?? "main",
+            loaderId: `loader-${spec.frameId}`,
+            url: spec.url,
+            securityOrigin: new URL(spec.url).origin,
+            mimeType: "text/html",
+          },
+        });
+        continue;
+      }
+      attachedTarget(page.debugger, {
+        sessionId: spec.sessionId,
+        targetId: spec.frameId,
+        url: spec.url,
+      });
+      // A frame in its own process is read through that session, which the
+      // tab sets up before a snapshot can reach it.
+      await expect
+        .poll(() =>
+          page.debugger.sent.some(
+            (command) => command.sessionId === spec.sessionId,
+          ),
+        )
+        .toBe(true);
+    }
+  };
+  // The frame group a read ran in, as its payload carries it.
+  const groupOf = (code: string) =>
+    /"frameContext":\{"group":"([^"]*)"/.exec(code)?.[1];
+  // What one group's read answers: its text in parts, its ranked controls
+  // and the frame owners its world could not read.
+  const groupRead = (
+    group: string,
+    read: {
+      text?: { order: number; value: string }[];
+      controls?: {
+        order: number;
+        tier: number;
+        local?: string;
+        entry: Record<string, unknown>;
+      }[];
+      owners?: Record<string, unknown>[];
+    },
+  ) => {
+    const text = read.text ?? [];
+    return {
+      url: "https://example.com/",
+      title: "Example",
+      group,
+      text,
+      controls: (read.controls ?? []).map((control) => ({
+        local: "",
+        ...control,
+      })),
+      outline: [],
+      placeholders: read.owners ?? [],
+      chars: text.reduce((total, part) => total + part.value.length, 0),
+    };
+  };
+  const owner = (local: string, order: number, key?: string, tier = 6) => ({
+    ...(key === undefined ? {} : { key }),
+    local,
+    order,
+    tier,
+    box: { left: 0, top: order * 60, right: 300, bottom: order * 60 + 50 },
+    readable: false,
+  });
+  const frameEntry = (
+    label: string,
+    ref: string,
+    contentFrame: string,
+    key?: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    index: 0,
+    ref,
+    tag: "iframe",
+    role: "iframe",
+    label,
+    selector: "iframe",
+    disabled: false,
+    crossOrigin: true,
+    contentFrame,
+    ...(key === undefined ? {} : { key }),
+    ...extra,
+  });
+  const control = (
+    label: string,
+    ref: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    index: 0,
+    ref,
+    tag: "button",
+    role: "button",
+    label,
+    selector: "button",
+    disabled: false,
+    ...extra,
+  });
+
+  it("a snapshot counts unread frames", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Nine frames one inside another, a frame whose read fails, and a frame
+    // whose own session ended.
+    const chain = Array.from({ length: 9 }, (_unused, depth) => ({
+      frameId: `deep-${depth}`,
+      ...(depth === 0 ? {} : { parent: `deep-${depth - 1}` }),
+      url: `https://deep${depth}.example/`,
+      local: "0",
+    }));
+    await addFrames([
+      ...chain,
+      { frameId: "card", url: "https://pay.example/", local: "1" },
+      {
+        frameId: "gone",
+        url: "https://map.example/",
+        local: "2",
+        sessionId: "gone-session",
+      },
+    ]);
+    page.emitProtocol("Target.detachedFromTarget", {
+      sessionId: "gone-session",
+      targetId: "gone",
+    });
+    page.result = (code: string) => {
+      const group = groupOf(code);
+      if (group === "")
+        return groupRead("", {
+          text: [{ order: 0, value: "Checkout" }],
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Deep form", "@e11", "0", "deep-0"),
+            },
+            {
+              order: 2,
+              tier: 6,
+              entry: frameEntry("Card details", "@e12", "1", "card"),
+            },
+            { order: 3, tier: 6, entry: frameEntry("Map", "@e13", "2", "gone") },
+          ],
+          owners: [
+            owner("0", 1, "deep-0"),
+            owner("1", 2, "card"),
+            owner("2", 3, "gone"),
+          ],
+        });
+      // The frame that loaded another document while it was read.
+      if (group === "1")
+        return {
+          ok: false,
+          code: "page_changed",
+          error: "The page changed during this operation. Take a new snapshot.",
+        };
+      const depth = (group ?? "").split("/").length;
+      return groupRead(group ?? "", {
+        owners: depth < 9 ? [owner("0", 1, `deep-${depth}`)] : [],
+      });
+    };
+    const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      maxControls: 2,
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // The card frame is pending, the map frame unavailable and the ninth
+    // nested frame past the levels one read reaches, listed or not.
+    expect(body.unreadFrames).toBe(3);
+    expect(
+      body.interactables.map(
+        (entry: Record<string, unknown>) => [
+          entry.label,
+          entry.content,
+          entry.origin,
+          entry.contentFrame,
+        ],
+      ),
+    ).toEqual([
+      ["Deep form", "read", "https://deep0.example", "0"],
+      ["Card details", "pending", "https://pay.example", "1"],
+    ]);
+    expect(body.interactables[0].key).toBeUndefined();
+    // Nothing left unread, nothing reported.
+    page.result = groupRead("", { text: [{ order: 0, value: "Checkout" }] });
+    const again = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(again.status).toBe(200);
+    expect((await again.json()).unreadFrames).toBeUndefined();
+  });
+
+  it("the control budget ranks frame controls at the owner's tier", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "near", url: "https://near.example/", local: "0" },
+      { frameId: "far", url: "https://far.example/", local: "1" },
+    ]);
+    page.result = (code: string) => {
+      const group = groupOf(code);
+      if (group === "")
+        return groupRead("", {
+          text: [{ order: 0, value: "Pay" }],
+          controls: [
+            { order: 1, tier: 6, entry: control("Save", "@e21") },
+            {
+              order: 2,
+              tier: 6,
+              entry: frameEntry("Card details", "@e22", "0", "near"),
+            },
+            {
+              order: 4,
+              tier: 10,
+              entry: frameEntry("Old offer", "@e23", "1", "far"),
+            },
+          ],
+          // The second owner is off screen, which its rank says.
+          owners: [owner("0", 2, "near"), owner("1", 4, "far", 10)],
+        });
+      if (group === "0")
+        return groupRead("0", {
+          controls: [
+            { order: 1, tier: 0, entry: control("Card number", "@e24") },
+            { order: 2, tier: 6, entry: control("Pay now", "@e25") },
+          ],
+        });
+      return groupRead("1", {
+        controls: [{ order: 1, tier: 0, entry: control("Claim offer", "@e26") }],
+      });
+    };
+    const take = async (maxControls: number) => {
+      const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+        maxControls,
+        header: false,
+      });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    // Every control, each carrying the path of its own document.
+    const whole = await take(6);
+    expect(
+      whole.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Save", undefined],
+      ["Card details", undefined],
+      ["Card number", "0"],
+      ["Pay now", "0"],
+      ["Old offer", undefined],
+      ["Claim offer", "1"],
+    ]);
+    // Past the budget a frame control keeps the more urgent of its own rank
+    // and its owner's, and an off-screen owner's controls go last.
+    const part = await take(3);
+    expect(
+      part.interactables.map((entry: Record<string, unknown>) => entry.label),
+    ).toEqual(["Save", "Card details", "Card number"]);
+    expect(part.omittedControls).toBe(3);
+  });
+
+  it("a frame that loads another document mid-read is listed as pending, and a main-frame navigation is still page_changed", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    const top = () =>
+      groupRead("", {
+        text: [{ order: 0, value: "Checkout" }],
+        controls: [
+          {
+            order: 1,
+            tier: 6,
+            entry: frameEntry("Card details", "@e31", "0", "card"),
+          },
+        ],
+        owners: [owner("0", 1, "card")],
+      });
+    page.result = (code: string) =>
+      groupOf(code) === ""
+        ? top()
+        : {
+            ok: false,
+            code: "page_changed",
+            error:
+              "The page changed during this operation. Take a new snapshot.",
+          };
+    const first = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(first.status).toBe(200);
+    const body = await first.json();
+    expect(body.interactables[0].content).toBe("pending");
+    expect(body.unreadFrames).toBe(1);
+    // The page itself loading another document still ends the snapshot.
+    page.result = (code: string) => {
+      if (groupOf(code) === "")
+        page.emit("did-start-navigation", {
+          url: "https://example.com/next",
+          isSameDocument: false,
+          isMainFrame: true,
+        });
+      return top();
+    };
+    const changed = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(changed.status).toBe(409);
+    expect((await changed.json()).error.code).toBe("page_changed");
+  });
+
+  it("a blocked frame is listed without an origin", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // An extension frame: the registry blocks it, and the page sees an
+    // address agents never reach.
+    await addFrames([
+      {
+        frameId: "panel",
+        url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html",
+        local: "0",
+      },
+    ]);
+    page.result = groupRead("", {
+      text: [{ order: 0, value: "Shop" }],
+      controls: [
+        {
+          order: 1,
+          tier: 6,
+          entry: frameEntry("Extension panel", "@e41", "0", undefined, {
+            blocked: true,
+          }),
+        },
+      ],
+      owners: [{ ...owner("0", 1), blocked: true }],
+    });
+    const response = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.interactables[0]).toMatchObject({
+      label: "Extension panel",
+      crossOrigin: true,
+      content: "blocked",
+    });
+    expect(body.interactables[0].origin).toBeUndefined();
+    expect(body.interactables[0].contentFrame).toBeUndefined();
+    expect(body.unreadFrames).toBeUndefined();
+  });
+
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
     const { tab } = await createPage();
     await request(`/tabs/${tab.id}/snapshot`);
@@ -1286,6 +1680,44 @@ describe("local automation socket", () => {
     expect(page.scripts).toEqual([]);
     expect(page.inputs).toEqual([]);
     expect(controller.activity).toHaveLength(activity);
+  });
+
+  it("ref homes survive a frame's same-document navigation and are evicted past the limit", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true, x: 25, y: 45 };
+    const home = { frameId: "frame-1", loaderId: "loader-1", group: "" };
+    const first = refs.reserve(MAX_HOMES + 1);
+    refs.record(
+      tab.id,
+      Array.from({ length: MAX_HOMES + 1 }, (_, at) => first + at),
+    );
+    for (let at = 0; at <= MAX_HOMES; at += 1)
+      refs.setHome(tab.id, `@e${first + at}`, home);
+    // A navigation inside the same document keeps every home.
+    page.emitProtocol("Page.navigatedWithinDocument", {
+      frameId: "frame-1",
+      url: "https://example.com/#paid",
+    });
+    expect(refs.home(tab.id, `@e${first + 1}`)).toEqual(home);
+    // The oldest home was evicted, and its ref is stale rather than unknown.
+    expect(refs.home(tab.id, `@e${first}`)).toBeUndefined();
+    const evicted = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: `@e${first}`,
+    });
+    expect(evicted.status).toBe(409);
+    expect((await evicted.json()).error).toEqual({
+      code: "stale_ref",
+      message: "Element reference is stale. Take a new snapshot.",
+      ref: `@e${first}`,
+    });
+    expect(
+      (
+        await request(`/tabs/${tab.id}/click`, "POST", {
+          ref: `@e${first + 1}`,
+        })
+      ).status,
+    ).toBe(200);
   });
 
   it("records only the refs a snapshot assigned", async () => {
@@ -1757,24 +2189,22 @@ describe("local automation socket", () => {
     expect(payloads("check")).toHaveLength(1);
   });
 
-  it("refuses a control inside a frame from another origin as a conflict, before any input", async () => {
+  it("reaches a control inside a frame from another origin", async () => {
     const { tab } = await createPage();
-    controller.contents.result = {
-      ok: false,
-      code: "cross_origin_frame",
-      error:
-        "This control is inside a frame from another origin, which Kamapathy cannot read. Ask the person to continue there.",
-    };
+    // Section 9 reads and acts in frames from any web origin, so the page
+    // script no longer answers cross_origin_frame and the action reaches the
+    // frame's own world.
+    controller.contents.result = (code: string) =>
+      code.includes(')("fill",') ? { ok: true } : { ok: true, x: 25, y: 45 };
     for (const [route, body] of [
       ["click", { ref: "@e2" }],
       ["fill", { ref: "@e2", value: "card" }],
-      ["drag", { source: { ref: "@e1" }, target: { ref: "@e2" } }],
     ] as const) {
       const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
-      expect(response.status).toBe(409);
-      expect((await response.json()).error.code).toBe("cross_origin_frame");
+      expect(response.status).toBe(200);
+      expect((await response.json()).ok).toBe(true);
     }
-    expect(controller.contents.inputs).toEqual([]);
+    expect(controller.contents.inputs.length).toBeGreaterThan(0);
     controller.contents.result = {
       url: "https://example.com/",
       title: "Example",
@@ -3846,6 +4276,10 @@ describe("local automation socket", () => {
   };
   const truthy = (value: unknown) => ({ result: { type: "object", value } });
   const falsy = { result: { type: "boolean", value: false } };
+  // Every page script Kamapathy sends names itself, so the page reports it
+  // under that name instead of inline.
+  const named = (source: string) =>
+    `${source}\n//# sourceURL=kamapathy-evaluate.js`;
 
   it("the function wait answers the first truthy value", async () => {
     const { tab } = await createPage();
@@ -3866,9 +4300,9 @@ describe("local automation socket", () => {
       value: { ready: true },
     });
     expect(calls.map((call) => call.expression)).toEqual([
-      source,
-      source,
-      source,
+      named(source),
+      named(source),
+      named(source),
     ]);
     // The checks are the interval apart.
     expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(50);
@@ -3883,11 +4317,13 @@ describe("local automation socket", () => {
       expect(command.sessionId).toBeUndefined();
       expect(command.params.contextId).toBeUndefined();
       expect(command.params).toMatchObject({
-        expression: source,
+        expression: named(source),
         returnByValue: true,
         awaitPromise: true,
         silent: true,
       });
+      // A check reads the page and never stops its scripts.
+      expect(command.params.timeout).toBeUndefined();
     }
     expect(controller.activity.at(-1)).toMatchObject({
       spaceId: tab.spaceId,
@@ -3909,14 +4345,14 @@ describe("local automation socket", () => {
     });
     expect(withArg.status).toBe(200);
     expect((await withArg.json()).value).toBe(
-      `(${source})({"count":2,"name":"two\\u2028"})`,
+      named(`(${source})({"count":2,"name":"two\\u2028"})`),
     );
     const alone = await waitForFunction(tab.id, {
       function: source,
       timeoutMs: 1000,
     });
     expect(alone.status).toBe(200);
-    expect((await alone.json()).value).toBe(`(${source})()`);
+    expect((await alone.json()).value).toBe(named(`(${source})()`));
     expect(calls).toHaveLength(2);
   });
 
@@ -4206,6 +4642,873 @@ describe("local automation socket", () => {
       field: "intervalMs",
     });
     expect(controller.contents.scripts).toEqual([]);
+  });
+
+  // Section 8's Page scripts gate: the switch, the signal in-flight script
+  // calls share, and the hooks a switch-off runs.
+  it("the gate reads the live setting", async () => {
+    expect(SCRIPTS_OFF_MESSAGE).toBe(
+      "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
+    );
+    const { tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("ready"));
+    const gate = createPageScripts(controller);
+    const body = { expression: "window.ready", timeoutMs: 1000 };
+    controller.state.settings.agentPageScripts = false;
+    expect(gate.on).toBe(false);
+    expect(() => gate.require()).toThrow(SCRIPTS_OFF_MESSAGE);
+    const off = await failure(await waitForFunction(tab.id, body));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    expect(calls).toEqual([]);
+    // The setting is the gate's only source of truth, so the same body runs
+    // as soon as it is back on.
+    controller.state.settings.agentPageScripts = true;
+    expect(gate.on).toBe(true);
+    expect(() => gate.require()).not.toThrow();
+    const ran = await waitForFunction(tab.id, body);
+    expect(ran.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    gate.dispose();
+  });
+
+  it("turning Page scripts off aborts in-flight script calls once", () => {
+    const gate = createPageScripts(controller);
+    const signal = gate.signal();
+    expect(signal.aborted).toBe(false);
+    const ran: string[] = [];
+    const stopFirst = gate.onOff(() => {
+      ran.push("first");
+      throw new Error("a hook that fails leaves the rest to run");
+    });
+    gate.onOff(() => ran.push("second"));
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBeInstanceOf(ApiError);
+    expect(signal.reason.code).toBe("agent_scripts_off");
+    expect(signal.reason.message).toBe(SCRIPTS_OFF_MESSAGE);
+    expect(ran).toEqual(["first", "second"]);
+    // Off again is no switch at all: nothing aborts twice and no hook runs.
+    gate.apply(false);
+    expect(ran).toEqual(["first", "second"]);
+    expect(gate.signal()).toBe(signal);
+    // A hook that let go is not called by the next switch-off.
+    stopFirst();
+    controller.state.settings.agentPageScripts = true;
+    gate.apply(true);
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(ran).toEqual(["first", "second", "second"]);
+    gate.dispose();
+  });
+
+  it("the signal is fresh after the switch comes back", () => {
+    const gate = createPageScripts(controller);
+    const first = gate.signal();
+    controller.state.settings.agentPageScripts = false;
+    gate.apply(false);
+    expect(first.aborted).toBe(true);
+    expect(() => gate.require()).toThrow(SCRIPTS_OFF_MESSAGE);
+    controller.state.settings.agentPageScripts = true;
+    gate.apply(true);
+    const second = gate.signal();
+    expect(second).not.toBe(first);
+    expect(second.aborted).toBe(false);
+    // The call the switch-off failed keeps its own aborted signal.
+    expect(first.aborted).toBe(true);
+    expect(() => gate.require()).not.toThrow();
+    gate.dispose();
+  });
+
+  it("a batch holding a function wait fails validation while the switch is off", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy(true));
+    controller.state.settings.agentPageScripts = false;
+    const batch = await failure(
+      await request(`/tabs/${tab.id}/actions`, "POST", {
+        actions: [
+          { type: "snapshot" },
+          { type: "wait-for-function", expression: "true" },
+        ],
+      }),
+    );
+    expect(batch.status).toBe(403);
+    expect(batch.error).toMatchObject({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    // The plan answered before its first action ran.
+    expect(calls).toEqual([]);
+    expect(page.scripts).toEqual([]);
+  });
+
+  it("the server exposes setPageScripts", async () => {
+    const { tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("ready"));
+    const gate = createPageScripts(controller);
+    const ran: string[] = [];
+    gate.onOff(() => ran.push("off"));
+    const body = { expression: "window.ready", timeoutMs: 1000 };
+    // What the app does when the person turns the switch off: the server
+    // applies the setting, and the state change itself runs the effects once.
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    controller.emit();
+    expect(ran).toEqual(["off"]);
+    expect(gate.signal().aborted).toBe(true);
+    const off = await failure(await waitForFunction(tab.id, body));
+    expect(off.status).toBe(403);
+    expect(off.error.code).toBe("agent_scripts_off");
+    expect(calls).toEqual([]);
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    controller.emit();
+    expect(gate.signal().aborted).toBe(false);
+    expect(ran).toEqual(["off"]);
+    const allowed = await waitForFunction(tab.id, body);
+    expect(allowed.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    // A gate that was disposed hears no more of the person's choices.
+    gate.dispose();
+    controller.state.settings.agentPageScripts = false;
+    controller.emit();
+    expect(ran).toEqual(["off"]);
+  });
+
+  // Section 8's evaluate route: the agent's own expression or function in
+  // the page's main frame.
+  const evaluate = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/evaluate`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // A page that answers only once the test lets it, so a takeover, a
+  // navigation or the switch can land while the call is in flight.
+  const heldEvaluate = async (
+    tabId: string,
+    value: unknown,
+    body: Record<string, unknown> = {},
+  ) => {
+    let release: (() => void) | undefined;
+    controller.contents.debugger.reply(
+      "Runtime.evaluate",
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ result: { type: "string", value } });
+        }),
+    );
+    const done = evaluate(tabId, {
+      expression: "document.cookie",
+      timeoutMs: 10000,
+      ...body,
+    });
+    await expect.poll(() => typeof release).toBe("function");
+    return { done, release: () => release!() };
+  };
+
+  it("evaluate answers through the route", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, (expression) => {
+      if (expression.startsWith("void 0"))
+        return { result: { type: "undefined" } };
+      if (expression.startsWith("10n"))
+        return {
+          result: {
+            type: "bigint",
+            description: "100n",
+            unserializableValue: "100n",
+          },
+        };
+      return { result: { type: "object", value: { items: [1, "two"] } } };
+    });
+    const answered = await evaluate(tab.id, { expression: "window.cart" });
+    expect(answered.status).toBe(200);
+    // The tab comes from the controller, so a client refreshes its page from
+    // the same answer.
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({
+        id: tab.id,
+        url: "https://example.com/",
+        title: "https://example.com/",
+        managed: true,
+      }),
+      value: { items: [1, "two"] },
+    });
+    const unserializable = await evaluate(tab.id, { expression: "10n ** 2n" });
+    expect(await unserializable.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      unserializable: "100n",
+    });
+    // Undefined is neither a value nor text, so the answer carries neither.
+    const nothing = await evaluate(tab.id, { expression: "void 0" });
+    expect(await nothing.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+    });
+    expect(calls.map((call) => call.expression)).toEqual([
+      "window.cart\n//# sourceURL=kamapathy-evaluate.js",
+      "10n ** 2n\n//# sourceURL=kamapathy-evaluate.js",
+      "void 0\n//# sourceURL=kamapathy-evaluate.js",
+    ]);
+    // A page script reads what the page reads, so the refs a snapshot gave
+    // still point at the same elements.
+    expect(refs.generation(tab.id)).toBe(0);
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent ran a page script",
+    });
+  });
+
+  it("evaluate validates before the lane", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy(true));
+    for (const [body, field] of [
+      [{ expression: "true", function: "() => true" }, "function"],
+      [{}, "expression"],
+      [{ expression: "x".repeat(16385) }, "expression"],
+      [{ expression: "true", arg: 1 }, "arg"],
+      [{ expression: "true", timeoutMs: 1999 }, "timeoutMs"],
+      [{ expression: "true", timeoutMs: 60001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await failure(await evaluate(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    expect(calls).toEqual([]);
+    // An argument is JSON data, so a 1 MiB body of it is sent as it is.
+    const source = "(value) => value.length";
+    const padding =
+      1048576 -
+      Buffer.byteLength(JSON.stringify({ function: source, arg: "" }));
+    const large = { function: source, arg: "x".repeat(padding) };
+    expect(Buffer.byteLength(JSON.stringify(large))).toBe(1048576);
+    const accepted = await evaluate(tab.id, large);
+    expect(accepted.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(await declaredSize(`/tabs/${tab.id}/evaluate`, 1048577)).toBe(413);
+  });
+
+  it("evaluate runs on about:blank but not without a page", async () => {
+    const { space, tab } = await createPage();
+    const calls = mainWorld(controller.contents, () => truthy("blank"));
+    // A committed about:blank document is a page for evaluate, which the
+    // hint for data URLs relies on.
+    controller.navigateAgentTab(tab.id, "about:blank");
+    const answered = await evaluate(tab.id, { expression: "location.href" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({
+      ok: true,
+      tab: expect.objectContaining({ url: "about:blank" }),
+      value: "blank",
+    });
+    expect(calls).toHaveLength(1);
+    // Every agent space opens with a tab on the new tab page, which has no
+    // web document of its own.
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    const refused = await failure(
+      await evaluate(blank.id, { expression: "1" }),
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.error).toMatchObject({ code: "no_web_page" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a navigation or a takeover during evaluate withholds the value", async () => {
+    const { space, tab } = await createPage();
+    const navigated = await heldEvaluate(tab.id, "from the old document");
+    controller.contents.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    navigated.release();
+    const changed = await failure(await navigated.done);
+    expect(changed.status).toBe(409);
+    expect(changed.error).toMatchObject({ code: "page_changed" });
+    expect(JSON.stringify(changed.error)).not.toContain("old document");
+    // A takeover answers after the call, so the value stays with the page.
+    const taken = await heldEvaluate(tab.id, "the person's page");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    taken.release();
+    const held = await failure(await taken.done);
+    expect(held.status).toBe(409);
+    expect(held.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+    });
+    expect(JSON.stringify(held.error)).not.toContain("person's page");
+  });
+
+  it("evaluate answers 403 while Page scripts are off, in flight included", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const calls = mainWorld(page, () => truthy("ready"));
+    controller.state.settings.agentPageScripts = false;
+    const off = await failure(await evaluate(tab.id, { expression: "1" }));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    expect(calls).toEqual([]);
+    // Switching it off fails the calls already running and withholds what
+    // they would have answered.
+    controller.state.settings.agentPageScripts = true;
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const stopped = await failure(await running.done);
+    expect(stopped.status).toBe(403);
+    expect(stopped.error).toMatchObject({ code: "agent_scripts_off" });
+    expect(JSON.stringify(stopped.error)).not.toContain("value from the page");
+    running.release();
+  });
+
+  // Section 8's in-page fetch: the page runs the request in Kamapathy's
+  // world and the route reads its body.
+  const fetchRoute = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/fetch`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  const FETCH_HEAD = {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    url: "https://example.com/api/cart",
+    redirected: false,
+    type: "basic",
+    headers: { "content-type": "application/json; charset=utf-8" },
+  };
+  // A page that answers the fetch operation itself. Each phase arrives as
+  // the payload the route sent, in order.
+  const servePageFetch = (
+    answer: (payload: Record<string, any>, count: number) => unknown,
+  ) => {
+    const marker = ')("fetch",';
+    const calls: Record<string, any>[] = [];
+    controller.contents.result = (code: string) => {
+      const at = code.indexOf(marker);
+      if (at < 0) return {};
+      const payload = JSON.parse(
+        code.slice(at + marker.length, code.lastIndexOf(',"')),
+      );
+      calls.push(payload);
+      return answer(payload, calls.length);
+    };
+    return calls;
+  };
+  // The page's answers for one response: the head, then its body in chunks.
+  const servePageBody = (
+    head: Record<string, unknown>,
+    chunks: Buffer[],
+    read?: (count: number) => unknown,
+  ) =>
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return { ok: true, phase: "start", handle: payload.handle, head };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      const held = read?.(count);
+      if (held !== undefined) return held;
+      const chunk = chunks.shift() ?? Buffer.alloc(0);
+      return {
+        ok: true,
+        phase: "read",
+        data: chunk.toString("base64"),
+        bytes: chunk.length,
+        done: chunks.length === 0,
+      };
+    });
+  // The lines of an NDJSON answer, in order.
+  const ndjson = async (response: Response) =>
+    (await response.text())
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, any>);
+
+  it("fetch validates its options before the lane", async () => {
+    const { tab } = await createPage();
+    const calls = servePageBody(FETCH_HEAD, [Buffer.from("{}")]);
+    const many = Object.fromEntries(
+      Array.from({ length: 65 }, (_, index) => [`x-item-${index}`, "1"]),
+    );
+    for (const [body, field] of [
+      [{ url: "/api/cart", method: "CONNECT" }, "method"],
+      [{ url: "/api/cart", method: "TRACE" }, "method"],
+      [{ url: "/api/cart", method: "TRACK" }, "method"],
+      [{ url: "/api/cart", method: "GET POST" }, "method"],
+      [{ url: "/api/cart", body: "q=1" }, "body"],
+      [{ url: "/api/cart", method: "HEAD", body: "q=1" }, "body"],
+      [{ url: "/api/cart", headers: many }, "headers"],
+      [{ url: "/api/cart", headers: [["accept", "*/*"]] }, "headers"],
+      [{ url: "/api/cart", headers: { Cookie: "lab=sugar" } }, "headers"],
+      [{ url: "/api/cart", headers: { Host: "example.com" } }, "headers"],
+      [{ url: "/api/cart", headers: { Origin: "https://example.com" } }, "headers"],
+      [{ url: "/api/cart", headers: { Referer: "https://example.com/" } }, "headers"],
+      [{ url: "/api/cart", headers: { "Sec-Fetch-Mode": "cors" } }, "headers"],
+      [{ url: "/api/cart", headers: { "Proxy-Authorization": "Basic x" } }, "headers"],
+      [{ url: "/api/cart", mode: "navigate" }, "mode"],
+      [{ url: "/api/cart", timeoutMs: 999 }, "timeoutMs"],
+      [{ url: "/api/cart", timeoutMs: 300001 }, "timeoutMs"],
+    ] as const) {
+      const { status, error } = await failure(await fetchRoute(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    // A forbidden header says which name the browser sets itself.
+    const forbidden = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", headers: { Cookie: "a=b" } }),
+    );
+    expect(forbidden.error.expected).toContain("Cookie");
+    for (const url of [
+      "ftp://example.com/file",
+      "data:text/plain,hello",
+      "https://reader:secret@example.com/",
+      "blob:https://other.example/8d1",
+      "javascript:fetch('/api')",
+    ]) {
+      const { status, error } = await failure(await fetchRoute(tab.id, { url }));
+      expect(status, url).toBe(400);
+      expect(error, url).toMatchObject({ code: "invalid_url" });
+    }
+    expect(calls).toEqual([]);
+    expect(await declaredSize(`/tabs/${tab.id}/fetch`, 1048577)).toBe(413);
+  });
+
+  it("only a streamed fetch may ask for more than 60000 ms", async () => {
+    const { tab } = await createPage();
+    servePageBody(FETCH_HEAD, [Buffer.from("saved")]);
+    const refused = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 120000 }),
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.error).toMatchObject({
+      code: "invalid_field",
+      field: "timeoutMs",
+      expected: "1000 to 60000 ms, or up to 300000 with saveAs",
+    });
+    // Saving a body may take the longer limit, which only a stream asks for.
+    const streamed = await fetchRoute(tab.id, {
+      url: "/api/cart",
+      timeoutMs: 300000,
+      stream: true,
+    });
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get("content-type")).toBe("application/x-ndjson");
+    const lines = await ndjson(streamed);
+    expect(lines.at(-1)).toEqual({ end: { bytes: 5 } });
+  });
+
+  it("a relative URL resolves against the tab's URL and a blob of the page's origin is allowed", async () => {
+    const { tab } = await createPage();
+    const calls = servePageBody(FETCH_HEAD, [Buffer.from("{}")]);
+    expect((await fetchRoute(tab.id, { url: "/api/cart?q=1" })).status).toBe(200);
+    const blob = "blob:https://example.com/8d1f6a1e-0b36-4c3a-9d3e-1f6a1e0b3645";
+    expect((await fetchRoute(tab.id, { url: blob })).status).toBe(200);
+    expect(
+      calls.filter((call) => call.phase === "start").map((call) => call.url),
+    ).toEqual(["https://example.com/api/cart?q=1", blob]);
+  });
+
+  it("a non-2xx response resolves", async () => {
+    const { tab } = await createPage();
+    const head = {
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      url: "https://example.com/api/cart",
+      redirected: true,
+      type: "basic",
+      headers: { "Content-Type": "text/plain", "X-Request-Id": "r-7" },
+    };
+    servePageBody(head, [Buffer.from("No such cart")]);
+    const answered = await fetchRoute(tab.id, { url: "/api/cart" });
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: tab.id }),
+      response: {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        url: "https://example.com/api/cart",
+        redirected: true,
+        type: "basic",
+        headers: { "content-type": "text/plain", "x-request-id": "r-7" },
+        body: "No such cart",
+      },
+    });
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: tab.spaceId,
+      message: "Agent fetched a URL in the page",
+    });
+  });
+
+  it("a body over 8 MiB answers result_too_large with the response fields", async () => {
+    const { tab } = await createPage();
+    const chunks = Array.from({ length: 9 }, () =>
+      Buffer.alloc(1024 * 1024, 97),
+    );
+    const calls = servePageBody(FETCH_HEAD, chunks);
+    const refused = await failure(await fetchRoute(tab.id, { url: "/api/cart" }));
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "result_too_large",
+      limit: 8 * 1024 * 1024,
+      status: 200,
+      url: "https://example.com/api/cart",
+      headers: FETCH_HEAD.headers,
+    });
+    expect(refused.error.bytes).toBeGreaterThan(8 * 1024 * 1024);
+    // The page stops reading the body it will not answer.
+    expect(calls.at(-1)).toMatchObject({ phase: "cancel" });
+  });
+
+  it("a CORS failure explains itself", async () => {
+    const { tab } = await createPage();
+    const url = "https://shop.example/api/cart";
+    const calls = servePageFetch(() => ({
+      ok: false,
+      code: "fetch_failed",
+      name: "TypeError",
+      error: "Failed to fetch",
+      pageOrigin: "https://example.com",
+    }));
+    // The tab's own session saw the request fail, which is where the reason
+    // comes from.
+    controller.contents.emitProtocol("Network.requestWillBeSent", {
+      requestId: "r-1",
+      loaderId: "loader-1",
+      documentURL: "https://example.com/",
+      request: { url, method: "GET", headers: {} },
+      timestamp: 1,
+      wallTime: 1,
+      initiator: { type: "script" },
+      type: "Fetch",
+      frameId: "main",
+    });
+    controller.contents.emitProtocol("Network.loadingFailed", {
+      requestId: "r-1",
+      timestamp: 2,
+      type: "Fetch",
+      errorText: "net::ERR_FAILED",
+      canceled: false,
+      corsErrorStatus: {
+        corsError: "MissingAllowOriginHeader",
+        failedParameter: "",
+      },
+    });
+    const refused = await failure(await fetchRoute(tab.id, { url }));
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "fetch_failed",
+      url,
+      pageOrigin: "https://example.com",
+      crossOrigin: true,
+      mode: "cors",
+      name: "TypeError",
+      corsError: "MissingAllowOriginHeader",
+      netError: "net::ERR_FAILED",
+    });
+    expect(refused.error.message).toContain("https://example.com");
+    expect(refused.error.message).toContain(url);
+    expect(refused.error.message).toContain("no-cors");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a timeout cancels the request", async () => {
+    const { tab } = await createPage();
+    const silent = new Promise(() => {});
+    // Nothing answers the start, so the response is what ran out.
+    const starting = servePageFetch((payload) =>
+      payload.phase === "cancel" ? { ok: true, phase: "cancel" } : silent,
+    );
+    const awaited = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 1000 }),
+    );
+    expect(awaited.status).toBe(504);
+    expect(awaited.error).toMatchObject({
+      code: "fetch_timeout",
+      awaited: "response",
+      timeoutMs: 1000,
+    });
+    expect(starting.at(-1)).toMatchObject({
+      phase: "cancel",
+      handle: starting[0].handle,
+    });
+    // A head that arrived and a body that stalls ran out of body time.
+    const reading = servePageBody(FETCH_HEAD, [], (count) =>
+      count > 1 ? silent : undefined,
+    );
+    const body = await failure(
+      await fetchRoute(tab.id, { url: "/api/cart", timeoutMs: 1000 }),
+    );
+    expect(body.status).toBe(504);
+    expect(body.error).toMatchObject({
+      code: "fetch_timeout",
+      awaited: "body",
+      timeoutMs: 1000,
+    });
+    expect(reading.at(-1)).toMatchObject({ phase: "cancel" });
+  });
+
+  it("stream true answers NDJSON head, data and end lines", async () => {
+    const { tab } = await createPage();
+    const chunk = Buffer.alloc(1024 * 1024, 98);
+    servePageBody(FETCH_HEAD, [chunk, Buffer.from("tail")]);
+    const streamed = await fetchRoute(tab.id, {
+      url: "/api/cart",
+      stream: true,
+    });
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get("content-type")).toBe("application/x-ndjson");
+    expect(streamed.headers.get("cache-control")).toBe("no-store");
+    const lines = await ndjson(streamed);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)).toEqual({ end: { bytes: chunk.length + 4 } });
+    for (const line of lines.slice(1, -1)) {
+      expect(typeof line.data).toBe("string");
+      expect(Buffer.from(line.data, "base64").length).toBeLessThanOrEqual(
+        1024 * 1024,
+      );
+    }
+    expect(
+      Buffer.concat(
+        lines.slice(1, -1).map((line) => Buffer.from(line.data, "base64")),
+      ).equals(Buffer.concat([chunk, Buffer.from("tail")])),
+    ).toBe(true);
+    // A failure after the head is a line of its own, and no end follows.
+    servePageFetch((payload, count) =>
+      payload.phase === "start"
+        ? { ok: true, phase: "start", handle: payload.handle, head: FETCH_HEAD }
+        : payload.phase === "cancel"
+          ? { ok: true, phase: "cancel" }
+          : count > 2
+            ? {
+                ok: false,
+                code: "fetch_failed",
+                name: "TypeError",
+                error: "network error",
+                pageOrigin: "https://example.com",
+              }
+            : {
+                ok: true,
+                phase: "read",
+                data: Buffer.from("part").toString("base64"),
+                bytes: 4,
+                done: false,
+              },
+    );
+    const broken = await ndjson(
+      await fetchRoute(tab.id, { url: "/api/cart", stream: true }),
+    );
+    expect(broken[0]).toEqual({ head: FETCH_HEAD });
+    expect(broken.at(-1)!.error).toMatchObject({ code: "fetch_failed" });
+    expect(broken.some((line) => line.end !== undefined)).toBe(false);
+    // Half a gigabyte is as much as one body may stream.
+    servePageBody(FETCH_HEAD, [], () => ({
+      ok: true,
+      phase: "read",
+      data: Buffer.from("x").toString("base64"),
+      bytes: 64 * 1024 * 1024,
+      done: false,
+    }));
+    const capped = await ndjson(
+      await fetchRoute(tab.id, { url: "/api/cart", stream: true }),
+    );
+    expect(capped.at(-1)!.error).toMatchObject({
+      code: "result_too_large",
+      limit: 512 * 1024 * 1024,
+    });
+    expect(capped.some((line) => line.end !== undefined)).toBe(false);
+  });
+
+  it("a takeover between chunks aborts the read and withholds the result", async () => {
+    const { space, tab } = await createPage();
+    let taken: (() => void) | undefined;
+    // The first chunk arrives, the second waits for this test.
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return {
+          ok: true,
+          phase: "start",
+          handle: payload.handle,
+          head: FETCH_HEAD,
+        };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      if (count === 2)
+        return {
+          ok: true,
+          phase: "read",
+          data: Buffer.from("the agent's bytes").toString("base64"),
+          bytes: 17,
+          done: false,
+        };
+      return new Promise((resolve) => {
+        taken = () =>
+          resolve({
+            ok: true,
+            phase: "read",
+            data: Buffer.from("the person's bytes").toString("base64"),
+            bytes: 18,
+            done: true,
+          });
+      });
+    });
+    const streaming = fetchRoute(tab.id, { url: "/api/cart", stream: true });
+    await expect.poll(() => typeof taken).toBe("function");
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    taken!();
+    const lines = await ndjson(await streaming);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)!.error).toMatchObject({
+      code: "human_control",
+      reason: "manual",
+    });
+    expect(lines.some((line) => line.end !== undefined)).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("person's bytes");
+  });
+
+  it("a navigation between chunks ends the stream and withholds the result", async () => {
+    const { tab } = await createPage();
+    let navigated: (() => void) | undefined;
+    servePageFetch((payload, count) => {
+      if (payload.phase === "start")
+        return {
+          ok: true,
+          phase: "start",
+          handle: payload.handle,
+          head: FETCH_HEAD,
+        };
+      if (payload.phase === "cancel") return { ok: true, phase: "cancel" };
+      if (count === 2)
+        return {
+          ok: true,
+          phase: "read",
+          data: Buffer.from("the first page's bytes").toString("base64"),
+          bytes: 22,
+          done: false,
+        };
+      // This chunk belongs to the document the page has left.
+      return new Promise((resolve) => {
+        navigated = () =>
+          resolve({
+            ok: true,
+            phase: "read",
+            data: Buffer.from("the old document's bytes").toString("base64"),
+            bytes: 24,
+            done: true,
+          });
+      });
+    });
+    const streaming = fetchRoute(tab.id, { url: "/api/cart", stream: true });
+    await expect.poll(() => typeof navigated).toBe("function");
+    controller.contents.emit("did-start-navigation", {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    navigated!();
+    const lines = await ndjson(await streaming);
+    expect(lines[0]).toEqual({ head: FETCH_HEAD });
+    expect(lines.at(-1)!.error).toMatchObject({ code: "page_changed" });
+    expect(lines.some((line) => line.end !== undefined)).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("old document");
+  });
+
+  // Section 8's events route: the tab's recorded protocol events, drained
+  // outside every queue.
+  const drainEvents = (tabId: string, body: Record<string, unknown> = {}) => {
+    const done = request(`/tabs/${tabId}/events`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+
+  it("events answers outside the space's queue", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    for (const max of [0, 10001, 1.5]) {
+      const { status, error } = await failure(
+        await drainEvents(tab.id, { max }),
+      );
+      expect(status, String(max)).toBe(400);
+      expect(error, String(max)).toMatchObject({
+        code: "invalid_field",
+        field: "max",
+      });
+    }
+    page.debugger.event("Network.loadingFinished", {
+      requestId: "1",
+      encodedDataLength: 5,
+    });
+    page.debugger.event("Page.loadEventFired", { timestamp: 1 });
+    // A pending evaluate holds the space's lane, and the drain answers now.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    const drained = await drainEvents(tab.id, { max: 1 });
+    expect(drained.status).toBe(200);
+    expect(await drained.json()).toEqual({
+      ok: true,
+      events: [
+        {
+          time: expect.any(Number),
+          method: "Network.loadingFinished",
+          params: { requestId: "1", encodedDataLength: 5 },
+        },
+      ],
+      dropped: 0,
+      gaps: [],
+      remaining: 1,
+    });
+    running.release();
+    expect((await running.done).status).toBe(200);
+  });
+
+  it("events answers 403 while Page scripts are off", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.event("Page.loadEventFired", { timestamp: 1 });
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const off = await failure(await drainEvents(tab.id));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    // The switch-off emptied the log, so nothing waits for the switch.
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    expect(await (await drainEvents(tab.id)).json()).toEqual({
+      ok: true,
+      events: [],
+      dropped: 0,
+      gaps: [],
+      remaining: 0,
+    });
   });
 
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
@@ -8375,6 +9678,9 @@ describe("local automation socket", () => {
       "POST /tabs/:id/wait-for-load-state": { state: "commit" },
       "POST /tabs/:id/wait-for-selector": { ref: "@e1", state: "attached" },
       "POST /tabs/:id/wait-for-function": { expression: "true" },
+      "POST /tabs/:id/evaluate": { expression: "true" },
+      "POST /tabs/:id/fetch": { url: "/api/cart" },
+      "POST /tabs/:id/events": { max: 10 },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

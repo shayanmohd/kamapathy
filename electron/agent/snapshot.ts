@@ -4,6 +4,25 @@ import { PAGE_BUDGET } from "../../shared/state";
 import type { OpenedBy } from "../../shared/types";
 import type { Actions } from "./actions";
 import { fail } from "./errors";
+import {
+  boundGroup,
+  countUnread,
+  mergeControls,
+  nestOutline,
+  orderReads,
+  prefixPath,
+  spliceText,
+  type GroupRead,
+  type OwnerPlaceholder,
+} from "./frames/compose";
+import { emptyArea, innerArea } from "./frames/geometry";
+import {
+  READ_LIMITS,
+  type FrameContent,
+  type FrameGroups,
+  type FrameGroupsByTab,
+  type GroupInfo,
+} from "./frames/groups";
 import { findLocators, type LocatorSource } from "./locators";
 import type { Resolver } from "./resolve";
 import type { SearchAst } from "./selectors";
@@ -11,9 +30,10 @@ import type { AutomationController } from "./server";
 import type { TabSession } from "./session/tab-session";
 import type { Step } from "./session/types";
 
-// The one snapshot path, shared by the routes and the batch step: the page
-// call with its scope and bounds, the cursor that chains its parts, and the
-// header naming the page, its space and the space's tabs.
+// The one snapshot path, shared by the routes and the batch step: the read
+// plan over the page's frame groups, the composition of what they report,
+// the cursor that chains its parts, and the header naming the page, its
+// space and the space's tabs.
 
 // A cursor holds only where the next part starts, which document it was
 // made on and which options it continues. Nothing of the page's content or
@@ -243,11 +263,198 @@ function nextCursor(
   });
 }
 
+/** What an `iframe` entry says about the frame it opens. */
+export interface FrameEntryFields {
+  origin?: string;
+  contentFrame?: string;
+  content: FrameContent;
+  crossOrigin?: true;
+}
+/**
+ * One frame group's read: what the composition needs, the group it belongs
+ * to, and the page's own answer, which carries the URL, the locator sources
+ * and the refs the read moved.
+ */
+export interface GroupSnapshot {
+  read: GroupRead;
+  group: GroupInfo;
+  value: Record<string, unknown>;
+}
+
+// A page that reported no group read answered the whole listing itself, as
+// a page read without a frame context does.
+function groupReadOf(
+  group: GroupInfo,
+  value: unknown,
+  owner?: OwnerPlaceholder,
+): GroupRead | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const read = value as Record<string, unknown>;
+  if (typeof read.group !== "string" || !Array.isArray(read.placeholders))
+    return undefined;
+  return {
+    group: group.path,
+    ...(owner === undefined ? {} : { owner }),
+    text: Array.isArray(read.text) ? (read.text as GroupRead["text"]) : [],
+    controls: Array.isArray(read.controls)
+      ? (read.controls as GroupRead["controls"])
+      : [],
+    outline: Array.isArray(read.outline)
+      ? (read.outline as GroupRead["outline"])
+      : [],
+    placeholders: read.placeholders as OwnerPlaceholder[],
+    chars: typeof read.chars === "number" ? read.chars : 0,
+    ...(read.truncated === true ? { truncated: true as const } : {}),
+  };
+}
+
+/**
+ * The reads the scope reaches: the group the scope sits in, and every group
+ * whose owner a reached read left a placeholder for. A group read while its
+ * owner's read failed, or one outside the scope, is left out.
+ */
+function reached(
+  reads: readonly GroupSnapshot[],
+  from: string,
+): GroupSnapshot[] {
+  const placed = new Set([from]);
+  for (const read of orderReads(reads.map((item) => item.read)))
+    if (placed.has(read.group))
+      for (const placeholder of read.placeholders)
+        placed.add(prefixPath(read.group, placeholder.local));
+  return reads.filter((item) => placed.has(item.read.group));
+}
+
+const omittedOf = (value: Record<string, unknown>) =>
+  typeof value.omittedControls === "number" ? value.omittedControls : 0;
+// A frame's origin as an entry reports it: an http or https origin, or
+// opaque for a sandboxed, data or blob document.
+const webOrigin = (origin: string) =>
+  /^https?:\/\/[^/]+$/.test(origin) ? origin : "opaque";
+
+/**
+ * The text, controls and outline of every reached group as one listing, cut
+ * to the part the cursor asks for.
+ */
+function composeReads(
+  reads: readonly GroupSnapshot[],
+  request: SnapshotRequest,
+  offsets: { text: number; control: number; line: number },
+): Record<string, unknown> {
+  // One character past the part's own budget, so the composition can see
+  // that a group's text goes on and give the part after it a cursor.
+  const list = reads.map(({ read }) =>
+    boundGroup(read, offsets.text, request.maxChars + 1),
+  );
+  const cut = list.some((read) => read.truncated === true);
+  const outline = request.format === "outline";
+  const merged = mergeControls(list, {
+    maxControls: outline ? Number.MAX_SAFE_INTEGER : request.maxControls,
+    from: outline ? 0 : offsets.control,
+  });
+  // What each group's own bound left out, plus what the ranking across them
+  // did not reach.
+  const omitted =
+    merged.omitted +
+    reads.reduce((total, { value }) => total + omittedOf(value), 0);
+  if (outline) {
+    const nested = nestOutline(list, {
+      maxChars: request.maxChars,
+      from: offsets.line,
+    });
+    // A read keeps one line past its own budget, so a cut listing leaves a
+    // line for the part after this one.
+    const line =
+      nested.next ??
+      (cut ? offsets.line + nested.outline.length : undefined);
+    // An outline lists the controls its lines printed.
+    const printed = new Set(
+      nested.outline.flatMap((line) => line.match(/@e\d+/g) ?? []),
+    );
+    const entries = merged.controls.filter(
+      (entry) => typeof entry.ref === "string" && printed.has(entry.ref),
+    );
+    for (const [index, entry] of entries.entries())
+      if (typeof entry.index === "number") entry.index = index;
+    return {
+      outline: nested.outline.join("\n"),
+      interactables: entries,
+      ...(omitted ? { omittedControls: omitted } : {}),
+      ...(line === undefined ? {} : { next: { text: 0, control: 0, line } }),
+      truncated: cut || nested.next !== undefined,
+    };
+  }
+  const spliced = spliceText(list, {
+    maxChars: request.maxChars,
+    from: offsets.text,
+  });
+  // A bound of 0 cannot print its half of the page, so it never asks for it
+  // again; truncated still reports that content was left out.
+  const more =
+    (spliced.next !== undefined && request.maxChars > 0) ||
+    (merged.omitted > 0 && request.maxControls > 0);
+  return {
+    text: spliced.text,
+    interactables: merged.controls,
+    ...(omitted ? { omittedControls: omitted } : {}),
+    ...(more
+      ? {
+          next: {
+            text: spliced.next ?? spliced.chars,
+            control: offsets.control + merged.controls.length,
+            line: 0,
+          },
+        }
+      : {}),
+    truncated: cut || spliced.next !== undefined || omitted > 0,
+  };
+}
+
+/**
+ * Every ref the listing hands out gets its home frame, and every `iframe`
+ * entry the frame it opens: its origin, the path its controls carry and
+ * whether that frame was read. Only the main process knows these.
+ */
+function fillFrames(
+  groups: FrameGroups,
+  entries: readonly Record<string, unknown>[],
+): void {
+  for (const entry of entries) {
+    const frame = typeof entry.frame === "string" ? entry.frame : "";
+    if (typeof entry.ref === "string")
+      groups.setHome(entry.ref, groups.frameAt(frame)?.frameId ?? "");
+    const content =
+      typeof entry.contentFrame === "string" ? entry.contentFrame : undefined;
+    if (content === undefined && entry.crossOrigin !== true) continue;
+    // The binding key is the frame's own id; a frame the main process has
+    // not bound is placed by its path alone.
+    const key = typeof entry.key === "string" ? entry.key : undefined;
+    const blocked = entry.blocked === true;
+    delete entry.key;
+    delete entry.blocked;
+    const frameId =
+      key ?? (content === undefined ? undefined : groups.frameAt(content)?.frameId);
+    const state: FrameContent = blocked
+      ? "blocked"
+      : frameId === undefined
+        ? "pending"
+        : groups.contentOf(frameId);
+    entry.content = state;
+    if (state === "blocked") {
+      delete entry.contentFrame;
+      continue;
+    }
+    const origin = frameId === undefined ? undefined : groups.groupOf(frameId)?.origin;
+    if (origin) entry.origin = webOrigin(origin);
+  }
+}
+
 export function createSnapshots(deps: {
   controller: AutomationController;
   evaluatePage: Actions["evaluatePage"];
   resolver: Resolver;
   namespace: Actions["namespace"];
+  frames: FrameGroupsByTab;
 }): {
   take(
     tabId: string,
@@ -257,7 +464,7 @@ export function createSnapshots(deps: {
     step: Step,
   ): Promise<Record<string, unknown>>;
 } {
-  const { controller, evaluatePage, resolver, namespace } = deps;
+  const { controller, evaluatePage, resolver, namespace, frames } = deps;
   return {
     async take(tabId, session, request, deadline, step) {
       const hash = optionsHash(request);
@@ -268,54 +475,170 @@ export function createSnapshots(deps: {
           ? undefined
           : readCursor(request.cursor, { h: hash });
       if (state) checkCursorPage(state, { epoch: session.epoch });
+      const groups = frames.for(tabId);
+      if (!groups)
+        return fail(
+          "debugger_busy",
+          "Kamapathy lost its connection to this tab. Try again shortly.",
+          { reason: "unavailable" },
+        );
+      const offsets = {
+        text: state?.t ?? 0,
+        control: state?.c ?? 0,
+        line: state?.l ?? 0,
+      };
       // The resolver checks a root, reserves the ref block and adds it to
       // this copy of the payload, so the request keeps none of it.
-      const result = await evaluatePage(
-        tabId,
-        session,
-        "snapshot",
+      const scoped = {
+        ...(request.selector === undefined
+          ? {}
+          : { selector: request.selector }),
+        ...(request.query === undefined ? {} : { query: request.query }),
+        ...(request.root === undefined ? {} : { root: request.root }),
+      };
+      // A root ref is read by the group whose world holds it, and goes
+      // stale once that frame has loaded another document.
+      const home =
+        request.root === undefined
+          ? undefined
+          : groups.homeFrame(request.root)?.frameId;
+      // The owner each group was found through, by the group's path.
+      const owners = new Map<string, OwnerPlaceholder>();
+      let start: GroupInfo | undefined;
+      const plan = await groups.read(
         {
-          mode: request.mode,
-          maxChars: request.maxChars,
-          maxControls: request.maxControls,
-          ...(request.selector === undefined
-            ? {}
-            : { selector: request.selector }),
-          ...(request.query === undefined ? {} : { query: request.query }),
-          ...(request.root === undefined ? {} : { root: request.root }),
-          scope: request.scope,
-          format: request.format,
-          ...(request.locators ? { locators: true } : {}),
-          offsets: {
-            text: state?.t ?? 0,
-            control: state?.c ?? 0,
-            line: state?.l ?? 0,
-          },
+          deadline,
+          ...(step.signal ? { signal: step.signal } : {}),
+          ...(step.guard ? { guard: step.guard } : {}),
+          budgetMs: Math.max(0, deadline - Date.now()),
+          perGroupMs: READ_LIMITS.perGroupMs,
+          ...(home === undefined ? {} : { from: home }),
         },
-        deadline,
-        step,
+        async (group) => {
+          start ??= group;
+          const owner = owners.get(group.path);
+          // scope viewport keeps to the part of the frame the person can
+          // see, through every owner around it.
+          const area =
+            request.scope === "viewport" && owner?.area && owner.content
+              ? innerArea(owner.area, [owner.content])
+              : undefined;
+          if (area && emptyArea(area)) return undefined;
+          // Every group reads the page with the same bounds, and only the
+          // group the scope sits in is given the scope itself; the
+          // composition takes this part's slice of what they report.
+          const value = await evaluatePage(
+            tabId,
+            session,
+            "snapshot",
+            {
+              mode: request.mode,
+              maxChars: request.maxChars,
+              maxControls: request.maxControls,
+              ...(group === start ? scoped : {}),
+              scope: request.scope,
+              format: request.format,
+              ...(request.locators ? { locators: true } : {}),
+              offsets,
+              frameContext: {
+                group: group.path,
+                tier: owner?.tier ?? 0,
+                ...(area ? { area } : {}),
+              },
+            },
+            deadline,
+            step,
+            group.root,
+          );
+          // The groups inside this one are read next, each placed where its
+          // owner sits.
+          for (const placeholder of groupReadOf(group, value)?.placeholders ??
+            [])
+            owners.set(prefixPath(group.path, placeholder.local), placeholder);
+          return value;
+        },
       );
+      const first = plan.results.find((item) => item.group === start);
+      if (!first || !first.value)
+        return fail("page_timeout", "The page did not respond in time.", {
+          awaited: "page",
+          timeoutMs: READ_LIMITS.perGroupMs,
+        });
+      const reads: GroupSnapshot[] = [];
+      for (const { group, value } of plan.results) {
+        const read = groupReadOf(group, value, owners.get(group.path));
+        if (read && value)
+          reads.push({ read, group, value: value as Record<string, unknown> });
+      }
+      const scope = reads.find((item) => item.group === start);
+      // A root naming a frame from another origin scopes to that frame's
+      // document: the read that found its owner is only the way in.
+      const shell = scope?.value.frameScope === true;
+      const kept = reached(reads, scope?.read.group ?? "").filter(
+        (item) => !shell || item !== scope,
+      );
+      const result = scope
+        ? composeReads(kept, request, offsets)
+        : { ...(first.value as Record<string, unknown>) };
+      if (scope) {
+        // The page's own URL and title, never a frame's: a snapshot scoped
+        // into a frame still reports the page it is part of.
+        const top = reads.find((item) => item.group.path === "")?.value;
+        const tab = controller.state.tabs.find((item) => item.id === tabId);
+        result.url = top?.url ?? tab?.url ?? "";
+        result.title = top?.title ?? tab?.title ?? "";
+        fillFrames(groups, result.interactables as Record<string, unknown>[]);
+        // Frames the reads left pending, unavailable or past a limit, their
+        // entries listed or not.
+        const blocked = new Set<string>();
+        for (const { read } of kept)
+          for (const placeholder of read.placeholders)
+            if (placeholder.blocked)
+              blocked.add(prefixPath(read.group, placeholder.local));
+        const unread = countUnread(
+          kept.map((item) => item.read),
+          (frame) =>
+            blocked.has(frame)
+              ? "blocked"
+              : groups.contentOf(groups.frameAt(frame)?.frameId ?? ""),
+        );
+        if (unread > 0) result.unreadFrames = unread;
+        const rebound = kept.flatMap(({ value }) =>
+          Array.isArray(value.rebound) ? (value.rebound as string[]) : [],
+        );
+        if (rebound.length) result.rebound = rebound;
+      }
       const url = typeof result.url === "string" ? result.url : "";
       // A URL change inside the same document shows only in the answer.
       if (state) checkCursorPage(state, { epoch: session.epoch, url });
       const next = nextCursor(result, { epoch: session.epoch, url }, hash);
       // What a locator may be built from stays in the main process: the
       // response carries the locators themselves.
-      const sources = result.locatorSources;
-      delete result.locatorSources;
+      const sources = scope
+        ? kept.map(({ group, value }) => ({
+            frameId: group.root,
+            sources: takeSources(value),
+          }))
+        : [{ frameId: undefined, sources: takeSources(result) }];
       let incomplete = false;
       if (request.locators) {
-        const found = await findLocators({
-          session,
-          resolver,
-          tabId,
-          namespace: namespace(tabId, session),
-          sources: Array.isArray(sources) ? (sources as LocatorSource[]) : [],
-          pageUrl: url,
-          deadline,
-          step,
-        });
-        incomplete = found.incomplete;
+        const locators = new Map<string, string>();
+        for (const read of sources) {
+          if (!read.sources.length) continue;
+          const found = await findLocators({
+            session,
+            resolver,
+            tabId,
+            namespace: namespace(tabId, session),
+            sources: read.sources,
+            pageUrl: url,
+            deadline,
+            step,
+            ...(read.frameId === undefined ? {} : { frameId: read.frameId }),
+          });
+          incomplete ||= found.incomplete;
+          for (const [ref, locator] of found.locators) locators.set(ref, locator);
+        }
         const listed = Array.isArray(result.interactables)
           ? result.interactables
           : [];
@@ -324,14 +647,14 @@ export function createSnapshots(deps: {
           const entry = control as Record<string, unknown>;
           const locator =
             typeof entry.ref === "string"
-              ? found.locators.get(entry.ref)
+              ? locators.get(entry.ref)
               : undefined;
           if (locator !== undefined) entry.locator = locator;
         }
         if (typeof result.outline === "string")
-          result.outline = appendLocators(result.outline, found.locators);
+          result.outline = appendLocators(result.outline, locators);
       }
-      // The header is read after the page call, which checks the tab again.
+      // The header is read after the page calls, which check the tab again.
       return {
         tabId,
         ...result,
@@ -343,4 +666,11 @@ export function createSnapshots(deps: {
       };
     },
   };
+}
+
+// The locator sources a read reported, taken out of its answer.
+function takeSources(value: Record<string, unknown>): LocatorSource[] {
+  const sources = value.locatorSources;
+  delete value.locatorSources;
+  return Array.isArray(sources) ? (sources as LocatorSource[]) : [];
 }

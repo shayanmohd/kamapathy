@@ -208,6 +208,8 @@ export async function findLocators(input: {
   deadline: number;
   step: Step;
   budgetMs?: number;
+  /** The frame whose world listed these controls, instead of the main frame. */
+  frameId?: string;
 }): Promise<{ locators: Map<string, string>; incomplete: boolean }> {
   const { session, resolver, tabId, namespace, sources, pageUrl, step } = input;
   const locators = new Map<string, string>();
@@ -227,7 +229,7 @@ export async function findLocators(input: {
   let world: { sessionId?: string; contextId: number } | undefined;
   let queried: (string | undefined)[] | undefined;
   try {
-    const frameId = await session.mainFrameId(budget);
+    const frameId = input.frameId ?? (await session.mainFrameId(budget));
     world = await session.world(frameId, budget);
     const held = await session.send<{ result?: { objectId?: string } }>(
       "Runtime.evaluate",
@@ -311,7 +313,13 @@ export async function findLocators(input: {
           ),
         })),
       },
-      { deadline: end, namespace, signal: step.signal, guard: step.guard },
+      {
+        deadline: end,
+        namespace,
+        signal: step.signal,
+        guard: step.guard,
+        ...(input.frameId === undefined ? {} : { frameId: input.frameId }),
+      },
     );
     const counted = Array.isArray(answer.valid) ? answer.valid : [];
     for (const [index, plan] of plans.entries()) {

@@ -1,15 +1,28 @@
 import { ApiError, fail } from "./errors";
-import type { AutomationController } from "./server";
-import { ContextLostError } from "./session/errors";
+import { CdpTimeoutError, ContextLostError } from "./session/errors";
 import type { TabSession } from "./session/tab-session";
 import type { Step } from "./session/types";
 
 // How long an agent's own source may be, per field.
 export const SCRIPT_LIMIT = 16384;
+// How large a result the route returns.
+export const RESULT_LIMIT = 16 * 1024 * 1024;
+// How much of the timeout the page keeps for itself, so Kamapathy hears
+// about its own limit before the transport one expires.
+export const EXECUTION_MARGIN_MS = 1000;
 // How much of an exception's text an error carries.
 const DESCRIPTION_LIMIT = 4000;
 // How much of it the message itself carries, before the envelope cuts it.
 const HEAD_CHARS = 160;
+// What names the agent's script wherever the page reports it.
+const SOURCE_URL = "\n//# sourceURL=kamapathy-evaluate.js";
+// What a probe allows the page, and what the transport allows the probe.
+const PROBE_EXECUTION_MS = 200;
+const PROBE_TRANSPORT_MS = 250;
+// How long a termination may take before the page counts as silent.
+const TERMINATE_MS = 1000;
+// How close to the execution limit an internal error counts as that limit.
+const LIMIT_WINDOW_MS = 100;
 
 // An agent's page script: an expression, or a function source called with
 // one JSON argument.
@@ -66,32 +79,30 @@ export function scriptFields(body: Record<string, unknown>): ScriptSource {
   };
 }
 
-// Page scripts are the person's setting. Section 8 adds its switch and the
-// rest of the surface it gates.
-export function requireScripts(controller: AutomationController): void {
-  if (controller.state.settings.agentPageScripts) return;
-  fail(
-    "agent_scripts_off",
-    "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
-  );
-}
+// Page scripts are the person's setting. Section 8's gate owns the reading,
+// and this name is the one the waits and the routes already call.
+export { requirePageScripts as requireScripts } from "./page-scripts";
 
-// The one expression an evaluation sends. A function source is called with
-// its argument, with the line separators JSON leaves raw escaped so the
-// expression stays valid JavaScript.
-function expressionFor(source: ScriptSource): {
+// The one expression an evaluation sends, and how far its first line moved.
+// A function source is called with its argument, with the line separators
+// JSON leaves raw escaped so the expression stays valid JavaScript. The
+// comment names the script wherever the page reports it.
+export function wrapSource(source: ScriptSource): {
   expression: string;
-  wrapped: boolean;
+  columnShift: number;
 } {
   if (source.expression !== undefined)
-    return { expression: source.expression, wrapped: false };
+    return { expression: `${source.expression}${SOURCE_URL}`, columnShift: 0 };
   const arg =
     source.arg === undefined
       ? ""
       : JSON.stringify(source.arg)
           .replace(/\u2028/g, "\\u2028")
           .replace(/\u2029/g, "\\u2029");
-  return { expression: `(${source.function})(${arg})`, wrapped: true };
+  return {
+    expression: `(${source.function})(${arg})${SOURCE_URL}`,
+    columnShift: 1,
+  };
 }
 
 interface ExceptionDetails {
@@ -110,7 +121,7 @@ interface EvaluateReply {
 }
 
 // What the page threw, at the place in the agent's own source.
-function scriptError(details: ExceptionDetails, wrapped: boolean): ApiError {
+function scriptError(details: ExceptionDetails, columnShift: number): ApiError {
   const description = (
     details.exception?.description ??
     details.text ??
@@ -125,7 +136,7 @@ function scriptError(details: ExceptionDetails, wrapped: boolean): ApiError {
   // character to the right of what the agent wrote.
   const column = Math.max(
     1,
-    (details.columnNumber ?? 0) + 1 - (wrapped && line === 1 ? 1 : 0),
+    (details.columnNumber ?? 0) + 1 - (line === 1 ? columnShift : 0),
   );
   return new ApiError(
     "script_error",
@@ -145,15 +156,50 @@ const asContextLost = (error: unknown) => {
   return error;
 };
 
-// One evaluation in the main frame's main world, so it reads the page's own
-// globals. Section 8 adds repl mode, the execution limit and its probe,
-// larger results and the frame choices on top of this.
-export async function evaluateScript(
+// One evaluation's step: how long the transport waits, how long the page may
+// run before Chromium stops it, and the world it runs in. Without a world it
+// is the main frame's main world, so it reads the page's own globals.
+export interface ScriptStep extends Step {
+  timeoutMs: number;
+  /** Sent as Runtime.evaluate's own timeout; without one the page keeps running. */
+  executionMs?: number;
+  contextId?: number;
+  sessionId?: string;
+  replMode?: boolean;
+  silent?: boolean;
+}
+
+// What one evaluation made, or the failure it was. A value larger than the
+// route returns is a failure of its own, so nothing of it is sent.
+export function decodeResult(
+  reply: EvaluateReply,
+  columnShift: number,
+): ScriptValue {
+  if (reply.exceptionDetails)
+    throw scriptError(reply.exceptionDetails, columnShift);
+  const result = reply.result;
+  if (!result || result.type === "undefined") return {};
+  if (result.unserializableValue !== undefined)
+    return { unserializable: String(result.unserializableValue) };
+  const encoded = JSON.stringify(result.value);
+  const bytes = encoded === undefined ? 0 : Buffer.byteLength(encoded);
+  if (bytes > RESULT_LIMIT)
+    return fail(
+      "result_too_large",
+      `The result is ${bytes} bytes, over the ${RESULT_LIMIT} this route returns. Return less of it, or read it in parts.`,
+      { bytes, limit: RESULT_LIMIT },
+    );
+  return { value: result.value };
+}
+
+// One Runtime.evaluate: the main frame's main world unless the step names a
+// frame world.
+export async function evaluateOnce(
   session: TabSession,
   source: ScriptSource,
-  step: Step & { timeoutMs: number },
+  step: ScriptStep,
 ): Promise<ScriptValue> {
-  const { expression, wrapped } = expressionFor(source);
+  const { expression, columnShift } = wrapSource(source);
   let reply: EvaluateReply;
   try {
     reply = await session.send<EvaluateReply>(
@@ -162,20 +208,141 @@ export async function evaluateScript(
         expression,
         returnByValue: true,
         awaitPromise: true,
-        silent: true,
+        userGesture: false,
+        silent: step.silent ?? false,
+        // Repl mode is the expression form's: top-level await works and a
+        // declaration may repeat. A called function needs neither.
+        ...(step.replMode && source.expression !== undefined
+          ? { replMode: true }
+          : {}),
+        ...(step.contextId === undefined ? {} : { contextId: step.contextId }),
+        ...(step.executionMs === undefined
+          ? {}
+          : { timeout: step.executionMs }),
       },
       { ...step, mutates: true },
     );
   } catch (error) {
     throw asContextLost(error);
   }
-  if (reply.exceptionDetails)
-    throw scriptError(reply.exceptionDetails, wrapped);
-  const result = reply.result;
-  if (!result || result.type === "undefined") return {};
-  if (result.unserializableValue !== undefined)
-    return { unserializable: String(result.unserializableValue) };
-  return { value: result.value };
+  return decodeResult(reply, columnShift);
+}
+
+export interface Recovery {
+  executionStopped: boolean;
+  pageResponsive: boolean;
+}
+
+// Whether the page still answers. A probe gets 200 ms of execution and
+// 250 ms of transport, and one more try on its own limit.
+export async function probePage(
+  session: TabSession,
+  step: Step,
+): Promise<boolean> {
+  const once = () =>
+    session
+      .send(
+        "Runtime.evaluate",
+        { expression: "1", returnByValue: true, timeout: PROBE_EXECUTION_MS },
+        {
+          deadline: Date.now() + PROBE_TRANSPORT_MS,
+          timeoutMs: PROBE_TRANSPORT_MS,
+          signal: step.signal,
+        },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  return (await once()) || (await once());
+}
+
+// The three outcomes of a limit, shared with the function wait and with
+// cdp_timeout. Chromium's own limit says both answers at once; a transport
+// limit asks the page, then stops it and asks again.
+export async function recoverFromTimeout(
+  session: TabSession,
+  step: Step,
+  hitExecutionLimit: boolean,
+): Promise<Recovery> {
+  if (hitExecutionLimit)
+    return { executionStopped: true, pageResponsive: true };
+  if (await probePage(session, step))
+    return { executionStopped: false, pageResponsive: true };
+  await session
+    .send(
+      "Runtime.terminateExecution",
+      {},
+      {
+        deadline: Date.now() + TERMINATE_MS,
+        timeoutMs: TERMINATE_MS,
+        signal: step.signal,
+      },
+    )
+    .catch(() => {});
+  if (await probePage(session, step))
+    return { executionStopped: true, pageResponsive: true };
+  return { executionStopped: false, pageResponsive: false };
+}
+
+export function evaluationTimeout(
+  timeoutMs: number,
+  recovery: Recovery,
+): ApiError {
+  const outcome = !recovery.pageResponsive
+    ? "The page stopped answering. Reload or close the page before continuing."
+    : recovery.executionStopped
+      ? "Kamapathy stopped it, and the page answers again."
+      : "It may still be running, and the page answers.";
+  return new ApiError(
+    "evaluation_timeout",
+    `The page script did not finish within ${timeoutMs} ms. ${outcome} Anything it already changed stays.`,
+    {
+      awaited: "script",
+      timeoutMs,
+      executionStopped: recovery.executionStopped,
+      // Work the script started may land after the answer, whatever the page
+      // says now.
+      mayHaveLateEffects: true,
+      pageResponsive: recovery.pageResponsive,
+    },
+  );
+}
+// Chromium names a termination when it knows one; its own execution limit
+// arrives as an internal error, so the moment it lands tells the rest.
+const STOPPED = /terminat|timed out|timeout/i;
+const INTERNAL = /internal error/i;
+function hitExecutionLimit(error: unknown, limitAt: number): boolean {
+  // A failure with a meaning of its own, such as a page exception, is not
+  // the limit however it reads.
+  if (error instanceof ApiError || !(error instanceof Error)) return false;
+  if (STOPPED.test(error.message)) return true;
+  return (
+    INTERNAL.test(error.message) &&
+    Math.abs(Date.now() - limitAt) <= LIMIT_WINDOW_MS
+  );
+}
+
+// One evaluation with its limits: the page keeps the timeout less the
+// margin, the transport the whole of it, and either limit ends as
+// evaluation_timeout with what the recovery found. What the route calls.
+export async function evaluateScript(
+  session: TabSession,
+  source: ScriptSource,
+  step: ScriptStep,
+): Promise<ScriptValue> {
+  const executionMs = Math.max(1, step.timeoutMs - EXECUTION_MARGIN_MS);
+  const limitAt = Date.now() + executionMs;
+  try {
+    return await evaluateOnce(session, source, { ...step, executionMs });
+  } catch (error) {
+    const execution = hitExecutionLimit(error, limitAt);
+    if (!execution && !(error instanceof CdpTimeoutError)) throw error;
+    throw evaluationTimeout(
+      step.timeoutMs,
+      await recoverFromTimeout(session, step, execution),
+    );
+  }
 }
 
 // The unserializable values that are not conditions.

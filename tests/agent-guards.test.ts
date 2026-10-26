@@ -40,7 +40,9 @@ const known = (
 ): KnownFrame => ({
   frameId,
   origin: "http://example.com",
+  loaderId: "loader-1",
   crossOrigin: false,
+  ownSession: false,
   blocked: false,
   unavailable: false,
   ...extra,

@@ -1394,6 +1394,8 @@ describe("evaluateInFrame", () => {
     expect(marked.sort()).toEqual([
       "applyFiles",
       "click",
+      // A request the page sends can change what the server holds.
+      "fetch",
       "fill",
       "fillPrepare",
       "focus",
@@ -2187,6 +2189,7 @@ describe("frames", () => {
         url: "file:///Users/person/page.html",
         origin: "file://",
         crossOrigin: false,
+        ownSession: false,
         path: "",
         loaderId: "loader-main",
         lifecycle: "unknown",
@@ -3046,6 +3049,78 @@ describe("lifecycle and network", () => {
     expect(session.network.lastActivityAt()).toBe(last);
   });
 
+  it("network.failureFor keeps the newest failure per URL", async () => {
+    const { session, cdp } = await tracked();
+    const url = "https://shop.example/api/cart";
+    const sent = (requestId: string, target = url) =>
+      requestWillBeSent(cdp, {
+        requestId,
+        frameId: "main",
+        loaderId: "loader-1",
+        url: target,
+      });
+    const failed = (
+      requestId: string,
+      params: Record<string, unknown> = {},
+    ) => {
+      cdp.event("Network.loadingFailed", {
+        requestId,
+        timestamp: 2,
+        type: "Fetch",
+        errorText: "net::ERR_FAILED",
+        canceled: false,
+        ...params,
+      });
+    };
+    expect(session.network.failureFor(url)).toBeUndefined();
+    sent("cors.1");
+    failed("cors.1", {
+      corsErrorStatus: { corsError: "MissingAllowOriginHeader" },
+    });
+    expect(session.network.failureFor(url)).toEqual({
+      url,
+      at: Date.now(),
+      corsError: "MissingAllowOriginHeader",
+      netError: "net::ERR_FAILED",
+    });
+    // A blocked request reports why it was blocked instead.
+    await vi.advanceTimersByTimeAsync(100);
+    sent("blocked.1");
+    failed("blocked.1", {
+      blockedReason: "mixed-content",
+      errorText: "net::ERR_BLOCKED_BY_CLIENT",
+    });
+    expect(session.network.failureFor(url)).toEqual({
+      url,
+      at: Date.now(),
+      blockedReason: "mixed-content",
+      netError: "net::ERR_BLOCKED_BY_CLIENT",
+    });
+    // A cancel is Kamapathy's or the page's own doing, so it leaves the
+    // reason that explains the URL in place.
+    sent("cancel.1");
+    failed("cancel.1", { canceled: true, errorText: "net::ERR_ABORTED" });
+    expect(session.network.failureFor(url)).toMatchObject({
+      blockedReason: "mixed-content",
+    });
+    // A request that ended well leaves nothing to explain.
+    sent("ok.1");
+    loadingEnded(cdp, "ok.1");
+    expect(session.network.failureFor(url)).toBeUndefined();
+    // Only the newest 32 URLs are kept, and the page's own URL is not one.
+    for (let index = 0; index < 33; index += 1) {
+      sent(`many.${index}`, `https://shop.example/item/${index}`);
+      failed(`many.${index}`, { errorText: "net::ERR_TIMED_OUT" });
+    }
+    const item = (index: number) =>
+      session.network.failureFor(`https://shop.example/item/${index}`);
+    expect(item(0)).toBeUndefined();
+    expect(item(32)).toMatchObject({ netError: "net::ERR_TIMED_OUT" });
+    // A request Kamapathy never saw start has no URL to file under.
+    failed("before-attach");
+    expect(session.network.failureFor(url)).toBeUndefined();
+  });
+
   it("ignores /favicon.ico requests and agent sessions", async () => {
     const { session, cdp } = await tracked();
     const sent = (
@@ -3407,7 +3482,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       {
         frameId: "main",
         origin: "https://example.com",
+        loaderId: "loader-1",
         crossOrigin: false,
+        ownSession: false,
         blocked: false,
         unavailable: false,
       },
@@ -3415,7 +3492,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-in",
         parentFrameId: "main",
         origin: "https://example.com",
+        loaderId: "loader-frame-in",
         crossOrigin: false,
+        ownSession: false,
         blocked: false,
         unavailable: false,
       },
@@ -3423,7 +3502,9 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-ext",
         parentFrameId: "main",
         origin: `chrome-extension://${PDF_VIEWER_ID}`,
+        loaderId: "loader-frame-ext",
         crossOrigin: true,
+        ownSession: false,
         blocked: true,
         unavailable: false,
       },
@@ -3431,8 +3512,10 @@ describe("dialogs, init scripts, agent sessions and events", () => {
         frameId: "frame-oop",
         parentFrameId: "main",
         origin: "https://frame.example",
+        loaderId: "loader-frame-oop",
         sessionId: "child-1",
         crossOrigin: true,
+        ownSession: true,
         blocked: false,
         unavailable: false,
       },
@@ -3447,10 +3530,45 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       frameId: "frame-oop",
       parentFrameId: "main",
       origin: "https://frame.example",
+      loaderId: "loader-frame-oop",
       crossOrigin: true,
+      ownSession: false,
       blocked: false,
       unavailable: true,
     });
+  });
+
+  it("frames report whether they run in their own session", async () => {
+    const { session, cdp } = await framed();
+    framePaths(cdp, { "frame-in": "0", "frame-ext": "1", "frame-oop": "2" });
+    expect(
+      (await session.frames(soon())).map(({ frameId, ownSession }) => [
+        frameId,
+        ownSession,
+      ]),
+    ).toEqual([
+      ["main", false],
+      ["frame-in", false],
+      ["frame-ext", false],
+      ["frame-oop", true],
+    ]);
+    // A frame Chromium moves back into the page's process runs there.
+    cdp.event("Page.frameAttached", {
+      frameId: "frame-oop",
+      parentFrameId: "main",
+    });
+    await settle();
+    expect(
+      (await session.frames(soon())).map(({ frameId, ownSession }) => [
+        frameId,
+        ownSession,
+      ]),
+    ).toEqual([
+      ["main", false],
+      ["frame-in", false],
+      ["frame-ext", false],
+      ["frame-oop", false],
+    ]);
   });
 
   const opening = (
@@ -4121,11 +4239,22 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     });
     session.events.setRecording(true);
     expect(session.events.recording).toBe(true);
+    // Section 8's redactor is told whose session each event came from.
+    const sources: [string, boolean][] = [];
+    session.events.setRedactor((event, source) => {
+      sources.push([event.method, source.fromAgent]);
+      return event;
+    });
     cdp.event("Page.lifecycleEvent", lifecycle);
     cdp.event("Network.requestWillBeSent", request, "child-1");
     cdp.event("Runtime.consoleAPICalled", consoleCall);
     cdp.event("Runtime.consoleAPICalled", consoleCall, agent);
     cdp.event("Page.lifecycleEvent", lifecycle, "another-tab");
+    expect(sources).toEqual([
+      ["Page.lifecycleEvent", false],
+      ["Network.requestWillBeSent", false],
+      ["Runtime.consoleAPICalled", true],
+    ]);
     expect(session.events.drain(10)).toEqual({
       events: [
         { method: "Page.lifecycleEvent", params: lifecycle, at: Date.now() },

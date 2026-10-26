@@ -17,7 +17,7 @@ import {
 import type { EventBuffer } from "./event-buffer";
 import { FrameRegistry, type FrameRecord } from "./frames";
 import { LifecycleTracker, reached } from "./lifecycle";
-import { NetworkTracker } from "./network";
+import { NetworkTracker, type RequestFailure } from "./network";
 import {
   OPERATIONS,
   PAGE_SOURCE,
@@ -220,11 +220,13 @@ export class TabSession {
     inFlight(): number;
     pending(limit: number): string[];
     lastActivityAt(): number;
+    failureFor(url: string): RequestFailure | undefined;
     waitForIdle(idleMs: number, step: Step): Promise<void>;
   } = {
     inFlight: () => this.requests.inFlight(),
     pending: (limit) => this.requests.pending(limit),
     lastActivityAt: () => this.requests.lastActivityAt(),
+    failureFor: (url) => this.requests.failureFor(url),
     waitForIdle: (idleMs, step) =>
       this.requests.waitForIdle(idleMs, {
         ...step,
@@ -238,10 +240,15 @@ export class TabSession {
   private pending = new Set<Pending>();
   private waiters = new Set<() => void>();
   private readonly buffer: EventBuffer;
-  readonly events: Pick<
-    EventBuffer,
-    "recording" | "setRecording" | "setRedactor" | "drain"
-  >;
+  readonly events: Pick<EventBuffer, "recording" | "setRecording" | "drain"> & {
+    /** Section 8's redactor, told whose session the event came from. */
+    setRedactor(
+      redact: (
+        event: CdpEvent,
+        source: { fromAgent: boolean },
+      ) => CdpEvent | null,
+    ): void;
+  };
   private shown?: DialogInfo;
   private scripts = new Map<string, InitScript>();
   private scriptCount = 0;
@@ -298,7 +305,22 @@ export class TabSession {
       this.ending.abort(new TabClosedError());
     });
     this.buffer = options.buffer;
-    this.events = this.buffer;
+    const buffer = this.buffer;
+    this.events = {
+      get recording() {
+        return buffer.recording;
+      },
+      setRecording: (on, reason) => buffer.setRecording(on, reason),
+      // Only this session knows which of its sessions are an agent's.
+      setRedactor: (redact) =>
+        buffer.setRedactor((event) =>
+          redact(event, {
+            fromAgent:
+              event.sessionId !== undefined && this.agents.has(event.sessionId),
+          }),
+        ),
+      drain: (max) => buffer.drain(max),
+    };
     // A lost debugger takes its script identifiers, agent sessions, target id
     // and dialog with it, and leaves a gap in the events recorded until a
     // setup completes again.
@@ -464,8 +486,10 @@ export class TabSession {
         ? {}
         : { parentFrameId: frame.parentFrameId }),
       origin: frame.origin,
+      loaderId: frame.loaderId,
       ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
       crossOrigin: this.registry.crossOrigin(frame.frameId),
+      ownSession: frame.ownSession,
       blocked: frame.blocked,
       unavailable: frame.unavailable,
     }));
@@ -497,6 +521,7 @@ export class TabSession {
             ? {}
             : { sessionId: frame.sessionId }),
           crossOrigin: this.registry.crossOrigin(frame.frameId),
+          ownSession: frame.ownSession,
           path,
           loaderId: frame.loaderId,
           lifecycle: this.lifecycle.state(frame.frameId, frame.loaderId),
@@ -755,12 +780,31 @@ export class TabSession {
       });
       world = made;
     }
-    const { contextId } = await world;
+    // A world another call is still making is waited for no longer than
+    // this step allows, so a frame that stopped answering cannot hold up
+    // the next read of it.
+    const { contextId } = await this.within(world, step);
     // The frame moved on to its next document while the world was made.
     if (this.registry.worldFor(frameId, this.epoch) !== world)
       throw new ContextLostError(false);
     this.handles.set(`${sessionId ?? ""}|${contextId}`, { frameId, world });
     return sessionId === undefined ? { contextId } : { sessionId, contextId };
+  }
+
+  // A promise of another call's, bounded by this step's own deadline.
+  private async within<T>(work: Promise<T>, step: Step): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const left = Math.max(0, step.deadline - Date.now());
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new CdpTimeoutError("page", left)), left);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // A frame's path: its owner element, found on the session hosting its

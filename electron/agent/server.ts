@@ -20,8 +20,10 @@ import { activeSpace, createAuthority } from "./authority";
 import { createDialogs } from "./dialogs";
 import { createDownloads } from "./downloads";
 import { envelope, fail } from "./errors";
+import { createEventRecording } from "./events";
 import { createExpectations } from "./expectations";
 import { createFileChoosers, watchTakeover } from "./file-choosers";
+import { createFrameGroupsByTab } from "./frames/groups";
 import {
   buildRoutes,
   findRoute,
@@ -31,6 +33,7 @@ import {
 } from "./http";
 import { registerCounters } from "./input/counters";
 import { createDispatchers } from "./input/dispatch";
+import { createPageScripts } from "./page-scripts";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
 import { createPresence } from "./presence";
@@ -188,6 +191,8 @@ export interface AutomationServer {
   endSpace(id: string): void;
   /** The person's answer to a request for a space. */
   answerRequest(id: string, answer: { allow: boolean; spaceId?: string }): void;
+  /** The Page scripts setting: off fails the script calls in flight. */
+  setPageScripts(on: boolean): void;
   close(): Promise<void>;
 }
 // End-to-end checks read tab sessions through this probe on globalThis in the
@@ -267,6 +272,18 @@ export async function startAutomation(
     },
   });
   const referenceSession = randomBytes(12).toString("hex");
+  // The person's switch over every call that runs the agent's own code.
+  const pageScripts = createPageScripts(controller);
+  // Recording follows the switch and control, and the events route drains it.
+  const events = createEventRecording({
+    controller,
+    authority,
+    sessions,
+    pageScripts,
+  });
+  // One frame map per tab session: the groups, their owner bindings and the
+  // home frame of every ref a read gave out.
+  const frames = createFrameGroupsByTab({ sessions, refs });
   const presence = createPresence({ controller, authority });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
@@ -283,6 +300,7 @@ export async function startAutomation(
     referenceSession,
     dispatchers,
     refs,
+    frames,
   });
   const tabLog = createTabLog();
   const receipts = createReceipts({
@@ -386,6 +404,9 @@ export async function startAutomation(
     choosers,
     presence,
     refs,
+    pageScripts,
+    events,
+    frames,
   });
   const deps: RouteDeps = {
     controller,
@@ -401,6 +422,9 @@ export async function startAutomation(
     choosers,
     presence,
     refs,
+    pageScripts,
+    events,
+    frames,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -628,6 +652,9 @@ export async function startAutomation(
     instance,
     grantSpace,
     answerRequest: requests.answer,
+    setPageScripts(on: boolean) {
+      pageScripts.apply(on);
+    },
     endSpace(id: string) {
       const space = controller.state.spaces.find((item) => item.id === id);
       if (!space) throw new Error("Space was not found.");
@@ -649,6 +676,9 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        frames.dispose();
+        events.dispose();
+        pageScripts.dispose();
         // A pending wait is answered before its tab session is released.
         expectations.endAll("access_off");
         // No tab keeps an armed policy or a handler once the server stops.

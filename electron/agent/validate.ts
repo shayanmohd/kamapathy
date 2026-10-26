@@ -15,6 +15,7 @@ import {
   checkBody,
 } from "../../skills/kamapathy/scripts/schema/index.mjs";
 import { MAX_PROMPT_TEXT, type DialogPolicyInput } from "./dialogs";
+import type { FetchStart } from "./dom/fetch";
 import { MAX_INPUT_FILES } from "./dom/files";
 import type { WaitState } from "./dom/select";
 import { WAIT_POLL_MS } from "./downloads";
@@ -228,6 +229,220 @@ export function waitForSelectorFields(body: Record<string, unknown>): {
     // The text the answer and the timeout echo: a ref names itself.
     selector: "ref" in target ? target.ref : target.selector,
     timeoutMs: integerField(body, "timeoutMs", 10000, 0, 60000),
+  };
+}
+// Section 8's evaluate takes the page script fields, which the Page scripts
+// setting gates, with a timeout the page keeps a margin of.
+export function evaluateFields(
+  body: Record<string, unknown>,
+): ScriptSource & { timeoutMs: number } {
+  return {
+    ...scriptFields(body),
+    timeoutMs: integerField(body, "timeoutMs", 15000, 2000, 60000),
+  };
+}
+// Section 8's fetch takes the Fetch standard's own option names, plus the
+// timeout and the stream flag of the route.
+export interface FetchRequest extends FetchStart {
+  timeoutMs: number;
+  stream: boolean;
+}
+// Headers the browser sets itself. A request that names one is refused, so
+// nothing an agent sent is dropped silently.
+export const FORBIDDEN_HEADERS: readonly string[] = [
+  "accept-charset",
+  "accept-encoding",
+  "access-control-request-headers",
+  "access-control-request-method",
+  "connection",
+  "content-length",
+  "cookie",
+  "cookie2",
+  "date",
+  "dnt",
+  "expect",
+  "host",
+  "keep-alive",
+  "origin",
+  "referer",
+  "set-cookie",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "via",
+];
+const FORBIDDEN_PREFIXES = ["proxy-", "sec-"];
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const FETCH_URL_EXPECTED =
+  "a complete HTTP or HTTPS URL without credentials, a URL relative to the page, or a blob: URL of the page's own origin";
+const origin = (url: string): string | undefined => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+};
+// What the page may fetch: its own relative URLs, any http or https URL, or
+// a blob: URL its own origin made.
+function fetchUrlField(body: Record<string, unknown>, tabUrl: string): string {
+  const value = stringField(body, "url", 8192);
+  const refuse = (): never => fail("invalid_url", `Use ${FETCH_URL_EXPECTED}.`);
+  let resolved: URL;
+  try {
+    resolved = new URL(value, tabUrl);
+  } catch {
+    return refuse();
+  }
+  if (isWebUrl(resolved.href)) return resolved.href;
+  // A blob: URL carries the origin that made it in its path.
+  if (
+    resolved.protocol === "blob:" &&
+    isWebUrl(resolved.pathname) &&
+    origin(resolved.pathname) === origin(tabUrl)
+  )
+    return resolved.href;
+  return refuse();
+}
+function fetchHeaderField(body: Record<string, unknown>): [string, string][] {
+  const value = body.headers;
+  if (value === undefined) return [];
+  const refuse = (expected: string): never =>
+    fail("invalid_field", `headers must be ${expected}.`, {
+      field: "headers",
+      expected,
+    });
+  const shape = "an object of header names and string values";
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return refuse(shape);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 64) return refuse("an object of at most 64 headers");
+  const headers: [string, string][] = [];
+  for (const [name, item] of entries) {
+    if (
+      !HEADER_NAME.test(name) ||
+      typeof item !== "string" ||
+      item.length > 8192 ||
+      /[\r\n\u0000]/.test(item)
+    )
+      return refuse(shape);
+    const lower = name.toLowerCase();
+    if (
+      FORBIDDEN_HEADERS.includes(lower) ||
+      FORBIDDEN_PREFIXES.some((prefix) => lower.startsWith(prefix))
+    )
+      return refuse(
+        `a header the Fetch standard allows (${name} is set by the browser)`,
+      );
+    headers.push([name, item]);
+  }
+  return headers;
+}
+const optionalEnum = <T extends string>(
+  body: Record<string, unknown>,
+  name: string,
+  values: readonly T[],
+): T | undefined =>
+  body[name] === undefined
+    ? undefined
+    : enumField(body, name, values, values[0]);
+
+export function fetchFields(
+  body: Record<string, unknown>,
+  tabUrl: string,
+): FetchRequest {
+  const stream = booleanField(body, "stream", false);
+  const timeoutMs = integerField(body, "timeoutMs", 20000, 1000, 300000);
+  // The schema declares the longest a saved body may take, so admission
+  // reserves it; only a stream may ask for more than a minute.
+  if (timeoutMs > 60000 && !stream) {
+    const expected = "1000 to 60000 ms, or up to 300000 with saveAs";
+    return fail("invalid_field", `timeoutMs must be ${expected}.`, {
+      field: "timeoutMs",
+      expected,
+    });
+  }
+  const method =
+    body.method === undefined ? "GET" : stringField(body, "method", 32);
+  if (!HEADER_NAME.test(method))
+    return fail("invalid_field", "method must be a method name.", {
+      field: "method",
+    });
+  if (["CONNECT", "TRACE", "TRACK"].includes(method.toUpperCase()))
+    return fail(
+      "invalid_field",
+      `method must be a method the Fetch standard allows (${method.toUpperCase()} is not).`,
+      { field: "method", expected: "a method the Fetch standard allows" },
+    );
+  const sent =
+    body.body === undefined
+      ? undefined
+      : stringField(body, "body", 524288, true);
+  if (sent !== undefined && ["GET", "HEAD"].includes(method.toUpperCase()))
+    return fail(
+      "invalid_field",
+      `method ${method.toUpperCase()} takes no body. Use POST, PUT or PATCH to send one.`,
+      { field: "body" },
+    );
+  const referrer =
+    body.referrer === undefined
+      ? undefined
+      : stringField(body, "referrer", 8192, true);
+  const integrity =
+    body.integrity === undefined
+      ? undefined
+      : stringField(body, "integrity", 256);
+  const cache = optionalEnum(body, "cache", [
+    "default",
+    "no-store",
+    "reload",
+    "no-cache",
+    "force-cache",
+    "only-if-cached",
+  ] as const);
+  const credentials = optionalEnum(body, "credentials", [
+    "omit",
+    "same-origin",
+    "include",
+  ] as const);
+  const redirect = optionalEnum(body, "redirect", [
+    "follow",
+    "error",
+    "manual",
+  ] as const);
+  const referrerPolicy = optionalEnum(body, "referrerPolicy", [
+    "",
+    "no-referrer",
+    "no-referrer-when-downgrade",
+    "same-origin",
+    "origin",
+    "strict-origin",
+    "origin-when-cross-origin",
+    "strict-origin-when-cross-origin",
+    "unsafe-url",
+  ] as const);
+  return {
+    url: fetchUrlField(body, tabUrl),
+    method,
+    headers: fetchHeaderField(body),
+    mode: enumField(
+      body,
+      "mode",
+      ["cors", "no-cors", "same-origin"] as const,
+      "cors",
+    ),
+    timeoutMs,
+    stream,
+    ...(sent === undefined ? {} : { body: sent }),
+    ...(cache === undefined ? {} : { cache }),
+    ...(credentials === undefined ? {} : { credentials }),
+    ...(integrity === undefined ? {} : { integrity }),
+    ...(body.keepalive === undefined
+      ? {}
+      : { keepalive: booleanField(body, "keepalive", false) }),
+    ...(redirect === undefined ? {} : { redirect }),
+    ...(referrer === undefined ? {} : { referrer }),
+    ...(referrerPolicy === undefined ? {} : { referrerPolicy }),
   };
 }
 // The function wait takes the page script fields, which the Page scripts
@@ -843,6 +1058,10 @@ export function urlField(body: Record<string, unknown>): string {
     );
   }
   return new URL(value).href;
+}
+// How many of a tab's recorded events one drain takes.
+export function eventFields(body: Record<string, unknown>): { max: number } {
+  return { max: integerField(body, "max", 10000, 1, 10000) };
 }
 export function expectationFields(body: Record<string, unknown>): {
   event: ExpectationEvent;

@@ -406,6 +406,28 @@ export function Settings({
         </div>
         <div className="setting-row">
           <div>
+            <strong>{settingsCopy.scripts}</strong>
+            <p>{settingsCopy.scriptsNote}</p>
+          </div>
+          <button
+            role="switch"
+            aria-label={settingsCopy.scripts}
+            aria-checked={state.settings.agentPageScripts}
+            className={`toggle ${state.settings.agentPageScripts ? "on" : ""}`}
+            onClick={() =>
+              update({
+                type: "settings:update",
+                settings: {
+                  agentPageScripts: !state.settings.agentPageScripts,
+                },
+              })
+            }
+          >
+            <span />
+          </button>
+        </div>
+        <div className="setting-row">
+          <div>
             <strong>{agentSetupCopy.settingsRow}</strong>
             <p>{setupSummary(setup)}</p>
           </div>

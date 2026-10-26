@@ -4,6 +4,7 @@ import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
 import { ApiError, fail } from "./errors";
+import type { FrameGroupsByTab } from "./frames/groups";
 import type { Park, Run } from "./http";
 import {
   createInputActions,
@@ -96,6 +97,8 @@ export interface Actions {
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
+    /** The frame whose world runs it, for a read inside a frame group. */
+    frameId?: string,
   ): Promise<Record<string, unknown>>;
   executeToolAction(
     id: string,
@@ -115,6 +118,7 @@ export function createActions(deps: {
   referenceSession: string;
   dispatchers: InputDispatchers;
   refs: RefBook;
+  frames: FrameGroupsByTab;
 }): Actions {
   const {
     controller,
@@ -217,6 +221,7 @@ export function createActions(deps: {
     payload: Record<string, unknown>,
     deadline: number,
     step?: Step,
+    frameId?: string,
   ) => {
     authorizeTab(id);
     const epoch = session.epoch;
@@ -227,6 +232,7 @@ export function createActions(deps: {
       signal: step?.signal,
       guard: () => authorizeTab(id),
       dispatch: step?.dispatch,
+      ...(frameId === undefined ? {} : { frameId }),
     });
     authorizeTab(id);
     if (
@@ -265,6 +271,7 @@ export function createActions(deps: {
     evaluatePage,
     resolver,
     namespace: namespaceOf,
+    frames: deps.frames,
   });
   const dispatcherFor = (_id: string, session: TabSession) =>
     dispatchers.for(session);

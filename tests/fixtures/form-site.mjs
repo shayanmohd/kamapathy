@@ -14,6 +14,7 @@ import { extensionPages } from './extension-pages.mjs';
 import { signInPages, SIGN_IN_PASSWORD } from './sign-in-pages.mjs';
 import { promptPages, ATTACHMENT, AUTH, BIG } from './prompt-pages.mjs';
 import { navigationPages, navigationRoute } from './navigation-pages.mjs';
+import { scriptPageHeaders, scriptPages, serveScriptEndpoint } from './script-pages.mjs';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const styles = `body{font:16px system-ui;margin:0;background:#f3f6f1;color:#24372c}header,main,footer{max-width:820px;margin:auto;padding:24px}header{border-bottom:1px solid #cfdbce}nav{display:flex;gap:20px}a{color:#285f39}h1{font-size:32px}label,legend{display:block;font-weight:600;margin:18px 0 8px}input:not([type=checkbox]):not([type=radio]),select,textarea{display:block;box-sizing:border-box;width:100%;max-width:640px;padding:10px;border:1px solid #9bac9b;border-radius:6px;font:inherit}button{padding:11px 18px;border:1px solid #426346;border-radius:6px;background:#36593e;color:white;font:inherit;margin:16px 8px 0 0}fieldset{border:1px solid #cfdbce;border-radius:8px;margin:20px 0;padding:12px 20px}fieldset label{font-weight:400}small{color:#58705c}pre{white-space:pre-wrap}#error{color:#912d26}.row{display:flex;align-items:center;gap:9px}.row label{margin:12px 0}footer{font-size:12px;color:#58705c}`;
@@ -30,9 +31,13 @@ export async function startFormSite() {
   const events = [];
   const requests = [];
   const csrf = randomUUID();
-  const server = createServer(async (request, response) => {
+  // The ports this fixture answers on, in the order it opened them. The same
+  // pages are served on both, so a page can hold a frame of its own name on
+  // the other port beside one from the other loopback name.
+  const ports = [];
+  const handle = async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
-    requests.push({ at: Date.now(), method: request.method, path: url.pathname });
+    requests.push({ at: Date.now(), method: request.method, path: url.pathname, port: request.socket.localPort });
     const send = (title, body, script = '', status = 200) => {
       response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(document(title, body, script));
@@ -102,13 +107,21 @@ export async function startFormSite() {
           return response.end(pixel);
         }
       }
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? inputPages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname] ?? navigationPages[url.pathname]);
+      // The page script endpoints: the cookie echo, the CORS pair, the
+      // binary body, the bodies that never end and the service worker.
+      if (serveScriptEndpoint(request, response, url, events)) return;
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? inputPages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname] ?? extensionPages[url.pathname] ?? signInPages[url.pathname] ?? promptPages[url.pathname] ?? navigationPages[url.pathname] ?? scriptPages[url.pathname]);
       if (typeof page === 'string') {
-        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...scriptPageHeaders[url.pathname] });
         // A page asking for {{other}} gets this server through its other
-        // loopback name, which makes a frame of it cross origin.
-        const other = `http://${request.headers.host?.startsWith('localhost') ? '127.0.0.1' : 'localhost'}:${server.address().port}`;
-        return response.end(page.replaceAll('{{other}}', other));
+        // loopback name, which makes a frame of it cross origin. {{otherPort}}
+        // keeps the name and changes the port, which Chromium runs in this
+        // page's own process.
+        const here = request.socket.localPort;
+        const name = request.headers.host?.split(':')[0] ?? '127.0.0.1';
+        const other = `http://${name === 'localhost' ? '127.0.0.1' : 'localhost'}:${here}`;
+        const otherPort = `http://${name}:${here === ports[0] ? ports[1] : ports[0]}`;
+        return response.end(page.replaceAll('{{other}}', other).replaceAll('{{otherPort}}', otherPort));
       }
       if (request.method === 'GET' && url.pathname === '/uploads') return send('File upload lab', `<h1>Upload test files</h1><form action="/upload-receipt" method="post" enctype="multipart/form-data"><label for="bundle">App bundle</label><input id="bundle" type="file" name="bundle" accept=".aab" required><section><label for="artwork">Artwork files</label><input id="artwork" style="display:none" type="file" name="artwork" accept="image/png" multiple></section><section hidden><input type="file" id="closed-upload" aria-label="Closed upload"></section><label for="disabled-upload">Disabled upload</label><input type="file" id="disabled-upload" disabled><button type="button" id="replace-upload">Replace bundle input</button><button type="submit">Submit files</button><p id="selected-status" role="status"></p></form>`, `document.querySelector('#replace-upload').onclick=()=>{const input=document.querySelector('#bundle');input.replaceWith(input.cloneNode());};document.querySelector('form').addEventListener('change',()=>{document.querySelector('#selected-status').textContent='Selected '+Array.from(document.querySelectorAll('input[type=file]')).reduce((n,input)=>n+input.files.length,0)+' files';});`);
       if (request.method === 'POST' && url.pathname === '/upload-receipt') {
@@ -173,7 +186,11 @@ export async function startFormSite() {
       if (navigationRoute(request, url, (status, headers, body) => response.writeHead(status, headers).end(body))) return;
       return send('Page not found', '<h1>Page not found</h1>', '', 404);
     } catch { return send('Request failed', '<h1>Request failed</h1>', '', 400); }
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { origin: `http://127.0.0.1:${server.address().port}`, forms, submissions, events, requests, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
+  };
+  const servers = [createServer(handle), createServer(handle)];
+  for (const listener of servers) {
+    await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+    ports.push(listener.address().port);
+  }
+  return { origin: `http://127.0.0.1:${ports[0]}`, ports: [...ports], forms, submissions, events, requests, close: () => Promise.all(servers.map(listener => new Promise(resolve => { listener.close(resolve); listener.closeAllConnections(); }))) };
 }

@@ -11,6 +11,18 @@ type Request = {
 // How many characters of a pending URL a wait's answer carries. The cut is
 // made here, so no caller can hand out a longer one.
 const URL_CHARS = 200;
+// How many failed URLs are kept, so a failure a page explains is still here
+// when the route asks for it.
+const MAX_FAILURES = 32;
+
+/** Why the newest request for a URL failed, as Chromium reported it. */
+export interface RequestFailure {
+  url: string;
+  at: number;
+  corsError?: string;
+  blockedReason?: string;
+  netError?: string;
+}
 
 const favicon = (url: string) => {
   try {
@@ -25,6 +37,8 @@ const favicon = (url: string) => {
 // and end on the frame's own.
 export class NetworkTracker {
   private requests = new Map<string, Request>();
+  // The newest failure per URL, oldest first.
+  private failures = new Map<string, RequestFailure>();
   private lastActivity = 0;
   private waits = new Set<() => void>();
 
@@ -48,6 +62,11 @@ export class NetworkTracker {
       method === "Network.loadingFinished" ||
       method === "Network.loadingFailed"
     ) {
+      const request = this.requests.get(params.requestId);
+      if (request && method === "Network.loadingFailed")
+        this.recordFailure(request.url, params);
+      // A request that reached its end is no longer a failure to explain.
+      else if (request) this.failures.delete(request.url);
       if (this.requests.delete(params.requestId)) this.changed();
     } else if (
       method === "Page.lifecycleEvent" &&
@@ -75,7 +94,37 @@ export class NetworkTracker {
   }
 
   clear(): void {
+    this.failures.clear();
     this.drop(() => true);
+  }
+
+  // Why the newest request for this URL failed, for a page error that says
+  // only that it could not fetch.
+  failureFor(url: string): RequestFailure | undefined {
+    return this.failures.get(url);
+  }
+
+  // A cancel is Kamapathy's or the page's own doing, so only a cancel
+  // Chromium blamed on CORS is kept.
+  private recordFailure(url: string, params: Record<string, any>): void {
+    const corsError = params.corsErrorStatus?.corsError;
+    if (params.canceled && !corsError) return;
+    this.failures.delete(url);
+    this.failures.set(url, {
+      url,
+      at: Date.now(),
+      ...(typeof corsError === "string" ? { corsError } : {}),
+      ...(typeof params.blockedReason === "string"
+        ? { blockedReason: params.blockedReason }
+        : {}),
+      ...(typeof params.errorText === "string"
+        ? { netError: params.errorText }
+        : {}),
+    });
+    for (const oldest of this.failures.keys()) {
+      if (this.failures.size <= MAX_FAILURES) break;
+      this.failures.delete(oldest);
+    }
   }
 
   inFlight(): number {
