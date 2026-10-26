@@ -306,47 +306,14 @@ for (const mode of ISOLATION)
         content: "read",
       });
       expect(listing.unreadFrames).toBeUndefined();
-      // A read that runs out of time lists the frames it did not reach and
-      // counts every one of them. The budget that leaves some unread has to
-      // sit above the page's own group read, which throws instead of being
-      // skipped, and below the whole pass. How long either takes is the
-      // machine's business and both stretch together when the machine is
-      // busy, so a whole read is timed first and the budgets tried are
-      // shares of it rather than fixed milliseconds. The shares run up and
-      // then back down, because the machine can also free up between the
-      // timing and the attempt, and the page is opened again each time so
-      // that no frame is remembered as silent.
-      await open("/frames/many", 13);
-      const began = Date.now();
-      await take();
-      const whole = Math.max(Date.now() - began, 8);
-      let starved: Listing | undefined;
-      for (const share of [0.25, 0.4, 0.55, 0.7, 0.85, 0.12, 0.06]) {
-        await open("/frames/many", 13);
-        starved = await take({}, Math.ceil(whole * share)).catch(
-          () => undefined,
-        );
-        if (starved?.unreadFrames) break;
-        starved = undefined;
-      }
-      expect(
-        starved,
-        `no budget left a frame unread; a whole read took ${whole} ms`,
-      ).toBeDefined();
-      const left = starved!.interactables.filter(
-        (control) =>
-          control.content !== undefined && control.content !== "read",
-      );
-      expect(left.some((control) => control.content === "pending")).toBe(true);
-      // A frame left unread still says which frame it was.
-      expect(
-        left.every(
-          (control) =>
-            typeof control.origin === "string" &&
-            typeof control.contentFrame === "string",
-        ),
-      ).toBe(true);
-      expect(starved!.unreadFrames).toBe(left.length);
+      // What a read that runs out of time reports is pinned on the fake in
+      // tests/automation.test.ts, "a snapshot counts unread frames": there a
+      // pending frame, an unavailable one and one past the group limit are
+      // all produced at once, with their origins and contentFrames, and
+      // unreadFrames counted over the three. Chromium cannot do better,
+      // because a group is pending only when the deadline falls between the
+      // page's own read, which throws instead of being skipped, and a child
+      // group's turn, and that window moves with how busy the machine is.
       // A frame that blocks its own thread answers no read at all. Without
       // site isolation it blocks the page around it too, so there is
       // nothing to tell apart.
