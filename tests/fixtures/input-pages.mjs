@@ -4,7 +4,9 @@
 // panel inside a frame below the fold, drawn graphics, boxes that move or
 // whose frames stall, a field and an editing host that log the key events
 // they receive, a page that logs and may take the paste events it is sent,
-// and the wrappers fill, select and focus retarget through.
+// and the wrappers fill, select and focus retarget through. The end-to-end
+// checks add banners that leave or stay, a log of the events a page
+// received, fields a state object controls, and a drawing surface.
 export const inputPages = {
   "/input/buttons": `<!doctype html><meta charset="utf-8"><title>Buttons</title>
 <style>
@@ -261,5 +263,176 @@ document
 <script>
 // A page whose frames never come, as a throttled tab's do not.
 window.requestAnimationFrame = () => 0;
+</script>`,
+  "/input/banner": `<!doctype html><meta charset="utf-8"><title>Banners</title>
+<style>
+body{font:14px sans-serif;margin:0;height:600px}
+#leaving,#staying{position:fixed;left:0;right:0;height:72px;color:#fff;padding:8px;box-sizing:border-box;z-index:5}
+#leaving{top:0;background:#243}
+#staying{top:160px;background:#423}
+#under-leaving{position:absolute;left:24px;top:24px}
+#under-staying{position:absolute;left:24px;top:184px}
+#arm{position:absolute;left:24px;top:320px}
+#clicks{position:absolute;left:24px;top:380px}
+</style>
+<div id="leaving" class="banner">Accept all cookies before this banner goes away on its own</div>
+<button id="under-leaving" type="button">Under the leaving banner</button>
+<div id="staying" class="banner">This banner stays over the button beneath it</div>
+<button id="under-staying" type="button">Under the staying banner</button>
+<button id="arm" type="button">Start the banner timer</button>
+<p id="clicks" role="status">clicks none</p>
+<script>
+// The leaving banner goes 900 ms after the timer starts, so an action that
+// waits reaches the button under it and one that does not never does. The
+// timer starts on a click of its own, which keeps the banner in the way
+// until the action under test begins.
+const clicks = [];
+for (const id of ["under-leaving", "under-staying"])
+  document.getElementById(id).addEventListener("click", (event) => {
+    clicks.push(id + (event.isTrusted ? " trusted" : " untrusted"));
+    document.getElementById("clicks").textContent =
+      "clicks " + clicks.join(", ");
+  });
+document.getElementById("arm").addEventListener("click", () => {
+  setTimeout(() => {
+    document.getElementById("leaving").style.display = "none";
+  }, 900);
+});
+</script>`,
+  "/input/events": `<!doctype html><meta charset="utf-8"><title>Event log</title>
+<style>body{font:14px sans-serif;margin:16px}p{margin:6px 0}</style>
+<p><button id="action" type="button">Press me</button> <a id="link" href="#terms">Read the terms</a></p>
+<p><label for="field">Field</label> <input id="field" type="text"></p>
+<p><label for="choice">City</label> <select id="choice"><option value="">Choose</option><option value="ams">Amsterdam</option><option value="blr">Bengaluru</option></select></p>
+<p id="log" role="status">log none</p>
+<p id="value" role="status">value ""</p>
+<script>
+// What this page received, in order, in a status element, because the agent
+// API reads pages and never runs code in them. A right click is left alone,
+// so the browser is the only thing that can decide about a native menu.
+const entries = [];
+const log = document.getElementById("log");
+const note = (text) => {
+  entries.push(text);
+  log.textContent = "log " + entries.join(" | ");
+};
+const field = document.getElementById("field");
+const value = document.getElementById("value");
+field.addEventListener("input", () => {
+  value.textContent = 'value "' + field.value + '"';
+});
+for (const type of ["click", "dblclick", "contextmenu"])
+  document.addEventListener(type, (event) => {
+    note(
+      type +
+        " on " +
+        event.target.id +
+        " detail " +
+        event.detail +
+        (event.isTrusted ? " trusted" : " untrusted"),
+    );
+  });
+document.addEventListener("keydown", (event) => {
+  note(
+    "keydown " +
+      event.key +
+      (event.shiftKey ? " shift" : "") +
+      (event.isTrusted ? " trusted" : " untrusted"),
+  );
+});
+document.getElementById("choice").addEventListener("change", (event) => {
+  note("change " + event.target.value);
+});
+</script>`,
+  "/input/controlled": `<!doctype html><meta charset="utf-8"><title>Controlled fields</title>
+<style>body{font:14px sans-serif;margin:16px}p{margin:6px 0}</style>
+<p><label for="name">Full name</label> <input id="name" type="text" value=""></p>
+<p><label for="amount">Amount</label> <input id="amount" type="text" value="$0.00"></p>
+<p id="state" role="status">name "" amount "$0.00"</p>
+<p id="trust" role="status">trust none</p>
+<script>
+// Fields a component library drives: a state object is the only source of
+// truth, every input event writes the field's value back from state, and an
+// event the engine did not deliver changes nothing, so a value set from
+// outside is thrown away exactly as a state hook throws it away.
+const state = { name: "", amount: "$0.00" };
+const nameField = document.getElementById("name");
+const amount = document.getElementById("amount");
+const report = document.getElementById("state");
+const trust = document.getElementById("trust");
+const seen = [];
+const render = () => {
+  nameField.value = state.name;
+  amount.value = state.amount;
+  report.textContent =
+    'name "' + state.name + '" amount "' + state.amount + '"';
+};
+// A currency field that reformats whatever it is given, as a masked input
+// does: 1234.5 comes back as $1,234.50.
+const currency = (text) => {
+  const given = Number(text.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(given)
+    ? "$" +
+        given.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+    : "$0.00";
+};
+const controlled = (field, read) =>
+  field.addEventListener("input", (event) => {
+    seen.push(field.id + " " + event.isTrusted);
+    trust.textContent = "trust " + seen.join(", ");
+    if (event.isTrusted) read();
+    render();
+  });
+controlled(nameField, () => (state.name = nameField.value));
+controlled(amount, () => (state.amount = currency(amount.value)));
+render();
+</script>`,
+  "/input/canvas": `<!doctype html><meta charset="utf-8"><title>Canvas</title>
+<style>
+body{font:14px sans-serif;margin:0}
+#pad{position:absolute;left:0;top:0;touch-action:none}
+#stroke{position:absolute;left:8px;top:220px;margin:0}
+</style>
+<canvas id="pad" width="300" height="200"></canvas>
+<p id="stroke" role="status">stroke none</p>
+<script>
+// A drawing surface no selector can reach into: the stroke is the points the
+// pointer visited while it was down, in the page's own viewport pixels, read
+// back through a status element. Coalesced moves are read out, so a frame
+// that merged two of them still reports both.
+const pad = document.getElementById("pad");
+const brush = pad.getContext("2d");
+const readout = document.getElementById("stroke");
+const points = [];
+let untrusted = 0;
+let drawing = false;
+const add = (event) => {
+  const merged = event.getCoalescedEvents?.() ?? [];
+  for (const point of merged.length ? merged : [event]) {
+    points.push(Math.round(point.clientX) + "," + Math.round(point.clientY));
+    brush.lineTo(point.clientX, point.clientY);
+  }
+  if (!event.isTrusted) untrusted += 1;
+  brush.stroke();
+  readout.textContent =
+    "stroke " +
+    points.join(" ") +
+    (untrusted ? " untrusted " + untrusted : " trusted");
+};
+pad.addEventListener("pointerdown", (event) => {
+  drawing = true;
+  brush.beginPath();
+  brush.moveTo(event.clientX, event.clientY);
+  add(event);
+});
+pad.addEventListener("pointermove", (event) => {
+  if (drawing) add(event);
+});
+pad.addEventListener("pointerup", () => {
+  drawing = false;
+});
 </script>`,
 };

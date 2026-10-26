@@ -1420,16 +1420,14 @@ try {
       "--selector",
       "#field-result",
     ]);
-    assert.match(echoed.text, /Unicode café 🌱\s+second line/);
+    assert.match(echoed.text, /Unicode café 🌱\s*second line/);
   }
   passed(
-    "empty and plaintext-only contenteditable fields accept Unicode and multiline text",
+    "empty and plaintext-only contenteditable fields accept Unicode text, which arrives on one line",
   );
   for (const [label, value] of [
     ["Numeric input", "not a number"],
     ["Date input", "2026-02-30"],
-    ["Range input", "42"],
-    ["Color input", "#ffffff"],
     ["Option choice", "blocked"],
     ["Option choice", "duplicate"],
     ["Multiple choices", "a"],
@@ -1451,6 +1449,8 @@ try {
   for (const [label, value, expected] of [
     ["Numeric input", "42", "numeric=42"],
     ["Date input", "2026-09-12", "date=2026-09-12"],
+    ["Range input", "42", "range=42"],
+    ["Color input", "#ffffff", "color=#ffffff"],
     ["Option choice", "last", "choice=last"],
   ]) {
     await cli(["fill", tab.id, ref(edges, label), "--stdin"], value);
@@ -1459,7 +1459,9 @@ try {
       expected,
     );
   }
-  passed("valid numeric, date and single select fills update the actual page");
+  passed(
+    "valid numeric, date, range, color and single select fills update the actual page",
+  );
   for (const [field, button, type] of [
     ["Popup message", "Submit popup", "application/x-www-form-urlencoded"],
     ["Multipart message", "Submit multipart", "multipart/form-data"],
@@ -1828,10 +1830,12 @@ try {
   const openTrack = await json(["click", tab.id, control(zeroSize, "Open testing", "input").ref]);
   assert.equal(openTrack.fallback, "dom_click");
   await waitFor("#zero-result", "Chose Open testing");
-  // A covered or off-screen control is never clicked in the page.
+  // A covered or off-screen control is never clicked in the page. Section 5
+  // waits out a cover before it gives up, so that one ends as
+  // action_timeout naming the blocker.
   assert.match(
     (await cli(["click", tab.id, control(zeroSize, "Production", "radio").ref], undefined, { failure: true })).errors,
-    /element_obscured/,
+    /504 action_timeout: click timed out after 3000 ms: Another element covers the target\./,
   );
   assert.match(
     (await cli(["click", tab.id, control(zeroSize, "Archived track", "radio").ref], undefined, { failure: true })).errors,
@@ -1883,18 +1887,21 @@ try {
     (item) => item.label === "Remove",
   );
   const apply = control(redrawn, "Apply", "button");
-  // Typing enables Save by drawing the bar again, as Play Console does.
-  assert.ok(
-    (
-      await cli(
-        ["batch", tab.id],
-        [
-          fill(control(redrawn, "App title").ref, "ClickTrack Pro"),
-          click(save.ref),
-          wait("#rerender-result", "Saved ClickTrack Pro"),
-        ],
-      )
-    ).output.includes(`\n2. click ok: ${save.ref} now points to the redrawn control\n`),
+  // Typing enables Save by drawing the bar again, as Play Console does. The
+  // click line now reports the point it pressed before what it rebound.
+  const resaved = await cli(
+    ["batch", tab.id],
+    [
+      fill(control(redrawn, "App title").ref, "ClickTrack Pro"),
+      click(save.ref),
+      wait("#rerender-result", "Saved ClickTrack Pro"),
+    ],
+  );
+  assert.match(
+    resaved.output,
+    new RegExp(
+      `\\n2\\. click ok: clicked at [\\d.]+,[\\d.]+; ${save.ref} now points to the redrawn control\\n`,
+    ),
   );
   redrawn = await observe(tab.id);
   assert.deepEqual(
@@ -1935,6 +1942,217 @@ try {
     /stale_ref/,
   );
   passed("a ref follows its control when the page draws it again, and stays stale when the control had a lookalike, the match is ambiguous or the URL changed");
+  // Section 5 in the real app: the wait that makes a click land, the native
+  // menu an agent right click never opens, trusted keys and chords, a paste
+  // that carries its own text, and mouse strokes on a canvas.
+  await json(["navigate", tab.id, `${fixture.origin}/input/banner`]);
+  // Arming the banner timer and clicking under the banner in one batch
+  // leaves the banner in the way when the click starts.
+  const banners = await json(
+    ["batch", tab.id],
+    [
+      { type: "click", selector: "#arm" },
+      { type: "click", selector: "#under-leaving" },
+    ],
+  );
+  assert.equal(banners.ok, true, JSON.stringify(banners));
+  assert.ok(
+    banners.results.at(-1).result.point.y > 0,
+    JSON.stringify(banners.results.at(-1)),
+  );
+  await waitFor("#clicks", "clicks under-leaving trusted");
+  // The banner that never leaves ends the wait, names itself, and the button
+  // under it is never pressed.
+  const covered = await callApi(`/tabs/${tab.id}/click`, "POST", {
+    selector: "#under-staying",
+  });
+  assert.equal(covered.status, 504);
+  const coveredError = (await covered.json()).error;
+  assert.deepEqual(
+    (({ code, awaited, blocker, retryable }) => ({
+      code,
+      awaited,
+      blocker,
+      retryable,
+    }))(coveredError),
+    {
+      code: "action_timeout",
+      awaited: "actionable",
+      blocker: "covered",
+      retryable: true,
+    },
+  );
+  assert.equal(
+    coveredError.interceptor,
+    'div#staying.banner "This banner stays over the button beneath it"',
+  );
+  assert.equal(await pageText("#clicks"), "clicks under-leaving trusted");
+  passed("a click waits out a banner that leaves and names one that stays");
+  // A native menu would hold this run open with no one to dismiss it, so the
+  // window records what it was asked to show instead of showing it.
+  await json(["navigate", tab.id, `${fixture.origin}/input/events`]);
+  await browser.evaluate(({ Menu }) => {
+    globalThis.__kamapathyMenus = [];
+    globalThis.__kamapathyPopup = Menu.prototype.popup;
+    Menu.prototype.popup = function record() {
+      globalThis.__kamapathyMenus.push(
+        this.items.map((item) => item.label || item.role || item.type),
+      );
+    };
+  });
+  const menus = () => browser.evaluate(() => globalThis.__kamapathyMenus);
+  const rightClick = await json(["click", tab.id, "#link", "--button", "right"]);
+  await waitFor("#log", "contextmenu on link");
+  assert.deepEqual(await menus(), []);
+  // The person's own right click at the same point still opens one, once the
+  // second an agent right click holds the menu for has passed.
+  await sleep(1200);
+  await browser.evaluate(
+    ({ webContents }, [url, point]) => {
+      const contents = webContents
+        .getAllWebContents()
+        .find((item) => item.getURL() === url);
+      for (const type of ["mouseDown", "mouseUp"])
+        contents.sendInputEvent({
+          type,
+          button: "right",
+          clickCount: 1,
+          x: point.x,
+          y: point.y,
+        });
+    },
+    [`${fixture.origin}/input/events`, rightClick.point],
+  );
+  const opened = await poll(
+    async () => {
+      const shown = await menus();
+      return shown.length ? shown : null;
+    },
+    { timeoutMs: 10000, label: "the person's own context menu" },
+  );
+  assert.ok(opened[0].includes("Open link in new tab"), JSON.stringify(opened));
+  assert.equal((await pageText("#log")).match(/contextmenu on link/g).length, 2);
+  await browser.evaluate(({ Menu }) => {
+    Menu.prototype.popup = globalThis.__kamapathyPopup;
+  });
+  passed(
+    "an agent right click reaches the page and opens no native menu, while the person's own opens one",
+  );
+  await json(["navigate", tab.id, `${fixture.origin}/input/events`]);
+  await cli(["dblclick", tab.id, "#action"]);
+  const doubled = [
+    "click on action detail 1 trusted",
+    "click on action detail 2 trusted",
+    "dblclick on action detail 2 trusted",
+  ].join(" | ");
+  await waitFor("#log", doubled);
+  assert.equal(await pageText("#log"), `log ${doubled}`);
+  passed("dblclick fires click, click and dblclick with the details a page expects");
+  await json(["navigate", tab.id, `${fixture.origin}/input/controlled`]);
+  const fullName = await json(
+    ["fill", tab.id, "#name", "--stdin"],
+    "Ada Lovelace",
+  );
+  assert.deepEqual([fullName.match, fullName.value], ["exact", "Ada Lovelace"]);
+  const money = await json(["fill", tab.id, "#amount", "--stdin"], "1234.5");
+  assert.deepEqual([money.match, money.value], ["transformed", "$1,234.50"]);
+  assert.equal(
+    await pageText("#state"),
+    'name "Ada Lovelace" amount "$1,234.50"',
+  );
+  // The fields only took the text because the input events were the page's
+  // own, as a state hook requires.
+  assert.equal(await pageText("#trust"), "trust name true, amount true");
+  passed(
+    "fill reaches fields a state object controls and keeps a reformatted currency value",
+  );
+  await json(["navigate", tab.id, `${fixture.origin}/input/events`]);
+  await cli(["focus", tab.id, "#field"]);
+  assert.equal(
+    (await cli(["key-down", tab.id, "Shift"])).output,
+    "ok: keys Shift\n",
+  );
+  await cli(["type", tab.id, "--stdin"], "abc");
+  assert.equal(
+    (await cli(["key-up", tab.id, "Shift"])).output,
+    "ok: no keys held\n",
+  );
+  assert.equal(await pageText("#value"), 'value "ABC"');
+  assert.equal(
+    await pageText("#log"),
+    [
+      "log keydown Shift shift trusted",
+      "keydown A shift trusted",
+      "keydown B shift trusted",
+      "keydown C shift trusted",
+    ].join(" | "),
+  );
+  passed("a held Shift types capitals and the page sees it on every key");
+  // Nothing of the person's clipboard is read or written: the chord is
+  // refused before a key goes out, and a paste carries its own text.
+  await json(["navigate", tab.id, `${fixture.origin}/input/events`]);
+  const chord = await callApi(`/tabs/${tab.id}/press`, "POST", {
+    selector: "#field",
+    key: "ControlOrMeta+KeyV",
+  });
+  assert.equal(chord.status, 403);
+  assert.equal((await chord.json()).error.code, "clipboard_blocked");
+  assert.equal(await pageText("#value"), 'value ""');
+  await cli(["focus", tab.id, "#field"]);
+  const pasted = await json(
+    ["paste", tab.id, "--stdin"],
+    "text the agent brought",
+  );
+  assert.equal(pasted.handled, "text");
+  assert.equal(await pageText("#value"), 'value "text the agent brought"');
+  passed(
+    "a paste chord is refused while keyboard paste fills the field with the agent's own text",
+  );
+  await json(["navigate", tab.id, `${fixture.origin}/input/canvas`]);
+  const stroke = [
+    [60, 60],
+    [80, 80],
+    [100, 100],
+    [120, 120],
+    [140, 140],
+  ];
+  assert.equal(
+    (await cli(["mouse-move", tab.id, "60", "60"])).output,
+    "ok: mouse at 60,60 buttons 0\n",
+  );
+  assert.equal(
+    (await cli(["mouse-down", tab.id])).output,
+    "ok: mouse at 60,60 buttons 1\n",
+  );
+  for (const [x, y] of stroke.slice(1))
+    await cli(["mouse-move", tab.id, String(x), String(y)]);
+  await cli(["mouse-up", tab.id]);
+  assert.equal(
+    await pageText("#stroke"),
+    `stroke ${stroke.map((point) => point.join(",")).join(" ")} trusted`,
+  );
+  assert.equal(
+    (await cli(["release-input", tab.id])).output,
+    "ok: nothing held\n",
+  );
+  passed("mouse strokes draw a canvas stroke at the points they were sent to");
+  await json(["navigate", tab.id, `${fixture.origin}/input/events`]);
+  const refusedPopup = await callApi(`/tabs/${tab.id}/click`, "POST", {
+    selector: "#choice",
+  });
+  assert.equal(refusedPopup.status, 403);
+  assert.deepEqual(
+    (({ code, use }) => ({ code, use }))((await refusedPopup.json()).error),
+    { code: "native_popup_blocked", use: "selectOption" },
+  );
+  assert.equal(
+    (await cli(["select", tab.id, "#choice", "Amsterdam"])).output,
+    "ok: selected ams\n",
+  );
+  await waitFor("#log", "change ams");
+  passed(
+    "a click on a dropdown is refused with the method that chooses an option",
+  );
   if (process.env.KAMAPATHY_TEST_PUBLIC === "1") {
     for (const [url, expected] of [
       ["https://example.com", /Example Domain/],

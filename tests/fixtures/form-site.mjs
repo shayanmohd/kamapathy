@@ -4,6 +4,7 @@ import { edgeCases } from './edge-cases.mjs';
 import { componentPages } from './component-pages.mjs';
 import { actionPages } from './action-pages.mjs';
 import { framePages } from './frame-pages.mjs';
+import { inputPages } from './input-pages.mjs';
 import { driverPages, SLOW_IMAGE_MS } from './driver-pages.mjs';
 import { popupPages } from './popup-pages.mjs';
 import { textPdf } from './pdf/index.mjs';
@@ -60,7 +61,7 @@ export async function startFormSite() {
       if (request.method === 'GET' && url.pathname === '/pdf/links') return send('Report links', '<h1>Reports</h1><p><a id="report-link" href="/pdf/report.pdf" target="_blank">Open the report</a></p>');
       if (request.method === 'GET' && url.pathname === '/pdf/form') return send('Request the report', '<h1>Request the report</h1><form action="/pdf/posted.pdf" method="post"><input type="hidden" name="quarter" value="Q3"><button id="post-report" type="submit">Post for the report</button></form>');
       if (request.method === 'GET' && url.pathname === '/pdf/blob') return send('Build the report', '<h1>Build the report</h1><button id="open-blob">Open the blob report</button><p id="blob-status" role="status"></p>', `document.querySelector('#open-blob').onclick=async()=>{const bytes=await (await fetch('/pdf/report.pdf')).arrayBuffer();const opened=window.open(URL.createObjectURL(new Blob([bytes],{type:'application/pdf'})));document.querySelector('#blob-status').textContent=opened?'Blob report opened':'Blob report refused';};`);
-      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname]);
+      const page = request.method === 'GET' && (componentPages[url.pathname] ?? actionPages[url.pathname] ?? framePages[url.pathname] ?? inputPages[url.pathname] ?? driverPages[url.pathname] ?? popupPages[url.pathname] ?? selectorPages[url.pathname] ?? snapshotPages[url.pathname]);
       if (typeof page === 'string') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         // A page asking for {{other}} gets this server through its other
