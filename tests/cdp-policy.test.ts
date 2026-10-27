@@ -382,8 +382,8 @@ describe("the protocol policy", () => {
       ["Runtime.evaluate", { uniqueContextId: "ctx-1" }, "uniqueContextId"],
       [
         "Runtime.addBinding",
-        { name: "b", executionContextName: "world" },
-        "executionContextName",
+        { name: "b", executionContextId: 7 },
+        "executionContextId",
       ],
       ["IO.read", { handle: "stream-1" }, "handle"],
     ];
@@ -392,13 +392,12 @@ describe("the protocol policy", () => {
         block: "scope",
         param,
       });
-    // A delivered id passes, and so does a world the agent made itself.
+    // A delivered id passes.
     const delivered = {
       delivered: (kind: string, id: string | number) =>
         (kind === "object" && id === "obj-1") ||
         (kind === "context" && (id === 7 || id === "ctx-1")) ||
         (kind === "handle" && id === "stream-1"),
-      worlds: new Set(["world"]),
     };
     for (const [method, params] of ids)
       expect(verdict(method, params, delivered), method).toEqual(
@@ -433,6 +432,49 @@ describe("the protocol policy", () => {
     expect(
       collectIds("DOM.resolveNode", { object: { objectId: "obj-3" } }),
     ).toEqual([{ kind: "object", id: "obj-3" }]);
+  });
+
+  it("a binding goes only into a context the agent was given", () => {
+    // A probe of Electron 44 saw a binding with no context land in every
+    // world of the page, Kamapathy's, Electron's preload world and an
+    // extension's included, replacing a global of the same name there, and
+    // one added by name land in an extension's world named like the agent's.
+    const given = {
+      delivered: (kind: string, id: string | number) =>
+        kind === "context" && id === 7,
+      worlds: new Set(["agent-world"]),
+    };
+    const refused: [Record<string, unknown>, string][] = [
+      [{ name: "b" }, "executionContextId"],
+      [{ name: "b", executionContextId: null }, "executionContextId"],
+      [{ name: "b", executionContextName: "agent-world" }, "executionContextName"],
+      [{ name: "b", executionContextName: "" }, "executionContextName"],
+      [
+        { name: "b", executionContextId: 7, executionContextName: "agent-world" },
+        "executionContextName",
+      ],
+    ];
+    // Each refusal says what to pass instead.
+    for (const [params, param] of refused)
+      expect(
+        verdict("Runtime.addBinding", params, given),
+        JSON.stringify(params),
+      ).toMatchObject({
+        block: "scope",
+        param,
+        message: expect.stringContaining("executionContextId"),
+      });
+    // The id must be one the tab gave.
+    expect(
+      verdict("Runtime.addBinding", { name: "b", executionContextId: 8 }, given),
+    ).toMatchObject({ block: "scope", param: "executionContextId" });
+    expect(
+      verdict("Runtime.addBinding", { name: "b", executionContextId: 7 }, given),
+    ).toEqual({ allow: true });
+    // Removing one only stops the agent's own session hearing it.
+    expect(verdict("Runtime.removeBinding", { name: "b" })).toEqual({
+      allow: true,
+    });
   });
 
   it("an agent never takes or names Kamapathy's worlds or Electron's preload world", () => {

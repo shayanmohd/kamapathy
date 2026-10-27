@@ -242,6 +242,8 @@ const reservedWorld = (value: unknown) => {
 const RESERVED_WORLD = `A world named ${WORLD_NAME} or starting with it is Kamapathy's, and ${PRELOAD_WORLD} is Electron's. Give an agent's world a name of its own.`;
 const DISPLACED =
   "A scale or a viewport moves where input lands away from the point Kamapathy checks. Emulate the device with width, height, deviceScaleFactor and mobile, and for a closer image pass clip.scale to Page.captureScreenshot.";
+const BINDING =
+  "A binding with no context goes into every world of the page, and one named by a context name into every world of that name, the person's extensions included. Pass the executionContextId of a context this tab gave you, from Runtime.executionContextCreated or Page.createIsolatedWorld.";
 // What a command's own parameters may not say. Each check reads the params it
 // names and nothing else.
 const CHECKS: Record<
@@ -314,6 +316,18 @@ const CHECKS: Record<
   "Page.createIsolatedWorld": (params) => worldCheck(params),
   "Page.addScriptToEvaluateOnNewDocument": (params) => worldCheck(params),
   "Page.setDeviceMetricsOverride": (params) => metricsCheck(params),
+  // A probe of Electron 44 saw a binding with no context land in every world
+  // of the page, Kamapathy's, Electron's preload world and an extension's
+  // among them, replacing a global of its name there, and one added by name
+  // land in an extension's world that shares the name, again after a
+  // navigation. An id names one context, which must be one the tab gave.
+  "Runtime.addBinding": (params) => {
+    if (params.executionContextName !== undefined)
+      return block("scope", { param: "executionContextName", message: BINDING });
+    if (typeof params.executionContextId !== "number")
+      return block("scope", { param: "executionContextId", message: BINDING });
+    return undefined;
+  },
 };
 // A probe of Electron 44 saw a view scale, or a viewport, carry a raw mouse
 // event and a touch into an out-of-process frame where the hit test the

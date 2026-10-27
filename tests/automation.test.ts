@@ -7169,6 +7169,100 @@ describe("local automation socket", () => {
     expect(sentOn(page, "Runtime.evaluate")).not.toContain("agent-1");
   });
 
+  it("a binding goes only into a context the agent was given", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const own = await cdp(tab.id, {
+      method: "Page.createIsolatedWorld",
+      params: { frameId: "main", worldName: "agent-world" },
+    });
+    expect(own.status).toBe(200);
+    const ownContext = (await own.json()).result.executionContextId as number;
+    // With no context a binding reaches every world of the page, and by a
+    // name it reaches every world of that name, an extension's included,
+    // those made later as well.
+    const refused: [Record<string, unknown>, string][] = [
+      [{ name: "b" }, "executionContextId"],
+      [{ name: "b", executionContextName: "agent-world" }, "executionContextName"],
+      [{ name: "b", executionContextName: EXTENSION_NAME }, "executionContextName"],
+      [{ name: "b", executionContextId: 99 }, "executionContextId"],
+    ];
+    for (const [params, param] of refused) {
+      const where = JSON.stringify(params);
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "Runtime.addBinding", params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method: "Runtime.addBinding",
+        reason: "scope",
+        param,
+      });
+    }
+    expect(sentOn(page, "Runtime.addBinding")).not.toContain("agent-1");
+    // The page's own world and the agent's own world each take one by the
+    // id the tab gave, and what it reports reaches the log.
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 9,
+          uniqueId: "ctx-9",
+          name: "",
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    for (const executionContextId of [9, ownContext])
+      expect(
+        (
+          await cdp(tab.id, {
+            method: "Runtime.addBinding",
+            params: { name: "b", executionContextId },
+          })
+        ).status,
+        String(executionContextId),
+      ).toBe(200);
+    expect(
+      page.debugger.sent
+        .filter(
+          (command) =>
+            command.method === "Runtime.addBinding" &&
+            command.sessionId === "agent-1",
+        )
+        .map((command) => command.params),
+    ).toEqual([
+      { name: "b", executionContextId: 9 },
+      { name: "b", executionContextId: ownContext },
+    ]);
+    page.debugger.event(
+      "Runtime.bindingCalled",
+      { name: "b", payload: "hi", executionContextId: 9 },
+      "agent-1",
+    );
+    const logged = (await (await drainEvents(tab.id)).json()).events as {
+      method: string;
+      params: unknown;
+    }[];
+    expect(
+      logged
+        .filter((event) => event.method === "Runtime.bindingCalled")
+        .map((event) => event.params),
+    ).toEqual([{ name: "b", payload: "hi", executionContextId: 9 }]);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.removeBinding",
+          params: { name: "b" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("a frame, an iframe entry's ref or a frameId naming a frame agents never reach is out of scope", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
