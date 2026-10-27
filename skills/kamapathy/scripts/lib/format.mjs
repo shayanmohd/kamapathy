@@ -357,9 +357,36 @@ const valueText = (data) =>
     : data.value === undefined
       ? "undefined"
       : printable(JSON.stringify(data.value));
+/**
+ * A fetched response: its status line, its headers, then its body, or the
+ * file a saved body went to.
+ */
+export function responseLines(response) {
+  const lines = [
+    [
+      Number(response.status),
+      line(response.statusText),
+      line(response.type),
+      line(response.url),
+      ...(response.redirected ? ["redirected"] : []),
+    ]
+      .filter((part) => part !== "")
+      .join(" "),
+    ...Object.entries(response.headers ?? {}).map(
+      ([name, value]) => `${line(name)}: ${line(value)}`,
+    ),
+  ];
+  if (response.savedPath !== undefined)
+    lines.push(
+      `saved ${printable(response.savedPath)} (${Number(response.bytes)} bytes)`,
+    );
+  else if (response.body) lines.push("", printable(response.body));
+  return lines;
+}
 // One reading per section 8 command, whose answers carry no action to sum up.
 const PAGE_SCRIPTS = {
   evaluate: valueText,
+  fetch: (data) => responseLines(data.response ?? {}).join("\n"),
 };
 
 // A PDF's pages, each under its own [page N] line.

@@ -1296,6 +1296,58 @@ export const COMMANDS = [
     },
   ),
   command(
+    "fetch",
+    "Pages",
+    'fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]',
+    "Fetch a URL with the page's cookies and CORS",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "url",
+          description: "The URL to fetch, absolute or relative to the page's.",
+        },
+      ],
+      flags: [
+        {
+          name: "--method",
+          value: "<m>",
+          description: "The request method, GET by default.",
+          since: 4,
+        },
+        {
+          name: "--header",
+          value: '"Name: value"',
+          description: "A request header. Repeat it for more, up to 64.",
+          since: 4,
+        },
+        {
+          name: "--stdin",
+          description: "Read the request body from stdin, at most 1 MiB.",
+          since: 4,
+        },
+        {
+          name: "--save",
+          value: "<file>",
+          description:
+            "Stream the body into this new file instead of printing it. It is never overwritten.",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long the request and its body may take, 1000 to 60000, default 20000; up to 300000 with --save.",
+          since: 4,
+        },
+      ],
+      stdin: "The request body, with --stdin.",
+      route: "POST /tabs/:id/fetch",
+      script: "page.fetch",
+      since: 4,
+    },
+  ),
+  command(
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",

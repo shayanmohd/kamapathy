@@ -18,6 +18,7 @@ const SELECTOR_WAIT = body("POST /tabs/:id/wait-for-selector");
 const FUNCTION_WAIT = body("POST /tabs/:id/wait-for-function");
 // Section 8's page scripts take their routes' fields the same way.
 const EVALUATE = body("POST /tabs/:id/evaluate");
+const FETCH = body("POST /tabs/:id/fetch");
 const timeout = (field) => ({ ...field, field: "timeoutMs" });
 // What a navigation or a wait can answer beyond the page codes.
 const NAVIGATION = [
@@ -1005,6 +1006,54 @@ export const PAGE_ENTRIES = [
       expected: "page.evaluate(fnOrString, arg?, { timeout? })",
       options: { timeout: timeout(EVALUATE.timeoutMs) },
       pageFunction: true,
+      since: 4,
+    },
+  ),
+  method(
+    "Page.fetch",
+    "page.fetch(url, options?)",
+    "Fetches a URL from the page with its cookies, origin and CORS, and resolves the response, a non-2xx one included. With saveAs the body streams into a new file instead.",
+    [{ name: "url", kind: "url" }, OPTIONS],
+    "Promise<{ ok, status, statusText, url, redirected, type, headers, body } or { ok, status, statusText, url, redirected, type, headers, savedPath, bytes }>",
+    "POST /tabs/:id/fetch",
+    [
+      "invalid_url",
+      "invalid_field",
+      "agent_scripts_off",
+      "fetch_failed",
+      "fetch_timeout",
+      "result_too_large",
+      "file_exists",
+      "download_interrupted",
+      "request_too_large",
+      "invalid_response",
+    ],
+    {
+      options: {
+        method: FETCH.method,
+        headers: FETCH.headers,
+        body: FETCH.body,
+        cache: FETCH.cache,
+        credentials: FETCH.credentials,
+        integrity: FETCH.integrity,
+        keepalive: FETCH.keepalive,
+        mode: FETCH.mode,
+        redirect: FETCH.redirect,
+        referrer: FETCH.referrer,
+        referrerPolicy: FETCH.referrerPolicy,
+        timeout: {
+          ...timeout(FETCH.timeoutMs),
+          description:
+            "How long the request and its body may take. Above 60000 only with saveAs.",
+        },
+        saveAs: {
+          kind: "string",
+          max: 4096,
+          since: 4,
+          description:
+            "A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails.",
+        },
+      },
       since: 4,
     },
   ),

@@ -4,7 +4,12 @@ import { stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KamapathyError } from "./lib/errors.mjs";
-import { formatResult, line, printable } from "./lib/format.mjs";
+import {
+  formatResult,
+  line,
+  printable,
+  responseLines,
+} from "./lib/format.mjs";
 import {
   readFiles,
   readInput,
@@ -1281,6 +1286,81 @@ export const PARSERS = {
       },
       limit: SCRIPT_LIMIT,
     };
+  },
+  // --header repeats, and --save streams the body into a new file through
+  // page.fetch, which removes the file after a failure.
+  fetch: async (args, options) => {
+    const rest = [];
+    const values = {};
+    const headers = {};
+    for (let index = 0; index < args.length; index++) {
+      const flag = args[index];
+      if (flag === "--header") {
+        const text = required(args[++index], flag);
+        const colon = text.indexOf(":");
+        const name = text.slice(0, colon).trim();
+        if (colon < 0 || !name)
+          throw new Error('--header must be "Name: value".');
+        const value = text.slice(colon + 1).trim();
+        headers[name] = Object.hasOwn(headers, name)
+          ? `${headers[name]}, ${value}`
+          : value;
+      } else if (flag === "--stdin") values[flag] = true;
+      else if (["--method", "--save", "--timeout"].includes(flag)) {
+        if (Object.hasOwn(values, flag))
+          throw new Error(`Give ${flag} once. Run help for usage.`);
+        values[flag] = required(args[++index], flag);
+      } else if (flag.startsWith("--"))
+        throw new Error(`Unknown option: ${flag}. Run help for usage.`);
+      else rest.push(flag);
+    }
+    if (rest.length > 2)
+      throw new Error(
+        'Use fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>].',
+      );
+    const id = tab(rest[0]);
+    const url = required(rest[1], "URL");
+    const save =
+      values["--save"] === undefined ? undefined : resolve(values["--save"]);
+    const timeout =
+      values["--timeout"] === undefined
+        ? undefined
+        : bounded(
+            values["--timeout"],
+            "--timeout",
+            1000,
+            save === undefined ? 60000 : 300000,
+          );
+    const fields = {
+      ...(values["--method"] === undefined
+        ? {}
+        : { method: values["--method"] }),
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...(values["--stdin"]
+        ? { body: await piped(options, false, SCRIPT_LIMIT) }
+        : {}),
+    };
+    if (save === undefined)
+      return {
+        path: `/tabs/${id}/fetch`,
+        method: "POST",
+        body: {
+          url,
+          ...fields,
+          ...(timeout === undefined ? {} : { timeoutMs: timeout }),
+        },
+        limit: SCRIPT_LIMIT,
+      };
+    const page = await pageFor(ownSession(options), id);
+    const saved = await page.fetch(url, {
+      ...fields,
+      ...(timeout === undefined ? {} : { timeout }),
+      saveAs: save,
+    });
+    (options.stdout || process.stdout).write(
+      `${options.json ? JSON.stringify(saved) : responseLines(saved).join("\n")}\n`,
+    );
+    return 0;
   },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {

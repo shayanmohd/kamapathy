@@ -791,6 +791,28 @@ Runs a function or an expression in the page's main frame and returns its value.
 
 Returns `Promise<unknown>`. Route `POST /tabs/:id/evaluate`. Errors: `invalid_field`, `agent_scripts_off`, `script_error`, `result_too_large`, `evaluation_timeout`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
+### `page.fetch(url, options?)`
+
+Fetches a URL from the page with its cookies, origin and CORS, and resolves the response, a non-2xx one included. With saveAs the body streams into a new file instead.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `method` | string of at most 32 characters | `"GET"` | The request method. CONNECT, TRACE and TRACK are refused. |
+| `headers` | JSON |  | Request headers as an object of at most 64 string pairs. Headers the browser sets itself, such as Cookie, Host, Origin, Referer, Sec- and Proxy-, are refused. |
+| `body` | string of at most 524288 characters |  | The request body. Not with GET or HEAD. |
+| `cache` | one of default, no-store, reload, no-cache, force-cache, only-if-cached |  | The cache mode, as in the Fetch standard. |
+| `credentials` | one of omit, same-origin, include |  | Which cookies and credentials the request carries. The page's own default applies without it. |
+| `integrity` | string of at most 256 characters |  | A subresource integrity value the body must match. |
+| `keepalive` | true or false |  | Let the request outlive the page. |
+| `mode` | one of cors, no-cors, same-origin | `"cors"` | cors reads a cross-origin answer the server allows; no-cors answers opaquely; same-origin refuses another origin. |
+| `redirect` | one of follow, error, manual |  | What a redirect does. |
+| `referrer` | string of at most 8192 characters |  | The referrer the request carries. |
+| `referrerPolicy` | one of , no-referrer, no-referrer-when-downgrade, same-origin, origin, strict-origin, origin-when-cross-origin, strict-origin-when-cross-origin, unsafe-url |  | Which referrer policy applies. |
+| `timeout` | milliseconds from 1000 to 300000 | `20000` | How long the request and its body may take. Above 60000 only with saveAs. |
+| `saveAs` | string of at most 4096 characters |  | A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails. |
+
+Returns `Promise<{ ok, status, statusText, url, redirected, type, headers, body } or { ok, status, statusText, url, redirected, type, headers, savedPath, bytes }>`. Route `POST /tabs/:id/fetch`. Errors: `invalid_url`, `invalid_field`, `agent_scripts_off`, `fetch_failed`, `fetch_timeout`, `result_too_large`, `file_exists`, `download_interrupted`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
 ## Page controllers
 
 ### `page.mouse.move(x, y, options?)`
@@ -1238,6 +1260,10 @@ Let go of every key and mouse button the page holds
 ### `evaluate <tab-id> --stdin [--timeout <ms>]`
 
 Run an expression in the page and print its value
+
+### `fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]`
+
+Fetch a URL with the page's cookies and CORS
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 

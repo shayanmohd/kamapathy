@@ -8165,6 +8165,56 @@ describe("scripted sessions", () => {
     ).toBe(0);
     return stdout.text();
   };
+  // A fetch's whole answer, a non-2xx one included.
+  const fetchedResponse = {
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    url: "https://example.test/api/cart",
+    redirected: true,
+    type: "basic",
+    headers: { "content-type": "application/json", "x-total": "0" },
+    body: '{"items":[]}',
+  };
+  // The head of a streamed body, and an NDJSON answer that arrives in
+  // pieces of a few hundred bytes, so lines are split across chunks.
+  const streamedHead = {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    url: "https://example.test/report.bin",
+    redirected: false,
+    type: "basic",
+    headers: { "content-type": "application/octet-stream" },
+  };
+  const ndjsonAnswer =
+    (lines, size = 777) =>
+    () => {
+      const text = Buffer.from(
+        lines.map((item) => `${JSON.stringify(item)}\n`).join(""),
+      );
+      const parts = [];
+      for (let at = 0; at < text.length; at += size)
+        parts.push(text.subarray(at, at + size));
+      return new Response(ReadableStream.from(parts), {
+        headers: { "Content-Type": "application/x-ndjson" },
+      });
+    };
+  // A 300000 byte body as three data lines and its end.
+  const streamedBytes = randomBytes(300000);
+  const dataLines = [0, 100000, 200000].map((at) => ({
+    data: streamedBytes.subarray(at, at + 100000).toString("base64"),
+  }));
+  const savedStream = ndjsonAnswer([
+    { head: streamedHead },
+    ...dataLines,
+    { end: { bytes: 300000 } },
+  ]);
+  const fetchFolder = async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kamapathy-fetch-test-"));
+    directories.push(directory);
+    return directory;
+  };
 
   it("page.evaluate decodes every value form", async () => {
     const { page, value } = await evaluated({
@@ -8407,6 +8457,410 @@ describe("scripted sessions", () => {
     expect(failed.stderr).toContain(
       "hint: Page functions run in the page and cannot see script variables. Pass values as the argument: page.evaluate((x) => x * 2, x).\n",
     );
+  });
+
+  it("page.fetch resolves the response object", async () => {
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      },
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.fetch("/api/cart")).toEqual(fetchedResponse);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: { url: "/api/cart", timeoutMs: 20000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(25000);
+      // Every option reaches the route under its own name, timeout as
+      // timeoutMs.
+      const options = {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Token": "t" },
+        body: '{"qty":2}',
+        cache: "no-store",
+        credentials: "include",
+        integrity: "sha256-abc",
+        keepalive: true,
+        mode: "same-origin",
+        redirect: "manual",
+        referrer: "https://example.test/",
+        referrerPolicy: "no-referrer",
+        timeout: 45000,
+      };
+      await page.fetch("https://example.test/api/cart", options);
+      const { timeout, ...fields } = options;
+      expect(api.requests.at(-1).body).toEqual({
+        url: "https://example.test/api/cart",
+        ...fields,
+        timeoutMs: timeout,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(50000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    // A bad option, and a timeout past a minute without saveAs, are refused
+    // before anything is sent.
+    const sent = api.requests.length;
+    for (const [options, option] of [
+      [{ timeout: 61000 }, "timeout"],
+      [{ timeout: 500 }, "timeout"],
+      [{ mode: "navigate" }, "mode"],
+      [{ timout: 1000 }, "timout"],
+    ])
+      await expect(
+        page.fetch("/api/cart", options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
+        code: "invalid_option",
+        entry: "page.fetch",
+        option,
+      });
+    await expect(page.fetch("")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.fetch",
+    });
+    expect(api.requests).toHaveLength(sent);
+    // The command prints the status line, the headers and the body.
+    expect(
+      await printed(["fetch", "tab-1", "/api/cart"], {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      }),
+    ).toBe(
+      [
+        "404 Not Found basic https://example.test/api/cart redirected",
+        "content-type: application/json",
+        "x-total: 0",
+        "",
+        '{"items":[]}',
+        "",
+      ].join("\n"),
+    );
+    // An opaque answer has no status text, headers or body to print.
+    expect(
+      await printed(["fetch", "tab-1", "https://cdn.test/x"], {
+        ok: true,
+        tab: slots,
+        response: {
+          ok: false,
+          status: 0,
+          statusText: "",
+          url: "https://cdn.test/x",
+          redirected: false,
+          type: "opaque",
+          headers: {},
+          body: "",
+        },
+      }),
+    ).toBe("0 opaque https://cdn.test/x\n");
+    // Its flags build the same body.
+    const cli = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      },
+    });
+    await runCli(
+      [
+        "fetch",
+        "tab-1",
+        "https://example.test/api/cart",
+        "--method",
+        "POST",
+        "--header",
+        "Content-Type: application/json",
+        "--header",
+        "X-Token:  t ",
+        "--stdin",
+        "--timeout",
+        "45000",
+      ],
+      {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        stdin: Readable.from(['{"qty":2}']),
+        stdout: sink(),
+      },
+    );
+    expect(cli.requests).toEqual([
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: {
+          url: "https://example.test/api/cart",
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Token": "t" },
+          body: '{"qty":2}',
+          timeoutMs: 45000,
+        },
+      },
+    ]);
+    const unused = vi.fn();
+    for (const args of [
+      ["fetch", "tab-1"],
+      ["fetch", "tab-1", "/x", "--header", "no colon"],
+      ["fetch", "tab-1", "/x", "--header", ": empty"],
+      ["fetch", "tab-1", "/x", "--timeout", "61000"],
+      ["fetch", "tab-1", "/x", "--timeout", "500"],
+      ["fetch", "tab-1", "/x", "--mode", "cors"],
+      ["fetch", "tab-1", "/x", "--method", "GET", "--method", "POST"],
+      ["fetch", "tab-1", "/x", "/y"],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from(["x"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("saveAs streams and never overwrites", async () => {
+    const directory = await fetchFolder();
+    const path = join(directory, "report.bin");
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": savedStream,
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(
+        await page.fetch("/report.bin", { saveAs: path, timeout: 120000 }),
+      ).toEqual({ ...streamedHead, savedPath: path, bytes: 300000 });
+      expect(timeouts).toHaveBeenLastCalledWith(125000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/fetch",
+      body: { url: "/report.bin", timeoutMs: 120000, stream: true },
+    });
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    if (posix) expect((await stat(path)).mode & 0o777).toBe(0o600);
+    // A path already taken fails before anything is sent, and the file
+    // stays as it was.
+    const sent = api.requests.length;
+    await expect(
+      page.fetch("/report.bin", { saveAs: path }),
+    ).rejects.toMatchObject({ code: "file_exists", path, entry: "page.fetch" });
+    expect(api.requests).toHaveLength(sent);
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    // An error line, a stream without its end line and a refusal before the
+    // head each leave no file behind.
+    const failures = [
+      [
+        ndjsonAnswer([
+          { head: streamedHead },
+          dataLines[0],
+          {
+            error: {
+              code: "fetch_timeout",
+              message: "The fetch did not answer within 20000 ms.",
+              awaited: "body",
+              timeoutMs: 20000,
+            },
+          },
+          dataLines[1],
+        ]),
+        {
+          code: "fetch_timeout",
+          status: 504,
+          awaited: "body",
+          timeoutMs: 20000,
+        },
+      ],
+      [
+        ndjsonAnswer([{ head: streamedHead }, dataLines[0]]),
+        { code: "download_interrupted" },
+      ],
+      [
+        ndjsonAnswer([{ head: streamedHead }, ...dataLines, { end: { bytes: 5 } }]),
+        { code: "download_interrupted" },
+      ],
+      [
+        () =>
+          new Response(`${JSON.stringify({ head: streamedHead })}\n{"data":`, {
+            headers: { "Content-Type": "application/x-ndjson" },
+          }),
+        { code: "download_interrupted" },
+      ],
+      [
+        () => new Response("not json\n"),
+        { code: "invalid_response" },
+      ],
+      [
+        refusal(403, {
+          code: "agent_scripts_off",
+          message:
+            "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
+        }),
+        { code: "agent_scripts_off", status: 403 },
+      ],
+    ];
+    for (const [answer, expected] of failures) {
+      const failing = fakeApi({
+        ...scriptAnswers,
+        "POST /tabs/tab-1/fetch": answer,
+      });
+      const target = join(directory, `failed-${expected.code}.bin`);
+      const failed = await (await inputPage(failing))
+        .fetch("/report.bin", { saveAs: target })
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(failed, expected.code).toMatchObject({
+        ...expected,
+        entry: "page.fetch",
+      });
+      expect(existsSync(target), expected.code).toBe(false);
+    }
+  });
+
+  it("a takeover during a saved fetch stops the run", async () => {
+    const directory = await fetchFolder();
+    const target = join(directory, "taken.bin");
+    const message =
+      "The person took over this space. Stop, and resume only when they ask you to.";
+    const run = await runIn(
+      `${firstPage}
+      const error = await page.fetch("/report.bin", { saveAs: ${JSON.stringify(target)} }).catch((error) => error);
+      globalThis.__scripted = { code: error.code, hardStop: error.hardStop };
+      process.stdout.write("after\\n");`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/fetch": ndjsonAnswer([
+          { head: streamedHead },
+          dataLines[0],
+          {
+            error: {
+              code: "human_control",
+              message,
+              reason: "manual",
+              spaceId: "space-1",
+            },
+          },
+        ]),
+      },
+      { options: { health: current } },
+    );
+    expect(run).toMatchObject({
+      status: 3,
+      stdout: "",
+      stderr: `${takeover}${message}\n${withheld}`,
+    });
+    expect(globalThis.__scripted).toEqual({
+      code: "human_control",
+      hardStop: true,
+    });
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("fetch --save cleans up after a failure", async () => {
+    const directory = await fetchFolder();
+    const path = join(directory, "report.bin");
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": savedStream,
+    });
+    const stdout = sink();
+    expect(
+      await runCli(
+        ["fetch", "tab-1", "/report.bin", "--save", path, "--timeout", "90000"],
+        { env, fetch: api.fetch, health: current, stdout },
+      ),
+    ).toBe(0);
+    expect(api.requests).toEqual([
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: { url: "/report.bin", timeoutMs: 90000, stream: true },
+      },
+    ]);
+    expect(stdout.text()).toBe(
+      [
+        "200 OK basic https://example.test/report.bin",
+        "content-type: application/octet-stream",
+        `saved ${path} (300000 bytes)`,
+        "",
+      ].join("\n"),
+    );
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    // --json prints what page.fetch resolved, and a taken path is refused.
+    const json = sink();
+    const second = join(directory, "second.bin");
+    await runCli(["fetch", "tab-1", "/report.bin", "--save", second, "--json"], {
+      env,
+      fetch: api.fetch,
+      health: current,
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({
+      ...streamedHead,
+      savedPath: second,
+      bytes: 300000,
+    });
+    const taken = sink();
+    expect(
+      await main(["fetch", "tab-1", "/report.bin", "--save", path], {
+        env,
+        fetch: api.fetch,
+        health: current,
+        stdout: sink(),
+        stderr: taken,
+      }),
+    ).toBe(1);
+    expect(taken.text()).toBe(
+      `Kamapathy: ${path} already exists, so nothing was fetched. Choose another path or remove that file first.\n`,
+    );
+    // A failure in the stream prints its error and leaves no file.
+    const failing = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": ndjsonAnswer([
+        { head: streamedHead },
+        dataLines[0],
+        {
+          error: {
+            code: "fetch_timeout",
+            message: "The fetch did not answer within 20000 ms.",
+            awaited: "body",
+            timeoutMs: 20000,
+          },
+        },
+      ]),
+    });
+    const target = join(directory, "failed.bin");
+    const stderr = sink();
+    expect(
+      await main(["fetch", "tab-1", "/report.bin", "--save", target], {
+        env,
+        fetch: failing.fetch,
+        health: current,
+        stdout: sink(),
+        stderr,
+      }),
+    ).toBe(1);
+    expect(stderr.text()).toBe(
+      "Kamapathy: 504 fetch_timeout: The fetch did not answer within 20000 ms.\n",
+    );
+    expect(existsSync(target)).toBe(false);
   });
 });
 

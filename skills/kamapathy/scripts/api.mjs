@@ -4,7 +4,7 @@
 // arguments against the schema before anything is sent. The site pack calls
 // send nothing at all: they read the workspace and the skill.
 import { rmSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -30,6 +30,7 @@ import { listSitePacks, runToolIn, siteContextFor } from "./lib/sites.mjs";
 import {
   checkBody,
   checkCall,
+  ERRORS,
   findEntry,
   matchRoute,
   requestBudget,
@@ -83,6 +84,107 @@ function decodeValue(answer) {
     "invalid_response",
     `Kamapathy answered with a value this client cannot read: ${String(token).slice(0, 40)}.`,
   );
+}
+
+// The longest stream line read: a data line carries at most 1 MiB as base64.
+const LINE_LIMIT = 2 * 1024 * 1024;
+
+// Reads an application/x-ndjson body one object per line, in order, waiting
+// for each to be handled. A line past the bound fails the read instead of
+// growing without end.
+async function readNdjson(response, onLine) {
+  const parse = (parts) => {
+    let item;
+    try {
+      item = JSON.parse(Buffer.concat(parts).toString("utf8"));
+    } catch {}
+    if (item === null || typeof item !== "object")
+      throw new KamapathyError(
+        "invalid_response",
+        "Kamapathy sent a stream line this client cannot read.",
+      );
+    return item;
+  };
+  let parts = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    let start = 0;
+    for (let end = chunk.indexOf(10); end >= 0; end = chunk.indexOf(10, start)) {
+      const line = [...parts, chunk.subarray(start, end)];
+      parts = [];
+      size = 0;
+      start = end + 1;
+      if (line.some((part) => part.length)) await onLine(parse(line));
+    }
+    const rest = chunk.subarray(start);
+    size += rest.length;
+    if (size > LINE_LIMIT)
+      throw new KamapathyError(
+        "invalid_response",
+        "Kamapathy sent a stream line longer than 2 MiB.",
+      );
+    if (rest.length) parts.push(rest);
+  }
+}
+
+// A stream's error line as the error it reports, with its code's status. It
+// is kept as any other answer's error is, so a takeover during the stream
+// stops a run.
+function streamError(session, { code, message, ...fields } = {}) {
+  return session.record(
+    new KamapathyError(
+      code || "request_failed",
+      message || "The API request failed.",
+      { ...fields, status: ERRORS[code]?.status ?? undefined },
+    ),
+  );
+}
+
+// Saves a fetch's body into a new file as it streams. The file is created
+// before the request, so a path already taken costs nothing, and an error
+// line, a stream that ends before its end line or any other failure removes
+// it.
+async function saveBody(session, path, request) {
+  let file;
+  try {
+    file = await open(path, "wx", 0o600);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    throw new KamapathyError(
+      "file_exists",
+      `${path} already exists, so nothing was fetched. Choose another path or remove that file first.`,
+      { path },
+    );
+  }
+  const interrupted = () =>
+    new KamapathyError(
+      "download_interrupted",
+      "The body stopped arriving before its end, so the incomplete file was removed. Kamapathy may have quit, or the page may have gone.",
+      { path },
+    );
+  let head;
+  let end;
+  let bytes = 0;
+  try {
+    const response = await request();
+    await readNdjson(response, async (line) => {
+      if (line.error) throw streamError(session, line.error);
+      if (line.head) head = line.head;
+      else if (typeof line.data === "string") {
+        const data = Buffer.from(line.data, "base64");
+        await file.write(data);
+        bytes += data.length;
+      } else if (line.end) end = line.end;
+    });
+    if (!head || end?.bytes !== bytes) throw interrupted();
+    await file.close();
+    file = undefined;
+    return { ...head, savedPath: path, bytes };
+  } catch (error) {
+    await file?.close().catch(() => {});
+    await rm(path, { force: true });
+    throw error instanceof KamapathyError ? error : interrupted();
+  }
 }
 
 // The label an input method was given, for its body.
@@ -382,6 +484,19 @@ const misplacedOptions = (value) =>
  * @property {boolean} truncated
  * @property {number} [nextPage] The first page not fully returned.
  * @property {true} [noText] The pages carry no text, such as scans.
+ */
+/**
+ * @typedef {object} FetchResponse What page.fetch resolves, whatever the status.
+ * @property {boolean} ok Whether the status is 200 to 299.
+ * @property {number} status 0 for an opaque response.
+ * @property {string} statusText
+ * @property {string} url The final URL, after redirects.
+ * @property {boolean} redirected
+ * @property {string} type basic, cors, opaque or opaqueredirect.
+ * @property {Record<string, string>} headers With lowercase names.
+ * @property {string} [body] The body as UTF-8 text.
+ * @property {string} [savedPath] With saveAs: the file the body went to.
+ * @property {number} [bytes] With saveAs: how many bytes it holds.
  */
 /**
  * @typedef {object} SiteTool A tool a site pack declares.
@@ -1483,6 +1598,46 @@ export class Page {
         { limit: SCRIPT_LIMIT },
       );
       return decodeValue(this.#refreshed(answer));
+    });
+  }
+  /**
+   * Fetches a URL from the page, with its cookies, origin, service worker and
+   * CORS, and resolves the response, a non-2xx one included. With saveAs the
+   * body streams into a new file instead. Needs Page scripts on.
+   * @param {string} url Absolute, or relative to the page's URL.
+   * @param {{ method?: string, headers?: Record<string, string>, body?: string,
+   *   cache?: string, credentials?: "omit" | "same-origin" | "include",
+   *   integrity?: string, keepalive?: boolean,
+   *   mode?: "cors" | "no-cors" | "same-origin",
+   *   redirect?: "follow" | "error" | "manual", referrer?: string,
+   *   referrerPolicy?: string, timeout?: number, saveAs?: string }} [options]
+   * `timeout` is 1000 to 60000 ms, 20000 by default, and up to 300000 with
+   * saveAs, a path that must not exist yet.
+   * @returns {Promise<FetchResponse>}
+   */
+  fetch(url, options = {}) {
+    return this.#call("fetch", [url, options], async () => {
+      const { timeout = 20000, saveAs, ...fields } = options;
+      if (timeout > 60000 && saveAs === undefined)
+        throw new KamapathyError(
+          "invalid_option",
+          "page.fetch got an invalid option: timeout must be 1000 to 60000 ms, or up to 300000 with saveAs.",
+          { entry: "page.fetch", option: "timeout" },
+        );
+      const body = { url, ...fields, timeoutMs: timeout };
+      if (saveAs === undefined) {
+        const answer = await this.#post("fetch", body, {
+          limit: SCRIPT_LIMIT,
+        });
+        return this.#refreshed(answer).response;
+      }
+      return saveBody(this.#session, resolve(saveAs), () =>
+        this.#post(
+          "fetch",
+          { ...body, stream: true },
+          { limit: SCRIPT_LIMIT, response: "stream" },
+        ),
+      );
     });
   }
 }
