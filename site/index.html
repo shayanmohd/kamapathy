@@ -185,12 +185,12 @@
       <article class="feature">
         <svg><use href="#i-sign-in" /></svg>
         <h3>Bring your browser with you</h3>
-        <p>Import bookmarks, history and, if you like, your sign-ins from Chrome, Edge, Brave, Arc, Vivaldi, Opera or Firefox, and Safari from the file it exports. Chrome Web Store extensions come over from your browser too, and saved passwords from the Chrome-based browsers or from a CSV file. Then sign in once to your top sites.</p>
+        <p>Import bookmarks and history from Chrome, Edge, Brave, Arc, Vivaldi, Opera or Firefox, and Safari from the file it exports, plus your sign-ins from the Chrome-based ones if you like. Chrome Web Store extensions come over from your browser too, and saved passwords from the Chrome-based browsers or from a CSV file. Then sign in once to your top sites.</p>
       </article>
       <article class="feature">
         <svg><use href="#i-eye" /></svg>
         <h3>Sees the whole page</h3>
-        <p>Agent snapshots read open shadow roots and same-origin frames, and list frames from other origins so an agent knows what it cannot reach.</p>
+        <p>Agent snapshots read open shadow roots and frames from any site, so an agent can fill an embedded checkout or sign-in form.</p>
       </article>
       <article class="feature">
         <svg><use href="#i-shield-check" /></svg>
@@ -246,7 +246,8 @@
         <li><svg><use href="#i-key" /></svg><div><b>Your sign-ins, unless you isolate.</b> Agents use the sites you're signed in to, so they can act for you. Isolate one space, or all of them in Settings.</div></li>
         <li><svg><use href="#i-hand-palm" /></svg><div><b>Take over anytime.</b> One click pauses the agent. Let agent continue hands the space back, and an agent can ask for it back with resume.</div></li>
         <li><svg><use href="#i-terminal" /></svg><div><b>One script, or one command at a time.</b> <code>node kamapathy.mjs run book.mjs</code> carries a whole task in JavaScript or TypeScript. The CLI does one step at a time when that's simpler.</div></li>
-        <li><svg><use href="#i-eye" /></svg><div><b>Sees inside frames and shadow roots.</b> Snapshots read open shadow roots and same-origin frames. Frames from other origins are listed, so the agent asks you instead of guessing.</div></li>
+        <li><svg><use href="#i-globe" /></svg><div><b>Site packs.</b> Notes and tools for the sites you use, so an agent knows its way around. GitHub, Google Search and X are included.</div></li>
+        <li><svg><use href="#i-eye" /></svg><div><b>Sees inside frames and shadow roots.</b> Snapshots read open shadow roots and frames, including ones from other sites.</div></li>
         <li><svg><use href="#i-shield-check" /></svg><div><b>Local and switchable.</b> Agents connect over a private socket on your computer. One switch in Settings turns them all off.</div></li>
       </ul>
     </div>
@@ -326,7 +327,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
             <td><span class="no">Some</span></td>
           </tr>
           <tr>
-            <th scope="row">Sees shadow roots and same-origin frames</th>
+            <th scope="row">Sees shadow roots and frames from any site</th>
             <td class="us"><span class="yes"><svg><use href="#i-check" /></svg><span class="visually-hidden">Yes</span></span></td>
             <td><span class="yes"><svg><use href="#i-check" /></svg><span class="visually-hidden">Yes</span></span></td>
             <td><span class="no">Some</span></td>
@@ -468,7 +469,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>Can an agent see my own tabs or accounts?</summary>
-        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. They never get your saved passwords. Kamapathy offers and fills those only while you are in control, and no API reaches them. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
+        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. In agent spaces they can also run their own scripts. Turn off <b>Page scripts</b> in Settings to keep agents to reading and clicking. They never get your saved passwords. Kamapathy offers and fills those only while you are in control, and no API reaches them. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
       </details>
       <details>
         <summary>Can I import from Chrome?</summary>
@@ -476,7 +477,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>What can an agent not do?</summary>
-        <p>Frames from another origin, such as a payment form or an embedded map, are listed in a snapshot but cannot be read or clicked. Canvas interfaces now take an agent's mouse and keyboard, while frames from another origin still need you: the agent hands the space over for those. A site's request for your location, your camera or a device waits for you in Kamapathy's own bar, which no agent can answer, and an agent keeps only a download it asked for.</p>
+        <p>Canvas interfaces and frames from other sites now take an agent's mouse and keyboard, while your extensions' frames and Kamapathy's own pages stay out of its reach. A site's request for your location, your camera or a device waits for you in Kamapathy's own bar, which no agent can answer, and an agent keeps only a download it asked for.</p>
       </details>
       <details>
         <summary>Will my sites work?</summary>
