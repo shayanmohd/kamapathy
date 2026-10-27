@@ -47,7 +47,6 @@ import {
   takeNotices,
 } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
-import { pageToolFunction } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
 // A workspace that does not exist, so runs load no .env from the real profile.
@@ -8396,11 +8395,31 @@ describe("scripted sessions", () => {
         timeoutMs: 9000,
       });
       expect(timeouts).toHaveBeenLastCalledWith(14000);
-      // A site pack's page tool is a function given as text: it travels in
-      // the function field with its arguments, never as an expression, and
-      // a trailing line comment cannot swallow the call.
+      // An async function travels in the function field with its argument,
+      // never as an expression: the page awaits a called function's promise,
+      // where replMode would answer {}.
+      await page.evaluate(async (args) => args.stars + 1, { stars: 3 });
+      expect(api.requests.at(-1).body).toEqual({
+        function: "async (args) => args.stars + 1",
+        arg: { stars: 3 },
+        timeoutMs: 15000,
+      });
+      // Every JSON argument is sent as given, a falsy one included.
+      for (const arg of [0, false, null, "", [], {}]) {
+        await page.evaluate((value) => value, arg);
+        expect(api.requests.at(-1).body, JSON.stringify(arg)).toEqual({
+          function: "(value) => value",
+          arg,
+          timeoutMs: 15000,
+        });
+      }
+      // A function is sent as what its toString gives, so a site pack's
+      // page tool, which is source text read from its file, reaches the
+      // function field with its checked arguments. The newline it ends with
+      // keeps a trailing line comment from swallowing the call.
       const tool = "async (args) => args.stars + 1 // the open repository";
-      await page.evaluate(pageToolFunction(tool), { stars: 3 });
+      const fromText = Object.assign(() => {}, { toString: () => `${tool}\n` });
+      await page.evaluate(fromText, { stars: 3 });
       expect(api.requests.at(-1).body).toEqual({
         function: `${tool}\n`,
         arg: { stars: 3 },
@@ -8457,6 +8476,55 @@ describe("scripted sessions", () => {
     expect(failed.stderr).toContain(
       "hint: Page functions run in the page and cannot see script variables. Pass values as the argument: page.evaluate((x) => x * 2, x).\n",
     );
+  });
+
+  it("a refused protocol command gets a hint naming its reason", async () => {
+    const hints = async (fields) => {
+      const failed = await runIn(
+        `${firstPage} await page.cdp(${JSON.stringify(fields.method)});`,
+        {
+          ...sectionTwo,
+          "POST /tabs/tab-1/cdp": refusal(403, {
+            code: "cdp_method_blocked",
+            message: `Kamapathy does not pass ${fields.method}.`,
+            ...fields,
+          }),
+        },
+        { options: { health: current } },
+      );
+      expect(failed.status, fields.method).toBe(1);
+      return failed.stderr
+        .split("\n")
+        .filter((text) => text.startsWith("hint: "));
+    };
+    expect(
+      await hints({ method: "Network.getCookies", reason: "session" }),
+    ).toEqual(["hint: Kamapathy refused Network.getCookies for reason session."]);
+    expect(
+      await hints({ method: "Page.bringToFront", reason: "person" }),
+    ).toEqual(["hint: Kamapathy refused Page.bringToFront for reason person."]);
+    // A command that is the person's names the call that does the same.
+    expect(
+      await hints({
+        method: "Fetch.enable",
+        reason: "person",
+        param: "handleAuthRequests",
+      }),
+    ).toEqual([
+      "hint: Kamapathy refused Fetch.enable for reason person. space.setHTTPCredentials({ origin, username, password }) answers a site's sign-in in this space.",
+    ]);
+    expect(
+      await hints({ method: "Fetch.continueWithAuth", reason: "person" }),
+    ).toEqual([
+      "hint: Kamapathy refused Fetch.continueWithAuth for reason person. space.setHTTPCredentials({ origin, username, password }) answers a site's sign-in in this space.",
+    ]);
+    for (const param of ["key", "commands", "button"])
+      expect(
+        await hints({ method: "Input.dispatchKeyEvent", reason: "person", param }),
+        param,
+      ).toEqual([
+        "hint: Kamapathy refused Input.dispatchKeyEvent for reason person. page.keyboard.paste(text) offers the page a paste without the system clipboard.",
+      ]);
   });
 
   it("page.fetch resolves the response object", async () => {

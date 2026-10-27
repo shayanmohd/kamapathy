@@ -1109,16 +1109,3 @@ export async function runToolIn(
     throw toolFailed(pack, declared, error);
   }
 }
-
-/**
- * A page tool's source as the page function page.evaluate sends in its
- * route's function field, with the checked arguments as arg: never as an
- * expression, which would leave an async tool's promise unawaited. The
- * newline keeps a trailing line comment from swallowing the call. The
- * function only carries the text; it never runs here.
- */
-export function pageToolFunction(source) {
-  const tool = () => {};
-  tool.toString = () => `${source}\n`;
-  return tool;
-}
