@@ -1111,14 +1111,6 @@ export async function runToolIn(
   }
 }
 
-// A page tool's arguments as JSON, with the line separators JSON leaves raw
-// escaped the way electron/agent/evaluate.ts escapes them, so the expression
-// is always valid JavaScript.
-const argsJson = (args) =>
-  JSON.stringify(args)
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
-
 // The line a compile failure sits on: a Script's stack opens with
 // "<file>:<line>", and the wrapper below adds no line of its own.
 function compileLine(error) {
@@ -1147,8 +1139,8 @@ function pageToolSource(buffer, file) {
   return source;
 }
 
-/** The pack, its page tool and the one expression that runs it. Sends nothing. */
-export async function pageToolExpression(
+/** The pack, its page tool, and the source and argument the page calls it with. Sends nothing. */
+export async function pageToolCall(
   env,
   { packId, tool, args, entry = "runPageTool", roots },
 ) {
@@ -1175,8 +1167,7 @@ export async function pageToolExpression(
     if (error instanceof PackProblem) throw packInvalid(pack, [error]);
     throw error;
   }
-  const json = argsJson(checked);
-  if (Buffer.byteLength(json) > LIMITS.pageToolArgs) {
+  if (Buffer.byteLength(JSON.stringify(checked)) > LIMITS.pageToolArgs) {
     const problem = `the arguments are larger than ${LIMITS.pageToolArgs / 1024} KiB.`;
     throw new KamapathyError(
       "invalid_tool_args",
@@ -1189,13 +1180,14 @@ export async function pageToolExpression(
       },
     );
   }
-  // The leading parenthesis keeps line 1 of the file where it was, one column
-  // over, and the newline before the closing one means a trailing line
-  // comment in the file cannot swallow the call.
-  return { pack, tool: declared, expression: `(${source}\n)(${json})` };
+  // The route calls the source as (<source>)(<arg>), outside repl mode, so a
+  // promise the tool returns is awaited and line 1 keeps its columns. The
+  // newline means a trailing line comment in the file cannot swallow the
+  // call.
+  return { pack, tool: declared, source: `${source}\n`, arg: checked };
 }
 
-/** pageToolExpression, then one evaluate, with the pack and the tool added to anything it throws. */
+/** pageToolCall, then one evaluate of the file called with its arguments, with the pack and the tool added to anything it throws. */
 export async function runPageToolIn(
   env,
   { packId, tool, args, evaluate, entry = "runPageTool", roots },
@@ -1203,8 +1195,9 @@ export async function runPageToolIn(
   const {
     pack,
     tool: declared,
-    expression,
-  } = await pageToolExpression(env, {
+    source,
+    arg,
+  } = await pageToolCall(env, {
     packId,
     tool,
     args,
@@ -1212,7 +1205,7 @@ export async function runPageToolIn(
     roots,
   });
   try {
-    return await evaluate(expression);
+    return await evaluate(source, arg);
   } catch (error) {
     // A page script's own failure is tagged in place, so an agent_scripts_off
     // stays the ordinary error a script can catch.
