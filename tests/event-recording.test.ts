@@ -345,4 +345,33 @@ describe("agent event recording", () => {
     ]);
     await harness.stop();
   });
+
+  it("an agent's own sessions name no frame for the page and the path for a frame", async () => {
+    const harness = setup();
+    const { tab, cdp } = await harness.open();
+    await framed(cdp);
+    await harness.events.drain(tab.id, 100, soon());
+    const session = harness.sessions.get(tab.id)!;
+    const onPage = await session.openAgentSession();
+    const inFrame = await session.openAgentSession("ads");
+    await settle();
+    request(cdp, "1", onPage);
+    request(cdp, "2", inFrame);
+    const frameOf = async () =>
+      (await harness.events.drain(tab.id, 10, soon())).events.map((event) => [
+        (event as { params: { requestId: string } }).params.requestId,
+        "frame" in event ? event.frame : "page",
+      ]);
+    expect(await frameOf()).toEqual([
+      ["1", "page"],
+      ["2", "0"],
+    ]);
+    // Events an agent session recorded before it closed still say where
+    // they came from.
+    request(cdp, "3", onPage);
+    await session.closeAgentSession(onPage);
+    await settle();
+    expect(await frameOf()).toEqual([["3", "page"]]);
+    await harness.stop();
+  });
 });

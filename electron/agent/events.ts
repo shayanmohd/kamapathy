@@ -55,15 +55,16 @@ const NO_DOMAINS: AgentDomains = {
 // How many segments a frame path has. The frame a session was attached for is
 // the one nearest the top of the tab.
 const depth = (path: string) => path.split("/").length;
-// One drained entry as the route answers it.
+// One drained entry as the route answers it. frameOf names the path of the
+// frame a session's event came from: undefined for the page itself, null for
+// a frame that has gone.
 const view = (
   event: CdpEvent | TooLarge,
-  paths: Map<string, string> | undefined,
+  frameOf: (sessionId: string) => string | null | undefined,
 ): RecordedEvent => {
-  const frame =
-    event.sessionId === undefined
-      ? {}
-      : { frame: paths?.get(event.sessionId) ?? null };
+  const path =
+    event.sessionId === undefined ? undefined : frameOf(event.sessionId);
+  const frame = path === undefined ? {} : { frame: path };
   return "omitted" in event
     ? {
         time: event.at,
@@ -138,8 +139,16 @@ export function createEventRecording(deps: {
       );
       const paths =
         framed && session ? await framePaths(session, step) : undefined;
+      // An agent's own session belongs to the page or to the frame it was
+      // opened for; any other session is one of Kamapathy's frame sessions.
+      const frameOf = (sessionId: string) => {
+        const opened = session?.agentFrame(sessionId);
+        if (opened === null) return undefined;
+        if (opened !== undefined) return paths?.byFrame.get(opened) ?? null;
+        return paths?.bySession.get(sessionId) ?? null;
+      };
       return {
-        events: drained.events.map((event) => view(event, paths)),
+        events: drained.events.map((event) => view(event, frameOf)),
         dropped: drained.dropped,
         gaps: drained.gaps,
         remaining: drained.remaining,
@@ -159,19 +168,25 @@ export function createEventRecording(deps: {
   };
 }
 
-// Each frame session's path, by session id. A read that fails leaves every
-// path unknown, which is what a frame that has gone reports anyway.
+// Each frame session's path, by session id, and each frame's own path, by
+// frame id. A read that fails leaves every path unknown, which is what a
+// frame that has gone reports anyway.
 async function framePaths(
   session: TabSession,
   step: Step,
-): Promise<Map<string, string>> {
+): Promise<{
+  bySession: Map<string, string>;
+  byFrame: Map<string, string>;
+}> {
   const paths = new Map<string, string>();
+  const byFrame = new Map<string, string>();
   const frames = await session.frames(step).catch(() => []);
   for (const frame of frames) {
+    byFrame.set(frame.frameId, frame.path);
     if (frame.sessionId === undefined) continue;
     const held = paths.get(frame.sessionId);
     if (held === undefined || depth(frame.path) < depth(held))
       paths.set(frame.sessionId, frame.path);
   }
-  return paths;
+  return { bySession: paths, byFrame };
 }
