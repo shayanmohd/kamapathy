@@ -285,13 +285,13 @@ export function createSpaceCdp(deps: {
       frameId = groups.frameAt(frame)?.frameId;
       // A blocked frame is never one of the groups: only the registry
       // places it.
-      const blocked =
-        frameId === undefined
-          ? (
-              await blockedFramesByPath(session, step).catch(() => undefined)
-            )?.get(frame)
-          : undefined;
-      if (blocked) return unreachable(call.method, blocked.url);
+      if (frameId === undefined) {
+        const blocked = await blockedFramesByPath(session, step).catch(
+          () => undefined,
+        );
+        const url = blocked?.get(frame)?.url;
+        if (url !== undefined) return unreachable(call.method, url);
+      }
     }
     if (frameId !== undefined && session.frameBlocked(frameId))
       return unreachable(
@@ -431,11 +431,11 @@ export function createSpaceCdp(deps: {
           answered = { result: {} };
         } else {
           // A frameId in params aims at its frame as surely as frame does.
-          const named = call.params.frameId;
-          if (typeof named === "string" && session.frameBlocked(named))
+          const aimed = call.params.frameId;
+          if (typeof aimed === "string" && session.frameBlocked(aimed))
             return unreachable(
               call.method,
-              await blockedUrl(session, named, step),
+              await blockedUrl(session, aimed, step),
               "frameId",
             );
           const frameId =
