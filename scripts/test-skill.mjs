@@ -3840,10 +3840,10 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   await json(["navigate", scriptTab.id, `${fixture.origin}/scripts/frames`]);
   const remoteLab = await poll(
     async () => {
-      const entry = (await observe(scriptTab.id)).interactables.find(
+      const labEntry = (await observe(scriptTab.id)).interactables.find(
         (control) => control.label === "Remote cookie lab",
       );
-      return entry?.content === "read" ? entry : null;
+      return labEntry?.content === "read" ? labEntry : null;
     },
     { timeoutMs: 15000, label: "the frame from the other loopback name" },
   );
@@ -4113,7 +4113,7 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   const printedCheckout = (await cli(["snapshot", crossTab.id, "--full"]))
     .output;
   assert.match(printedCheckout, /iframe "Card details" frame from localhost:\d+/);
-  assert.match(printedCheckout, /textbox "Card number" \(value hidden\)/);
+  assert.match(printedCheckout, /input "Card number" \(value hidden\)/);
   checkout = await observe(crossTab.id);
   assert.equal(
     checkout.interactables.find((control) => control.label === "Card number")

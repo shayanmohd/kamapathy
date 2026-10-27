@@ -327,10 +327,10 @@ try {
   // which the frame's own value then shows.
   const remote = await poll(
     async () => {
-      const found = await snapshot(embedded);
-      return byLabel(found, "Card details")?.content === "read" &&
-        byLabel(found, "Card number")
-        ? found
+      const listed = await snapshot(embedded);
+      return byLabel(listed, "Card details")?.content === "read" &&
+        byLabel(listed, "Card number")
+        ? listed
         : null;
     },
     { timeoutMs: 10000, label: "the frame from the other loopback host" },
