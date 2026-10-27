@@ -275,7 +275,7 @@ export function mergeControls(
   };
 }
 
-type Line = { text: string; control: boolean };
+type Line = { depth: number; text: string; control: boolean };
 function flatOutline(nodes: readonly Node[], depth: number, lines: Line[]) {
   for (const node of nodes) {
     // A group's lines sit one level under its owner's line.
@@ -284,6 +284,7 @@ function flatOutline(nodes: readonly Node[], depth: number, lines: Line[]) {
       if (row.item) {
         base = depth + row.item.depth + 1;
         lines.push({
+          depth: depth + row.item.depth,
           text: "  ".repeat(depth + row.item.depth) + row.item.line,
           control: row.item.control === true,
         });
@@ -293,8 +294,8 @@ function flatOutline(nodes: readonly Node[], depth: number, lines: Line[]) {
 
 /**
  * The outline of every group, nested under its iframe line, from the
- * cursor's line within both bounds. `omitted` counts the control and frame
- * lines after the part that the reads reported.
+ * cursor's line within both bounds and after the lines around it. `omitted`
+ * counts the control and frame lines after the part that the reads reported.
  */
 export function nestOutline(
   reads: readonly GroupRead[],
@@ -306,6 +307,22 @@ export function nestOutline(
   let used = 0;
   let taken = 0;
   const from = offsetOf(options.from);
+  // A continued part first repeats the lines around its first line, which
+  // cost characters but are not progress: each line above it that sits
+  // less deep than every line between them, across frames too.
+  if (from > 0 && from < lines.length) {
+    const around: string[] = [];
+    let depth = lines[from].depth;
+    for (let above = from - 1; above >= 0 && depth > 0; above -= 1)
+      if (lines[above].depth < depth) {
+        around.unshift(lines[above].text);
+        depth = lines[above].depth;
+      }
+    for (const text of around) {
+      outline.push(text);
+      used += text.length + 1;
+    }
+  }
   let at = from;
   // A part always prints one line, so a cursor never sticks.
   for (; at < lines.length; at += 1) {

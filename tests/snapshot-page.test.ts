@@ -742,6 +742,72 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
     }
   }, 60000);
 
+  it("opens a continued outline part taken as the routes take it with its first line's ancestors", async () => {
+    const take = routes(await load("/snapshot/parts"));
+    const whole = (
+      await take({ format: "outline", maxChars: 24000, maxControls: 100 })
+    ).outline!.split("\n");
+    // The lines around a line of the outline: each line above it that is
+    // less indented than every line between them.
+    const indent = (line: string) => line.length - line.trimStart().length;
+    const around = (at: number) => {
+      const chain: string[] = [];
+      for (let above = at - 1, depth = indent(whole[at]); above >= 0; above -= 1)
+        if (indent(whole[above]) < depth) {
+          chain.unshift(whole[above]);
+          depth = indent(whole[above]);
+        }
+      return chain;
+    };
+    const lineOf = (cursor: string) =>
+      readCursor(cursor, { h: optionsHash({ scope: "page", format: "outline" }) })
+        .l;
+    const shapeOf = (listing: Listing | Part) => ({
+      outline: listing.outline,
+      refs: listing.interactables.map((control) => control.ref),
+      omittedControls: listing.omittedControls,
+      truncated: listing.truncated,
+    });
+    for (const bounds of [
+      { maxChars: 600 },
+      { maxChars: 300, maxControls: 3 },
+    ]) {
+      const name = JSON.stringify(bounds);
+      const parts = await partsOf(take, { format: "outline", ...bounds });
+      // Each part repeats the ancestors of its first line, unmarked, and
+      // then prints its own lines.
+      let from = 0;
+      let repeated = 0;
+      for (const [index, part] of parts.entries()) {
+        const to = part.next ? lineOf(part.next) : whole.length;
+        expect(part.outline!.split("\n"), `${name} part ${index}`).toEqual([
+          ...around(from),
+          ...whole.slice(from, to),
+        ]);
+        repeated += around(from).length;
+        from = to;
+      }
+      expect(from, name).toBe(whole.length);
+      expect(repeated, name).toBeGreaterThan(0);
+      // The page's own read prints the same parts, line for line.
+      let offsets: Offsets = { text: 0, control: 0, line: 0 };
+      for (const [index, part] of parts.entries()) {
+        const own = await snapshot({
+          mode: "compact",
+          format: "outline",
+          maxControls: 40,
+          ...bounds,
+          offsets,
+        });
+        expect(shapeOf(part), `${name} part ${index}`).toEqual(shapeOf(own));
+        expect(part.next && lineOf(part.next), `${name} part ${index}`).toBe(
+          own.next?.line,
+        );
+        if (own.next) offsets = own.next;
+      }
+    }
+  }, 60000);
+
   it("lists absolute http, https, mailto and tel links", async () => {
     await load("/snapshot/links");
     const listing = await snapshot();

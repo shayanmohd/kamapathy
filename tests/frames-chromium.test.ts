@@ -461,6 +461,22 @@ for (const mode of ISOLATION)
         readCursor(cursor, {
           h: optionsHash({ scope: "page", format: "outline" }),
         }).l;
+      // The lines around a line of the outline: each line above it that is
+      // less indented than every line between them.
+      const indent = (line: string) => line.length - line.trimStart().length;
+      const around = (at: number) => {
+        const chain: string[] = [];
+        for (
+          let above = at - 1, depth = indent(whole[at]);
+          above >= 0;
+          above -= 1
+        )
+          if (indent(whole[above]) < depth) {
+            chain.unshift(whole[above]);
+            depth = indent(whole[above]);
+          }
+        return chain;
+      };
       for (const bounds of [
         { maxChars: 60, maxControls: 100 },
         { maxChars: 24000, maxControls: 1 },
@@ -479,7 +495,8 @@ for (const mode of ISOLATION)
         } while (cursor !== undefined && parts.length < 20);
         expect(cursor, `${name} ends`).toBeUndefined();
         // Each part prints the lines from its cursor to the next one's,
-        // after whatever it repeats from earlier parts to place them.
+        // after the lines around the first of them, which for a part that
+        // starts among a frame's own lines include the iframe line.
         let from = 0;
         let inside = 0;
         for (const [index, part] of parts.entries()) {
@@ -487,20 +504,22 @@ for (const mode of ISOLATION)
           const to = part.next ? lineOf(part.next) : whole.length;
           expect(to, `${name} part ${index}`).toBeGreaterThan(from);
           const fresh = whole.slice(from, to);
-          expect(printed.slice(printed.length - fresh.length)).toEqual(fresh);
-          for (const before of printed.slice(0, printed.length - fresh.length))
-            expect(whole.slice(0, from), `${name} part ${index}`).toContain(
-              before,
-            );
+          expect(printed, `${name} part ${index}`).toEqual([
+            ...around(from),
+            ...fresh,
+          ]);
           // Frame refs count toward maxControls like any control's.
           expect(refsIn(fresh).length, `${name} part ${index}`).toBeLessThanOrEqual(
             bounds.maxControls,
           );
-          if (fresh[0].startsWith("  ")) inside += 1;
+          // A part lists the controls and frames it printed.
+          expect(part.interactables.map((control) => control.ref)).toEqual(
+            refsIn(printed),
+          );
+          if (around(from).some((line) => line.startsWith("iframe "))) inside += 1;
           from = to;
         }
         expect(from, name).toBe(whole.length);
-        // Some part starts among a frame's own lines.
         expect(inside, name).toBeGreaterThan(0);
       }
     }, 60000);

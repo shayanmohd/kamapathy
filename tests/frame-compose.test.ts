@@ -303,12 +303,30 @@ describe("frame composition", () => {
     const part = nestOutline(reads, { maxChars: 20, maxControls: 10 });
     expect(part.outline).toEqual(['main "Checkout"']);
     expect(part.next).toBe(1);
+    // A continued part first repeats the lines around its first line, up
+    // through the iframe lines of every frame it sits in.
     const rest = nestOutline(reads, { maxChars: 1000, maxControls: 10, from: 4 });
     expect(rest.outline).toEqual([
+      'main "Checkout"',
+      '  iframe "Payment" @e1',
+      '    iframe "Expiry" @e4',
       '      group "Expiry"',
       '        textbox "MM / YY" @e3',
     ]);
     expect(rest.next).toBeUndefined();
+    // Those lines cost characters, so with them the part holds only its
+    // first line, which it always prints.
+    expect(nestOutline(reads, { maxChars: 60, maxControls: 10, from: 4 })).toEqual(
+      {
+        outline: rest.outline.slice(0, 4),
+        omitted: 1,
+        next: 5,
+      },
+    );
+    // They are not progress, so their refs do not count toward maxControls.
+    expect(
+      nestOutline(reads, { maxChars: 1000, maxControls: 1, from: 5 }).outline,
+    ).toEqual(rest.outline);
     // Control and frame lines count toward maxControls, across frames, and
     // the ones a part leaves out are counted.
     const bounded = nestOutline(reads, { maxChars: 1000, maxControls: 2 });
