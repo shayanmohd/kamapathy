@@ -9253,6 +9253,190 @@ describe("scripted sessions", () => {
       ).rejects.toThrow();
     expect(unused).not.toHaveBeenCalled();
   });
+
+  it("snapshots print frame entries and the unread line", async () => {
+    const framed = {
+      tabId: "tab-1",
+      url: "https://shop.test/checkout",
+      title: "Checkout",
+      interactables: [
+        { ref: "@e1", role: "button", label: "Pay" },
+        {
+          ref: "@e2",
+          role: "iframe",
+          label: "Card",
+          crossOrigin: true,
+          origin: "https://js.stripe.com",
+          contentFrame: "0",
+          content: "read",
+        },
+        {
+          ref: "@e3",
+          role: "textbox",
+          label: "Card number",
+          frame: "0",
+          valueHidden: true,
+        },
+        {
+          ref: "@e4",
+          role: "iframe",
+          label: "Map",
+          crossOrigin: true,
+          origin: "http://127.0.0.1:4321",
+          contentFrame: "1",
+          content: "pending",
+        },
+        {
+          ref: "@e5",
+          role: "iframe",
+          label: "Ads",
+          crossOrigin: true,
+          origin: "opaque",
+          contentFrame: "2",
+          content: "unavailable",
+        },
+        {
+          ref: "@e6",
+          role: "iframe",
+          label: "Deep",
+          crossOrigin: true,
+          origin: "https://deep.test",
+          contentFrame: "3",
+          content: "limit",
+        },
+        {
+          ref: "@e7",
+          role: "iframe",
+          label: "Extension: Kamapathy marker",
+          extension: "Kamapathy marker",
+          crossOrigin: true,
+          content: "blocked",
+        },
+        {
+          ref: "@e8",
+          role: "iframe",
+          label: "Later",
+          crossOrigin: true,
+          content: "pending",
+        },
+      ],
+      unreadFrames: 4,
+      truncated: false,
+    };
+    const lines = [
+      "Checkout",
+      "https://shop.test/checkout",
+      "",
+      "Controls:",
+      '@e1 button "Pay"',
+      '@e2 iframe "Card" frame from js.stripe.com',
+      '@e3 textbox "Card number" (value hidden)',
+      '@e4 iframe "Map" frame from 127.0.0.1:4321, not read: still loading',
+      '@e5 iframe "Ads" frame from an opaque origin, not read: did not respond',
+      '@e6 iframe "Deep" frame from deep.test, not read: frame limit reached',
+      '@e7 iframe "Extension: Kamapathy marker" extension or internal frame, not read',
+      '@e8 iframe "Later" frame, not read: still loading',
+      "",
+      "4 frames were not read. Snapshot again, or scope to one with --root <ref>.",
+    ];
+    expect(formatSnapshot(framed)).toBe(lines.join("\n"));
+    // One unread frame reads as one, and none prints no line.
+    expect(
+      formatSnapshot({ ...framed, unreadFrames: 1 }).split("\n").at(-1),
+    ).toBe(
+      "1 frame was not read. Snapshot again, or scope to one with --root <ref>.",
+    );
+    expect(formatSnapshot({ ...framed, unreadFrames: undefined })).toBe(
+      lines.slice(0, -2).join("\n"),
+    );
+    // The command and page.text() print the same.
+    expect(await printed(["snapshot", "tab-1"], framed)).toBe(
+      `${lines.join("\n")}\n`,
+    );
+    const api = fakeApi({ ...scriptAnswers, "POST /tabs/tab-1/snapshot": framed });
+    expect(await (await inputPage(api)).text()).toBe(lines.join("\n"));
+  });
+
+  it("each command sends one request and respects --json", async () => {
+    const directory = await fetchFolder();
+    const answers = {
+      evaluate: { ok: true, tab: slots, value: 42 },
+      fetch: { ok: true, tab: slots, response: fetchedResponse },
+      cdp: { ok: true, result: { entries: [] } },
+      "space cdp": { ok: true, result: { targetInfos: [] } },
+      events: { ok: true, events: [], dropped: 0, gaps: [], remaining: 0 },
+      "clear-site-data": {
+        ok: true,
+        origin: "https://shop.test",
+        cleared: { cache: true },
+      },
+    };
+    for (const [args, name, piped] of [
+      [["evaluate", "tab-1", "--stdin"], "evaluate", "document.title"],
+      [["fetch", "tab-1", "/api/cart"], "fetch"],
+      [["cdp", "tab-1", "Page.getNavigationHistory"], "cdp"],
+      [["space", "cdp", "space-1", "Target.getTargets"], "space cdp"],
+      [["events", "tab-1"], "events"],
+      [["clear-site-data", "tab-1", "--cache"], "clear-site-data"],
+    ])
+      for (const json of [false, true]) {
+        const fetch = vi.fn(async () => Response.json(answers[name]));
+        const stdout = sink();
+        expect(
+          await runCli(json ? [...args, "--json"] : args, {
+            env,
+            fetch,
+            health: current,
+            ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+            stdout,
+          }),
+          args.join(" "),
+        ).toBe(0);
+        expect(fetch, args.join(" ")).toHaveBeenCalledTimes(1);
+        if (json)
+          expect(JSON.parse(stdout.text()), args.join(" ")).toEqual(
+            answers[name],
+          );
+        else
+          expect(stdout.text(), args.join(" ")).not.toBe(
+            `${JSON.stringify(answers[name])}\n`,
+          );
+      }
+    // A saved fetch is one request too.
+    const fetch = vi.fn(savedStream);
+    await runCli(
+      ["fetch", "tab-1", "/report.bin", "--save", join(directory, "one.bin")],
+      { env, fetch, health: current, stdout: sink() },
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // Each one is refused by name against a Kamapathy that predates it.
+    const unused = vi.fn();
+    for (const [args, piped] of [
+      [["evaluate", "tab-1", "--stdin"], "1"],
+      [["fetch", "tab-1", "/api/cart"]],
+      [["fetch", "tab-1", "/x", "--save", join(directory, "old.bin")]],
+      [["cdp", "tab-1", "Page.reload"]],
+      [["space", "cdp", "space-1", "Target.getTargets"]],
+      [["events", "tab-1"]],
+      [["clear-site-data", "tab-1", "--cache"]],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: level3,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toMatchObject({
+        code: "app_outdated",
+        required: 4,
+        available: 3,
+      });
+    expect(unused).not.toHaveBeenCalled();
+    expect(existsSync(join(directory, "old.bin"))).toBe(false);
+  });
 });
 
 describe("client errors and timeouts", () => {

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError, envelope } from "../electron/agent/errors.ts";
 import { buildRoutes, routeBudget } from "../electron/agent/http.ts";
 import { createNavigation } from "../electron/agent/routes/navigation.ts";
@@ -14,6 +14,7 @@ import { statusRoutes } from "../electron/agent/routes/status.ts";
 import { tabRoutes } from "../electron/agent/routes/tabs.ts";
 import { updateRoutes } from "../electron/agent/routes/update.ts";
 import { parseToolAction } from "../electron/agent/validate.ts";
+import { METHOD_PATTERN as SERVER_METHOD_PATTERN } from "../electron/agent/cdp-policy.ts";
 import {
   Client,
   Download,
@@ -28,6 +29,8 @@ import { PARSERS } from "../skills/kamapathy/scripts/kamapathy.mjs";
 import { installGlobals } from "../skills/kamapathy/scripts/lib/run.mjs";
 import {
   generateReference,
+  help,
+  helpTopic,
   resolveNames,
 } from "../skills/kamapathy/scripts/help.mjs";
 
@@ -1469,6 +1472,165 @@ describe("API schema", () => {
       "`reload <tab-id> [--wait-until <state>] [--timeout <ms>] [--ignore-cache]`",
       "`info <tab-id>`",
       "`wait-for-selector <tab-id> <ref-or-selector> [--state <state>] [--timeout <ms>]`",
+    ])
+      expect(reference, text).toContain(text);
+  });
+
+  it("the new entries, commands and topics are complete", () => {
+    // Every section 8 route has its client entry and its command, at this
+    // API level.
+    for (const [key, name, commandName] of [
+      ["POST /tabs/:id/evaluate", "Page.evaluate", "evaluate"],
+      ["POST /tabs/:id/fetch", "Page.fetch", "fetch"],
+      ["POST /tabs/:id/cdp", "Page.cdp", "cdp"],
+      ["POST /spaces/:id/cdp", "Space.cdp", "space cdp"],
+      ["POST /tabs/:id/events", "Page.events", "events"],
+      ["POST /tabs/:id/clear-site-data", "Page.clearSiteData", "clear-site-data"],
+    ]) {
+      expect(route(key), key).toBeDefined();
+      const item = entry(name);
+      expect(item, name).toMatchObject({ kind: "method", route: key, since: 4 });
+      const command = findCommand(commandName);
+      expect(command, commandName).toMatchObject({
+        route: key,
+        script: item.signature.split("(")[0],
+        since: 4,
+      });
+      for (const flag of command.flags)
+        expect(flag.since, `${commandName} ${flag.name}`).toBe(4);
+      expect(Object.hasOwn(PARSERS, commandName), commandName).toBe(true);
+    }
+    expect(
+      [
+        "Page.evaluate",
+        "Page.fetch",
+        "Page.cdp",
+        "Page.events",
+        "Page.clearSiteData",
+        "Space.cdp",
+      ].map((name) => entry(name).signature),
+    ).toEqual([
+      "page.evaluate(fnOrString, arg?, options?)",
+      "page.fetch(url, options?)",
+      "page.cdp(method, params?, options?)",
+      "page.events(options?)",
+      "page.clearSiteData(options)",
+      "space.cdp(method, params?)",
+    ]);
+    // Each option is its route's field under the Playwright name.
+    expect(Object.keys(entry("Page.fetch").options)).toEqual([
+      "method",
+      "headers",
+      "body",
+      "cache",
+      "credentials",
+      "integrity",
+      "keepalive",
+      "mode",
+      "redirect",
+      "referrer",
+      "referrerPolicy",
+      "timeout",
+      "saveAs",
+    ]);
+    for (const [name, key, max] of [
+      ["Page.evaluate", "POST /tabs/:id/evaluate", 60000],
+      ["Page.fetch", "POST /tabs/:id/fetch", 300000],
+      ["Page.cdp", "POST /tabs/:id/cdp", 60000],
+      ["Page.clearSiteData", "POST /tabs/:id/clear-site-data", 300000],
+    ])
+      expect(entry(name).options.timeout, name).toMatchObject({
+        kind: "ms",
+        min: route(key).body.timeoutMs.min,
+        max,
+        default: route(key).body.timeoutMs.default,
+        field: "timeoutMs",
+      });
+    expect(entry("Page.cdp").options.frame).toBe(
+      route("POST /tabs/:id/cdp").body.frame,
+    );
+    expect(entry("Page.events").options.max).toBe(
+      route("POST /tabs/:id/events").body.max,
+    );
+    // The new argument kinds: JSON data names where it stops being JSON, and
+    // a method keeps the server's pattern.
+    const evaluate = entry("Page.evaluate");
+    expect(evaluate.pageFunction).toBe(true);
+    for (const args of [
+      [() => 1, { rows: [1, 2], at: null, gone: undefined }],
+      ["document.title"],
+      [() => 1, undefined, { timeout: 2000 }],
+    ])
+      expect(checkCall(evaluate, args), String(args[0])).toBeNull();
+    expect(checkCall(evaluate, [() => 1, { rows: [1, 2n] }])).toEqual({
+      code: "invalid_argument",
+      message:
+        "page.evaluate got a BigInt at arg.rows[1], which JSON cannot carry. Pass strings, finite numbers, booleans, null, arrays and objects.",
+      fields: { entry: "page.evaluate", expected: "JSON data at arg.rows[1]" },
+    });
+    expect(
+      checkCall(entry("Page.waitForFunction"), [(x) => x, Number.NaN]),
+    ).toMatchObject({ fields: { expected: "JSON data at arg" } });
+    const cdp = entry("Page.cdp");
+    for (const method of ["Page.reload", "DOM.getDocument", "Runtime.evaluate"])
+      expect(checkCall(cdp, [method]), method).toBeNull();
+    for (const method of [
+      "page.reload",
+      "Page.Reload",
+      "Page",
+      "Page.reload.now",
+      "",
+      5,
+    ])
+      expect(checkCall(cdp, [method])?.code, String(method)).toBe(
+        "invalid_argument",
+      );
+    expect(schema.METHOD_PATTERN.source).toBe(SERVER_METHOD_PATTERN.source);
+    // The page-scripts topic, from the CLI and from a script.
+    const topic = helpTopic(["page-scripts"], "kamapathy");
+    const folded = topic.split("\n").join(" ");
+    for (const text of [
+      "Page scripts is on in Kamapathy's Settings, under Agents",
+      "agent_scripts_off",
+      "page.evaluate",
+      "page.fetch",
+      "page.cdp",
+      "page.events",
+      "space.cdp",
+      "page.waitForFunction",
+      "the wait-for-function, evaluate, fetch, cdp, space cdp and events commands",
+      "Take a fresh snapshot after it.",
+      "page.clearSiteData is not gated.",
+      "references/api.md",
+    ])
+      expect(folded, text).toContain(text);
+    for (const text of topic.split("\n"))
+      expect(text.length, text).toBeLessThanOrEqual(80);
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      help("page-scripts");
+      expect(logged).toHaveBeenCalledWith(topic);
+    } finally {
+      logged.mockRestore();
+    }
+    expect(findCommand("help").arguments[0].description).toContain(
+      "page-scripts",
+    );
+    // The generated reference carries the members and the commands.
+    const reference = read("skills/kamapathy/references/api.md");
+    for (const text of [
+      "`page.evaluate(fnOrString, arg?, options?)`",
+      "`page.fetch(url, options?)`",
+      "`page.cdp(method, params?, options?)`",
+      "`page.events(options?)`",
+      "`page.clearSiteData(options)`",
+      "`space.cdp(method, params?)`",
+      "`evaluate <tab-id> --stdin [--timeout <ms>]`",
+      '`fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]`',
+      "`cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]`",
+      "`space cdp <space-id> <method> [--stdin]`",
+      "`events <tab-id> [--max <n>]`",
+      "`clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>]`",
     ])
       expect(reference, text).toContain(text);
   });

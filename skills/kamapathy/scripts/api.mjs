@@ -293,6 +293,14 @@ const misplacedOptions = (value) =>
  * @property {string} [locator] A selector naming this control alone.
  * @property {{ value: string, label: string, disabled?: boolean, selected?: boolean }[]} [options]
  * @property {string} [extension] The extension a blocked frame belongs to.
+ * @property {string} [frame] The path of the frame the control sits in.
+ * @property {true} [crossOrigin] An iframe entry whose frame's origin differs
+ * from the document around it.
+ * @property {string} [origin] An iframe entry's frame origin, or "opaque".
+ * @property {string} [contentFrame] The frame path an iframe entry's own
+ * controls carry, which page.cdp takes as `frame`.
+ * @property {"read" | "pending" | "unavailable" | "limit" | "blocked"} [content]
+ * Whether an iframe entry's frame was read.
  */
 /**
  * @typedef {object} SnapshotTab
@@ -325,6 +333,8 @@ const misplacedOptions = (value) =>
  * @property {string} [next] Pass back as `cursor` for the next part.
  * @property {string[]} [rebound]
  * @property {true} [locatorsIncomplete]
+ * @property {number} [unreadFrames] Frames left pending, unavailable or past
+ * the frame limit. Snapshot again, or scope to one with root.
  */
 /**
  * @typedef {object} SnapshotOptions

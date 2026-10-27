@@ -32,6 +32,31 @@ function controlDetails(control) {
   return details.map((detail) => ` ${detail}`).join("");
 }
 
+// Why a frame's content is missing from a snapshot, by its iframe entry's
+// content.
+const UNREAD = {
+  pending: "still loading",
+  unavailable: "did not respond",
+  limit: "frame limit reached",
+};
+// After an iframe entry's label: the host its frame comes from and whether
+// it was read. Extension and internal frames are never read.
+function frameText(control) {
+  if (control.role !== "iframe" || control.content === undefined) return "";
+  if (control.content === "blocked")
+    return " extension or internal frame, not read";
+  let from = "";
+  if (control.origin === "opaque") from = " from an opaque origin";
+  else if (control.origin !== undefined)
+    try {
+      from = ` from ${line(new URL(control.origin).host)}`;
+    } catch {
+      from = ` from ${line(control.origin)}`;
+    }
+  const unread = UNREAD[control.content];
+  return ` frame${from}${unread ? `, not read: ${unread}` : ""}`;
+}
+
 // Which tab a header line names: its label, or its ID without one.
 const tabName = (tab) => line(tab.label ?? tab.id);
 // Who a tab belongs to: this page, a popup the page opened, or the person.
@@ -83,7 +108,7 @@ export function formatSnapshot(snapshot) {
     lines.push("", "Controls:");
     for (const control of snapshot.interactables) {
       lines.push(
-        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${controlDetails(control)}${control.locator ? ` locator: ${line(control.locator)}` : ""}`,
+        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${frameText(control)}${controlDetails(control)}${control.locator ? ` locator: ${line(control.locator)}` : ""}`,
       );
       if (control.type === "file")
         lines.push(
@@ -114,6 +139,11 @@ export function formatSnapshot(snapshot) {
       "Truncated. Scope with --selector or request --full if needed.",
     );
   if (snapshot.next) lines.push("", `Next part: cursor ${line(snapshot.next)}`);
+  if (snapshot.unreadFrames > 0)
+    lines.push(
+      "",
+      `${Number(snapshot.unreadFrames)} ${snapshot.unreadFrames === 1 ? "frame was" : "frames were"} not read. Snapshot again, or scope to one with --root <ref>.`,
+    );
   return lines.join("\n");
 }
 

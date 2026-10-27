@@ -238,6 +238,44 @@ export function formatSelectors() {
   ].join("\n");
 }
 
+// A paragraph on lines of at most 80 characters.
+function wrapped(text, width = 80) {
+  const lines = [];
+  for (const word of text.split(" ")) {
+    const last = lines.at(-1);
+    if (last !== undefined && last.length + 1 + word.length <= width)
+      lines[lines.length - 1] = `${last} ${word}`;
+    else lines.push(word);
+  }
+  return lines;
+}
+const listed = (items) =>
+  items.length < 2
+    ? items.join("")
+    : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+
+// The page-scripts topic: what the Page scripts switch gates, read from the
+// entries that answer agent_scripts_off, and how agents work with it.
+export function formatPageScripts() {
+  const gated = ENTRIES.filter((entry) =>
+    entry.errors.includes("agent_scripts_off"),
+  ).map(callName);
+  const commands = COMMANDS.filter((command) =>
+    gated.includes(command.script),
+  ).map((command) => command.name);
+  return [
+    "Page scripts",
+    ...[
+      "Agents can run their own scripts and developer commands in agent tabs while Page scripts is on in Kamapathy's Settings, under Agents. It is on by default.",
+      `It gates ${listed(gated)}, and the ${listed(commands)} commands. While it is off they answer 403 agent_scripts_off. That is the person's choice: continue with snapshots and actions.`,
+      "Prefer snapshots and actions. A script sees what the page sees, including values snapshots hide. A function runs in the page and cannot see your script's variables, so pass them as its argument: page.evaluate((x) => x * 2, 21).",
+      "Every page.cdp command that reaches Chromium expires the tab's refs. Take a fresh snapshot after it.",
+      "page.clearSiteData is not gated. In a space that uses the person's sign-ins it waits for their approval, and only their Clear clears anything.",
+      'help("page.evaluate") shows one of these calls, and references/api.md in the skill folder lists every call, command and error.',
+    ].flatMap((paragraph) => ["", ...wrapped(paragraph)]),
+  ].join("\n");
+}
+
 // "kamapathy" when a launcher says so; otherwise how to run this client.
 export function programName(env = process.env) {
   return env.KAMAPATHY_PROGRAM
@@ -309,13 +347,16 @@ export function helpTopic(words, program) {
   if (topic === "errors") return formatErrors();
   if (topic === "routes") return formatRoutes();
   if (topic === "selectors") return formatSelectors();
+  if (topic === "page-scripts") return formatPageScripts();
   const entries = resolveNames(topic);
   if (entries.length) return entries.map(formatEntry).join("\n\n");
   throw new Error(
     `No help topic "${topic}".${closeText(
       closeMatches(topic, [
         ...COMMANDS.map((item) => [item.name, item.name]),
-        ...["api", "errors", "routes", "selectors"].map((name) => [name, name]),
+        ...["api", "errors", "routes", "selectors", "page-scripts"].map(
+          (name) => [name, name],
+        ),
         ...ENTRIES.map((entry) => [callName(entry), callName(entry)]),
       ]),
     )}`,
@@ -327,6 +368,7 @@ function entryText(name) {
   if (name === "errors") return formatErrors();
   if (name === "routes") return formatRoutes();
   if (name === "selectors") return formatSelectors();
+  if (name === "page-scripts") return formatPageScripts();
   const entries = resolveNames(name);
   if (entries.length) return entries.map(formatEntry).join("\n\n");
   return `No help entry named "${name}".${closeText(
@@ -339,6 +381,7 @@ function entryText(name) {
       ["errors", "errors"],
       ["routes", "routes"],
       ["selectors", "selectors"],
+      ["page-scripts", "page-scripts"],
     ]),
   )}`;
 }

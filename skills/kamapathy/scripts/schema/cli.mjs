@@ -1580,7 +1580,7 @@ export const COMMANDS = [
       {
         name: "topic",
         description:
-          "A command such as space create, api, errors, routes, or a script entry such as page.click.",
+          "A command such as space create, api, errors, routes, page-scripts, or a script entry such as page.click.",
       },
     ],
   }),
