@@ -727,6 +727,42 @@ const FIELDS = {
       description: "The command's parameters as an object.",
     },
   },
+  "clear-site-data": {
+    origin: {
+      kind: "string",
+      max: 2048,
+      since: 4,
+      description:
+        "The http or https origin to clear, such as https://example.com. Defaults to the page's own.",
+    },
+    cookies: {
+      kind: "json",
+      since: 4,
+      description:
+        "true for every cookie the origin receives on any path, parent-domain cookies included, or {name, domain?, path?}, or a list of up to 20 of them, to pick cookies by name.",
+    },
+    storage: {
+      kind: "json",
+      since: 4,
+      description:
+        "true, or a list of localStorage, indexedDB, cacheStorage, serviceWorkers and fileSystem.",
+    },
+    cache: {
+      kind: "boolean",
+      default: false,
+      since: 4,
+      description: "Clear the origin's HTTP cache.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 1000,
+      max: 300000,
+      default: 60000,
+      since: 4,
+      description:
+        "How long the person has to answer, in a space that uses their sign-ins.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -1179,6 +1215,14 @@ export const ROUTES = [
     "{ ok: true, result }",
     FIELDS.spaceCdp,
     { lane: "none", budget: 10000, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/clear-site-data",
+    "Clears one origin's cookies, storage or cache. In a space that uses the person's sign-ins, the person approves it first.",
+    '{ ok: true, origin, cleared: { cookies?: { removed, domains }, storage?: string[], cache?: true }, approvedBy?: "person" }',
+    FIELDS["clear-site-data"],
+    { budget: { field: "timeoutMs" }, since: 4 },
   ),
   route(
     "GET",

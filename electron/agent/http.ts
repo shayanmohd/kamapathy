@@ -20,6 +20,7 @@ import type { PageScripts } from "./page-scripts";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
 import type { RefBook } from "./refs";
+import type { SiteData } from "./site-data";
 import type { SpaceCdpFilter } from "./space-cdp";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
@@ -161,6 +162,8 @@ export interface RouteDeps {
   frames: FrameGroupsByTab;
   /** Section 8's filter, the only path a protocol command takes. */
   cdp: SpaceCdpFilter;
+  /** Section 8's clearing of one site's data, with the person's approval. */
+  siteData: SiteData;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

@@ -49,6 +49,12 @@ import {
   type SearchAst,
 } from "./selectors";
 import type { AutomationController } from "./server";
+import {
+  STORAGE_KINDS,
+  type ClearRequest,
+  type CookiePick,
+  type StorageKind,
+} from "./site-data";
 import { MAX_CURSOR } from "./snapshot";
 
 export const UPLOAD_FILE_LIMIT = 16 * 1024 * 1024;
@@ -1163,6 +1169,103 @@ export function credentialFields(body: Record<string, unknown>): {
   )
     return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
   return { origin: parsed.origin, username, password };
+}
+// What clear-site-data takes: cookies by name, storage kinds and the cache,
+// for one origin, with the time the person has to answer.
+const CLEAR_WHAT = "at least one of cookies, storage and cache";
+const COOKIES_EXPECTED =
+  "true, a pick {name, domain?, path?} whose path starts with /, or a list of 1 to 20 picks";
+const STORAGE_EXPECTED = `true, or a list of ${STORAGE_KINDS.join(", ")}`;
+const MAX_PICKS = 20;
+function cookiePicks(value: unknown): true | CookiePick[] {
+  if (value === true) return true;
+  const refuse = (): never =>
+    fail("invalid_field", `cookies must be ${COOKIES_EXPECTED}.`, {
+      field: "cookies",
+      expected: COOKIES_EXPECTED,
+    });
+  const picks: unknown[] = Array.isArray(value) ? value : [value];
+  if (!picks.length || picks.length > MAX_PICKS) return refuse();
+  const text = (field: unknown, max: number): field is string =>
+    typeof field === "string" && field.length > 0 && field.length <= max;
+  return picks.map((pick) => {
+    if (!pick || typeof pick !== "object" || Array.isArray(pick))
+      return refuse();
+    const { name, domain, path, ...rest } = pick as Record<string, unknown>;
+    if (
+      Object.keys(rest).length ||
+      !text(name, 256) ||
+      (domain !== undefined && !text(domain, 255)) ||
+      (path !== undefined && !(text(path, 1024) && path.startsWith("/")))
+    )
+      return refuse();
+    return {
+      name,
+      ...(domain === undefined ? {} : { domain }),
+      ...(path === undefined ? {} : { path }),
+    };
+  });
+}
+function storageKinds(value: unknown): true | StorageKind[] {
+  if (value === true) return true;
+  if (
+    !Array.isArray(value) ||
+    !value.length ||
+    !value.every((kind) => STORAGE_KINDS.includes(kind))
+  )
+    return fail("invalid_field", `storage must be ${STORAGE_EXPECTED}.`, {
+      field: "storage",
+      expected: STORAGE_EXPECTED,
+    });
+  return [...new Set(value as StorageKind[])];
+}
+// The origin a body names, or the page's own when it names none.
+function clearOrigin(body: Record<string, unknown>, tabUrl: string): string {
+  if (body.origin === undefined) {
+    if (!isWebUrl(tabUrl))
+      return fail(
+        "invalid_field",
+        "This tab shows no http or https page, so give origin.",
+        { field: "origin" },
+      );
+    return new URL(tabUrl).origin;
+  }
+  const value = stringField(body, "origin", 2048);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  }
+  if (
+    !isWebUrl(value) ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  )
+    return fail("invalid_field", ORIGIN_EXPECTED, { field: "origin" });
+  return parsed.origin;
+}
+export function clearSiteDataFields(
+  body: Record<string, unknown>,
+  tabUrl: string,
+): ClearRequest {
+  const cookies =
+    body.cookies === undefined ? undefined : cookiePicks(body.cookies);
+  const storage =
+    body.storage === undefined ? undefined : storageKinds(body.storage);
+  const cache = booleanField(body, "cache", false);
+  if (!cookies && !storage && !cache)
+    return fail("invalid_field", `Say what to clear: ${CLEAR_WHAT}.`, {
+      expected: CLEAR_WHAT,
+    });
+  return {
+    origin: clearOrigin(body, tabUrl),
+    ...(cookies ? { cookies } : {}),
+    ...(storage ? { storage } : {}),
+    ...(cache ? { cache: true as const } : {}),
+    timeoutMs: integerField(body, "timeoutMs", 60000, 1000, 300000),
+  };
 }
 // The files of an upload or a file input: metadata and canonical base64, read
 // once so both routes keep the same rules.

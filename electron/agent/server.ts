@@ -40,6 +40,7 @@ import { createPageScripts } from "./page-scripts";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
 import { createPresence } from "./presence";
+import { createSiteData } from "./site-data";
 import { createSpaceCdp, type InputDispatcherPort } from "./space-cdp";
 import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
@@ -200,6 +201,8 @@ export interface AutomationServer {
   answerRequest(id: string, answer: { allow: boolean; spaceId?: string }): void;
   /** The Page scripts setting: off fails the script calls in flight. */
   setPageScripts(on: boolean): void;
+  /** The person's answer to a request to clear a site's data. */
+  answerApproval(id: string, clear: boolean): void;
   close(): Promise<void>;
 }
 // End-to-end checks read tab sessions through this probe on globalThis in the
@@ -294,6 +297,14 @@ export async function startAutomation(
   // home frame of every ref a read gave out.
   const frames = createFrameGroupsByTab({ sessions, refs });
   const presence = createPresence({ controller, authority });
+  // Clearing one site's data, which a session the person uses holds for
+  // their answer.
+  const siteData = createSiteData({
+    controller,
+    authority,
+    sessions,
+    presence,
+  });
   // One input dispatcher per tab session, each authorizing its commands.
   const dispatchers = createDispatchers({
     guard: (tabId) => {
@@ -452,6 +463,7 @@ export async function startAutomation(
     events,
     frames,
     cdp,
+    siteData,
   });
   const deps: RouteDeps = {
     controller,
@@ -471,6 +483,7 @@ export async function startAutomation(
     events,
     frames,
     cdp,
+    siteData,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -705,6 +718,7 @@ export async function startAutomation(
     setPageScripts(on: boolean) {
       pageScripts.apply(on);
     },
+    answerApproval: siteData.answer,
     endSpace(id: string) {
       const space = controller.state.spaces.find((item) => item.id === id);
       if (!space) throw new Error("Space was not found.");
@@ -721,6 +735,8 @@ export async function startAutomation(
         authority.stop();
         presence.close();
         requests.close();
+        // No clear waits for the person once agent access is off.
+        siteData.dispose();
         scheduler.close();
         // The dispatchers go last, so each session's release still lets go
         // of the keys it holds.
