@@ -228,11 +228,12 @@ const besideWhole = (point: { x: number; y: number }) => {
   return [...found.values()];
 };
 
-// Where input at a point lands in the layout viewport, which the hit test
-// reads. Mobile emulation lets a page zoom in, and a scroll then moves the
-// visual viewport within it: a probe of Electron 44 saw mouse, touch, tap,
-// scroll and wheel input land that offset further right and down. A page
-// that cannot say is taken at its own scale, as a failed hit test is.
+// Where input at a point lands, in the document coordinates the hit test
+// reads. A probe of Electron 44 saw DOM.getNodeForLocation name what lay a
+// page's scroll above where a press landed, and saw mouse, touch, tap,
+// scroll and wheel input land at the visual viewport's place in the
+// document plus the point, mobile emulation's zoom included. A page that
+// cannot say is taken at its top, as a failed hit test is.
 async function landingPoint(
   session: TabSession,
   point: { x: number; y: number },
@@ -240,12 +241,12 @@ async function landingPoint(
 ): Promise<{ x: number; y: number }> {
   try {
     const metrics = await session.send<{
-      cssVisualViewport?: { offsetX?: unknown; offsetY?: unknown };
+      cssVisualViewport?: { pageX?: unknown; pageY?: unknown };
     }>("Page.getLayoutMetrics", {}, step);
-    const { offsetX, offsetY } = metrics?.cssVisualViewport ?? {};
+    const { pageX, pageY } = metrics?.cssVisualViewport ?? {};
     const by = (value: unknown) =>
       typeof value === "number" && Number.isFinite(value) ? value : 0;
-    return { x: point.x + by(offsetX), y: point.y + by(offsetY) };
+    return { x: point.x + by(pageX), y: point.y + by(pageY) };
   } catch (error) {
     if (toApiError(error)) throw error;
     return point;

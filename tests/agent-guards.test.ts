@@ -419,11 +419,19 @@ describe("the input guards", () => {
     ];
     const frames = [known(MAIN), known("panel", { blocked: true })];
     for (const offset of [30, 30.5]) {
+      // The page itself is not scrolled, so the visual viewport's place in
+      // the document is its offset.
       const zoomed = tab({
         spots,
         frames,
         paths: { panel: "0" },
-        visual: { offsetX: offset, offsetY: offset, scale: 2 },
+        visual: {
+          offsetX: offset,
+          offsetY: offset,
+          pageX: offset,
+          pageY: offset,
+          scale: 2,
+        },
       });
       const error = await refusal(press(zoomed.session, { x: 275, y: 175 }));
       expect([error.code, error.fields.frame], String(offset)).toEqual([
@@ -433,12 +441,53 @@ describe("the input guards", () => {
     }
     // At the page's own scale the same point is the page's, and so it is
     // when the page cannot say.
-    for (const visual of [{ offsetX: 0, offsetY: 0, scale: 1 }, undefined]) {
+    for (const visual of [
+      { offsetX: 0, offsetY: 0, pageX: 0, pageY: 0, scale: 1 },
+      undefined,
+    ]) {
       const level = tab({ spots, frames, ...(visual ? { visual } : {}) });
       await expect(
         press(level.session, { x: 275, y: 175 }),
       ).resolves.toBeUndefined();
     }
+  });
+
+  it("checks a scrolled page's point where the hit test reads the document", async () => {
+    // DOM.getNodeForLocation takes document coordinates while input lands in
+    // the viewport: a probe of Electron 44 saw a page scrolled 250 pixels
+    // down have the hit test name what lies 250 pixels above where a press
+    // landed. Scrolled 120 across and 150 down, a press at 180, 200 lands
+    // on the document's 300, 350.
+    const spots: Spot[] = [
+      { x: 180, y: 200, frameId: MAIN, author: { nodeName: "button" } },
+      {
+        x: 300,
+        y: 350,
+        frameId: MAIN,
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+    ];
+    const frames = [known(MAIN), known("panel", { blocked: true })];
+    const scrolled = tab({
+      spots,
+      frames,
+      paths: { panel: "0" },
+      visual: { offsetX: 0, offsetY: 0, pageX: 120, pageY: 150, scale: 1 },
+    });
+    const error = await refusal(press(scrolled.session, { x: 180, y: 200 }));
+    expect([error.code, error.fields.frame]).toEqual([
+      "input_target_blocked",
+      "0",
+    ]);
+    // At the top of the page the same point is the page's own button.
+    const top = tab({
+      spots,
+      frames,
+      visual: { offsetX: 0, offsetY: 0, pageX: 0, pageY: 0, scale: 1 },
+    });
+    await expect(
+      press(top.session, { x: 180, y: 200 }),
+    ).resolves.toBeUndefined();
   });
 
   it("refuses a press that would open a native select, color or date picker", async () => {
