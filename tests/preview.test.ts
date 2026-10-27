@@ -297,6 +297,12 @@ describe("interactive preview state invariants", () => {
     ).resolves.toBeUndefined();
     expect((await bridge.getState()).prompts).toEqual([]);
   });
+  it("answers no requests to clear a site's data in the web preview", async () => {
+    const bridge = create();
+    expect((await bridge.getState()).approvals).toEqual([]);
+    await expect(bridge.answerApproval("approval", true)).resolves.toBeUndefined();
+    expect((await bridge.getState()).approvals).toEqual([]);
+  });
 
   it("has no thumbnails in the web preview", async () => {
     expect(await create().thumbnails()).toEqual({});

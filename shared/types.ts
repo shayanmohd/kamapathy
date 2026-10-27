@@ -621,4 +621,7 @@ export interface KamapathyBridge {
   makeDefaultBrowser(): Promise<void>;
   // Answers go their own way, so a password never joins an action or state.
   answerPrompt(answer: PromptAnswer): Promise<void>;
+  // The person's Clear or Don't clear for an agent's request to clear a
+  // site's data.
+  answerApproval(id: string, clear: boolean): Promise<void>;
 }
