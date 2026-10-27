@@ -7781,6 +7781,93 @@ describe("local automation socket", () => {
     expect(sentOn(page, "Input.imeSetComposition")).toEqual([]);
   });
 
+  it("raw touches, taps and emulated touches never reach an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // The extension's frame is under (25, 45), and the page under every
+    // other point.
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    const at = (x: number, y: number): [string, Record<string, unknown>][] => [
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x, y }] },
+      ],
+      // Each point a touch names, not only its first.
+      [
+        "Input.dispatchTouchEvent",
+        {
+          type: "touchStart",
+          touchPoints: [
+            { x: 600, y: 400, id: 1 },
+            { x, y, id: 2 },
+          ],
+        },
+      ],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchMove", touchPoints: [{ x, y }] },
+      ],
+      ["Input.synthesizeTapGesture", { x, y }],
+      [
+        "Input.emulateTouchFromMouseEvent",
+        { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+      ],
+    ];
+    for (const [method, params] of at(25, 45)) {
+      const where = `${method} ${String(params.type ?? "")}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+    }
+    for (const [method] of at(25, 45))
+      expect(sentOn(page, method), method).toEqual([]);
+    // Anywhere else on the page each of them goes out.
+    for (const [method, params] of at(300, 200))
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+    expect(sentOn(page, "Input.dispatchTouchEvent")).toHaveLength(3);
+    // An emulated touch takes the page's device-independent pixels, which a
+    // probe saw land at x / zoom: at zoom 2 its (50, 90) is the frame's
+    // (25, 45), while a touch at (50, 90) lands on the page.
+    page.zoom = 2;
+    const emulated = await failure(
+      await cdp(tab.id, {
+        method: "Input.emulateTouchFromMouseEvent",
+        params: { type: "mousePressed", x: 50, y: 90, button: "left" },
+      }),
+    );
+    expect(emulated.status).toBe(403);
+    expect(emulated.error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.emulateTouchFromMouseEvent")).toHaveLength(1);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Input.dispatchTouchEvent",
+          params: { type: "touchStart", touchPoints: [{ x: 50, y: 90 }] },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

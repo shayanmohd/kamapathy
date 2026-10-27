@@ -1,3 +1,4 @@
+import type { WebContents } from "electron";
 import { cleanAgentText } from "../../shared/agent-text";
 import type { Tab } from "../../shared/types";
 import { reducedUserAgent } from "../identity";
@@ -101,6 +102,55 @@ const KEY_METHODS: readonly string[] = [
 // frameId. One of the person's extensions is named for them instead.
 const OUT_OF_REACH =
   "This frame belongs to an extension or an internal page, which agents never reach.";
+
+type RawPoint = { x: number; y: number; press: boolean; button: Button };
+// Every point a raw pointer command lands on, in the top page's CSS pixels,
+// and whether it presses there. A touch and a tap take CSS pixels as a mouse
+// event does. An emulated touch takes the page's device-independent pixels,
+// which a probe of Electron 44 saw land at x / zoom.
+function pointsOf(
+  method: string,
+  params: Record<string, unknown>,
+  zoom: () => number,
+): RawPoint[] {
+  const at = (
+    point: unknown,
+    press: boolean,
+    button: unknown = "left",
+    scale = 1,
+  ): RawPoint[] => {
+    const { x, y } = (point ?? {}) as { x?: unknown; y?: unknown };
+    if (typeof x !== "number" || !Number.isFinite(x)) return [];
+    if (typeof y !== "number" || !Number.isFinite(y)) return [];
+    return [
+      {
+        x: x / scale,
+        y: y / scale,
+        press,
+        button: (typeof button === "string" ? button : "left") as Button,
+      },
+    ];
+  };
+  const pressed = params.type === "mousePressed";
+  switch (method) {
+    case "Input.dispatchMouseEvent":
+      return at(params, pressed, params.button);
+    case "Input.emulateTouchFromMouseEvent":
+      return at(params, pressed, params.button, zoom());
+    case "Input.synthesizeTapGesture":
+      return at(params, true);
+    case "Input.dispatchTouchEvent": {
+      const touches = Array.isArray(params.touchPoints)
+        ? params.touchPoints
+        : [];
+      return touches.flatMap((touch: unknown) =>
+        at(touch, params.type === "touchStart"),
+      );
+    }
+    default:
+      return [];
+  }
+}
 
 // Electron's debugger rejects with the protocol message alone. Chromium's own
 // dispatcher writes these two, each with a fixed code of its own; a domain's
@@ -317,28 +367,25 @@ export function createSpaceCdp(deps: {
       );
     return frameId;
   };
-  // Section 5's guards on a raw pointer command: the point may belong to a
-  // frame agent input never reaches, and a press on a select, a colour or a
-  // date field would open a native picker no agent can answer.
+  // Section 5's guards on a raw pointer command, at each point it lands on:
+  // the point may belong to a frame agent input never reaches, and a press
+  // on a select, a colour or a date field would open a native picker no
+  // agent can answer.
   const guardPoint = async (
     session: TabSession,
+    contents: WebContents,
     call: CdpCall,
     step: Step,
   ): Promise<void> => {
-    if (call.method !== "Input.dispatchMouseEvent") return;
-    const { x, y, type, button } = call.params as {
-      x?: unknown;
-      y?: unknown;
-      type?: unknown;
-      button?: unknown;
-    };
-    if (typeof x !== "number" || typeof y !== "number") return;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    await checkPointerTarget(session, { x, y }, step, {
-      button: (typeof button === "string" ? button : "left") as Button,
-      press: type === "mousePressed",
-      extensions,
-    });
+    const points = pointsOf(call.method, call.params, () =>
+      contents.getZoomFactor(),
+    );
+    for (const { x, y, press, button } of points)
+      await checkPointerTarget(session, { x, y }, step, {
+        button,
+        press,
+        extensions,
+      });
   };
   // What Chromium's refusal, or its silence, means to the agent.
   const mapped = async (
@@ -402,7 +449,7 @@ export function createSpaceCdp(deps: {
               "Kamapathy sends input itself: use the click, press, scroll and drag routes.",
           });
       }
-      const { session } = await actions.readyContents(
+      const { contents, session } = await actions.readyContents(
         call.tabId,
         remaining(run.deadline),
         true,
@@ -427,7 +474,7 @@ export function createSpaceCdp(deps: {
       try {
         let answered: { result: unknown; newSession?: true };
         if (verdict.dispatcher) {
-          await guardPoint(session, call, step);
+          await guardPoint(session, contents, call, step);
           if (KEY_METHODS.includes(call.method))
             await input!.checkFocus(call.tabId, session, step);
           const dispatching = input!.dispatch(
