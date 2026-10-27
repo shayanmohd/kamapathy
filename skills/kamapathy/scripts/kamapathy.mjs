@@ -4,7 +4,12 @@ import { stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KamapathyError } from "./lib/errors.mjs";
-import { formatResult, line, printable } from "./lib/format.mjs";
+import {
+  formatResult,
+  line,
+  printable,
+  responseLines,
+} from "./lib/format.mjs";
 import {
   readFiles,
   readInput,
@@ -49,6 +54,7 @@ import {
   ERRORS,
   findCommand,
   matchRoute,
+  METHOD_PATTERN,
   outdated,
   pointFrom,
   requestBudget,
@@ -88,6 +94,8 @@ const POLICY = matchRoute("POST", "/tabs/:id/dialog-policy").body;
 const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
 const PASTE_LIMIT = 192 * 1024;
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
+// The page script routes take 1 MiB, and so does what their commands pipe.
+const SCRIPT_LIMIT = matchRoute("POST", "/tabs/:id/evaluate").limit;
 
 // A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
 function tab(value) {
@@ -268,11 +276,33 @@ function action(args, specs, count, usage) {
   if (rest.length > count + 1) throw new Error(`Use ${usage}.`);
   return { id: tab(rest[0]), rest, body, given };
 }
-// The text a command reads from standard input, as itself or as JSON.
-function piped(options, json = false) {
+// The text a command reads from standard input, as itself or as JSON, under
+// the shared 64 KiB limit unless the command names its route's own.
+function piped(options, json = false, limit = undefined) {
   const stream = options.stdin || process.stdin;
-  const read = { timeoutMs: options.stdinTimeoutMs };
+  const read = {
+    timeoutMs: options.stdinTimeoutMs,
+    ...(limit === undefined ? {} : { limit }),
+  };
   return json ? readJson(stream, read) : readInput(stream, read);
+}
+// A protocol method, checked before anything connects.
+function protocolMethod(value) {
+  const method = required(value, "method");
+  if (!METHOD_PATTERN.test(method))
+    throw new Error(
+      "method must be a protocol domain and command, such as Page.getNavigationHistory.",
+    );
+  return method;
+}
+// A protocol command's params, piped as one JSON object.
+async function protocolParams(options) {
+  const params = await piped(options, true);
+  if (!params || typeof params !== "object" || Array.isArray(params))
+    throw new Error(
+      "Standard input must be a JSON object of the command's params.",
+    );
+  return params;
 }
 
 // The session the commands that drive the client themselves work through.
@@ -1247,6 +1277,211 @@ export const PARSERS = {
   "release-input": (args) => {
     const { id } = action(args, {}, 0, "release-input <tab-id>");
     return { path: `/tabs/${id}/input/release`, method: "POST", body: {} };
+  },
+  // Section 8: the agent's own scripts and requests in the page. The
+  // expression is sent as piped, so its lines and columns stay the agent's.
+  evaluate: async (args, options) => {
+    const { id, body, given } = action(
+      args,
+      {
+        "--stdin": FLAGS.stdin,
+        "--timeout": {
+          field: "timeoutMs",
+          read: (value, flag) => bounded(value, flag, 2000, 60000),
+        },
+      },
+      0,
+      "evaluate <tab-id> --stdin",
+    );
+    if (!given.has("--stdin"))
+      throw new Error("Use evaluate <tab-id> --stdin and pipe the expression.");
+    const expression = await piped(options, false, SCRIPT_LIMIT);
+    return {
+      path: `/tabs/${id}/evaluate`,
+      method: "POST",
+      body: {
+        expression: required(expression.trim() && expression, "expression"),
+        ...body,
+      },
+      limit: SCRIPT_LIMIT,
+    };
+  },
+  // --header repeats, and --save streams the body into a new file through
+  // page.fetch, which removes the file after a failure.
+  fetch: async (args, options) => {
+    const rest = [];
+    const values = {};
+    const headers = {};
+    for (let index = 0; index < args.length; index++) {
+      const flag = args[index];
+      if (flag === "--header") {
+        const text = required(args[++index], flag);
+        const colon = text.indexOf(":");
+        const name = text.slice(0, colon).trim();
+        if (colon < 0 || !name)
+          throw new Error('--header must be "Name: value".');
+        const value = text.slice(colon + 1).trim();
+        headers[name] = Object.hasOwn(headers, name)
+          ? `${headers[name]}, ${value}`
+          : value;
+      } else if (flag === "--stdin") values[flag] = true;
+      else if (["--method", "--save", "--timeout"].includes(flag)) {
+        if (Object.hasOwn(values, flag))
+          throw new Error(`Give ${flag} once. Run help for usage.`);
+        values[flag] = required(args[++index], flag);
+      } else if (flag.startsWith("--"))
+        throw new Error(`Unknown option: ${flag}. Run help for usage.`);
+      else rest.push(flag);
+    }
+    if (rest.length > 2)
+      throw new Error(
+        'Use fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>].',
+      );
+    const id = tab(rest[0]);
+    const url = required(rest[1], "URL");
+    const save =
+      values["--save"] === undefined ? undefined : resolve(values["--save"]);
+    const timeout =
+      values["--timeout"] === undefined
+        ? undefined
+        : bounded(
+            values["--timeout"],
+            "--timeout",
+            1000,
+            save === undefined ? 60000 : 300000,
+          );
+    const fields = {
+      ...(values["--method"] === undefined
+        ? {}
+        : { method: values["--method"] }),
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...(values["--stdin"]
+        ? { body: await piped(options, false, SCRIPT_LIMIT) }
+        : {}),
+    };
+    if (save === undefined)
+      return {
+        path: `/tabs/${id}/fetch`,
+        method: "POST",
+        body: {
+          url,
+          ...fields,
+          ...(timeout === undefined ? {} : { timeoutMs: timeout }),
+        },
+        limit: SCRIPT_LIMIT,
+      };
+    const page = await pageFor(ownSession(options), id);
+    const saved = await page.fetch(url, {
+      ...fields,
+      ...(timeout === undefined ? {} : { timeout }),
+      saveAs: save,
+    });
+    (options.stdout || process.stdout).write(
+      `${options.json ? JSON.stringify(saved) : responseLines(saved).join("\n")}\n`,
+    );
+    return 0;
+  },
+  cdp: async (args, options) => {
+    const { id, rest, body, given } = action(
+      args,
+      {
+        "--stdin": FLAGS.stdin,
+        "--frame": { field: "frame", read: (value) => value },
+        "--timeout": {
+          field: "timeoutMs",
+          read: (value, flag) => bounded(value, flag, 1000, 60000),
+        },
+      },
+      1,
+      "cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]",
+    );
+    return {
+      path: `/tabs/${id}/cdp`,
+      method: "POST",
+      body: {
+        method: protocolMethod(rest[1]),
+        ...(given.has("--stdin")
+          ? { params: await protocolParams(options) }
+          : {}),
+        ...body,
+      },
+      limit: SCRIPT_LIMIT,
+    };
+  },
+  "space cdp": async (args, options) => {
+    const { rest, given } = takeFlags(args, { "--stdin": FLAGS.stdin });
+    if (rest.length > 2)
+      throw new Error("Use space cdp <space-id> <method> [--stdin].");
+    return {
+      path: `/spaces/${identifier(rest[0])}/cdp`,
+      method: "POST",
+      body: {
+        method: protocolMethod(rest[1]),
+        ...(given.has("--stdin")
+          ? { params: await protocolParams(options) }
+          : {}),
+      },
+    };
+  },
+  events: (args) => {
+    const { id, body } = action(
+      args,
+      {
+        "--max": {
+          field: "max",
+          read: (value, flag) => bounded(value, flag, 1, 10000),
+        },
+      },
+      0,
+      "events <tab-id> [--max <n>]",
+    );
+    return { path: `/tabs/${id}/events`, method: "POST", body };
+  },
+  // --cookie repeats, one name each, and stands instead of --cookies.
+  "clear-site-data": (args) => {
+    const rest = [];
+    const body = {};
+    const names = [];
+    const given = new Set();
+    for (let index = 0; index < args.length; index++) {
+      const flag = args[index];
+      if (flag === "--cookie") {
+        names.push(required(args[++index], flag));
+        continue;
+      }
+      if (!flag.startsWith("--")) {
+        rest.push(flag);
+        continue;
+      }
+      if (given.has(flag))
+        throw new Error(`Give ${flag} once. Run help for usage.`);
+      given.add(flag);
+      if (["--cookies", "--storage", "--cache"].includes(flag))
+        body[flag.slice(2)] = true;
+      else if (flag === "--origin")
+        body.origin = required(args[++index], flag);
+      else if (flag === "--timeout")
+        body.timeoutMs = bounded(args[++index], flag, 1000, 300000);
+      else throw new Error(`Unknown option: ${flag}. Run help for usage.`);
+    }
+    if (rest.length > 1)
+      throw new Error(
+        "Use clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>].",
+      );
+    if (names.length) {
+      if (body.cookies)
+        throw new Error("Use --cookies or --cookie <name>, not both.");
+      body.cookies = names.map((name) => ({ name }));
+    }
+    if (!body.cookies && !body.storage && !body.cache)
+      throw new Error(
+        "Say what to clear: --cookies, --cookie <name>, --storage or --cache.",
+      );
+    return {
+      path: `/tabs/${tab(rest[0])}/clear-site-data`,
+      method: "POST",
+      body,
+    };
   },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {

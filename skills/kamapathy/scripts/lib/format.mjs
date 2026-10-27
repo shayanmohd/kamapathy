@@ -32,6 +32,31 @@ function controlDetails(control) {
   return details.map((detail) => ` ${detail}`).join("");
 }
 
+// Why a frame's content is missing from a snapshot, by its iframe entry's
+// content.
+const UNREAD = {
+  pending: "still loading",
+  unavailable: "did not respond",
+  limit: "frame limit reached",
+};
+// After an iframe entry's label: the host its frame comes from and whether
+// it was read. Extension and internal frames are never read.
+function frameText(control) {
+  if (control.role !== "iframe" || control.content === undefined) return "";
+  if (control.content === "blocked")
+    return " extension or internal frame, not read";
+  let from = "";
+  if (control.origin === "opaque") from = " from an opaque origin";
+  else if (control.origin !== undefined)
+    try {
+      from = ` from ${line(new URL(control.origin).host)}`;
+    } catch {
+      from = ` from ${line(control.origin)}`;
+    }
+  const unread = UNREAD[control.content];
+  return ` frame${from}${unread ? `, not read: ${unread}` : ""}`;
+}
+
 // Which tab a header line names: its label, or its ID without one.
 const tabName = (tab) => line(tab.label ?? tab.id);
 // Who a tab belongs to: this page, a popup the page opened, or the person.
@@ -83,7 +108,7 @@ export function formatSnapshot(snapshot) {
     lines.push("", "Controls:");
     for (const control of snapshot.interactables) {
       lines.push(
-        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${controlDetails(control)}${control.locator ? ` locator: ${line(control.locator)}` : ""}`,
+        `${line(control.ref || control.selector)} ${line(control.role || control.tag)} ${JSON.stringify(line(control.label))}${frameText(control)}${controlDetails(control)}${control.locator ? ` locator: ${line(control.locator)}` : ""}`,
       );
       if (control.type === "file")
         lines.push(
@@ -114,6 +139,11 @@ export function formatSnapshot(snapshot) {
       "Truncated. Scope with --selector or request --full if needed.",
     );
   if (snapshot.next) lines.push("", `Next part: cursor ${line(snapshot.next)}`);
+  if (snapshot.unreadFrames > 0)
+    lines.push(
+      "",
+      `${Number(snapshot.unreadFrames)} ${snapshot.unreadFrames === 1 ? "frame was" : "frames were"} not read. Snapshot again, or scope to one with --root <ref>.`,
+    );
   return lines.join("\n");
 }
 
@@ -349,6 +379,108 @@ const WAITS = {
         : `ok: value ${printable(JSON.stringify(data.value)).slice(0, VALUE_CHARS)}`,
 };
 
+// What a page script answered: JSON as JSON, and the values JSON cannot
+// carry as JavaScript writes them, such as NaN, -0 and 12n.
+const valueText = (data) =>
+  data.unserializable !== undefined
+    ? line(data.unserializable)
+    : data.value === undefined
+      ? "undefined"
+      : printable(JSON.stringify(data.value));
+/**
+ * A fetched response: its status line, its headers, then its body, or the
+ * file a saved body went to.
+ */
+export function responseLines(response) {
+  const lines = [
+    [
+      Number(response.status),
+      line(response.statusText),
+      line(response.type),
+      line(response.url),
+      ...(response.redirected ? ["redirected"] : []),
+    ]
+      .filter((part) => part !== "")
+      .join(" "),
+    ...Object.entries(response.headers ?? {}).map(
+      ([name, value]) => `${line(name)}: ${line(value)}`,
+    ),
+  ];
+  if (response.savedPath !== undefined)
+    lines.push(
+      `saved ${printable(response.savedPath)} (${Number(response.bytes)} bytes)`,
+    );
+  else if (response.body) lines.push("", printable(response.body));
+  return lines;
+}
+// A protocol command's result, and a note when it opened a new session.
+const protocolText = (data) =>
+  [
+    printable(JSON.stringify(data.result ?? {})),
+    ...(data.newSession
+      ? ["new session: enable again what earlier commands enabled"]
+      : []),
+  ].join("\n");
+const timeText = (time) =>
+  Number.isFinite(time) ? new Date(time).toISOString() : "-";
+// One line per recorded event: when, which frame (- for the page itself,
+// gone for a frame that has gone) and what; then what was not recorded and
+// what is left to take.
+function eventsText(data) {
+  const plural = (count, word) =>
+    `${Number(count)} ${word}${count === 1 ? "" : "s"}`;
+  const lines = (data.events ?? []).map((event) =>
+    [
+      timeText(event.time),
+      event.frame === undefined
+        ? "-"
+        : event.frame === null
+          ? "gone"
+          : line(event.frame),
+      line(event.method),
+      ...(event.omitted
+        ? [`(too large, ${Number(event.bytes)} bytes)`]
+        : []),
+    ].join(" "),
+  );
+  if (data.dropped > 0) lines.push(`dropped ${plural(data.dropped, "event")}`);
+  for (const gap of data.gaps ?? [])
+    lines.push(
+      `not recorded while ${line(gap.reason)} from ${timeText(gap.from)} to ${timeText(gap.to)}`,
+    );
+  if (data.remaining > 0)
+    lines.push(`${plural(data.remaining, "more event")}: run events again`);
+  return lines.length ? lines.join("\n") : "No events.";
+}
+// What a clear removed, and who approved it. Cookie names never come back.
+function clearedText(data) {
+  const { cookies, storage, cache } = data.cleared ?? {};
+  const parts = [
+    ...(cookies
+      ? [
+          `${Number(cookies.removed)} ${cookies.removed === 1 ? "cookie" : "cookies"}${
+            cookies.domains?.length
+              ? ` from ${cookies.domains.map(line).join(", ")}`
+              : ""
+          }`,
+        ]
+      : []),
+    ...(storage?.length ? [`storage ${storage.map(line).join(", ")}`] : []),
+    ...(cache ? ["cache"] : []),
+    ...(data.approvedBy === "person" ? ["approved by the person"] : []),
+  ];
+  return `ok: cleared ${line(data.origin)}${parts.length ? `: ${parts.join("; ")}` : ""}`;
+}
+// One reading per section 8 command, whose answers carry no action to sum up.
+const PAGE_SCRIPTS = {
+  evaluate: valueText,
+  fetch: (data) => responseLines(data.response ?? {}).join("\n"),
+  cdp: protocolText,
+  "space cdp": protocolText,
+  events: eventsText,
+  "clear-site-data": clearedText,
+};
+
 // A PDF's pages, each under its own [page N] line.
 const pdfPages = (data) =>
   (data.pages ?? []).flatMap((page) => {
@@ -366,6 +498,8 @@ export function formatResult(data, command) {
       : `ok: status ${JSON.stringify(line(data.status))}`;
   if (command === "fail") return "ok: failure reported, the person has control";
   if (Object.hasOwn(WAITS, command ?? "")) return WAITS[command](data);
+  if (Object.hasOwn(PAGE_SCRIPTS, command ?? ""))
+    return PAGE_SCRIPTS[command](data);
   if (command === "space finish")
     return [
       `ok: space ${line(data.spaceId)} finished${data.closedSpace ? " and closed" : ""}`,

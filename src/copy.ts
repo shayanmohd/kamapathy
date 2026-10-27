@@ -697,3 +697,29 @@ export const sitePermissionsCopy = {
   removeOne: (permission: string, origin: string) =>
     `Remove ${permission} for ${origin}`,
 } as const;
+
+// "a", "a and b", "a, b and c".
+const listed = (items: string[]) =>
+  items.length < 2
+    ? items.join("")
+    : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+
+// The bar that asks the person before an agent clears a site's data in a
+// session they use.
+export const clearDataCopy = {
+  title: (host: string) => `Clear data for ${host}?`,
+  cookies: (what: string, origin: string, space: string, domains: string) =>
+    `An agent in ${space} wants to clear ${what} for ${origin}. You'll be signed out of ${domains} in every space that shares your sign-ins.`,
+  settings: (origin: string) =>
+    `Sites may forget your settings for ${origin} in every space that shares your sign-ins.`,
+  deny: "Don't clear",
+  clear: "Clear",
+  // What the cookies line says a clear takes.
+  what: (cookies: number, storage: boolean, cache: boolean) =>
+    listed([
+      `${cookies} ${cookies === 1 ? "cookie" : "cookies"}`,
+      ...(storage ? ["site storage"] : []),
+      ...(cache ? ["cached files"] : []),
+    ]),
+  domains: listed,
+} as const;

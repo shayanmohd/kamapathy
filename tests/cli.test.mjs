@@ -8133,6 +8133,1378 @@ describe("scripted sessions", () => {
       api.requests.filter((item) => item.path.endsWith("/input/release")),
     ).toHaveLength(1);
   });
+
+  // Section 8's client surface: page scripts, the page's own fetch, protocol
+  // commands, recorded events and clearing one site's data.
+  const scriptAnswers = {
+    ...inputAnswers,
+    "POST /tabs/tab-1/evaluate": { ok: true, tab: slots, value: 42 },
+  };
+  // What one evaluate answer resolves to, through a page of its own.
+  const evaluated = async (answer) => {
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/evaluate": { ok: true, tab: slots, ...answer },
+    });
+    const page = await inputPage(api);
+    return { page, value: await page.evaluate(() => document.title) };
+  };
+  // What a CLI command printed for one answer.
+  const printed = async (args, answer, piped) => {
+    const stdout = sink();
+    expect(
+      await runCli(args, {
+        env,
+        fetch: vi.fn(async () => Response.json(answer)),
+        health: current,
+        ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+        stdout,
+      }),
+      args.join(" "),
+    ).toBe(0);
+    return stdout.text();
+  };
+  // A fetch's whole answer, a non-2xx one included.
+  const fetchedResponse = {
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    url: "https://example.test/api/cart",
+    redirected: true,
+    type: "basic",
+    headers: { "content-type": "application/json", "x-total": "0" },
+    body: '{"items":[]}',
+  };
+  // The head of a streamed body, and an NDJSON answer that arrives in
+  // pieces of a few hundred bytes, so lines are split across chunks.
+  const streamedHead = {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    url: "https://example.test/report.bin",
+    redirected: false,
+    type: "basic",
+    headers: { "content-type": "application/octet-stream" },
+  };
+  const ndjsonAnswer =
+    (lines, size = 777) =>
+    () => {
+      const text = Buffer.from(
+        lines.map((item) => `${JSON.stringify(item)}\n`).join(""),
+      );
+      const parts = [];
+      for (let at = 0; at < text.length; at += size)
+        parts.push(text.subarray(at, at + size));
+      return new Response(ReadableStream.from(parts), {
+        headers: { "Content-Type": "application/x-ndjson" },
+      });
+    };
+  // A 300000 byte body as three data lines and its end.
+  const streamedBytes = randomBytes(300000);
+  const dataLines = [0, 100000, 200000].map((at) => ({
+    data: streamedBytes.subarray(at, at + 100000).toString("base64"),
+  }));
+  const savedStream = ndjsonAnswer([
+    { head: streamedHead },
+    ...dataLines,
+    { end: { bytes: 300000 } },
+  ]);
+  const fetchFolder = async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kamapathy-fetch-test-"));
+    directories.push(directory);
+    return directory;
+  };
+
+  it("page.evaluate decodes every value form", async () => {
+    const { page, value } = await evaluated({
+      value: { rows: [1, 2], name: "Avery", none: null },
+    });
+    expect(value).toEqual({ rows: [1, 2], name: "Avery", none: null });
+    // The answer carries the tab, so the page follows it.
+    expect([page.url, page.title]).toEqual([slots.url, slots.title]);
+    for (const [answer, expected] of [
+      [{ value: null }, null],
+      [{ value: "Slots" }, "Slots"],
+      [{ value: 0 }, 0],
+      [{ unserializable: "NaN" }, Number.NaN],
+      [{ unserializable: "Infinity" }, Number.POSITIVE_INFINITY],
+      [{ unserializable: "-Infinity" }, Number.NEGATIVE_INFINITY],
+      [{ unserializable: "-0" }, -0],
+      [{ unserializable: "12n" }, 12n],
+      [{ unserializable: "-9007199254740993n" }, -9007199254740993n],
+      [{}, undefined],
+    ])
+      expect(
+        Object.is((await evaluated(answer)).value, expected),
+        JSON.stringify(answer),
+      ).toBe(true);
+    await expect(evaluated({ unserializable: "Wat" })).rejects.toMatchObject({
+      code: "invalid_response",
+      entry: "page.evaluate",
+    });
+    // The CLI prints the value as JSON, and the rest as JavaScript writes them.
+    for (const [answer, text] of [
+      [{ value: { rows: 3 } }, '{"rows":3}'],
+      [{ value: "Slots" }, '"Slots"'],
+      [{ value: null }, "null"],
+      [{ unserializable: "NaN" }, "NaN"],
+      [{ unserializable: "-0" }, "-0"],
+      [{ unserializable: "12n" }, "12n"],
+      [{}, "undefined"],
+    ])
+      expect(
+        await printed(
+          ["evaluate", "tab-1", "--stdin"],
+          { ok: true, tab: slots, ...answer },
+          "document.title",
+        ),
+        JSON.stringify(answer),
+      ).toBe(`${text}\n`);
+    const json = sink();
+    await runCli(["evaluate", "tab-1", "--stdin", "--json"], {
+      env,
+      fetch: vi.fn(async () =>
+        Response.json({ ok: true, tab: slots, unserializable: "12n" }),
+      ),
+      health: current,
+      stdin: Readable.from(["10n + 2n"]),
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({
+      ok: true,
+      tab: slots,
+      unserializable: "12n",
+    });
+  });
+
+  it("page.evaluate refuses a bad call before sending", async () => {
+    const api = fakeApi(scriptAnswers);
+    const page = await inputPage(api);
+    const sent = api.requests.length;
+    const expected = "page.evaluate(fnOrString, arg?, { timeout? })";
+    // An expression takes no argument.
+    for (const arg of [5, null, { rows: 3 }])
+      await expect(
+        page.evaluate("document.title", arg),
+        JSON.stringify(arg),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.evaluate",
+        expected,
+      });
+    // An argument must be JSON data, and the error names where it is not.
+    const loop = { name: "loop" };
+    loop.self = loop;
+    for (const [arg, what, path] of [
+      [{ items: [{ total: 12n }] }, "a BigInt", "arg.items[0].total"],
+      [5n, "a BigInt", "arg"],
+      [{ total: Number.POSITIVE_INFINITY }, "Infinity", "arg.total"],
+      [[1, Number.NaN], "NaN", "arg[1]"],
+      [{ run: () => 1 }, "a function", "arg.run"],
+      [{ tag: Symbol("tag") }, "a symbol", "arg.tag"],
+      [loop, "a cycle", "arg.self"],
+      [[1, undefined], "undefined", "arg[1]"],
+      [{ "first name": [undefined] }, "undefined", 'arg["first name"][0]'],
+    ]) {
+      const refused = await page.evaluate((value) => value, arg).then(
+        () => null,
+        (error) => error,
+      );
+      expect(refused, path).toMatchObject({
+        code: "invalid_argument",
+        entry: "page.evaluate",
+        expected: `JSON data at ${path}`,
+      });
+      expect(refused.message, path).toBe(
+        `page.evaluate got ${what} at ${path}, which JSON cannot carry. Pass strings, finite numbers, booleans, null, arrays and objects.`,
+      );
+    }
+    // The first argument, the options and their range are checked too.
+    for (const call of [
+      () => page.evaluate(5),
+      () => page.evaluate(""),
+      () => page.evaluate(() => 1, undefined, { timeout: 1000 }),
+      () => page.evaluate(() => 1, undefined, { timeoutMs: 5000 }),
+    ])
+      await expect(call(), String(call)).rejects.toMatchObject({
+        entry: "page.evaluate",
+      });
+    expect(api.requests).toHaveLength(sent);
+    // An undefined property is absent, and an object reached twice is no
+    // cycle.
+    const shared = { n: 1 };
+    await page.evaluate((value) => value, { a: shared, b: shared, c: undefined });
+    expect(api.requests.at(-1).body).toEqual({
+      function: "(value) => value",
+      arg: { a: { n: 1 }, b: { n: 1 } },
+      timeoutMs: 15000,
+    });
+    // The CLI needs the expression on stdin.
+    const unused = vi.fn();
+    for (const args of [
+      ["evaluate", "tab-1"],
+      ["evaluate", "tab-1", "--stdin", "--timeout", "1000"],
+      ["evaluate", "tab-1", "--stdin", "--frame", "0"],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from(["document.title"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    await expect(
+      runCli(["evaluate", "tab-1", "--stdin"], {
+        env,
+        fetch: unused,
+        health: current,
+        stdin: Readable.from(["  \n"]),
+        stdout: sink(),
+      }),
+    ).rejects.toThrow(/expression/);
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("page.evaluate sends the function source and the argument", async () => {
+    const api = fakeApi(scriptAnswers);
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.evaluate((x) => x * 2, 21)).toBe(42);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/evaluate",
+        body: { function: "(x) => x * 2", arg: 21, timeoutMs: 15000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(20000);
+      await page.evaluate(() => document.title);
+      expect(api.requests.at(-1).body).toEqual({
+        function: "() => document.title",
+        timeoutMs: 15000,
+      });
+      await page.evaluate(
+        "await Promise.resolve(document.title)",
+        undefined,
+        { timeout: 9000 },
+      );
+      expect(api.requests.at(-1).body).toEqual({
+        expression: "await Promise.resolve(document.title)",
+        timeoutMs: 9000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(14000);
+      // An async function travels in the function field with its argument,
+      // never as an expression: the page awaits a called function's promise,
+      // where replMode would answer {}.
+      await page.evaluate(async (args) => args.stars + 1, { stars: 3 });
+      expect(api.requests.at(-1).body).toEqual({
+        function: "async (args) => args.stars + 1",
+        arg: { stars: 3 },
+        timeoutMs: 15000,
+      });
+      // Every JSON argument is sent as given, a falsy one included.
+      for (const arg of [0, false, null, "", [], {}]) {
+        await page.evaluate((value) => value, arg);
+        expect(api.requests.at(-1).body, JSON.stringify(arg)).toEqual({
+          function: "(value) => value",
+          arg,
+          timeoutMs: 15000,
+        });
+      }
+      // A function is sent as what its toString gives, so a site pack's
+      // page tool, which is source text read from its file, reaches the
+      // function field with its checked arguments. The newline it ends with
+      // keeps a trailing line comment from swallowing the call.
+      const tool = "async (args) => args.stars + 1 // the open repository";
+      const fromText = Object.assign(() => {}, { toString: () => `${tool}\n` });
+      await page.evaluate(fromText, { stars: 3 });
+      expect(api.requests.at(-1).body).toEqual({
+        function: `${tool}\n`,
+        arg: { stars: 3 },
+        timeoutMs: 15000,
+      });
+      // The command sends the expression as it was piped.
+      await runCli(["evaluate", "tab-1", "--stdin", "--timeout", "30000"], {
+        env,
+        fetch: api.fetch,
+        health: current,
+        stdin: Readable.from(["\nawait 1\n"]),
+        stdout: sink(),
+      });
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/evaluate",
+        body: { expression: "\nawait 1\n", timeoutMs: 30000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(35000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    // A body up to the route's 1 MiB is sent; past it nothing is.
+    await page.evaluate((value) => value.length, "x".repeat(600000));
+    expect(api.requests.at(-1).body.arg).toHaveLength(600000);
+    const sent = api.requests.length;
+    await expect(
+      page.evaluate((value) => value.length, "x".repeat(1100000)),
+    ).rejects.toMatchObject({ code: "request_too_large" });
+    expect(api.requests).toHaveLength(sent);
+  });
+
+  it("a page function's ReferenceError gets the hint about script variables", async () => {
+    const failed = await runIn(
+      `${firstPage} await page.evaluate(() => total);`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/evaluate": refusal(422, {
+          code: "script_error",
+          message:
+            "The page function failed at line 1, column 7: ReferenceError: total is not defined",
+          name: "ReferenceError",
+          line: 1,
+          column: 7,
+          description: "ReferenceError: total is not defined",
+        }),
+      },
+      { options: { health: current } },
+    );
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain(
+      "error: script_error: The page function failed at line 1, column 7: ReferenceError: total is not defined\n",
+    );
+    expect(failed.stderr).toContain(
+      "hint: Page functions run in the page and cannot see script variables. Pass values as the argument: page.evaluate((x) => x * 2, x).\n",
+    );
+  });
+
+  it("a refused protocol command gets a hint naming its reason", async () => {
+    const hints = async (fields) => {
+      const failed = await runIn(
+        `${firstPage} await page.cdp(${JSON.stringify(fields.method)});`,
+        {
+          ...sectionTwo,
+          "POST /tabs/tab-1/cdp": refusal(403, {
+            code: "cdp_method_blocked",
+            message: `Kamapathy does not pass ${fields.method}.`,
+            ...fields,
+          }),
+        },
+        { options: { health: current } },
+      );
+      expect(failed.status, fields.method).toBe(1);
+      return failed.stderr
+        .split("\n")
+        .filter((text) => text.startsWith("hint: "));
+    };
+    expect(
+      await hints({ method: "Network.getCookies", reason: "session" }),
+    ).toEqual(["hint: Kamapathy refused Network.getCookies for reason session."]);
+    expect(
+      await hints({ method: "Page.bringToFront", reason: "person" }),
+    ).toEqual(["hint: Kamapathy refused Page.bringToFront for reason person."]);
+    // A command that is the person's names the call that does the same.
+    expect(
+      await hints({
+        method: "Fetch.enable",
+        reason: "person",
+        param: "handleAuthRequests",
+      }),
+    ).toEqual([
+      "hint: Kamapathy refused Fetch.enable for reason person. space.setHTTPCredentials({ origin, username, password }) answers a site's sign-in in this space.",
+    ]);
+    expect(
+      await hints({ method: "Fetch.continueWithAuth", reason: "person" }),
+    ).toEqual([
+      "hint: Kamapathy refused Fetch.continueWithAuth for reason person. space.setHTTPCredentials({ origin, username, password }) answers a site's sign-in in this space.",
+    ]);
+    for (const param of ["key", "commands", "button"])
+      expect(
+        await hints({ method: "Input.dispatchKeyEvent", reason: "person", param }),
+        param,
+      ).toEqual([
+        "hint: Kamapathy refused Input.dispatchKeyEvent for reason person. page.keyboard.paste(text) offers the page a paste without the system clipboard.",
+      ]);
+  });
+
+  it("page.fetch resolves the response object", async () => {
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      },
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.fetch("/api/cart")).toEqual(fetchedResponse);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: { url: "/api/cart", timeoutMs: 20000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(25000);
+      // Every option reaches the route under its own name, timeout as
+      // timeoutMs.
+      const options = {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Token": "t" },
+        body: '{"qty":2}',
+        cache: "no-store",
+        credentials: "include",
+        integrity: "sha256-abc",
+        keepalive: true,
+        mode: "same-origin",
+        redirect: "manual",
+        referrer: "https://example.test/",
+        referrerPolicy: "no-referrer",
+        timeout: 45000,
+      };
+      await page.fetch("https://example.test/api/cart", options);
+      const { timeout, ...fields } = options;
+      expect(api.requests.at(-1).body).toEqual({
+        url: "https://example.test/api/cart",
+        ...fields,
+        timeoutMs: timeout,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(50000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    // A bad option, and a timeout past a minute without saveAs, are refused
+    // before anything is sent.
+    const sent = api.requests.length;
+    for (const [options, option] of [
+      [{ timeout: 61000 }, "timeout"],
+      [{ timeout: 500 }, "timeout"],
+      [{ mode: "navigate" }, "mode"],
+      [{ timout: 1000 }, "timout"],
+    ])
+      await expect(
+        page.fetch("/api/cart", options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
+        code: "invalid_option",
+        entry: "page.fetch",
+        option,
+      });
+    await expect(page.fetch("")).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "page.fetch",
+    });
+    expect(api.requests).toHaveLength(sent);
+    // The command prints the status line, the headers and the body.
+    expect(
+      await printed(["fetch", "tab-1", "/api/cart"], {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      }),
+    ).toBe(
+      [
+        "404 Not Found basic https://example.test/api/cart redirected",
+        "content-type: application/json",
+        "x-total: 0",
+        "",
+        '{"items":[]}',
+        "",
+      ].join("\n"),
+    );
+    // An opaque answer has no status text, headers or body to print.
+    expect(
+      await printed(["fetch", "tab-1", "https://cdn.test/x"], {
+        ok: true,
+        tab: slots,
+        response: {
+          ok: false,
+          status: 0,
+          statusText: "",
+          url: "https://cdn.test/x",
+          redirected: false,
+          type: "opaque",
+          headers: {},
+          body: "",
+        },
+      }),
+    ).toBe("0 opaque https://cdn.test/x\n");
+    // Its flags build the same body.
+    const cli = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": {
+        ok: true,
+        tab: slots,
+        response: fetchedResponse,
+      },
+    });
+    await runCli(
+      [
+        "fetch",
+        "tab-1",
+        "https://example.test/api/cart",
+        "--method",
+        "POST",
+        "--header",
+        "Content-Type: application/json",
+        "--header",
+        "X-Token:  t ",
+        "--stdin",
+        "--timeout",
+        "45000",
+      ],
+      {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        stdin: Readable.from(['{"qty":2}']),
+        stdout: sink(),
+      },
+    );
+    expect(cli.requests).toEqual([
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: {
+          url: "https://example.test/api/cart",
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Token": "t" },
+          body: '{"qty":2}',
+          timeoutMs: 45000,
+        },
+      },
+    ]);
+    const unused = vi.fn();
+    for (const args of [
+      ["fetch", "tab-1"],
+      ["fetch", "tab-1", "/x", "--header", "no colon"],
+      ["fetch", "tab-1", "/x", "--header", ": empty"],
+      ["fetch", "tab-1", "/x", "--timeout", "61000"],
+      ["fetch", "tab-1", "/x", "--timeout", "500"],
+      ["fetch", "tab-1", "/x", "--mode", "cors"],
+      ["fetch", "tab-1", "/x", "--method", "GET", "--method", "POST"],
+      ["fetch", "tab-1", "/x", "/y"],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from(["x"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("saveAs streams and never overwrites", async () => {
+    const directory = await fetchFolder();
+    const path = join(directory, "report.bin");
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": savedStream,
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(
+        await page.fetch("/report.bin", { saveAs: path, timeout: 120000 }),
+      ).toEqual({ ...streamedHead, savedPath: path, bytes: 300000 });
+      expect(timeouts).toHaveBeenLastCalledWith(125000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/fetch",
+      body: { url: "/report.bin", timeoutMs: 120000, stream: true },
+    });
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    if (posix) expect((await stat(path)).mode & 0o777).toBe(0o600);
+    // A path already taken fails before anything is sent, and the file
+    // stays as it was.
+    const sent = api.requests.length;
+    await expect(
+      page.fetch("/report.bin", { saveAs: path }),
+    ).rejects.toMatchObject({ code: "file_exists", path, entry: "page.fetch" });
+    expect(api.requests).toHaveLength(sent);
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    // An error line, a stream without its end line and a refusal before the
+    // head each leave no file behind.
+    const failures = [
+      [
+        ndjsonAnswer([
+          { head: streamedHead },
+          dataLines[0],
+          {
+            error: {
+              code: "fetch_timeout",
+              message: "The fetch did not answer within 20000 ms.",
+              awaited: "body",
+              timeoutMs: 20000,
+            },
+          },
+          dataLines[1],
+        ]),
+        {
+          code: "fetch_timeout",
+          status: 504,
+          awaited: "body",
+          timeoutMs: 20000,
+        },
+      ],
+      [
+        ndjsonAnswer([{ head: streamedHead }, dataLines[0]]),
+        { code: "download_interrupted" },
+      ],
+      [
+        ndjsonAnswer([{ head: streamedHead }, ...dataLines, { end: { bytes: 5 } }]),
+        { code: "download_interrupted" },
+      ],
+      [
+        () =>
+          new Response(`${JSON.stringify({ head: streamedHead })}\n{"data":`, {
+            headers: { "Content-Type": "application/x-ndjson" },
+          }),
+        { code: "download_interrupted" },
+      ],
+      [
+        () => new Response("not json\n"),
+        { code: "invalid_response" },
+      ],
+      [
+        refusal(403, {
+          code: "agent_scripts_off",
+          message:
+            "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
+        }),
+        { code: "agent_scripts_off", status: 403 },
+      ],
+    ];
+    for (const [answer, expected] of failures) {
+      const failing = fakeApi({
+        ...scriptAnswers,
+        "POST /tabs/tab-1/fetch": answer,
+      });
+      const target = join(directory, `failed-${expected.code}.bin`);
+      const failed = await (await inputPage(failing))
+        .fetch("/report.bin", { saveAs: target })
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(failed, expected.code).toMatchObject({
+        ...expected,
+        entry: "page.fetch",
+      });
+      expect(existsSync(target), expected.code).toBe(false);
+    }
+  });
+
+  it("a takeover during a saved fetch stops the run", async () => {
+    const directory = await fetchFolder();
+    const target = join(directory, "taken.bin");
+    const message =
+      "The person took over this space. Stop, and resume only when they ask you to.";
+    const run = await runIn(
+      `${firstPage}
+      const error = await page.fetch("/report.bin", { saveAs: ${JSON.stringify(target)} }).catch((error) => error);
+      globalThis.__scripted = { code: error.code, hardStop: error.hardStop };
+      process.stdout.write("after\\n");`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/fetch": ndjsonAnswer([
+          { head: streamedHead },
+          dataLines[0],
+          {
+            error: {
+              code: "human_control",
+              message,
+              reason: "manual",
+              spaceId: "space-1",
+            },
+          },
+        ]),
+      },
+      { options: { health: current } },
+    );
+    expect(run).toMatchObject({
+      status: 3,
+      stdout: "",
+      stderr: `${takeover}${message}\n${withheld}`,
+    });
+    expect(globalThis.__scripted).toEqual({
+      code: "human_control",
+      hardStop: true,
+    });
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("fetch --save cleans up after a failure", async () => {
+    const directory = await fetchFolder();
+    const path = join(directory, "report.bin");
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": savedStream,
+    });
+    const stdout = sink();
+    expect(
+      await runCli(
+        ["fetch", "tab-1", "/report.bin", "--save", path, "--timeout", "90000"],
+        { env, fetch: api.fetch, health: current, stdout },
+      ),
+    ).toBe(0);
+    expect(api.requests).toEqual([
+      {
+        method: "POST",
+        path: "/tabs/tab-1/fetch",
+        body: { url: "/report.bin", timeoutMs: 90000, stream: true },
+      },
+    ]);
+    expect(stdout.text()).toBe(
+      [
+        "200 OK basic https://example.test/report.bin",
+        "content-type: application/octet-stream",
+        `saved ${path} (300000 bytes)`,
+        "",
+      ].join("\n"),
+    );
+    expect((await readFile(path)).equals(streamedBytes)).toBe(true);
+    // --json prints what page.fetch resolved, and a taken path is refused.
+    const json = sink();
+    const second = join(directory, "second.bin");
+    await runCli(["fetch", "tab-1", "/report.bin", "--save", second, "--json"], {
+      env,
+      fetch: api.fetch,
+      health: current,
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({
+      ...streamedHead,
+      savedPath: second,
+      bytes: 300000,
+    });
+    const taken = sink();
+    expect(
+      await main(["fetch", "tab-1", "/report.bin", "--save", path], {
+        env,
+        fetch: api.fetch,
+        health: current,
+        stdout: sink(),
+        stderr: taken,
+      }),
+    ).toBe(1);
+    expect(taken.text()).toBe(
+      `Kamapathy: ${path} already exists, so nothing was fetched. Choose another path or remove that file first.\n`,
+    );
+    // A failure in the stream prints its error and leaves no file.
+    const failing = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/fetch": ndjsonAnswer([
+        { head: streamedHead },
+        dataLines[0],
+        {
+          error: {
+            code: "fetch_timeout",
+            message: "The fetch did not answer within 20000 ms.",
+            awaited: "body",
+            timeoutMs: 20000,
+          },
+        },
+      ]),
+    });
+    const target = join(directory, "failed.bin");
+    const stderr = sink();
+    expect(
+      await main(["fetch", "tab-1", "/report.bin", "--save", target], {
+        env,
+        fetch: failing.fetch,
+        health: current,
+        stdout: sink(),
+        stderr,
+      }),
+    ).toBe(1);
+    expect(stderr.text()).toBe(
+      "Kamapathy: 504 fetch_timeout: The fetch did not answer within 20000 ms.\n",
+    );
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("page.cdp and space cdp send params from stdin", async () => {
+    const history = { entries: [], currentIndex: 0 };
+    const targets = { targetInfos: [] };
+    const answers = {
+      ...scriptAnswers,
+      "POST /tabs/tab-1/cdp": { ok: true, result: history, newSession: true },
+      "POST /spaces/space-1/cdp": { ok: true, result: targets },
+    };
+    const api = fakeApi(answers);
+    const client = await connect({ env, fetch: api.fetch, health: current });
+    const research = await client.space("space-1");
+    const page = await research.open("https://example.test/reserve");
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.cdp("Page.getNavigationHistory")).toEqual(history);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/cdp",
+        body: {
+          method: "Page.getNavigationHistory",
+          params: {},
+          timeoutMs: 15000,
+        },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(20000);
+      // A frame by its path or by its entry's ref, and a timeout of its own.
+      await page.cdp(
+        "Runtime.evaluate",
+        { expression: "1" },
+        { frame: "0/1", timeout: 5000 },
+      );
+      expect(api.requests.at(-1).body).toEqual({
+        method: "Runtime.evaluate",
+        params: { expression: "1" },
+        frame: "0/1",
+        timeoutMs: 5000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(10000);
+      await page.cdp("DOM.getDocument", undefined, { frame: "@e4" });
+      expect(api.requests.at(-1).body).toEqual({
+        method: "DOM.getDocument",
+        params: {},
+        frame: "@e4",
+        timeoutMs: 15000,
+      });
+    } finally {
+      timeouts.mockRestore();
+    }
+    expect(await research.cdp("Target.getTargets")).toEqual(targets);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/spaces/space-1/cdp",
+      body: { method: "Target.getTargets", params: {} },
+    });
+    await research.cdp("Browser.getVersion", { verbose: true });
+    expect(api.requests.at(-1).body).toEqual({
+      method: "Browser.getVersion",
+      params: { verbose: true },
+    });
+    // A method outside the pattern, params JSON cannot carry, and a bad
+    // option are refused before anything is sent.
+    const sent = api.requests.length;
+    for (const [call, code] of [
+      [() => page.cdp("getNavigationHistory"), "invalid_argument"],
+      [() => page.cdp("page.reload"), "invalid_argument"],
+      [() => page.cdp("Page.navigate", { when: 1n }), "invalid_argument"],
+      [() => page.cdp("Page.reload", {}, { timeout: 500 }), "invalid_option"],
+      [() => page.cdp("Page.reload", {}, { frames: "0" }), "invalid_option"],
+      [() => research.cdp("Target"), "invalid_argument"],
+      [() => research.cdp("Target.getTargets", { at: Number.NaN }), "invalid_argument"],
+    ])
+      await expect(call(), String(call)).rejects.toMatchObject({ code });
+    expect(api.requests).toHaveLength(sent);
+    // The commands read the params from stdin.
+    for (const [args, path, body, piped] of [
+      [
+        [
+          "cdp",
+          "tab-1",
+          "Runtime.evaluate",
+          "--stdin",
+          "--frame",
+          "0/1",
+          "--timeout",
+          "5000",
+        ],
+        "/tabs/tab-1/cdp",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          frame: "0/1",
+          timeoutMs: 5000,
+        },
+        '{"expression":"1"}',
+      ],
+      [
+        ["cdp", "tab-1", "Page.getNavigationHistory", "--frame", "@e4"],
+        "/tabs/tab-1/cdp",
+        { method: "Page.getNavigationHistory", frame: "@e4" },
+      ],
+      [
+        ["space", "cdp", "space-1", "Target.getTargets", "--stdin"],
+        "/spaces/space-1/cdp",
+        { method: "Target.getTargets", params: {} },
+        "{}",
+      ],
+      [
+        ["space", "cdp", "space-1", "Browser.getVersion"],
+        "/spaces/space-1/cdp",
+        { method: "Browser.getVersion" },
+      ],
+    ]) {
+      const cli = fakeApi(answers);
+      await runCli(args, {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+        stdout: sink(),
+      });
+      expect(cli.requests, args.join(" ")).toEqual([
+        { method: "POST", path, body },
+      ]);
+    }
+    // They print the result, and say when the command opened a new session.
+    expect(
+      await printed(["cdp", "tab-1", "Page.getNavigationHistory"], {
+        ok: true,
+        result: history,
+        newSession: true,
+      }),
+    ).toBe(
+      '{"entries":[],"currentIndex":0}\nnew session: enable again what earlier commands enabled\n',
+    );
+    expect(
+      await printed(["space", "cdp", "space-1", "Target.getTargets"], {
+        ok: true,
+        result: targets,
+      }),
+    ).toBe('{"targetInfos":[]}\n');
+    const unused = vi.fn();
+    for (const [args, piped] of [
+      [["cdp", "tab-1"]],
+      [["cdp", "tab-1", "nope"]],
+      [["cdp", "tab-1", "Page.reload", "--stdin"], "[1]"],
+      [["cdp", "tab-1", "Page.reload", "--stdin"], "not json"],
+      [["cdp", "tab-1", "Page.reload", "--timeout", "500"]],
+      [["cdp", "tab-1", "Page.reload", "Page.stop"]],
+      [["space", "cdp", "space-1"]],
+      [["space", "cdp", "space-1", "Target.getTargets", "--frame", "0"]],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from([piped ?? "{}"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("events prints one line per event", async () => {
+    const at = (seconds) => Date.UTC(2026, 9, 27, 10, 0, seconds, 5);
+    const drained = {
+      events: [
+        { time: at(0), method: "Page.frameNavigated", params: { frame: {} } },
+        {
+          time: at(1),
+          method: "Network.requestWillBeSent",
+          params: {},
+          frame: "0/1",
+        },
+        {
+          time: at(2),
+          method: "Network.responseReceived",
+          frame: null,
+          omitted: "too_large",
+          bytes: 2097152,
+        },
+      ],
+      dropped: 3,
+      gaps: [{ reason: "human_control", from: at(3), to: at(9) }],
+      remaining: 12,
+    };
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/events": { ok: true, ...drained },
+    });
+    const page = await inputPage(api);
+    expect(await page.events()).toEqual(drained);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/events",
+      body: { max: 10000 },
+    });
+    await page.events({ max: 50 });
+    expect(api.requests.at(-1).body).toEqual({ max: 50 });
+    const sent = api.requests.length;
+    for (const options of [{ max: 0 }, { max: 10001 }, { limit: 5 }])
+      await expect(
+        page.events(options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({ code: "invalid_option", entry: "page.events" });
+    expect(api.requests).toHaveLength(sent);
+    // The command: time, the frame path or - for the page and gone for a
+    // frame that has gone, and the method; then what was not recorded.
+    expect(
+      await printed(["events", "tab-1", "--max", "50"], {
+        ok: true,
+        ...drained,
+      }),
+    ).toBe(
+      [
+        "2026-10-27T10:00:00.005Z - Page.frameNavigated",
+        "2026-10-27T10:00:01.005Z 0/1 Network.requestWillBeSent",
+        "2026-10-27T10:00:02.005Z gone Network.responseReceived (too large, 2097152 bytes)",
+        "dropped 3 events",
+        "not recorded while human_control from 2026-10-27T10:00:03.005Z to 2026-10-27T10:00:09.005Z",
+        "12 more events: run events again",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      await printed(["events", "tab-1"], {
+        ok: true,
+        events: [],
+        dropped: 0,
+        gaps: [],
+        remaining: 0,
+      }),
+    ).toBe("No events.\n");
+    const cli = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/events": { ok: true, ...drained },
+    });
+    const json = sink();
+    await runCli(["events", "tab-1", "--max", "50", "--json"], {
+      env,
+      fetch: cli.fetch,
+      health: current,
+      stdout: json,
+    });
+    expect(cli.requests).toEqual([
+      { method: "POST", path: "/tabs/tab-1/events", body: { max: 50 } },
+    ]);
+    expect(JSON.parse(json.text())).toEqual({ ok: true, ...drained });
+    const unused = vi.fn();
+    for (const args of [
+      ["events"],
+      ["events", "tab-1", "--max", "0"],
+      ["events", "tab-1", "--max", "10001"],
+      ["events", "tab-1", "--stdin"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("clear-site-data maps its flags", async () => {
+    const cleared = {
+      ok: true,
+      origin: "https://shop.test",
+      cleared: {
+        cookies: { removed: 2, domains: ["shop.test", ".shop.test"] },
+        storage: ["localStorage", "indexedDB"],
+        cache: true,
+      },
+      approvedBy: "person",
+    };
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/clear-site-data": cleared,
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.clearSiteData({ cookies: true })).toEqual(cleared);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/clear-site-data",
+        body: { cookies: true, timeoutMs: 60000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(65000);
+      await page.clearSiteData({
+        origin: "https://shop.test",
+        cookies: [{ name: "cart", path: "/" }],
+        storage: ["localStorage"],
+        cache: true,
+        timeout: 120000,
+      });
+      expect(api.requests.at(-1).body).toEqual({
+        origin: "https://shop.test",
+        cookies: [{ name: "cart", path: "/" }],
+        storage: ["localStorage"],
+        cache: true,
+        timeoutMs: 120000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(125000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    const sent = api.requests.length;
+    for (const options of [
+      undefined,
+      {},
+      { cache: false },
+      { cookie: true },
+      { cookies: true, timeout: 500 },
+    ])
+      await expect(
+        page.clearSiteData(options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
+        code: "invalid_option",
+        entry: "page.clearSiteData",
+      });
+    expect(api.requests).toHaveLength(sent);
+    // The command's flags build the same bodies.
+    for (const [args, body] of [
+      [["clear-site-data", "tab-1", "--cookies"], { cookies: true }],
+      [
+        [
+          "clear-site-data",
+          "tab-1",
+          "--origin",
+          "https://shop.test",
+          "--cookie",
+          "cart",
+          "--cookie",
+          "session",
+          "--storage",
+          "--cache",
+          "--timeout",
+          "120000",
+        ],
+        {
+          origin: "https://shop.test",
+          cookies: [{ name: "cart" }, { name: "session" }],
+          storage: true,
+          cache: true,
+          timeoutMs: 120000,
+        },
+      ],
+      [["clear-site-data", "tab-1", "--storage"], { storage: true }],
+    ]) {
+      const cli = fakeApi({
+        ...scriptAnswers,
+        "POST /tabs/tab-1/clear-site-data": cleared,
+      });
+      await runCli(args, {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        stdout: sink(),
+      });
+      expect(cli.requests, args.join(" ")).toEqual([
+        { method: "POST", path: "/tabs/tab-1/clear-site-data", body },
+      ]);
+    }
+    // It prints what was cleared, and who approved it.
+    expect(await printed(["clear-site-data", "tab-1", "--cookies"], cleared)).toBe(
+      "ok: cleared https://shop.test: 2 cookies from shop.test, .shop.test; storage localStorage, indexedDB; cache; approved by the person\n",
+    );
+    expect(
+      await printed(["clear-site-data", "tab-1", "--cookie", "cart"], {
+        ok: true,
+        origin: "https://shop.test",
+        cleared: { cookies: { removed: 0, domains: [] } },
+      }),
+    ).toBe("ok: cleared https://shop.test: 0 cookies\n");
+    const unused = vi.fn();
+    for (const args of [
+      ["clear-site-data", "tab-1"],
+      ["clear-site-data", "tab-1", "--cookies", "--cookie", "cart"],
+      ["clear-site-data", "tab-1", "--cookie"],
+      ["clear-site-data", "tab-1", "--cache", "--timeout", "500"],
+      ["clear-site-data", "tab-1", "--cache", "--origin"],
+      ["clear-site-data", "tab-1", "--cache", "--all"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("snapshots print frame entries and the unread line", async () => {
+    const framed = {
+      tabId: "tab-1",
+      url: "https://shop.test/checkout",
+      title: "Checkout",
+      interactables: [
+        { ref: "@e1", role: "button", label: "Pay" },
+        {
+          ref: "@e2",
+          role: "iframe",
+          label: "Card",
+          crossOrigin: true,
+          origin: "https://js.stripe.com",
+          contentFrame: "0",
+          content: "read",
+        },
+        {
+          ref: "@e3",
+          role: "textbox",
+          label: "Card number",
+          frame: "0",
+          valueHidden: true,
+        },
+        {
+          ref: "@e4",
+          role: "iframe",
+          label: "Map",
+          crossOrigin: true,
+          origin: "http://127.0.0.1:4321",
+          contentFrame: "1",
+          content: "pending",
+        },
+        {
+          ref: "@e5",
+          role: "iframe",
+          label: "Ads",
+          crossOrigin: true,
+          origin: "opaque",
+          contentFrame: "2",
+          content: "unavailable",
+        },
+        {
+          ref: "@e6",
+          role: "iframe",
+          label: "Deep",
+          crossOrigin: true,
+          origin: "https://deep.test",
+          contentFrame: "3",
+          content: "limit",
+        },
+        {
+          ref: "@e7",
+          role: "iframe",
+          label: "Extension: Kamapathy marker",
+          extension: "Kamapathy marker",
+          crossOrigin: true,
+          content: "blocked",
+        },
+        {
+          ref: "@e8",
+          role: "iframe",
+          label: "Later",
+          crossOrigin: true,
+          content: "pending",
+        },
+      ],
+      unreadFrames: 4,
+      truncated: false,
+    };
+    const lines = [
+      "Checkout",
+      "https://shop.test/checkout",
+      "",
+      "Controls:",
+      '@e1 button "Pay"',
+      '@e2 iframe "Card" frame from js.stripe.com',
+      '@e3 textbox "Card number" (value hidden)',
+      '@e4 iframe "Map" frame from 127.0.0.1:4321, not read: still loading',
+      '@e5 iframe "Ads" frame from an opaque origin, not read: did not respond',
+      '@e6 iframe "Deep" frame from deep.test, not read: frame limit reached',
+      '@e7 iframe "Extension: Kamapathy marker" extension or internal frame, not read',
+      '@e8 iframe "Later" frame, not read: still loading',
+      "",
+      "4 frames were not read. Snapshot again, or scope to one with --root <ref>.",
+    ];
+    expect(formatSnapshot(framed)).toBe(lines.join("\n"));
+    // One unread frame reads as one, and none prints no line.
+    expect(
+      formatSnapshot({ ...framed, unreadFrames: 1 }).split("\n").at(-1),
+    ).toBe(
+      "1 frame was not read. Snapshot again, or scope to one with --root <ref>.",
+    );
+    expect(formatSnapshot({ ...framed, unreadFrames: undefined })).toBe(
+      lines.slice(0, -2).join("\n"),
+    );
+    // The command and page.text() print the same.
+    expect(await printed(["snapshot", "tab-1"], framed)).toBe(
+      `${lines.join("\n")}\n`,
+    );
+    const api = fakeApi({ ...scriptAnswers, "POST /tabs/tab-1/snapshot": framed });
+    expect(await (await inputPage(api)).text()).toBe(lines.join("\n"));
+  });
+
+  it("each command sends one request and respects --json", async () => {
+    const directory = await fetchFolder();
+    const answers = {
+      evaluate: { ok: true, tab: slots, value: 42 },
+      fetch: { ok: true, tab: slots, response: fetchedResponse },
+      cdp: { ok: true, result: { entries: [] } },
+      "space cdp": { ok: true, result: { targetInfos: [] } },
+      events: { ok: true, events: [], dropped: 0, gaps: [], remaining: 0 },
+      "clear-site-data": {
+        ok: true,
+        origin: "https://shop.test",
+        cleared: { cache: true },
+      },
+    };
+    for (const [args, name, piped] of [
+      [["evaluate", "tab-1", "--stdin"], "evaluate", "document.title"],
+      [["fetch", "tab-1", "/api/cart"], "fetch"],
+      [["cdp", "tab-1", "Page.getNavigationHistory"], "cdp"],
+      [["space", "cdp", "space-1", "Target.getTargets"], "space cdp"],
+      [["events", "tab-1"], "events"],
+      [["clear-site-data", "tab-1", "--cache"], "clear-site-data"],
+    ])
+      for (const json of [false, true]) {
+        const fetch = vi.fn(async () => Response.json(answers[name]));
+        const stdout = sink();
+        expect(
+          await runCli(json ? [...args, "--json"] : args, {
+            env,
+            fetch,
+            health: current,
+            ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+            stdout,
+          }),
+          args.join(" "),
+        ).toBe(0);
+        expect(fetch, args.join(" ")).toHaveBeenCalledTimes(1);
+        if (json)
+          expect(JSON.parse(stdout.text()), args.join(" ")).toEqual(
+            answers[name],
+          );
+        else
+          expect(stdout.text(), args.join(" ")).not.toBe(
+            `${JSON.stringify(answers[name])}\n`,
+          );
+      }
+    // A saved fetch is one request too.
+    const fetch = vi.fn(savedStream);
+    await runCli(
+      ["fetch", "tab-1", "/report.bin", "--save", join(directory, "one.bin")],
+      { env, fetch, health: current, stdout: sink() },
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // Each one is refused by name against a Kamapathy that predates it.
+    const unused = vi.fn();
+    for (const [args, piped] of [
+      [["evaluate", "tab-1", "--stdin"], "1"],
+      [["fetch", "tab-1", "/api/cart"]],
+      [["fetch", "tab-1", "/x", "--save", join(directory, "old.bin")]],
+      [["cdp", "tab-1", "Page.reload"]],
+      [["space", "cdp", "space-1", "Target.getTargets"]],
+      [["events", "tab-1"]],
+      [["clear-site-data", "tab-1", "--cache"]],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: level3,
+          ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toMatchObject({
+        code: "app_outdated",
+        required: 4,
+        available: 3,
+      });
+    expect(unused).not.toHaveBeenCalled();
+    expect(existsSync(join(directory, "old.bin"))).toBe(false);
+  });
 });
 
 describe("client errors and timeouts", () => {

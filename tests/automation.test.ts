@@ -7490,6 +7490,261 @@ describe("local automation socket", () => {
     expect((await running.done).status).toBe(200);
   });
 
+  // POST /tabs/:id/clear-site-data, kept from failing a test that ends while
+  // the clear still waits for the person.
+  const clearSiteData = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/clear-site-data`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // The request a clear waits on, once its bar is up.
+  const approvalAsked = async () => {
+    await expect.poll(() => controller.state.approvals.length).toBe(1);
+    return controller.state.approvals[0];
+  };
+  // A cookie as the tab's session lists it, with a value no answer carries.
+  const jarCookie = (
+    fields: Partial<Electron.Cookie> & { name: string; domain: string },
+  ): Electron.Cookie => ({
+    value: "secret-value",
+    path: "/",
+    secure: false,
+    httpOnly: true,
+    hostOnly: !fields.domain.startsWith("."),
+    session: true,
+    sameSite: "lax",
+    ...fields,
+  });
+
+  it("the route needs one of cookies, storage and cache", async () => {
+    const { tab } = await createPage();
+    for (const body of [{}, { cache: false }, { origin: "https://example.com" }]) {
+      const { status, error } = await failure(await clearSiteData(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toEqual({
+        code: "invalid_field",
+        message: "Say what to clear: at least one of cookies, storage and cache.",
+        expected: "at least one of cookies, storage and cache",
+      });
+    }
+    // The origin is http or https, with nothing after the host.
+    for (const origin of [
+      "ftp://example.com",
+      "example.com",
+      "about:blank",
+      "https://example.com/cart",
+      "https://example.com/?q=1",
+      "https://user:secret@example.com",
+    ]) {
+      const { status, error } = await failure(
+        await clearSiteData(tab.id, { origin, cookies: true }),
+      );
+      expect(status, origin).toBe(400);
+      expect(error, origin).toMatchObject({
+        code: "invalid_field",
+        field: "origin",
+      });
+    }
+    // What to clear has its own shapes.
+    for (const body of [
+      { cookies: false },
+      { cookies: [] },
+      { cookies: { name: "" } },
+      { cookies: { name: "sid", value: "x" } },
+      { cookies: [{ name: "sid", path: "cart" }] },
+      { storage: [] },
+      { storage: "localStorage" },
+      { storage: ["cookies"] },
+    ]) {
+      const { status, error } = await failure(await clearSiteData(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field: Object.keys(body)[0],
+      });
+    }
+    expect(controller.state.approvals).toEqual([]);
+    expect(controller.contents.removedCookies).toEqual([]);
+  });
+
+  it("an origin not loaded in the tab or its frames is refused in a shared session", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.jar = [jarCookie({ name: "sid", domain: "pay.example" })];
+    const refused = await failure(
+      await clearSiteData(tab.id, {
+        origin: "https://pay.example",
+        cookies: true,
+      }),
+    );
+    expect(refused).toEqual({
+      status: 403,
+      error: {
+        code: "origin_not_in_tab",
+        message:
+          "https://pay.example is not loaded in this tab or its frames. Clear data only for a site this tab shows.",
+        origin: "https://pay.example",
+      },
+    });
+    expect(controller.state.approvals).toEqual([]);
+    // Once one of the tab's frames shows it, the person is asked.
+    frameNavigated(page.debugger, {
+      frameId: "card",
+      parentId: "main",
+      loaderId: "loader-card",
+      url: "https://pay.example/card",
+    });
+    const asking = clearSiteData(tab.id, {
+      origin: "https://pay.example",
+      cookies: true,
+    });
+    const approval = await approvalAsked();
+    expect(approval).toMatchObject({
+      tabId: tab.id,
+      origin: "https://pay.example",
+      cookies: { count: 1, domains: ["pay.example"] },
+    });
+    api.answerApproval(approval.id, false);
+    expect(await failure(await asking)).toMatchObject({
+      status: 403,
+      error: { code: "clear_declined", origin: "https://pay.example" },
+    });
+    expect(page.removedCookies).toEqual([]);
+    expect(page.jar).toHaveLength(1);
+  });
+
+  it("the route is not gated by the Page scripts switch", async () => {
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const created = await (
+      await request("/spaces", "POST", { name: "Clean", isolated: true })
+    ).json();
+    const opened = await (
+      await request(`/spaces/${created.space.id}/tabs`, "POST", {
+        url: "https://example.com/",
+      })
+    ).json();
+    controller.contents.jar = [jarCookie({ name: "sid", domain: "example.com" })];
+    const response = await clearSiteData(opened.tab.id, {
+      cookies: true,
+      storage: ["localStorage"],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      origin: "https://example.com",
+      cleared: {
+        cookies: { removed: 1, domains: ["example.com"] },
+        storage: ["localStorage"],
+      },
+    });
+    expect(controller.state.approvals).toEqual([]);
+  });
+
+  it("another request in the space answers human_control with reason approval while a clear waits", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.jar = [jarCookie({ name: "sid", domain: ".example.com" })];
+    const clearing = clearSiteData(tab.id, { cookies: true });
+    const approval = await approvalAsked();
+    // The clear waits parked, so the space answers at once, and only the
+    // person ends the hold.
+    for (const [path, method, body] of [
+      [`/tabs/${tab.id}/snapshot`, "GET", undefined],
+      [`/tabs/${tab.id}/clear-site-data`, "POST", { cache: true }],
+      [`/spaces/${space.id}/resume`, "POST", {}],
+    ] as const) {
+      const { status, error } = await failure(await request(path, method, body));
+      expect(status, path).toBe(409);
+      expect(error, path).toMatchObject({
+        code: "human_control",
+        message:
+          "Kamapathy is asking the person to approve clear data for example.com. Wait for control.",
+        spaceId: space.id,
+        reason: "approval",
+        prompt: "clear data for example.com",
+      });
+    }
+    expect(controller.state.approvals).toHaveLength(1);
+    // The waiting call itself goes on once the person answers.
+    api.answerApproval(approval.id, true);
+    const answered = await clearing;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toMatchObject({ approvedBy: "person" });
+    expect(space.owner).toBe("agent");
+    // Its own pass lasts only while its hold does: a takeover answers it.
+    const second = clearSiteData(tab.id, { cache: true });
+    await approvalAsked();
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(await failure(await second)).toMatchObject({
+      status: 409,
+      error: { code: "human_control", reason: "manual" },
+    });
+    expect(controller.state.approvals).toEqual([]);
+    expect(page.dataClears).toEqual([]);
+  });
+
+  it("the answer names what was cleared", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.jar = [
+      jarCookie({ name: "sid", domain: ".example.com" }),
+      jarCookie({ name: "theme", domain: "example.com", path: "/settings" }),
+      jarCookie({ name: "sid", domain: "other.example" }),
+    ];
+    const clearing = clearSiteData(tab.id, {
+      cookies: true,
+      storage: true,
+      cache: true,
+    });
+    const approval = await approvalAsked();
+    const storage = [
+      "localStorage",
+      "indexedDB",
+      "cacheStorage",
+      "serviceWorkers",
+      "fileSystem",
+    ];
+    expect(approval).toEqual({
+      id: expect.any(String),
+      spaceId: space.id,
+      tabId: tab.id,
+      origin: "https://example.com",
+      cookies: { count: 2, domains: ["example.com"] },
+      storage,
+      cache: true,
+    });
+    api.answerApproval(approval.id, true);
+    const answered = await clearing;
+    expect(answered.status).toBe(200);
+    const text = await answered.text();
+    expect(JSON.parse(text)).toEqual({
+      ok: true,
+      origin: "https://example.com",
+      cleared: {
+        cookies: { removed: 2, domains: ["example.com"] },
+        storage,
+        cache: true,
+      },
+      approvedBy: "person",
+    });
+    // Cookie names and values reach neither the agent, the bar nor activity.
+    for (const secret of ["secret-value", "theme"]) {
+      expect(text).not.toContain(secret);
+      expect(JSON.stringify(approval)).not.toContain(secret);
+      expect(JSON.stringify(controller.activity)).not.toContain(secret);
+    }
+    expect(controller.activity.at(-1)).toMatchObject({
+      spaceId: space.id,
+      message: "Agent cleared site data for https://example.com",
+    });
+    expect(page.jar.map((cookie) => cookie.domain)).toEqual(["other.example"]);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -11773,6 +12028,7 @@ describe("local automation socket", () => {
       "POST /tabs/:id/events": { max: 10 },
       "POST /tabs/:id/cdp": { method: "Page.enable" },
       "POST /spaces/:id/cdp": { method: "Browser.getVersion" },
+      "POST /tabs/:id/clear-site-data": { cookies: true },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

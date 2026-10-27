@@ -11,6 +11,7 @@ export {
   checkBody,
   checkCall,
   editDistance,
+  METHOD_PATTERN,
   outdated,
   pointFrom,
   suggest,

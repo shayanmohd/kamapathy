@@ -453,6 +453,7 @@ export function createPreviewBridge(): KamapathyBridge {
     defaultBrowser: async () => ({ state: "unavailable", reason: "web" }),
     makeDefaultBrowser: async () => {},
     answerPrompt: async () => {},
+    answerApproval: async () => {},
   };
 }
 export const bridge: KamapathyBridge = window.kamapathy || createPreviewBridge();

@@ -100,6 +100,8 @@ const bridge: KamapathyBridge = {
   // an action or in the state an action returns.
   answerPrompt: (answer: PromptAnswer) =>
     invoke("kamapathy:answer-prompt", answer),
+  answerApproval: (id: string, clear: boolean) =>
+    invoke("kamapathy:answer-approval", id, clear),
 };
 
 contextBridge.exposeInMainWorld("kamapathy", bridge);

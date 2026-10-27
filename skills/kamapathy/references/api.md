@@ -383,6 +383,12 @@ Closes the space and its tabs.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /spaces/:id`. Errors: `human_control`, `space_not_found`, `automation_stopped`. Since API level 1.
 
+### `space.cdp(method, params?)`
+
+Asks Kamapathy for this space's pages with Target.getTargets, or its versions with Browser.getVersion. Nothing reaches Chromium, and every other method is refused.
+
+Returns `Promise<object>`. Route `POST /spaces/:id/cdp`. Errors: `invalid_field`, `agent_scripts_off`, `cdp_method_blocked`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 4.
+
 ## Page
 
 ### `page.id`
@@ -800,6 +806,73 @@ Returns `Promise<{ ok: true, released }>`. Route `POST /tabs/:id/input/release`.
 Closes the tab.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+
+### `page.evaluate(fnOrString, arg?, options?)`
+
+Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 2000 to 60000 | `15000` | How long the script may run. The page itself gets this less 1000 ms. |
+
+Returns `Promise<unknown>`. Route `POST /tabs/:id/evaluate`. Errors: `invalid_field`, `agent_scripts_off`, `script_error`, `result_too_large`, `evaluation_timeout`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.fetch(url, options?)`
+
+Fetches a URL from the page with its cookies, origin and CORS, and resolves the response, a non-2xx one included. With saveAs the body streams into a new file instead.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `method` | string of at most 32 characters | `"GET"` | The request method. CONNECT, TRACE and TRACK are refused. |
+| `headers` | JSON |  | Request headers as an object of at most 64 string pairs. Headers the browser sets itself, such as Cookie, Host, Origin, Referer, Sec- and Proxy-, are refused. |
+| `body` | string of at most 524288 characters |  | The request body. Not with GET or HEAD. |
+| `cache` | one of default, no-store, reload, no-cache, force-cache, only-if-cached |  | The cache mode, as in the Fetch standard. |
+| `credentials` | one of omit, same-origin, include |  | Which cookies and credentials the request carries. The page's own default applies without it. |
+| `integrity` | string of at most 256 characters |  | A subresource integrity value the body must match. |
+| `keepalive` | true or false |  | Let the request outlive the page. |
+| `mode` | one of cors, no-cors, same-origin | `"cors"` | cors reads a cross-origin answer the server allows; no-cors answers opaquely; same-origin refuses another origin. |
+| `redirect` | one of follow, error, manual |  | What a redirect does. |
+| `referrer` | string of at most 8192 characters |  | The referrer the request carries. |
+| `referrerPolicy` | one of , no-referrer, no-referrer-when-downgrade, same-origin, origin, strict-origin, origin-when-cross-origin, strict-origin-when-cross-origin, unsafe-url |  | Which referrer policy applies. |
+| `timeout` | milliseconds from 1000 to 300000 | `20000` | How long the request and its body may take. Above 60000 only with saveAs. |
+| `saveAs` | string of at most 4096 characters |  | A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails. |
+
+Returns `Promise<{ ok, status, statusText, url, redirected, type, headers, body } or { ok, status, statusText, url, redirected, type, headers, savedPath, bytes }>`. Route `POST /tabs/:id/fetch`. Errors: `invalid_url`, `invalid_field`, `agent_scripts_off`, `fetch_failed`, `fetch_timeout`, `result_too_large`, `file_exists`, `download_interrupted`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.cdp(method, params?, options?)`
+
+Sends one protocol command to this tab's page, or to one of its frames, and returns its result. Each command that reaches Chromium expires the tab's refs, so take a snapshot after it.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 1000 to 60000 | `15000` | How long to wait for Chromium's answer. |
+| `frame` | string of at most 160 characters |  | An out-of-process frame to send the command to: an iframe entry's contentFrame path, such as 0/1, or that entry's ref. |
+
+Returns `Promise<object>`. Route `POST /tabs/:id/cdp`. Errors: `invalid_field`, `agent_scripts_off`, `cdp_method_blocked`, `cdp_error`, `cdp_timeout`, `frame_not_found`, `invalid_ref`, `unknown_ref`, `stale_ref`, `input_target_blocked`, `native_popup_blocked`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.events(options?)`
+
+Takes the oldest protocol events recorded for this tab, with how many were dropped, when recording paused and how many remain.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `max` | integer from 1 to 10000 | `10000` | How many of the oldest events to take. |
+
+Returns `Promise<{ events, dropped, gaps, remaining }>`. Route `POST /tabs/:id/events`. Errors: `invalid_field`, `agent_scripts_off`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.clearSiteData(options)`
+
+Clears one origin's cookies, storage or cache, at least one of them. In a space that uses the person's sign-ins, the person approves it first.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `origin` | string of at most 2048 characters |  | The http or https origin to clear, such as https://example.com. Defaults to the page's own. |
+| `cookies` | JSON |  | true for every cookie the origin receives on any path, parent-domain cookies included, or {name, domain?, path?}, or a list of up to 20 of them, to pick cookies by name. |
+| `storage` | JSON |  | true, or a list of localStorage, indexedDB, cacheStorage, serviceWorkers and fileSystem. |
+| `cache` | true or false | `false` | Clear the origin's HTTP cache. |
+| `timeout` | milliseconds from 1000 to 300000 | `60000` | How long the person has to answer, in a space that uses their sign-ins. |
+
+Returns `Promise<{ ok: true, origin, cleared, approvedBy?: "person" }>`. Route `POST /tabs/:id/clear-site-data`. Errors: `invalid_field`, `origin_not_in_tab`, `clear_declined`, `approval_timeout`, `space_ended`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ## Page controllers
 
@@ -1245,6 +1318,30 @@ Offer the page a paste of stdin, without the system clipboard
 
 Let go of every key and mouse button the page holds
 
+### `evaluate <tab-id> --stdin [--timeout <ms>]`
+
+Run an expression in the page and print its value
+
+### `fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]`
+
+Fetch a URL with the page's cookies and CORS
+
+### `cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]`
+
+Send one protocol command to the page or one of its frames
+
+### `space cdp <space-id> <method> [--stdin]`
+
+Ask Kamapathy for this space's pages or its versions
+
+### `events <tab-id> [--max <n>]`
+
+Drain the protocol events recorded for the page
+
+### `clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>]`
+
+Clear one site's cookies, storage or cache
+
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
 Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself
@@ -1304,6 +1401,7 @@ Show the commands, or help on one
 | POST | `/tabs/:id/events` | `max?` | Drains the protocol events recorded for this tab. Returns `{ ok: true, events, dropped, gaps, remaining }`. |
 | POST | `/tabs/:id/cdp` | `method`, `params?`, `frame?`, `timeoutMs?` | Sends one protocol command to the tab's own page or one of its frames. Returns `{ ok: true, result, newSession? }`. |
 | POST | `/spaces/:id/cdp` | `method`, `params?` | Answers Target.getTargets for this space's pages and Browser.getVersion. Returns `{ ok: true, result }`. |
+| POST | `/tabs/:id/clear-site-data` | `origin?`, `cookies?`, `storage?`, `cache?`, `timeoutMs?` | Clears one origin's cookies, storage or cache. In a space that uses the person's sign-ins, the person approves it first. Returns `{ ok: true, origin, cleared: { cookies?: { removed, domains }, storage?: string[], cache?: true }, approvedBy?: "person" }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
@@ -1373,6 +1471,8 @@ Show the commands, or help on one
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason`, `param` | The protocol command reaches beyond this tab's own page and frames. |
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
+| `origin_not_in_tab` | 403 | not retryable | `origin` | The origin is not loaded in this tab or its frames. |
+| `clear_declined` | 403 | not retryable | `origin` | The person chose not to clear the site's data. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
 | `input_target_blocked` | 403 | not retryable | `frame`, `extension` | The point, or the frame holding focus, belongs to an extension or an internal page. |
 | `native_popup_blocked` | 403 | not retryable | `use` | The input would open a native select, color or date picker. |
@@ -1462,6 +1562,7 @@ Show the commands, or help on one
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `approval_timeout` | 504 | not retryable | `awaited`, `origin`, `timeoutMs` | The person did not answer the request to clear data in time. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |

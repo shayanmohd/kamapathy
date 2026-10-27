@@ -60,6 +60,7 @@ import { TabStrip } from "./components/TabStrip";
 import { Toolbar } from "./components/Toolbar";
 import { AgentBar } from "./components/AgentBar";
 import { PromptBar } from "./components/PromptBar";
+import { ClearSiteDataBar } from "./components/ClearSiteDataBar";
 import { PasswordPromptBar } from "./components/PasswordPrompt";
 import { shownPasswordPrompt } from "./lib/passwords";
 import { acknowledgeTask, agentStatus, statusLine } from "./lib/spaces";
@@ -184,6 +185,8 @@ export default function App() {
   // The active tab's offer to save a password, when section 7 has no prompt
   // for it.
   const passwordPrompt = shownPasswordPrompt(state);
+  // The oldest request to clear a site's data for the tab on screen.
+  const approval = state.approvals.find((item) => item.tabId === active?.id);
   const barStatus = agentStatus(activeSpace, state, now, seen);
   const ring =
     barStatus === "browsing" || barStatus === "idle" || barStatus === "error";
@@ -214,6 +217,16 @@ export default function App() {
   const answerPrompt = useCallback(async (answer: PromptAnswer) => {
     try {
       await bridge.answerPrompt(answer);
+      return "";
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : "Something went wrong. Please try again.";
+    }
+  }, []);
+  const answerApproval = useCallback(async (id: string, clear: boolean) => {
+    try {
+      await bridge.answerApproval(id, clear);
       return "";
     } catch (error) {
       return error instanceof Error
@@ -359,6 +372,7 @@ export default function App() {
     scriptsOff,
     prompt?.id,
     passwordPrompt?.id,
+    approval?.id,
     ring,
     barStatus,
     toast,
@@ -803,6 +817,14 @@ export default function App() {
             space={activeSpace}
             total={spacePrompts.length}
             onAnswer={answerPrompt}
+          />
+        )}
+        {approval && (
+          <ClearSiteDataBar
+            key={approval.id}
+            approval={approval}
+            space={activeSpace}
+            onAnswer={(clear) => answerApproval(approval.id, clear)}
           />
         )}
         {passwordPrompt && (

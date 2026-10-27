@@ -14,6 +14,7 @@ import { cdpRoutes } from "./cdp";
 import { inputRoutes } from "./input";
 import { screenshotRoutes } from "./screenshot";
 import { scriptRoutes } from "./scripts";
+import { siteDataRoutes } from "./site-data";
 import { checkPageBudget } from "./spaces";
 
 // The actions whose answer carries a receipt: the input routes and their
@@ -285,6 +286,7 @@ export function tabRoutes(deps: RouteDeps): Record<string, RouteImpl> {
     ...screenshotRoutes(deps),
     ...scriptRoutes(deps),
     ...cdpRoutes(deps),
+    ...siteDataRoutes(deps),
     ...inputRoutes(deps),
     ...Object.fromEntries(
       ["click", "fill", "press", "scroll", "drag", "wait"].map((type) => [

@@ -129,6 +129,42 @@ function fits(value, field) {
   }
 }
 
+// A protocol method: a domain and a command, such as Page.getNavigationHistory.
+export const METHOD_PATTERN = /^[A-Z][A-Za-z]+\.[a-z][A-Za-z]+$/;
+
+// Where a value stops being JSON data, as { path, what }, or null. A value
+// JSON would drop or change is refused: a BigInt, a number that is not
+// finite, a function, a symbol, a cycle, or undefined in an array. An
+// undefined property is absent, as everywhere else in the client.
+function jsonProblem(value, path, seen = new Set()) {
+  const found = (what) => ({ path, what });
+  if (typeof value === "bigint") return found("a BigInt");
+  if (typeof value === "number")
+    return Number.isFinite(value) ? null : found(String(value));
+  if (typeof value === "function") return found("a function");
+  if (typeof value === "symbol") return found("a symbol");
+  if (value === undefined) return found("undefined");
+  if (value === null || typeof value !== "object") return null;
+  if (seen.has(value)) return found("a cycle");
+  seen.add(value);
+  const entries = Array.isArray(value)
+    ? Array.from(value, (item, index) => [`${path}[${index}]`, item])
+    : Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .map(([key, item]) => [
+          /^[A-Za-z_$][\w$]*$/.test(key)
+            ? `${path}.${key}`
+            : `${path}[${JSON.stringify(key)}]`,
+          item,
+        ]);
+  for (const [at, item] of entries) {
+    const problem = jsonProblem(item, at, seen);
+    if (problem) return problem;
+  }
+  seen.delete(value);
+  return null;
+}
+
 // A field of the wrong kind, as invalid_field.
 const invalid = (at, field, context) =>
   problem("invalid_field", `${at} must be ${expectation(field)}.`, {
@@ -323,6 +359,9 @@ function argumentFits(value, arg) {
         typeof value === "function" ||
         (typeof value === "string" && value.trim() !== "")
       );
+    // A protocol method's name.
+    case "method":
+      return typeof value === "string" && METHOD_PATTERN.test(value);
     // A coordinate or a delta, within the bounds it declares.
     case "number":
       return (
@@ -454,6 +493,14 @@ function checkArguments(entry, shape, args, expected, app) {
     if (arg.kind === "options") {
       const found = checkOptions(entry, value, expected, app);
       if (found) return found;
+    } else if (arg.kind === "json") {
+      // JSON data, with the place it stops being JSON named in expected.
+      const found = jsonProblem(value, arg.name);
+      if (found)
+        return fail(
+          `${name} got ${found.what} at ${found.path}, which JSON cannot carry. Pass strings, finite numbers, booleans, null, arrays and objects.`,
+          { expected: `JSON data at ${found.path}` },
+        );
     } else if (arg.kind === "actions") {
       if (!Array.isArray(value))
         return fail(

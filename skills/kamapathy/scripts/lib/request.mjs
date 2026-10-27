@@ -286,6 +286,13 @@ export class Session {
   notice(key, text) {
     queueNotice(key, text);
   }
+  // An error a caller found in a body it reads itself, such as a stream's
+  // error line, kept the way request keeps its own: the first one that stops
+  // a run stops it for good.
+  record(error) {
+    this.#record(error);
+    return error;
+  }
   // Runs once a run's script settles; returns a function that removes it.
   onRunEnd(hook) {
     this.endHooks.push(hook);

@@ -920,6 +920,48 @@ describe("native browser lifecycle", () => {
     expect(space.owner).toBe("agent");
   });
 
+  it("addApproval and removeApproval emit state", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = controller();
+      const space = browser.createAgentSpace("Task");
+      const tab = browser.state.tabs.find((item) => item.spaceId === space.id)!;
+      const shell = browser.window.webContents as unknown as FakeContents;
+      const sent = () =>
+        shell.send.mock.calls.filter(
+          ([channel]) => channel === "kamapathy:state-changed",
+        ).length;
+      const emitted = vi.fn();
+      browser.subscribe(emitted);
+      await vi.advanceTimersByTimeAsync(400);
+      vi.mocked(writeState).mockClear();
+      const shown = sent();
+      const approval = {
+        id: "approval-1",
+        spaceId: space.id,
+        tabId: tab.id,
+        origin: "https://shop.example",
+        cookies: { count: 2, domains: ["shop.example"] },
+      };
+      browser.addApproval(approval);
+      expect(browser.state.approvals).toEqual([approval]);
+      expect(emitted).toHaveBeenCalledTimes(1);
+      expect(sent()).toBe(shown + 1);
+      browser.removeApproval(approval.id);
+      expect(browser.state.approvals).toEqual([]);
+      expect(emitted).toHaveBeenCalledTimes(2);
+      expect(sent()).toBe(shown + 2);
+      // A second remove finds nothing and says nothing.
+      browser.removeApproval(approval.id);
+      expect(emitted).toHaveBeenCalledTimes(2);
+      // The list lives for this run only, so neither change is saved.
+      await vi.advanceTimersByTimeAsync(400);
+      expect(writeState).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps unwatched agent pages painting after every navigation, but not personal pages", async () => {
     const browser = controller();
     await browser.dispatch({ type: "tab:navigate", id: browser.state.activeTabId, url: "https://example.com/" });

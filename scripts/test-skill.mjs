@@ -26,6 +26,7 @@ import {
   navigationLog,
 } from "../tests/fixtures/navigation-pages.mjs";
 import { startUpdateFeed } from "../tests/fixtures/update-feed.mjs";
+import { SCRIPT_BINARY_SHA256 } from "../tests/fixtures/script-pages.mjs";
 import { API_LEVEL } from "../skills/kamapathy/scripts/schema/index.mjs";
 
 const temporary = await mkdtemp(join(tmpdir(), "kamapathy-skill-e2e-"));
@@ -3686,6 +3687,547 @@ console.log(JSON.stringify(await waiting));
   });
   await cli(["close", details.id]);
   passed("agents keep working with the window closed on the same instance");
+  // Section 8 in the real app, in an isolated agent space so a clear needs
+  // no approval: the agent's own scripts and their values, fetch through
+  // the page, protocol commands on the page and its frames, events with
+  // cookie values hidden, and one site's data cleared.
+  const scriptSpace = (
+    await json(["space", "create", "Page script review", "--isolated"])
+  ).space;
+  const scriptTab = (
+    await json(["open", scriptSpace.id, `${fixture.origin}/scripts/cookie`])
+  ).tab;
+  const scriptRun = async (body) =>
+    JSON.parse(
+      (
+        await cli([
+          "run",
+          "-e",
+          `const page = (await (await space(${JSON.stringify(scriptSpace.id)})).tabs()).find((item) => item.id === ${JSON.stringify(scriptTab.id)});\n${body}`,
+        ])
+      ).output
+        .trim()
+        .split("\n")
+        .at(-1),
+    );
+  const evaluated = async (expression) =>
+    (await cli(["evaluate", scriptTab.id, "--stdin"], expression)).output;
+  assert.deepEqual(
+    await scriptRun(`const values = [
+  await page.evaluate(() => 6 * 7),
+  await page.evaluate((item) => item.rows.length, { rows: [1, 2, 3] }),
+  await page.evaluate(async (x) => (await Promise.resolve(x)) + 1, 41),
+  await page.evaluate("await Promise.resolve(document.title)"),
+];
+const special = [
+  Number.isNaN(await page.evaluate(() => Number.NaN)),
+  Object.is(await page.evaluate(() => -0), -0),
+  (await page.evaluate(() => 2n ** 64n)) === 2n ** 64n,
+  (await page.evaluate(() => Number.NEGATIVE_INFINITY)) === Number.NEGATIVE_INFINITY,
+  (await page.evaluate(() => undefined)) === undefined,
+];
+console.log(JSON.stringify({ values, special }));`),
+    {
+      values: [42, 3, 42, "Cookie lab"],
+      special: [true, true, true, true, true],
+    },
+  );
+  for (const [expression, printed] of [
+    ["6 * 7", "42"],
+    ["({ rows: [1, 2] })", '{"rows":[1,2]}'],
+    ["Number.NaN", "NaN"],
+    ["-0", "-0"],
+    ["10n + 2n", "12n"],
+    ["undefined", "undefined"],
+  ])
+    assert.equal(await evaluated(expression), `${printed}\n`, expression);
+  // A loop past the page's own limit is stopped there; a promise that never
+  // settles is left running in a page that still answers.
+  const timedOut = await scriptRun(`const outcome = async (fn) => {
+  try {
+    await page.evaluate(fn, undefined, { timeout: 3000 });
+    return "answered";
+  } catch (error) {
+    return {
+      code: error.code,
+      awaited: error.awaited,
+      executionStopped: error.executionStopped,
+      pageResponsive: error.pageResponsive,
+      mayHaveLateEffects: error.mayHaveLateEffects,
+    };
+  }
+};
+const busy = await outcome(() => {
+  const end = Date.now() + 30000;
+  while (Date.now() < end) {}
+});
+const pending = await outcome(() => new Promise(() => {}));
+console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 + 1) }));`);
+  const scriptLimit = {
+    code: "evaluation_timeout",
+    awaited: "script",
+    pageResponsive: true,
+    mayHaveLateEffects: true,
+  };
+  assert.deepEqual(timedOut, {
+    busy: { ...scriptLimit, executionStopped: true },
+    pending: { ...scriptLimit, executionStopped: false },
+    after: 2,
+  });
+  passed("evaluate returns values and both timeout outcomes");
+  const echoedCookie = await json([
+    "fetch",
+    scriptTab.id,
+    "/scripts/echo-cookie",
+  ]);
+  assert.deepEqual(
+    [
+      echoedCookie.response.ok,
+      echoedCookie.response.status,
+      JSON.parse(echoedCookie.response.body),
+    ],
+    [true, 200, { cookie: "lab=sugar" }],
+  );
+  assert.ok(
+    fixture.events.some(
+      (event) =>
+        event.type === "script-fetch" &&
+        event.path === "/scripts/echo-cookie" &&
+        event.cookie === "lab=sugar",
+    ),
+  );
+  const unreadable = await callApi(`/tabs/${scriptTab.id}/fetch`, "POST", {
+    url: `${otherOrigin}/scripts/no-cors`,
+  });
+  assert.equal(unreadable.status, 422);
+  const corsFailure = (await unreadable.json()).error;
+  assert.deepEqual(
+    [corsFailure.code, corsFailure.crossOrigin],
+    ["fetch_failed", true],
+  );
+  assert.match(
+    corsFailure.message,
+    /^http:\/\/127\.0\.0\.1:\d+ cannot read http:\/\/localhost:\d+\/scripts\/no-cors: the server does not allow it/,
+  );
+  const savedBinary = join(temporary, "fetched-binary.bin");
+  const savedFetch = await json([
+    "fetch",
+    scriptTab.id,
+    "/scripts/binary",
+    "--save",
+    savedBinary,
+  ]);
+  assert.deepEqual(
+    [savedFetch.status, savedFetch.savedPath, savedFetch.bytes],
+    [200, savedBinary, 2 * 1024 * 1024],
+  );
+  const savedDigest = async () =>
+    createHash("sha256")
+      .update(await readFile(savedBinary))
+      .digest("hex");
+  assert.equal(await savedDigest(), SCRIPT_BINARY_SHA256);
+  // A second save never overwrites the first.
+  const savedAgain = await cli(
+    ["fetch", scriptTab.id, "/scripts/binary", "--save", savedBinary],
+    undefined,
+    { failure: true },
+  );
+  assert.match(savedAgain.errors, /already exists/);
+  assert.equal(await savedDigest(), SCRIPT_BINARY_SHA256);
+  passed(
+    "fetch sends the page's cookie, explains a CORS failure and saves a body whose SHA-256 matches",
+  );
+  await json(["navigate", scriptTab.id, `${fixture.origin}/scripts/frames`]);
+  const remoteLab = await poll(
+    async () => {
+      const labEntry = (await observe(scriptTab.id)).interactables.find(
+        (control) => control.label === "Remote cookie lab",
+      );
+      return labEntry?.content === "read" ? labEntry : null;
+    },
+    { timeoutMs: 15000, label: "the frame from the other loopback name" },
+  );
+  assert.deepEqual(
+    [remoteLab.role, remoteLab.crossOrigin, remoteLab.origin],
+    ["iframe", true, otherOrigin],
+  );
+  const originIn = async (frame) =>
+    (
+      await json(
+        [
+          "cdp",
+          scriptTab.id,
+          "Runtime.evaluate",
+          "--stdin",
+          ...(frame === undefined ? [] : ["--frame", frame]),
+        ],
+        { expression: "location.origin", returnByValue: true },
+      )
+    ).result.result.value;
+  // The entry's ref names the frame it opens, and so does its path. The
+  // first command expires the ref, so the ref goes first.
+  assert.equal(await originIn(remoteLab.ref), otherOrigin);
+  assert.equal(await originIn(remoteLab.contentFrame), otherOrigin);
+  assert.equal(await originIn(undefined), fixture.origin);
+  passed("cdp with a snapshot's contentFrame runs inside the out-of-process frame");
+  // The accelerator and W through the protocol reach the page, and nothing
+  // of the shell reacts: no tab closes and the window stays.
+  await json(["navigate", scriptTab.id, `${fixture.origin}/input/events`]);
+  const everyTab = async () =>
+    (await chrome.evaluate(() => window.kamapathy.getState())).tabs
+      .map((item) => item.id)
+      .sort();
+  const windowsShown = () =>
+    browser.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().map((window) => window.isVisible()),
+    );
+  const tabsBeforeKeys = await everyTab();
+  const windowsBeforeKeys = await windowsShown();
+  const accelerator = process.platform === "darwin" ? 4 : 2;
+  for (const type of ["keyDown", "keyUp"])
+    await json(["cdp", scriptTab.id, "Input.dispatchKeyEvent", "--stdin"], {
+      type,
+      key: "w",
+      code: "KeyW",
+      windowsVirtualKeyCode: 87,
+      modifiers: accelerator,
+    });
+  await cli(["wait", scriptTab.id, "--stdin"], {
+    selector: "#log",
+    text: "keydown w trusted",
+    timeoutMs: 5000,
+  });
+  await sleep(1000);
+  assert.deepEqual(await everyTab(), tabsBeforeKeys);
+  assert.deepEqual(await windowsShown(), windowsBeforeKeys);
+  passed(
+    "page.cdp Input.dispatchKeyEvent with Meta+W (Control+W off macOS) reaches the page but neither closes the person's tab nor triggers a menu accelerator",
+  );
+  for (const [method, reason] of [
+    ["Target.getTargets", "browser"],
+    ["Target.attachToTarget", "browser"],
+    ["Network.getAllCookies", "session"],
+    ["Network.getCookies", "session"],
+    ["Storage.getCookies", "session"],
+  ]) {
+    const refusedCommand = await callApi(`/tabs/${scriptTab.id}/cdp`, "POST", {
+      method,
+    });
+    assert.equal(refusedCommand.status, 403, method);
+    const blockedCommand = (await refusedCommand.json()).error;
+    assert.deepEqual(
+      [blockedCommand.code, blockedCommand.method, blockedCommand.reason],
+      ["cdp_method_blocked", method, reason],
+    );
+  }
+  const refusedSpaceCommand = await callApi(
+    `/spaces/${scriptSpace.id}/cdp`,
+    "POST",
+    { method: "Target.attachToTarget", params: { targetId: scriptTab.id } },
+  );
+  assert.equal(refusedSpaceCommand.status, 403);
+  assert.equal(
+    (await refusedSpaceCommand.json()).error.code,
+    "cdp_method_blocked",
+  );
+  passed("Target and cookie commands are blocked");
+  // The page sends its cookie with every request, and the agent's own
+  // Network session records them with the value hidden.
+  await json(["navigate", scriptTab.id, `${fixture.origin}/scripts/cookie`]);
+  await json(["events", scriptTab.id]);
+  await json(["cdp", scriptTab.id, "Network.enable"]);
+  await json(["fetch", scriptTab.id, "/scripts/echo-cookie"]);
+  const recorded = [];
+  await poll(
+    async () => {
+      recorded.push(...(await json(["events", scriptTab.id])).events);
+      return JSON.stringify(recorded).includes("(hidden)");
+    },
+    { timeoutMs: 10000, label: "a recorded request with its cookie hidden" },
+  );
+  assert.ok(
+    recorded.some((event) => event.method === "Network.requestWillBeSent"),
+  );
+  assert.doesNotMatch(JSON.stringify(recorded), /sugar/);
+  await json(["fetch", scriptTab.id, "/scripts/echo-cookie"]);
+  const printedEvents = await poll(
+    async () => {
+      const text = (await cli(["events", scriptTab.id])).output;
+      return /^\d{4}-\d\d-\d\dT[\d:.]+Z - Network\.requestWillBeSent$/m.test(
+        text,
+      )
+        ? text
+        : null;
+    },
+    { timeoutMs: 10000, label: "the printed event lines" },
+  );
+  assert.doesNotMatch(printedEvents, /sugar/);
+  passed("events hide cookie values");
+  // The agent's emulation ends with its session when the person takes the
+  // space, so the page reports its own metrics once the agent is back.
+  const pixelRatio = async () =>
+    Number((await evaluated("devicePixelRatio")).trim());
+  const ownRatio = await pixelRatio();
+  const emulatedRatio = ownRatio === 3 ? 2 : 3;
+  await json(
+    ["cdp", scriptTab.id, "Emulation.setDeviceMetricsOverride", "--stdin"],
+    { width: 480, height: 360, deviceScaleFactor: emulatedRatio, mobile: false },
+  );
+  assert.equal(await pixelRatio(), emulatedRatio);
+  await cli(["handoff", scriptSpace.id]);
+  await cli(["resume", scriptSpace.id]);
+  await poll(async () => (await pixelRatio()) === ownRatio, {
+    timeoutMs: 5000,
+    label: "the page's own device pixel ratio after handoff and resume",
+  });
+  passed("an emulation override is gone after handoff and resume");
+  const listedTargets = (
+    await json(["space", "cdp", scriptSpace.id, "Target.getTargets"])
+  ).result.targetInfos;
+  const personalTabIds = (
+    await chrome.evaluate(() => window.kamapathy.getState())
+  ).tabs
+    .filter((item) => item.spaceId === "personal")
+    .map((item) => item.id);
+  assert.ok(personalTabIds.length > 0);
+  assert.deepEqual(
+    listedTargets.map((item) => [item.targetId, item.type, item.browserContextId]),
+    [[scriptTab.id, "page", scriptSpace.id]],
+  );
+  assert.ok(
+    personalTabIds.every((id) => !JSON.stringify(listedTargets).includes(id)),
+  );
+  const reportedVersion = (
+    await json(["space", "cdp", scriptSpace.id, "Browser.getVersion"])
+  ).result;
+  assert.equal(reportedVersion.protocolVersion, "1.3");
+  assert.match(reportedVersion.product, /^Chrome\/152\./);
+  assert.doesNotMatch(reportedVersion.userAgent, /Electron\//);
+  passed("space.cdp does not list a personal tab");
+  await json(["navigate", scriptTab.id, `${fixture.origin}/scripts/cookie`]);
+  assert.equal(
+    await evaluated('localStorage.setItem("lab", "kept"); document.cookie'),
+    '"lab=sugar"\n',
+  );
+  await json(["navigate", scriptTab.id, `${fixture.origin}/input/events`]);
+  const clearedSite = await json([
+    "clear-site-data",
+    scriptTab.id,
+    "--cookies",
+    "--storage",
+  ]);
+  assert.equal(clearedSite.origin, fixture.origin);
+  assert.ok(clearedSite.cleared.cookies.removed >= 1, JSON.stringify(clearedSite));
+  assert.ok(
+    clearedSite.cleared.storage.includes("localStorage"),
+    JSON.stringify(clearedSite),
+  );
+  assert.equal(clearedSite.approvedBy, undefined);
+  await json(["navigate", scriptTab.id, `${fixture.origin}/input/events`]);
+  assert.equal(
+    await evaluated('[document.cookie, localStorage.getItem("lab")]'),
+    '["",null]\n',
+  );
+  await cli(["space", "close", scriptSpace.id]);
+  passed("clearing in an isolated space removes a cookie and localStorage");
+  // Section 9 in the real app, in a space that shares the person's sign-ins:
+  // frames from another site are read, filled, clicked, waited for and
+  // focused like the page's own, and their refs belong to their document.
+  const crossSpace = (
+    await json(["space", "create", "Embedded checkout review"])
+  ).space;
+  const crossTab = (
+    await json(["open", crossSpace.id, `${fixture.origin}/frames/pay`])
+  ).tab;
+  const framesRead = (labels) =>
+    poll(
+      async () => {
+        const found = await observe(crossTab.id);
+        return !found.unreadFrames &&
+          labels.every((label) =>
+            found.interactables.some((control) => control.label === label),
+          )
+          ? found
+          : null;
+      },
+      { timeoutMs: 15000, label: `frames holding ${labels.join(", ")}` },
+    );
+  // A control with this label inside a frame, once the page shows it.
+  const shownInFrame = (label) =>
+    poll(
+      async () => {
+        const found = await observe(crossTab.id);
+        return found.interactables.some(
+          (control) =>
+            control.label === label && typeof control.frame === "string",
+        )
+          ? found
+          : null;
+      },
+      { timeoutMs: 5000, label: `${label} inside a frame` },
+    );
+  let checkout = await framesRead([
+    "Card number",
+    "Pay now",
+    "Postcode",
+    "Save billing",
+  ]);
+  const cardFrame = checkout.interactables.find(
+    (control) => control.label === "Card details",
+  );
+  assert.deepEqual(
+    [cardFrame.role, cardFrame.crossOrigin, cardFrame.origin, cardFrame.content],
+    ["iframe", true, otherOrigin, "read"],
+  );
+  assert.equal(
+    checkout.interactables.find((control) => control.label === "Card number")
+      .frame,
+    cardFrame.contentFrame,
+  );
+  const filledThroughApi = await callApi(`/tabs/${crossTab.id}/fill`, "POST", {
+    ref: ref(checkout, "Card number"),
+    value: "4111111111111111",
+  });
+  assert.equal(filledThroughApi.status, 200, await filledThroughApi.text());
+  const digits = await json(
+    [
+      "cdp",
+      crossTab.id,
+      "Runtime.evaluate",
+      "--stdin",
+      "--frame",
+      cardFrame.contentFrame,
+    ],
+    {
+      expression: "document.getElementById('card').value.length",
+      returnByValue: true,
+    },
+  );
+  assert.equal(digits.result.result.value, 16);
+  // That command expired the refs, so the CLI works from a new snapshot.
+  checkout = await observe(crossTab.id);
+  await cli(
+    ["fill", crossTab.id, ref(checkout, "Card number"), "--stdin"],
+    "4242424242424242",
+  );
+  const printedCheckout = (await cli(["snapshot", crossTab.id, "--full"]))
+    .output;
+  assert.match(printedCheckout, /iframe "Card details" frame from localhost:\d+/);
+  assert.match(printedCheckout, /input "Card number" \(value hidden\)/);
+  checkout = await observe(crossTab.id);
+  assert.equal(
+    checkout.interactables.find((control) => control.label === "Card number")
+      .valueHidden,
+    true,
+  );
+  // A ref, a port or an id may hold four of these digits, so the check
+  // looks for the whole number.
+  for (const text of [printedCheckout, JSON.stringify(checkout)])
+    assert.doesNotMatch(text, /4242424242424242|4111111111111111/);
+  await cli(["click", crossTab.id, ref(checkout, "Pay now")]);
+  await shownInFrame("Paid");
+  passed(
+    "fills a cross-site checkout frame through the API and CLI, hiding the card number",
+  );
+  // The billing frame is this host on the other port: another origin of the
+  // same site, which Chromium keeps in the page's own process.
+  const billingFrame = checkout.interactables.find(
+    (control) => control.label === "Billing details",
+  );
+  assert.deepEqual(
+    [billingFrame.crossOrigin, billingFrame.origin, billingFrame.content],
+    [true, `http://127.0.0.1:${fixture.ports[1]}`, "read"],
+  );
+  await cli(
+    ["fill", crossTab.id, ref(checkout, "Postcode"), "--stdin"],
+    "AB1 2CD",
+  );
+  await cli(["click", crossTab.id, ref(checkout, "Save billing")]);
+  const billed = await shownInFrame("Billing saved");
+  assert.equal(
+    billed.interactables.find((control) => control.label === "Postcode").value,
+    "AB1 2CD",
+  );
+  const inProcess = await callApi(`/tabs/${crossTab.id}/cdp`, "POST", {
+    method: "Runtime.evaluate",
+    params: { expression: "1" },
+    frame: billingFrame.contentFrame,
+  });
+  assert.equal(inProcess.status, 400);
+  const inProcessError = (await inProcess.json()).error;
+  assert.equal(inProcessError.code, "invalid_field");
+  assert.equal(typeof inProcessError.frameId, "string");
+  passed("a same-site frame on another port behaves the same");
+  await json(["navigate", crossTab.id, `${fixture.origin}/frames/far`]);
+  const farPage = await framesRead(["Pay now"]);
+  await cli(["click", crossTab.id, ref(farPage, "Pay now")]);
+  await shownInFrame("Paid");
+  const farInfo = await json(["info", crossTab.id]);
+  assert.ok(farInfo.scroll.y > 1000, JSON.stringify(farInfo.scroll));
+  passed("clicks in a frame 1600 px below the fold after wheel scrolling");
+  // The page's own Pay now sits under an overlay, so the frame's button is
+  // the one the text selector reaches.
+  await json(["navigate", crossTab.id, `${fixture.origin}/frames/covered`]);
+  await framesRead(["Card number"]);
+  await cli(["click", crossTab.id, "text=Pay now"]);
+  const coveredPage = await shownInFrame("Paid");
+  assert.doesNotMatch(coveredPage.text, /Top paid/);
+  passed("a text selector passes a covered top-page duplicate for the frame's button");
+  await json(["navigate", crossTab.id, `${fixture.origin}/frames/late`]);
+  await cli(["wait", crossTab.id, "--stdin"], {
+    selector: "#card",
+    timeoutMs: 10000,
+  });
+  const latePage = await framesRead(["Card number", "Payment form"]);
+  assert.equal(
+    latePage.interactables.find((control) => control.label === "Card number")
+      .frame,
+    latePage.interactables.find((control) => control.label === "Payment form")
+      .contentFrame,
+  );
+  passed("waits find a frame added after 1500 ms");
+  await json(["navigate", crossTab.id, `${fixture.origin}/frames/navigating`]);
+  const movingPage = await framesRead(["Card number", "Load the next page"]);
+  const movedCard = movingPage.interactables.find(
+    (control) => control.label === "Card number",
+  );
+  const nextPage = ref(movingPage, "Load the next page");
+  await cli(["click", crossTab.id, nextPage]);
+  await cli(["wait", crossTab.id, "--stdin"], {
+    selector: "#pay",
+    timeoutMs: 10000,
+  });
+  const staleCard = await callApi(`/tabs/${crossTab.id}/fill`, "POST", {
+    ref: movedCard.ref,
+    value: "1234",
+  });
+  assert.equal(staleCard.status, 409);
+  const staleCardError = (await staleCard.json()).error;
+  assert.deepEqual(
+    [staleCardError.code, staleCardError.frame],
+    ["stale_ref", movedCard.frame],
+  );
+  // The page's own document stayed, and so did its ref.
+  await cli(["click", crossTab.id, nextPage]);
+  await cli(["wait", crossTab.id, "--stdin"], {
+    selector: "input[aria-label='Card number']",
+    timeoutMs: 10000,
+  });
+  passed("frame refs go stale after the frame navigates, top-page refs do not");
+  await json(["navigate", crossTab.id, `${fixture.origin}/frames/focus`]);
+  const focusPage = await framesRead(["Top field", "Card number", "Pay now"]);
+  await cli(["focus", crossTab.id, ref(focusPage, "Card number")]);
+  assert.equal(
+    (await json(["paste", crossTab.id, "--stdin"], "4242424242424242")).ok,
+    true,
+  );
+  await cli(["press", crossTab.id, "Enter"]);
+  await poll(
+    async () => (await observe(crossTab.id)).text.includes("Entered 16 digits"),
+    { timeoutMs: 5000, label: "Enter in the focused frame's field" },
+  );
+  await cli(["space", "close", crossSpace.id]);
+  passed("Enter and paste reach a focused cross-site field");
   // Section 17 in the real app: the person's extensions reach a shared agent
   // space, an isolated space keeps them out, and what an extension opens or
   // changes while an agent works follows the isolation rules.
@@ -3752,6 +4294,58 @@ console.log(JSON.stringify(await waiting));
   assert.match(marked.text, /Marker from the extension/);
   passed(
     "the person's extension runs in a shared agent space and its marker shows in a snapshot",
+  );
+  // The extension's own frame is a blocked entry named for the extension,
+  // and agent input never reaches it.
+  const markerListing = await poll(
+    async () => {
+      const found = await observe(extensionTab.id);
+      return found.interactables.some(
+        (control) => control.extension === "Kamapathy marker",
+      )
+        ? found
+        : null;
+    },
+    { timeoutMs: 10000, label: "the marker extension's frame entry" },
+  );
+  const markerFrame = markerListing.interactables.find(
+    (control) => control.extension === "Kamapathy marker",
+  );
+  assert.deepEqual(
+    [
+      markerFrame.role,
+      markerFrame.label,
+      markerFrame.content,
+      markerFrame.origin,
+      markerFrame.contentFrame,
+    ],
+    ["iframe", "Extension: Kamapathy marker", "blocked", undefined, undefined],
+  );
+  assert.match(
+    (await cli(["snapshot", extensionTab.id, "--full"])).output,
+    /^@e\d+ iframe "Extension: Kamapathy marker" extension or internal frame, not read( |$)/m,
+  );
+  const markerClick = await callApi(`/tabs/${extensionTab.id}/click`, "POST", {
+    ref: markerFrame.ref,
+  });
+  assert.equal(markerClick.status, 403);
+  const markerRefusal = (await markerClick.json()).error;
+  assert.deepEqual(
+    [
+      markerRefusal.code,
+      markerRefusal.extension,
+      typeof markerRefusal.frame,
+      markerRefusal.message,
+    ],
+    [
+      "input_target_blocked",
+      "Kamapathy marker",
+      "string",
+      "This is part of the Kamapathy marker extension. Agents can't use extensions; ask the person to continue there.",
+    ],
+  );
+  passed(
+    "the marker extension's frame is a blocked entry labelled Extension: Kamapathy marker, and a click on it is refused with the extension's message",
   );
   // The person is looking at a page of their own while the agent works, so a
   // tab the extension opens has a personal space to land in.

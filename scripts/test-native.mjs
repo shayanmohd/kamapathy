@@ -322,12 +322,53 @@ try {
   assert.match((await snapshot(embedded)).text, /Files 1/);
   passed("fill, key presses, waits, scoped snapshots and uploads work inside a frame");
 
-  const blocked = await api(`/tabs/${embedded}/click`, "POST", {
-    ref: byLabel(outer, "Card details").ref,
+  // The frame from the other loopback host is read like the page's own, and
+  // a click inside it lands: the field it focused takes the text sent next,
+  // which the frame's own value then shows.
+  const remote = await poll(
+    async () => {
+      const listed = await snapshot(embedded);
+      return byLabel(listed, "Card details")?.content === "read" &&
+        byLabel(listed, "Card number")
+        ? listed
+        : null;
+    },
+    { timeoutMs: 10000, label: "the frame from the other loopback host" },
+  );
+  assert.equal(byLabel(remote, "Card details").crossOrigin, true);
+  const remoteField = byLabel(remote, "Card number");
+  assert.equal(typeof remoteField.frame, "string", JSON.stringify(remoteField));
+  const pressedRemote = await api(`/tabs/${embedded}/click`, "POST", {
+    ref: remoteField.ref,
   });
-  assert.equal(blocked.status, 409);
-  assert.equal((await blocked.response.json()).error.code, "cross_origin_frame");
-  passed("a frame from another origin is listed and refuses actions");
+  assert.equal(
+    pressedRemote.status,
+    200,
+    JSON.stringify(await pressedRemote.response.json()),
+  );
+  const typedRemote = await api(`/tabs/${embedded}/keyboard/insert-text`, "POST", {
+    text: "4242",
+  });
+  assert.equal(
+    typedRemote.status,
+    200,
+    JSON.stringify(await typedRemote.response.json()),
+  );
+  assert.equal(byLabel(await snapshot(embedded), "Card number").value, "4242");
+  const filledRemote = await api(`/tabs/${embedded}/fill`, "POST", {
+    ref: remoteField.ref,
+    value: "remote hello",
+  });
+  assert.equal(
+    filledRemote.status,
+    200,
+    JSON.stringify(await filledRemote.response.json()),
+  );
+  assert.equal(
+    byLabel(await snapshot(embedded), "Card number").value,
+    "remote hello",
+  );
+  passed("a frame from another origin is read and its field filled");
 
   const hosted = await open("/frames/shadow-frame");
   const widget = await poll(

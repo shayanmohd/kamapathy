@@ -4,7 +4,7 @@
 // arguments against the schema before anything is sent. The site pack calls
 // send nothing at all: they read the workspace and the skill.
 import { rmSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -35,6 +35,7 @@ import {
 import {
   checkBody,
   checkCall,
+  ERRORS,
   findEntry,
   matchRoute,
   requestBudget,
@@ -61,6 +62,135 @@ const PASTE_BODY_LIMIT = 192 * 1024;
 const RELEASE_ROUTE = matchRoute("POST", "/tabs/:id/input/release");
 const RELEASE_BUDGET_MS = requestBudget(RELEASE_ROUTE);
 const RELEASE_LEVEL = RELEASE_ROUTE.since;
+// The body a page script, a fetch or a protocol command may send, as their
+// routes declare it.
+const SCRIPT_LIMIT = matchRoute("POST", "/tabs/:id/evaluate").limit;
+
+// What a page script sends: a function as its source, called with its
+// argument, or an expression as written.
+function scriptSource(fnOrString) {
+  return typeof fnOrString === "function"
+    ? { function: String(fnOrString) }
+    : { expression: fnOrString };
+}
+
+// The value an evaluate answered with: JSON as it came, the values JSON
+// cannot carry rebuilt, and undefined when the answer has none.
+function decodeValue(answer) {
+  if ("value" in answer) return answer.value;
+  const token = answer.unserializable;
+  if (token === undefined) return undefined;
+  if (token === "NaN") return Number.NaN;
+  if (token === "Infinity") return Number.POSITIVE_INFINITY;
+  if (token === "-Infinity") return Number.NEGATIVE_INFINITY;
+  if (token === "-0") return -0;
+  if (/^-?\d+n$/.test(token)) return BigInt(token.slice(0, -1));
+  throw new KamapathyError(
+    "invalid_response",
+    `Kamapathy answered with a value this client cannot read: ${String(token).slice(0, 40)}.`,
+  );
+}
+
+// The longest stream line read: a data line carries at most 1 MiB as base64.
+const LINE_LIMIT = 2 * 1024 * 1024;
+
+// Reads an application/x-ndjson body one object per line, in order, waiting
+// for each to be handled. A line past the bound fails the read instead of
+// growing without end.
+async function readNdjson(response, onLine) {
+  const parse = (parts) => {
+    let item;
+    try {
+      item = JSON.parse(Buffer.concat(parts).toString("utf8"));
+    } catch {}
+    if (item === null || typeof item !== "object")
+      throw new KamapathyError(
+        "invalid_response",
+        "Kamapathy sent a stream line this client cannot read.",
+      );
+    return item;
+  };
+  let parts = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    let start = 0;
+    for (let end = chunk.indexOf(10); end >= 0; end = chunk.indexOf(10, start)) {
+      const line = [...parts, chunk.subarray(start, end)];
+      parts = [];
+      size = 0;
+      start = end + 1;
+      if (line.some((part) => part.length)) await onLine(parse(line));
+    }
+    const rest = chunk.subarray(start);
+    size += rest.length;
+    if (size > LINE_LIMIT)
+      throw new KamapathyError(
+        "invalid_response",
+        "Kamapathy sent a stream line longer than 2 MiB.",
+      );
+    if (rest.length) parts.push(rest);
+  }
+}
+
+// A stream's error line as the error it reports, with its code's status. It
+// is kept as any other answer's error is, so a takeover during the stream
+// stops a run.
+function streamError(session, { code, message, ...fields } = {}) {
+  return session.record(
+    new KamapathyError(
+      code || "request_failed",
+      message || "The API request failed.",
+      { ...fields, status: ERRORS[code]?.status ?? undefined },
+    ),
+  );
+}
+
+// Saves a fetch's body into a new file as it streams. The file is created
+// before the request, so a path already taken costs nothing, and an error
+// line, a stream that ends before its end line or any other failure removes
+// it.
+async function saveBody(session, path, request) {
+  let file;
+  try {
+    file = await open(path, "wx", 0o600);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    throw new KamapathyError(
+      "file_exists",
+      `${path} already exists, so nothing was fetched. Choose another path or remove that file first.`,
+      { path },
+    );
+  }
+  const interrupted = () =>
+    new KamapathyError(
+      "download_interrupted",
+      "The body stopped arriving before its end, so the incomplete file was removed. Kamapathy may have quit, or the page may have gone.",
+      { path },
+    );
+  let head;
+  let end;
+  let bytes = 0;
+  try {
+    const response = await request();
+    await readNdjson(response, async (line) => {
+      if (line.error) throw streamError(session, line.error);
+      if (line.head) head = line.head;
+      else if (typeof line.data === "string") {
+        const data = Buffer.from(line.data, "base64");
+        await file.write(data);
+        bytes += data.length;
+      } else if (line.end) end = line.end;
+    });
+    if (!head || end?.bytes !== bytes) throw interrupted();
+    await file.close();
+    file = undefined;
+    return { ...head, savedPath: path, bytes };
+  } catch (error) {
+    await file?.close().catch(() => {});
+    await rm(path, { force: true });
+    throw error instanceof KamapathyError ? error : interrupted();
+  }
+}
 
 // The label an input method was given, for its body.
 const labelOf = (options) =>
@@ -168,6 +298,14 @@ const misplacedOptions = (value) =>
  * @property {string} [locator] A selector naming this control alone.
  * @property {{ value: string, label: string, disabled?: boolean, selected?: boolean }[]} [options]
  * @property {string} [extension] The extension a blocked frame belongs to.
+ * @property {string} [frame] The path of the frame the control sits in.
+ * @property {true} [crossOrigin] An iframe entry whose frame's origin differs
+ * from the document around it.
+ * @property {string} [origin] An iframe entry's frame origin, or "opaque".
+ * @property {string} [contentFrame] The frame path an iframe entry's own
+ * controls carry, which page.cdp takes as `frame`.
+ * @property {"read" | "pending" | "unavailable" | "limit" | "blocked"} [content]
+ * Whether an iframe entry's frame was read.
  */
 /**
  * @typedef {object} SnapshotTab
@@ -200,6 +338,8 @@ const misplacedOptions = (value) =>
  * @property {string} [next] Pass back as `cursor` for the next part.
  * @property {string[]} [rebound]
  * @property {true} [locatorsIncomplete]
+ * @property {number} [unreadFrames] Frames left pending, unavailable or past
+ * the frame limit. Snapshot again, or scope to one with root.
  */
 /**
  * @typedef {object} SnapshotOptions
@@ -359,6 +499,19 @@ const misplacedOptions = (value) =>
  * @property {boolean} truncated
  * @property {number} [nextPage] The first page not fully returned.
  * @property {true} [noText] The pages carry no text, such as scans.
+ */
+/**
+ * @typedef {object} FetchResponse What page.fetch resolves, whatever the status.
+ * @property {boolean} ok Whether the status is 200 to 299.
+ * @property {number} status 0 for an opaque response.
+ * @property {string} statusText
+ * @property {string} url The final URL, after redirects.
+ * @property {boolean} redirected
+ * @property {string} type basic, cors, opaque or opaqueredirect.
+ * @property {Record<string, string>} headers With lowercase names.
+ * @property {string} [body] The body as UTF-8 text.
+ * @property {string} [savedPath] With saveAs: the file the body went to.
+ * @property {number} [bytes] With saveAs: how many bytes it holds.
  */
 /**
  * @typedef {object} SiteTool A tool a site pack declares.
@@ -1427,6 +1580,153 @@ export class Page {
       this.#session.request(`/tabs/${this.id}`, { method: "DELETE" }),
     );
   }
+  /**
+   * Runs a function or an expression in the page's main frame and returns
+   * its value. A function is sent as its source and called with `arg`, so it
+   * cannot see this script's variables; an expression takes no argument and
+   * may use top-level await. Needs Page scripts on.
+   * @param {Function | string} fnOrString
+   * @param {unknown} [arg] JSON data: no BigInt, NaN, Infinity, function,
+   * symbol or cycle.
+   * @param {{ timeout?: number }} [options] 2000 to 60000 ms, 15000 by default.
+   * @returns {Promise<unknown>} The value, with NaN, Infinity, -0 and a
+   * BigInt as themselves, and undefined when there is none.
+   */
+  evaluate(fnOrString, arg, options = {}) {
+    return this.#call("evaluate", [fnOrString, arg, options], async () => {
+      if (typeof fnOrString === "string" && arg !== undefined) {
+        const { expected } = findEntry("Page.evaluate");
+        throw new KamapathyError(
+          "invalid_argument",
+          `page.evaluate got an argument for an expression, which takes none. Pass a function to give it one, such as page.evaluate((x) => x * 2, 21). Expected ${expected}.`,
+          { entry: "page.evaluate", expected },
+        );
+      }
+      const { timeout = 15000 } = options;
+      const answer = await this.#post(
+        "evaluate",
+        {
+          ...scriptSource(fnOrString),
+          ...(arg === undefined ? {} : { arg }),
+          timeoutMs: timeout,
+        },
+        { limit: SCRIPT_LIMIT },
+      );
+      return decodeValue(this.#refreshed(answer));
+    });
+  }
+  /**
+   * Fetches a URL from the page, with its cookies, origin, service worker and
+   * CORS, and resolves the response, a non-2xx one included. With saveAs the
+   * body streams into a new file instead. Needs Page scripts on.
+   * @param {string} url Absolute, or relative to the page's URL.
+   * @param {{ method?: string, headers?: Record<string, string>, body?: string,
+   *   cache?: string, credentials?: "omit" | "same-origin" | "include",
+   *   integrity?: string, keepalive?: boolean,
+   *   mode?: "cors" | "no-cors" | "same-origin",
+   *   redirect?: "follow" | "error" | "manual", referrer?: string,
+   *   referrerPolicy?: string, timeout?: number, saveAs?: string }} [options]
+   * `timeout` is 1000 to 60000 ms, 20000 by default, and up to 300000 with
+   * saveAs, a path that must not exist yet.
+   * @returns {Promise<FetchResponse>}
+   */
+  fetch(url, options = {}) {
+    return this.#call("fetch", [url, options], async () => {
+      const { timeout = 20000, saveAs, ...fields } = options;
+      if (timeout > 60000 && saveAs === undefined)
+        throw new KamapathyError(
+          "invalid_option",
+          "page.fetch got an invalid option: timeout must be 1000 to 60000 ms, or up to 300000 with saveAs.",
+          { entry: "page.fetch", option: "timeout" },
+        );
+      const body = { url, ...fields, timeoutMs: timeout };
+      if (saveAs === undefined) {
+        const answer = await this.#post("fetch", body, {
+          limit: SCRIPT_LIMIT,
+        });
+        return this.#refreshed(answer).response;
+      }
+      return saveBody(this.#session, resolve(saveAs), () =>
+        this.#post(
+          "fetch",
+          { ...body, stream: true },
+          { limit: SCRIPT_LIMIT, response: "stream" },
+        ),
+      );
+    });
+  }
+  /**
+   * Sends one protocol command to this tab's page, or with `frame` to one of
+   * its frames that runs in its own process, and returns the result. Each
+   * command that reaches Chromium expires the tab's refs, so take a snapshot
+   * after it. Needs Page scripts on.
+   * @param {string} method Such as Page.getNavigationHistory.
+   * @param {object} [params] The command's parameters.
+   * @param {{ timeout?: number, frame?: string }} [options] `frame` is an
+   * iframe entry's contentFrame, such as "0/1", or its ref. `timeout` is
+   * 1000 to 60000 ms, 15000 by default.
+   * @returns {Promise<object>} The protocol's result.
+   */
+  cdp(method, params = {}, options = {}) {
+    return this.#call("cdp", [method, params, options], async () => {
+      const { timeout = 15000, frame } = options;
+      const { result } = await this.#post(
+        "cdp",
+        {
+          method,
+          params,
+          ...(frame === undefined ? {} : { frame }),
+          timeoutMs: timeout,
+        },
+        { limit: SCRIPT_LIMIT },
+      );
+      return result;
+    });
+  }
+  /**
+   * Takes the oldest protocol events recorded for this tab: its Page and
+   * Network events and every event of the agent's own sessions, with cookie
+   * values hidden. Needs Page scripts on.
+   * @param {{ max?: number }} [options] 1 to 10000, 10000 by default.
+   * @returns {Promise<{ events: { time: number, method: string, params?: object, frame?: string | null, omitted?: "too_large", bytes?: number }[], dropped: number, gaps: { reason: string, from: number, to: number }[], remaining: number }>}
+   * An event's frame is a frame path, null for a frame that has gone, and
+   * absent for the page itself.
+   */
+  events(options = {}) {
+    return this.#call("events", [options], async () => {
+      const { max = 10000 } = options;
+      const { events, dropped, gaps, remaining } = await this.#post(
+        "events",
+        { max },
+      );
+      return { events, dropped, gaps, remaining };
+    });
+  }
+  /**
+   * Clears one origin's cookies, storage or cache. In an isolated space it
+   * runs at once; in a space that uses the person's sign-ins it waits for
+   * their approval, and only their Clear clears anything.
+   * @param {{ origin?: string, cookies?: true | { name: string, domain?: string, path?: string } | { name: string, domain?: string, path?: string }[], storage?: true | string[], cache?: boolean, timeout?: number }} options
+   * At least one of cookies, storage and cache. `timeout` is how long the
+   * person has to answer, 1000 to 300000 ms, 60000 by default.
+   * @returns {Promise<{ ok: true, origin: string, cleared: { cookies?: { removed: number, domains: string[] }, storage?: string[], cache?: true }, approvedBy?: "person" }>}
+   */
+  clearSiteData(options = {}) {
+    return this.#call("clearSiteData", [options], async () => {
+      const { timeout = 60000, ...fields } = options;
+      if (
+        fields.cookies === undefined &&
+        fields.storage === undefined &&
+        fields.cache !== true
+      )
+        throw new KamapathyError(
+          "invalid_option",
+          "page.clearSiteData got nothing to clear. Give at least one of cookies, storage and cache.",
+          { entry: "page.clearSiteData" },
+        );
+      return this.#post("clear-site-data", { ...fields, timeoutMs: timeout });
+    });
+  }
 }
 
 /** One download Kamapathy holds for the agent in its space. */
@@ -1938,6 +2238,23 @@ export class Space {
     return this.#call("close", [], () =>
       this.#session.request(`/spaces/${this.id}`, { method: "DELETE" }),
     );
+  }
+  /**
+   * Asks Kamapathy itself for this space's pages, with Target.getTargets, or
+   * its versions, with Browser.getVersion. Nothing reaches Chromium, and
+   * every other method is refused. Needs Page scripts on.
+   * @param {string} method
+   * @param {object} [params]
+   * @returns {Promise<object>} The protocol's result.
+   */
+  cdp(method, params = {}) {
+    return this.#call("cdp", [method, params], async () => {
+      const { result } = await this.#session.request(
+        `/spaces/${this.id}/cdp`,
+        { method: "POST", body: { method, params } },
+      );
+      return result;
+    });
   }
 }
 

@@ -1268,6 +1268,222 @@ export const COMMANDS = [
     },
   ),
   command(
+    "evaluate",
+    "Pages",
+    "evaluate <tab-id> --stdin [--timeout <ms>]",
+    "Run an expression in the page and print its value",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--stdin",
+          description: "Read the expression from stdin",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long the expression may run, 2000 to 60000, default 15000.",
+          since: 4,
+        },
+      ],
+      stdin:
+        "An expression to run in the page's main frame, at most 16384 characters. It may use await.",
+      route: "POST /tabs/:id/evaluate",
+      script: "page.evaluate",
+      since: 4,
+    },
+  ),
+  command(
+    "fetch",
+    "Pages",
+    'fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]',
+    "Fetch a URL with the page's cookies and CORS",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "url",
+          description: "The URL to fetch, absolute or relative to the page's.",
+        },
+      ],
+      flags: [
+        {
+          name: "--method",
+          value: "<m>",
+          description: "The request method, GET by default.",
+          since: 4,
+        },
+        {
+          name: "--header",
+          value: '"Name: value"',
+          description: "A request header. Repeat it for more, up to 64.",
+          since: 4,
+        },
+        {
+          name: "--stdin",
+          description: "Read the request body from stdin, at most 1 MiB.",
+          since: 4,
+        },
+        {
+          name: "--save",
+          value: "<file>",
+          description:
+            "Stream the body into this new file instead of printing it. It is never overwritten.",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long the request and its body may take, 1000 to 60000, default 20000; up to 300000 with --save.",
+          since: 4,
+        },
+      ],
+      stdin: "The request body, with --stdin.",
+      route: "POST /tabs/:id/fetch",
+      script: "page.fetch",
+      since: 4,
+    },
+  ),
+  command(
+    "cdp",
+    "Pages",
+    "cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]",
+    "Send one protocol command to the page or one of its frames",
+    {
+      arguments: [
+        TAB_ID,
+        {
+          name: "method",
+          description: "A protocol method, such as Page.getNavigationHistory.",
+        },
+      ],
+      flags: [
+        {
+          name: "--stdin",
+          description: "Read the command's params from stdin",
+          since: 4,
+        },
+        {
+          name: "--frame",
+          value: "<path-or-ref>",
+          description:
+            "Send it to a frame in its own process: an iframe entry's contentFrame, such as 0/1, or its ref.",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long to wait for Chromium's answer, 1000 to 60000, default 15000.",
+          since: 4,
+        },
+      ],
+      stdin: "The command's params as a JSON object, at most 64 KiB.",
+      route: "POST /tabs/:id/cdp",
+      script: "page.cdp",
+      since: 4,
+    },
+  ),
+  command(
+    "space cdp",
+    "Spaces",
+    "space cdp <space-id> <method> [--stdin]",
+    "Ask Kamapathy for this space's pages or its versions",
+    {
+      arguments: [
+        SPACE_ID,
+        {
+          name: "method",
+          description: "Target.getTargets or Browser.getVersion.",
+        },
+      ],
+      flags: [
+        {
+          name: "--stdin",
+          description: "Read the command's params from stdin",
+          since: 4,
+        },
+      ],
+      stdin: "The command's params as a JSON object, at most 64 KiB.",
+      route: "POST /spaces/:id/cdp",
+      script: "space.cdp",
+      since: 4,
+    },
+  ),
+  command(
+    "events",
+    "Pages",
+    "events <tab-id> [--max <n>]",
+    "Drain the protocol events recorded for the page",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--max",
+          value: "<n>",
+          description:
+            "How many of the oldest events to take, 1 to 10000, default 10000.",
+          since: 4,
+        },
+      ],
+      route: "POST /tabs/:id/events",
+      script: "page.events",
+      since: 4,
+    },
+  ),
+  command(
+    "clear-site-data",
+    "Pages",
+    "clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>]",
+    "Clear one site's cookies, storage or cache",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--origin",
+          value: "<o>",
+          description:
+            "The http or https origin to clear, the page's own by default.",
+          since: 4,
+        },
+        {
+          name: "--cookies",
+          description: "Clear every cookie the origin receives.",
+          since: 4,
+        },
+        {
+          name: "--cookie",
+          value: "<name>",
+          description: "Clear the origin's cookies of this name. Repeat it for more.",
+          since: 4,
+        },
+        {
+          name: "--storage",
+          description: "Clear the origin's storage.",
+          since: 4,
+        },
+        {
+          name: "--cache",
+          description: "Clear the origin's HTTP cache.",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long the person has to answer in a space that uses their sign-ins, 1000 to 300000, default 60000.",
+          since: 4,
+        },
+      ],
+      route: "POST /tabs/:id/clear-site-data",
+      script: "page.clearSiteData",
+      since: 4,
+    },
+  ),
+  command(
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",
@@ -1364,7 +1580,7 @@ export const COMMANDS = [
       {
         name: "topic",
         description:
-          "A command such as space create, api, errors, routes, or a script entry such as page.click.",
+          "A command such as space create, api, errors, routes, page-scripts, or a script entry such as page.click.",
       },
     ],
   }),

@@ -118,6 +118,8 @@ const captureFailure = (error: unknown): unknown => {
 };
 // Kamapathy's own sessions record only page and network events.
 const RECORDED = /^(Page|Network)\./;
+// How many agent sessions a tab remembers the frame of.
+const AGENT_FRAMES = 256;
 // Dialog text keeps tab and newline, and loses other control characters and
 // bidirectional overrides.
 const UNSAFE_TEXT =
@@ -257,6 +259,10 @@ export class TabSession {
   private agents = new Set<string>();
   private opening = new Map<string, number>();
   private closingAgents = new Set<string>();
+  // The frame each agent session was opened for, null for the tab's own
+  // page. Kept after the session closes, so events it left in the buffer
+  // still say where they came from.
+  private agentFrames = new Map<string, string | null>();
   private targetId?: string;
   // The worlds handed out, by session and context id. Context ids restart in
   // each renderer process, so a call naming a world whose document ended
@@ -960,12 +966,20 @@ export class TabSession {
         15000,
       );
       this.agents.add(sessionId);
+      this.agentFrames.set(sessionId, frameId ?? null);
+      if (this.agentFrames.size > AGENT_FRAMES)
+        this.agentFrames.delete(this.agentFrames.keys().next().value!);
       return sessionId;
     } finally {
       const left = this.opening.get(targetId)! - 1;
       if (left > 0) this.opening.set(targetId, left);
       else this.opening.delete(targetId);
     }
+  }
+
+  /** The frame an agent session was opened for: null for the tab's own page, undefined for a session that is not an agent's. */
+  agentFrame(sessionId: string): string | null | undefined {
+    return this.agentFrames.get(sessionId);
   }
 
   async closeAgentSession(sessionId: string): Promise<void> {

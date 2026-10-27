@@ -693,6 +693,18 @@ function registerIpc(): void {
       throw new Error("Invalid prompt answer.");
     owner.prompts.answer(answer);
   });
+  // The person's Clear or Don't clear for an agent's request to clear a
+  // site's data. A request that already ended, or that this run never made,
+  // changes nothing.
+  ipcMain.handle(
+    "kamapathy:answer-approval",
+    (event, id: unknown, clear: unknown) => {
+      validateSender(event);
+      if (typeof id !== "string" || typeof clear !== "boolean")
+        throw new Error("Invalid approval answer.");
+      automation?.answerApproval(id, clear);
+    },
+  );
   ipcMain.on("kamapathy:window", (event, action: string) => {
     try {
       const current = validateSender(event).window;

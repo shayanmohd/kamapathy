@@ -96,9 +96,23 @@ function scriptFrame(error, paths) {
   return null;
 }
 
+// A refused protocol command: its reason, and for one that is the person's,
+// the call that does the same.
+function blockedHint({ method, reason, param }) {
+  const instead =
+    reason !== "person"
+      ? ""
+      : method === "Fetch.continueWithAuth" || param === "handleAuthRequests"
+        ? " space.setHTTPCredentials({ origin, username, password }) answers a site's sign-in in this space."
+        : ["key", "commands", "button"].includes(param)
+          ? " page.keyboard.paste(text) offers the page a paste without the system clipboard."
+          : "";
+  return `hint: Kamapathy refused ${line(method)} for reason ${line(reason)}.${instead}`;
+}
+
 /**
- * Hints for an error, at most two: page globals, page functions, then
- * dialogs, or saved passwords followed by names.
+ * Hints for an error, at most two: page globals, page functions, refused
+ * protocol commands, then dialogs, or saved passwords followed by names.
  * @param {unknown} error
  * @param {{ client?: { app?: { version?: string, apiLevel: number } | null }, entries?: object[] }} [options]
  * @returns {string[]}
@@ -126,6 +140,8 @@ export function hintsFor(error, { client, entries = ENTRIES } = {}) {
     hints.push(
       "hint: Page functions run in the page and cannot see script variables. Pass values as the argument: page.evaluate((x) => x * 2, x).",
     );
+  if (error?.name === "KamapathyError" && error.code === "cdp_method_blocked")
+    hints.push(blockedHint(error));
   const notFunction =
     error?.name === "TypeError" &&
     /^(.+)\.([\w$]+) is not a function$/.exec(message);

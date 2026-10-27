@@ -16,6 +16,12 @@ const URL_WAIT = body("POST /tabs/:id/wait-for-url");
 const LOAD_WAIT = body("POST /tabs/:id/wait-for-load-state");
 const SELECTOR_WAIT = body("POST /tabs/:id/wait-for-selector");
 const FUNCTION_WAIT = body("POST /tabs/:id/wait-for-function");
+// Section 8's page scripts take their routes' fields the same way.
+const EVALUATE = body("POST /tabs/:id/evaluate");
+const FETCH = body("POST /tabs/:id/fetch");
+const CDP = body("POST /tabs/:id/cdp");
+const EVENTS = body("POST /tabs/:id/events");
+const CLEAR = body("POST /tabs/:id/clear-site-data");
 const timeout = (field) => ({ ...field, field: "timeoutMs" });
 // What a navigation or a wait can answer beyond the page codes.
 const NAVIGATION = [
@@ -975,6 +981,146 @@ export const PAGE_ENTRIES = [
       options: {
         text: paste.text,
         html: paste.html,
+      },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.evaluate",
+    "page.evaluate(fnOrString, arg?, options?)",
+    "Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.",
+    [
+      { name: "fnOrString", kind: "pageFunction" },
+      { name: "arg", kind: "json", optional: true },
+      OPTIONS,
+    ],
+    "Promise<unknown>",
+    "POST /tabs/:id/evaluate",
+    [
+      "invalid_field",
+      "agent_scripts_off",
+      "script_error",
+      "result_too_large",
+      "evaluation_timeout",
+      "request_too_large",
+      "invalid_response",
+    ],
+    {
+      expected: "page.evaluate(fnOrString, arg?, { timeout? })",
+      options: { timeout: timeout(EVALUATE.timeoutMs) },
+      pageFunction: true,
+      since: 4,
+    },
+  ),
+  method(
+    "Page.fetch",
+    "page.fetch(url, options?)",
+    "Fetches a URL from the page with its cookies, origin and CORS, and resolves the response, a non-2xx one included. With saveAs the body streams into a new file instead.",
+    [{ name: "url", kind: "url" }, OPTIONS],
+    "Promise<{ ok, status, statusText, url, redirected, type, headers, body } or { ok, status, statusText, url, redirected, type, headers, savedPath, bytes }>",
+    "POST /tabs/:id/fetch",
+    [
+      "invalid_url",
+      "invalid_field",
+      "agent_scripts_off",
+      "fetch_failed",
+      "fetch_timeout",
+      "result_too_large",
+      "file_exists",
+      "download_interrupted",
+      "request_too_large",
+      "invalid_response",
+    ],
+    {
+      options: {
+        method: FETCH.method,
+        headers: FETCH.headers,
+        body: FETCH.body,
+        cache: FETCH.cache,
+        credentials: FETCH.credentials,
+        integrity: FETCH.integrity,
+        keepalive: FETCH.keepalive,
+        mode: FETCH.mode,
+        redirect: FETCH.redirect,
+        referrer: FETCH.referrer,
+        referrerPolicy: FETCH.referrerPolicy,
+        timeout: {
+          ...timeout(FETCH.timeoutMs),
+          description:
+            "How long the request and its body may take. Above 60000 only with saveAs.",
+        },
+        saveAs: {
+          kind: "string",
+          max: 4096,
+          since: 4,
+          description:
+            "A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails.",
+        },
+      },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.cdp",
+    "page.cdp(method, params?, options?)",
+    "Sends one protocol command to this tab's page, or to one of its frames, and returns its result. Each command that reaches Chromium expires the tab's refs, so take a snapshot after it.",
+    [
+      { name: "method", kind: "method" },
+      { name: "params", kind: "json", optional: true },
+      OPTIONS,
+    ],
+    "Promise<object>",
+    "POST /tabs/:id/cdp",
+    [
+      "invalid_field",
+      "agent_scripts_off",
+      "cdp_method_blocked",
+      "cdp_error",
+      "cdp_timeout",
+      "frame_not_found",
+      "invalid_ref",
+      "unknown_ref",
+      "stale_ref",
+      "input_target_blocked",
+      "native_popup_blocked",
+      "request_too_large",
+    ],
+    {
+      options: { timeout: timeout(CDP.timeoutMs), frame: CDP.frame },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.events",
+    "page.events(options?)",
+    "Takes the oldest protocol events recorded for this tab, with how many were dropped, when recording paused and how many remain.",
+    [OPTIONS],
+    "Promise<{ events, dropped, gaps, remaining }>",
+    "POST /tabs/:id/events",
+    ["invalid_field", "agent_scripts_off"],
+    { options: { max: EVENTS.max }, since: 4 },
+  ),
+  method(
+    "Page.clearSiteData",
+    "page.clearSiteData(options)",
+    "Clears one origin's cookies, storage or cache, at least one of them. In a space that uses the person's sign-ins, the person approves it first.",
+    [{ name: "options", kind: "options" }],
+    'Promise<{ ok: true, origin, cleared, approvedBy?: "person" }>',
+    "POST /tabs/:id/clear-site-data",
+    [
+      "invalid_field",
+      "origin_not_in_tab",
+      "clear_declined",
+      "approval_timeout",
+      "space_ended",
+    ],
+    {
+      options: {
+        origin: CLEAR.origin,
+        cookies: CLEAR.cookies,
+        storage: CLEAR.storage,
+        cache: CLEAR.cache,
+        timeout: timeout(CLEAR.timeoutMs),
       },
       since: 4,
     },
