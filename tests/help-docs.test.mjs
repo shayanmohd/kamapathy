@@ -205,4 +205,10 @@ describe("what the help says frames, page scripts and runs do", () => {
     ])
       expect(read(path).toLowerCase(), path).toContain(RULE.toLowerCase());
   });
+
+  it("names every global a run defines, the site pack calls included", () => {
+    const { summary } = findCommand("run");
+    for (const { name } of ENTRIES.filter((entry) => entry.kind === "global"))
+      expect(summary, name).toMatch(new RegExp(`\\b${name}\\b`));
+  });
 });

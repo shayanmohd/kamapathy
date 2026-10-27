@@ -1487,7 +1487,7 @@ export const COMMANDS = [
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",
-    "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself",
+    "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces, requestSpace, sitePacks, siteContext, runSiteTool and runPageTool, plus help; run - reads it from stdin and run -e <code> runs the code itself",
     {
       arguments: [
         {
