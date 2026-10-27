@@ -51,7 +51,7 @@ const SAYS = [
   "Every click, fill, press, scroll, drag and file action reports what it caused",
   "`requestSpace`, `help`, `sitePacks`, `siteContext`, `runSiteTool` and `runPageTool`, and connects on its first call.",
   "`opener`, `evaluate`, `fetch`, `cdp`, `events`, `clearSiteData` and `close`; a space also has `downloads`, `setHTTPCredentials` and `cdp`.",
-  "the script runs in your own Node.js; only what you pass to `evaluate` or `waitForFunction` runs in the page.",
+  "the script runs in your own Node.js; only what you pass to `evaluate`, `waitForFunction` or `cdp` runs in the page.",
   "An expression passed to `evaluate` runs with top-level `await` and may repeat declarations, but one whose value is a promise comes back as an empty object unless you `await` it; the function form awaits.",
   "Prefer snapshots and actions.",
   "A `cdp` command that reaches the page makes the tab's refs stale, so take a fresh snapshot after one.",

@@ -62,6 +62,10 @@ describe("the agent guide", () => {
       "Recording runs only while Page scripts is on and the agent has control",
       "Only **Clear** clears anything.",
       "No route clears a whole session.",
+      // As the client and the bar do it.
+      "a cycle or an `undefined` array item anywhere in `arg`, naming its path. An `undefined` property is left out, and an `undefined` `arg` means none.",
+      "`evaluate`, `fetch`, `cdp` and `clear-site-data` wait for their answer their own timeout plus 5,000 ms, and `events` and `space cdp` 45,000 ms.",
+      "otherwise it says sites may forget the person's settings for that origin.",
     ])
       expect(scripts).toContain(sentence);
   });
@@ -127,6 +131,11 @@ describe("the agent guide", () => {
       // Sections 17 and 18 shipped: neither is missing.
       "Browser extensions, a password manager",
       "A password manager, sync",
+      // Section 8 as it shipped: an undefined arg is no argument, events
+      // has no timeout of its own, and the bar counts cookies only.
+      "a top-level `undefined`",
+      "Each call's HTTP timeout is its own timeout plus 5,000 ms.",
+      "naming the cookies, site storage and cached files at stake",
     ])
       expect(guide, retired).not.toContain(retired);
   });

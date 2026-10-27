@@ -75,7 +75,10 @@ describe("what the security model says", () => {
     says([
       "An agent can clear one site's cookies, storage or cache, and nothing clears a whole session.",
       "Only the person's **Clear** clears anything",
+      // The bar counts cookies and names sign-ins, or warns about settings.
+      'asks above that tab, "Clear data for <host>?", with how many cookies would go and the sites the person would be signed out of, or, when no cookie would go, that sites may forget their settings.',
     ]);
+    expect(security).not.toContain("naming what would go");
   });
 
   it("says where site pack code runs and what the client refuses", () => {
