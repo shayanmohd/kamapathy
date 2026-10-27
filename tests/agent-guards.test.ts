@@ -342,6 +342,54 @@ describe("the input guards", () => {
     );
   });
 
+  it("refuses a fractional point that rounds out of a frame agents may not reach", async () => {
+    // A frame in its own process spans x 0 to 150 and y 0 to 100. Chromium
+    // sends input to the exact point, while the hit test takes whole ones:
+    // a probe saw a press at x 149.6 land in the frame, and the hit test at
+    // 150 find the page.
+    const spots: Spot[] = [
+      {
+        x: 149,
+        y: 50,
+        frameId: MAIN,
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+      { x: 150, y: 50, frameId: MAIN, author: { nodeName: "body" } },
+      {
+        x: 75,
+        y: 99,
+        frameId: MAIN,
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+      { x: 75, y: 100, frameId: MAIN, author: { nodeName: "body" } },
+    ];
+    const frames = [known(MAIN), known("panel", { blocked: true })];
+    for (const [point, pressing] of [
+      [{ x: 149.6, y: 50 }, true],
+      [{ x: 75, y: 99.5 }, false],
+    ] as const) {
+      const { session } = tab({ spots, frames, paths: { panel: "0" } });
+      const error = await refusal(
+        checkPointerTarget(session, point, step(), {
+          button: "left",
+          press: pressing,
+        }),
+      );
+      expect([error.code, error.fields.frame]).toEqual([
+        "input_target_blocked",
+        "0",
+      ]);
+    }
+    // A whole point is the one point hit-tested.
+    const whole = tab({ spots, frames });
+    await expect(press(whole.session, { x: 150, y: 50 })).resolves.toBe(
+      undefined,
+    );
+    expect(
+      whole.sent.filter((command) => command.method === "DOM.getNodeForLocation"),
+    ).toHaveLength(1);
+  });
+
   it("refuses a press that would open a native select, color or date picker", async () => {
     const use = async (point: { x: number; y: number }) => {
       const { session } = tab({ spots: CONTROLS });

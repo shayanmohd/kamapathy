@@ -215,6 +215,19 @@ const pickerAt = async (
   return part && pickerKindOf(part);
 };
 
+// The hit test takes whole points while Chromium sends input to the exact
+// one: a probe of Electron 44 saw a press at x 149.6 land in a frame in its
+// own process whose edge is at 150, where the hit test found the page. So
+// the frame check also covers the whole points beside a fractional one.
+const besideWhole = (point: { x: number; y: number }) => {
+  const rounded = `${Math.round(point.x)},${Math.round(point.y)}`;
+  const found = new Map<string, { x: number; y: number }>();
+  for (const x of [Math.floor(point.x), Math.ceil(point.x)])
+    for (const y of [Math.floor(point.y), Math.ceil(point.y)])
+      if (`${x},${y}` !== rounded) found.set(`${x},${y}`, { x, y });
+  return [...found.values()];
+};
+
 // Every press goes through this, force included, and a move with no press
 // is checked for its frame alone.
 export async function checkPointerTarget(
@@ -230,20 +243,24 @@ export async function checkPointerTarget(
   },
 ): Promise<void> {
   const platform = options.platform ?? process.platform;
-  const hit = await hitNodeAt(session, point, step);
-  if (!hit) return;
-  if (hit.frameId !== undefined) {
+  const checkFrame = async (found: HitNode | undefined) => {
+    const frameId = found?.frameId;
+    if (frameId === undefined) return;
     const frames = await session.knownFrames(step);
-    const frame = frames.find((entry) => entry.frameId === hit.frameId);
+    const frame = frames.find((entry) => entry.frameId === frameId);
     if (!frame || refusesInput(frame))
       await refusePoint(
         session,
-        hit.frameId,
+        frameId,
         step,
         options.extensions ?? NO_EXTENSION_NAMES,
       );
-  }
-  if (!options.press) return;
+  };
+  const hit = await hitNodeAt(session, point, step);
+  await checkFrame(hit);
+  for (const whole of besideWhole(point))
+    await checkFrame(await hitNodeAt(session, whole, step));
+  if (!hit || !options.press) return;
   if (platform === "linux" && options.button === "middle" && hit.editable)
     fail(
       "clipboard_blocked",

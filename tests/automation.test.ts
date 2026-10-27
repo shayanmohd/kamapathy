@@ -7908,6 +7908,52 @@ describe("local automation socket", () => {
       );
   });
 
+  it("a raw point just inside an extension frame's edge is refused", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // The frame's right edge is at x 150: the hit test finds it at 149 and
+    // the page at 150, while input at 149.6 lands in the frame.
+    page.hits = [
+      { x: 149, y: 50, nodeName: "iframe", holds: "panel" },
+      { x: 150, y: 50, nodeName: "body" },
+    ];
+    for (const [method, params] of [
+      [
+        "Input.dispatchMouseEvent",
+        {
+          type: "mousePressed",
+          x: 149.6,
+          y: 50,
+          button: "left",
+          clickCount: 1,
+        },
+      ],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x: 149.6, y: 50 }] },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
