@@ -39,7 +39,13 @@ export interface GroupRead {
     local: string;
     entry: Record<string, unknown>;
   }[];
-  outline: { order: number; depth: number; line: string }[];
+  outline: {
+    order: number;
+    depth: number;
+    line: string;
+    /** A control or frame line, which maxControls bounds. */
+    control?: true;
+  }[];
   placeholders: OwnerPlaceholder[];
   /** The characters this read's text parts hold together. */
   chars: number;
@@ -269,35 +275,73 @@ export function mergeControls(
   };
 }
 
-function flatOutline(nodes: readonly Node[], depth: number, lines: string[]) {
+type Line = { depth: number; text: string; control: boolean };
+function flatOutline(nodes: readonly Node[], depth: number, lines: Line[]) {
   for (const node of nodes) {
     // A group's lines sit one level under its owner's line.
     let base = depth;
     for (const row of sequence(node, node.read.outline))
       if (row.item) {
         base = depth + row.item.depth + 1;
-        lines.push("  ".repeat(depth + row.item.depth) + row.item.line);
+        lines.push({
+          depth: depth + row.item.depth,
+          text: "  ".repeat(depth + row.item.depth) + row.item.line,
+          control: row.item.control === true,
+        });
       } else flatOutline([row.child], base, lines);
   }
 }
 
-/** The outline of every group, nested under its iframe line, from the cursor's line. */
+/**
+ * The outline of every group, nested under its iframe line, from the
+ * cursor's line within both bounds and after the lines around it. `omitted`
+ * counts the control and frame lines after the part that the reads reported.
+ */
 export function nestOutline(
   reads: readonly GroupRead[],
-  options: { maxChars: number; from?: number },
-): { outline: string[]; next?: number } {
-  const lines: string[] = [];
+  options: { maxChars: number; maxControls: number; from?: number },
+): { outline: string[]; omitted: number; next?: number } {
+  const lines: Line[] = [];
   flatOutline(treeOf(reads), 0, lines);
   const outline: string[] = [];
   let used = 0;
-  let at = offsetOf(options.from);
+  let taken = 0;
+  const from = offsetOf(options.from);
+  // A continued part first repeats the lines around its first line, which
+  // cost characters but are not progress: each line above it that sits
+  // less deep than every line between them, across frames too.
+  if (from > 0 && from < lines.length) {
+    const around: string[] = [];
+    let depth = lines[from].depth;
+    for (let above = from - 1; above >= 0 && depth > 0; above -= 1)
+      if (lines[above].depth < depth) {
+        around.unshift(lines[above].text);
+        depth = lines[above].depth;
+      }
+    for (const text of around) {
+      outline.push(text);
+      used += text.length + 1;
+    }
+  }
+  let at = from;
   // A part always prints one line, so a cursor never sticks.
   for (; at < lines.length; at += 1) {
-    if (outline.length && used + lines[at].length + 1 > options.maxChars) break;
-    outline.push(lines[at]);
-    used += lines[at].length + 1;
+    const line = lines[at];
+    if (
+      at > from &&
+      ((line.control && taken >= options.maxControls) ||
+        used + line.text.length + 1 > options.maxChars)
+    )
+      break;
+    outline.push(line.text);
+    used += line.text.length + 1;
+    if (line.control) taken += 1;
   }
-  return { outline, ...(at < lines.length ? { next: at } : {}) };
+  return {
+    outline,
+    omitted: lines.slice(at).filter((line) => line.control).length,
+    ...(at < lines.length ? { next: at } : {}),
+  };
 }
 
 /** The frames these reads left pending, unavailable or past a limit. */

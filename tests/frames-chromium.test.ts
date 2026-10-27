@@ -33,6 +33,8 @@ import { parseSelector } from "../electron/agent/selectors";
 import type { AutomationController } from "../electron/agent/server";
 import {
   createSnapshots,
+  optionsHash,
+  readCursor,
   type SnapshotRequest,
 } from "../electron/agent/snapshot";
 import { EventBufferPool } from "../electron/agent/session/event-buffer";
@@ -431,6 +433,95 @@ for (const mode of ISOLATION)
       expect(printed[printed.indexOf('iframe "Billing details"') + 1]).toBe(
         '  "Billing address"',
       );
+    }, 60000);
+
+    it("an open dialog prints first, with its frame's lines under the iframe line", async () => {
+      await open("/frames/dialog", 2);
+      const shape = await take({ format: "outline" });
+      expect(shape.outline!.replace(/ @e\d+/g, "").split("\n")).toEqual([
+        'dialog "Pay"',
+        '  iframe "Card details"',
+        '    "Card number"',
+        '    textbox "Card number"',
+        "main",
+        '  "Order summary"',
+      ]);
+      // The frame's control is listed after its owner, as its line prints.
+      expect(
+        Array.from(shape.outline!.matchAll(/@e\d+/g)).map((found) => found[0]),
+      ).toEqual(shape.interactables.map((control) => control.ref));
+    }, 60000);
+
+    it("pages an outline through its frames within both bounds", async () => {
+      await open("/frames/pay", 3);
+      const whole = (await take({ format: "outline" })).outline!.split("\n");
+      const refsIn = (lines: readonly string[]) =>
+        lines.flatMap((line) => line.match(/@e\d+/g) ?? []);
+      const lineOf = (cursor: string) =>
+        readCursor(cursor, {
+          h: optionsHash({ scope: "page", format: "outline" }),
+        }).l;
+      // The lines around a line of the outline: each line above it that is
+      // less indented than every line between them.
+      const indent = (line: string) => line.length - line.trimStart().length;
+      const around = (at: number) => {
+        const chain: string[] = [];
+        for (
+          let above = at - 1, depth = indent(whole[at]);
+          above >= 0;
+          above -= 1
+        )
+          if (indent(whole[above]) < depth) {
+            chain.unshift(whole[above]);
+            depth = indent(whole[above]);
+          }
+        return chain;
+      };
+      for (const bounds of [
+        { maxChars: 60, maxControls: 100 },
+        { maxChars: 24000, maxControls: 1 },
+      ]) {
+        const name = JSON.stringify(bounds);
+        const parts: Listing[] = [];
+        let cursor: string | undefined;
+        do {
+          const got = await take({
+            format: "outline",
+            ...bounds,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          parts.push(got);
+          cursor = got.next;
+        } while (cursor !== undefined && parts.length < 20);
+        expect(cursor, `${name} ends`).toBeUndefined();
+        // Each part prints the lines from its cursor to the next one's,
+        // after the lines around the first of them, which for a part that
+        // starts among a frame's own lines include the iframe line.
+        let from = 0;
+        let inside = 0;
+        for (const [index, part] of parts.entries()) {
+          const printed = part.outline!.split("\n");
+          const to = part.next ? lineOf(part.next) : whole.length;
+          expect(to, `${name} part ${index}`).toBeGreaterThan(from);
+          const fresh = whole.slice(from, to);
+          expect(printed, `${name} part ${index}`).toEqual([
+            ...around(from),
+            ...fresh,
+          ]);
+          // Frame refs count toward maxControls like any control's.
+          expect(refsIn(fresh).length, `${name} part ${index}`).toBeLessThanOrEqual(
+            bounds.maxControls,
+          );
+          // A part lists the controls and frames it printed.
+          expect(part.interactables.map((control) => control.ref)).toEqual(
+            refsIn(printed),
+          );
+          if (around(from).some((line) => line.startsWith("iframe "))) inside += 1;
+          from = to;
+        }
+        expect(from, name).toBe(whole.length);
+        expect(inside, name).toBeGreaterThan(0);
+      }
     }, 60000);
 
     it("viewport scope reads only the visible part of each frame", async () => {

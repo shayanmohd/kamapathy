@@ -47,7 +47,7 @@ const CHECKOUT = () => [
     placeholders: [owner({ local: "0", order: 3, tier: 3 })],
     outline: [
       { order: 1, depth: 0, line: 'main "Checkout"' },
-      { order: 3, depth: 1, line: 'iframe "Payment" @e1' },
+      { order: 3, depth: 1, line: 'iframe "Payment" @e1', control: true },
     ],
     controls: [
       {
@@ -69,7 +69,9 @@ const CHECKOUT = () => [
     group: "0",
     owner: owner({ local: "0", order: 3, tier: 3 }),
     text: textOf([[1, "Card number"]]),
-    outline: [{ order: 1, depth: 0, line: 'textbox "Card number" @e2' }],
+    outline: [
+      { order: 1, depth: 0, line: 'textbox "Card number" @e2', control: true },
+    ],
     controls: [
       {
         order: 1,
@@ -277,16 +279,16 @@ describe("frame composition", () => {
         owner: owner({ local: "1", order: 2 }),
         outline: [
           { order: 1, depth: 0, line: 'group "Expiry"' },
-          { order: 2, depth: 1, line: 'textbox "MM / YY" @e3' },
+          { order: 2, depth: 1, line: 'textbox "MM / YY" @e3', control: true },
         ],
       }),
     ];
     reads[1].outline = [
       ...reads[1].outline,
-      { order: 2, depth: 0, line: 'iframe "Expiry" @e4' },
+      { order: 2, depth: 0, line: 'iframe "Expiry" @e4', control: true },
     ];
     reads[1].placeholders = [owner({ local: "1", order: 2 })];
-    expect(nestOutline(reads, { maxChars: 1000 })).toEqual({
+    expect(nestOutline(reads, { maxChars: 1000, maxControls: 10 })).toEqual({
       outline: [
         'main "Checkout"',
         '  iframe "Payment" @e1',
@@ -295,17 +297,45 @@ describe("frame composition", () => {
         '      group "Expiry"',
         '        textbox "MM / YY" @e3',
       ],
+      omitted: 0,
     });
     // Lines continue from the cursor's line, and a part always prints one.
-    const part = nestOutline(reads, { maxChars: 20 });
+    const part = nestOutline(reads, { maxChars: 20, maxControls: 10 });
     expect(part.outline).toEqual(['main "Checkout"']);
     expect(part.next).toBe(1);
-    const rest = nestOutline(reads, { maxChars: 1000, from: 4 });
+    // A continued part first repeats the lines around its first line, up
+    // through the iframe lines of every frame it sits in.
+    const rest = nestOutline(reads, { maxChars: 1000, maxControls: 10, from: 4 });
     expect(rest.outline).toEqual([
+      'main "Checkout"',
+      '  iframe "Payment" @e1',
+      '    iframe "Expiry" @e4',
       '      group "Expiry"',
       '        textbox "MM / YY" @e3',
     ]);
     expect(rest.next).toBeUndefined();
+    // Those lines cost characters, so with them the part holds only its
+    // first line, which it always prints.
+    expect(nestOutline(reads, { maxChars: 60, maxControls: 10, from: 4 })).toEqual(
+      {
+        outline: rest.outline.slice(0, 4),
+        omitted: 1,
+        next: 5,
+      },
+    );
+    // They are not progress, so their refs do not count toward maxControls.
+    expect(
+      nestOutline(reads, { maxChars: 1000, maxControls: 1, from: 5 }).outline,
+    ).toEqual(rest.outline);
+    // Control and frame lines count toward maxControls, across frames, and
+    // the ones a part leaves out are counted.
+    const bounded = nestOutline(reads, { maxChars: 1000, maxControls: 2 });
+    expect(bounded.outline).toEqual([
+      'main "Checkout"',
+      '  iframe "Payment" @e1',
+      '    textbox "Card number" @e2',
+    ]);
+    expect(bounded).toMatchObject({ next: 3, omitted: 2 });
   });
 
   it("prefixes local paths with the group's path", () => {

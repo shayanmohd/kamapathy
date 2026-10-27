@@ -365,15 +365,16 @@ function composeReads(
     merged.omitted +
     reads.reduce((total, { value }) => total + omittedOf(value), 0);
   if (outline) {
+    // A read keeps one line past its own budget, so a part stops at a line
+    // the composition holds, where the part after it starts.
     const nested = nestOutline(list, {
       maxChars: request.maxChars,
+      maxControls: request.maxControls,
       from: offsets.line,
     });
-    // A read keeps one line past its own budget, so a cut listing leaves a
-    // line for the part after this one.
-    const line =
-      nested.next ??
-      (cut ? offsets.line + nested.outline.length : undefined);
+    // The control lines past this part: those the reads reported, and
+    // those past their own budgets.
+    const left = omitted + nested.omitted;
     // An outline lists the controls its lines printed.
     const printed = new Set(
       nested.outline.flatMap((line) => line.match(/@e\d+/g) ?? []),
@@ -386,8 +387,10 @@ function composeReads(
     return {
       outline: nested.outline.join("\n"),
       interactables: entries,
-      ...(omitted ? { omittedControls: omitted } : {}),
-      ...(line === undefined ? {} : { next: { text: 0, control: 0, line } }),
+      ...(left ? { omittedControls: left } : {}),
+      ...(nested.next === undefined
+        ? {}
+        : { next: { text: 0, control: 0, line: nested.next } }),
       truncated: cut || nested.next !== undefined,
     };
   }
@@ -396,10 +399,11 @@ function composeReads(
     from: offsets.text,
   });
   // A bound of 0 cannot print its half of the page, so it never asks for it
-  // again; truncated still reports that content was left out.
+  // again; truncated still reports that content was left out. A control past
+  // this part counts wherever it is, past a group's own bound as well.
   const more =
     (spliced.next !== undefined && request.maxChars > 0) ||
-    (merged.omitted > 0 && request.maxControls > 0);
+    (omitted > 0 && request.maxControls > 0);
   return {
     text: spliced.text,
     interactables: merged.controls,
