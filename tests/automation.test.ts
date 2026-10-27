@@ -8266,6 +8266,52 @@ describe("local automation socket", () => {
     ).toBe(200);
   });
 
+  it("an emulated touch is checked where mobile emulation's page scale puts it", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    // An emulated touch takes device-independent pixels, which the page
+    // scale stretches as well: a probe saw one at 100, 100 land at 250, 250
+    // on a page mobile emulation fitted at 0.4, where a select would open
+    // the browser's own list.
+    Object.assign(page.metrics.cssVisualViewport, { scale: 0.4 });
+    page.hits = [{ x: 250, y: 250, nodeName: "select" }];
+    const press = {
+      type: "mousePressed",
+      x: 100,
+      y: 100,
+      button: "left",
+      clickCount: 1,
+    };
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Input.emulateTouchFromMouseEvent",
+        params: press,
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "native_popup_blocked",
+      use: "selectOption",
+    });
+    expect(sentOn(page, "Input.emulateTouchFromMouseEvent")).toEqual([]);
+    // A mouse press there lands on the point itself, and so does an
+    // emulated touch at the page's own scale.
+    expect(
+      (await cdp(tab.id, { method: "Input.dispatchMouseEvent", params: press }))
+        .status,
+    ).toBe(200);
+    Object.assign(page.metrics.cssVisualViewport, { scale: 1 });
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Input.emulateTouchFromMouseEvent",
+          params: press,
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

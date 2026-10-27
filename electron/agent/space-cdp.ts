@@ -109,11 +109,11 @@ type RawPoint = { x: number; y: number; press: boolean; button: Button };
 // as a mouse event does; a probe of Electron 44 saw a scroll or a pinch send
 // its touches or wheel events to the frame under the point it starts at. An
 // emulated touch takes the page's device-independent pixels, which the
-// probe saw land at x / zoom.
+// probe saw land at x / (zoom * page scale).
 function pointsOf(
   method: string,
   params: Record<string, unknown>,
-  zoom: () => number,
+  dipScale: () => number,
 ): RawPoint[] {
   const at = (
     point: unknown,
@@ -138,7 +138,7 @@ function pointsOf(
     case "Input.dispatchMouseEvent":
       return at(params, pressed, params.button);
     case "Input.emulateTouchFromMouseEvent":
-      return at(params, pressed, params.button, zoom());
+      return at(params, pressed, params.button, dipScale());
     case "Input.synthesizeTapGesture":
       return at(params, true);
     case "Input.synthesizeScrollGesture":
@@ -154,6 +154,24 @@ function pointsOf(
     }
     default:
       return [];
+  }
+}
+
+// The scale a page is shown at, which mobile emulation sets below 1 to fit a
+// wide page and a zoom sets above it. A page that cannot say is taken at 1,
+// as a failed hit test is.
+async function pageScale(session: TabSession, step: Step): Promise<number> {
+  try {
+    const metrics = await session.send<{
+      cssVisualViewport?: { scale?: unknown };
+    }>("Page.getLayoutMetrics", {}, step);
+    const scale = metrics?.cssVisualViewport?.scale;
+    return typeof scale === "number" && Number.isFinite(scale) && scale > 0
+      ? scale
+      : 1;
+  } catch (error) {
+    if (toApiError(error)) throw error;
+    return 1;
   }
 }
 
@@ -382,8 +400,16 @@ export function createSpaceCdp(deps: {
     call: CdpCall,
     step: Step,
   ): Promise<void> => {
-    const points = pointsOf(call.method, call.params, () =>
-      contents.getZoomFactor(),
+    // A probe saw an emulated touch at 100, 100 land at 250, 250 on a page
+    // mobile emulation fitted at 0.4.
+    const scale =
+      call.method === "Input.emulateTouchFromMouseEvent"
+        ? await pageScale(session, step)
+        : 1;
+    const points = pointsOf(
+      call.method,
+      call.params,
+      () => contents.getZoomFactor() * scale,
     );
     for (const { x, y, press, button } of points)
       await checkPointerTarget(session, { x, y }, step, {
