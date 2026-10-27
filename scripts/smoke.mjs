@@ -4194,8 +4194,13 @@ try {
     (url) => window.kamapathy.dispatch({ type: "tab:create", url }),
     `${origin}/second`,
   );
-  await waitForState(page, (state) =>
-    state.tabs.some((tab) => tab.title === "Second page" && !tab.loading),
+  // The agent's tab is answered before its page commits, and a view has no
+  // address until then, so both pages finish loading before the close.
+  await waitForState(
+    page,
+    (state) =>
+      state.tabs.some((tab) => tab.title === "Second page" && !tab.loading) &&
+      state.tabs.some((tab) => tab.id === nightTab && !tab.loading),
   );
   const windowPages = () =>
     app.evaluate(({ BrowserWindow }) => {
@@ -4209,7 +4214,12 @@ try {
           }
         : null;
     });
-  assert.ok((await windowPages()).pages.some((url) => url.endsWith("/second")));
+  const beforeClose = await windowPages();
+  assert.ok(beforeClose.pages.some((url) => url.endsWith("/second")));
+  assert.ok(
+    beforeClose.pages.includes(`${origin}/`),
+    JSON.stringify(beforeClose.pages),
+  );
   assert.equal(
     (await page.evaluate(() => window.kamapathy.getState())).settings
       .backgroundNoticeShown,
