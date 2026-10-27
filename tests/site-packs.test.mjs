@@ -21,13 +21,16 @@ import {
   cleanText,
   declaredFiles,
   hostOf,
+  importToolExport,
   listSitePacks,
   loadPacks,
   matchPacks,
+  pageToolExpression,
   problemText,
   readManifest,
   readTrustedFile,
   rootState,
+  runPageToolIn,
   runToolIn,
   siteContextFor,
   siteRoots,
@@ -46,6 +49,7 @@ import {
   hardStopCause,
 } from "../skills/kamapathy/scripts/lib/errors.mjs";
 import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
+import { Session } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { runCli } from "../skills/kamapathy/scripts/kamapathy.mjs";
 
 const posix = process.platform !== "win32";
@@ -696,6 +700,89 @@ function runWith(home, code) {
 // What a run says about a helpers.mjs its account cannot trust.
 const refusalText = (home) =>
   `error: helpers_failed: Kamapathy will not load ${join(home, "helpers.mjs")}: it must be a regular file of at most 256 KiB that your account owns and others cannot change.\n`;
+
+// One function expression, with a trailing comment the wrapper's own newline
+// keeps from swallowing the call.
+const STATS_PAGE_TOOL = `(args) => ({
+  fullName: document.title,
+  stars: args.stars ?? 0,
+}) // the open repository
+`;
+// A file that does not compile, with its mistake on line 2.
+const BROKEN_PAGE_TOOL = `(args) => {
+  return args.(;
+}
+`;
+
+// A pack of page tools, beside a Node tool runPageTool must never find.
+const pagePack = () => ({
+  format: 1,
+  id: "github",
+  name: "GitHub",
+  domains: ["github.com"],
+  tools: {
+    search_repositories: {
+      description: "Search repositories and read the first results.",
+      file: "tools/search-repositories.mjs",
+      export: "searchRepositories",
+      returns: { type: "array", description: "[{ fullName, url }]" },
+    },
+  },
+  pageTools: {
+    repository_stats: {
+      description: "Read the stars of the open repository.",
+      file: "page-tools/repository-stats.js",
+      args: {
+        stars: { type: "integer", description: "A count to fall back to." },
+        note: { type: "string", description: "Anything to carry along." },
+      },
+      returns: { type: "object", description: "{ fullName, stars }" },
+    },
+    broken: {
+      description: "A page tool whose file does not compile.",
+      file: "page-tools/broken.js",
+      returns: { type: "object", description: "Nothing: it never runs." },
+    },
+  },
+});
+
+// The route's own reply to one evaluate, and the failures phase 7 raises.
+const EVALUATE_FAILURES = [
+  [
+    403,
+    {
+      code: "agent_scripts_off",
+      message:
+        "Page scripts are off. Ask the person to turn Page scripts on in Kamapathy's settings.",
+    },
+  ],
+  [
+    422,
+    {
+      code: "script_error",
+      message: "The page script threw TypeError: args.stars is not a function.",
+      name: "TypeError",
+      line: 2,
+      column: 10,
+    },
+  ],
+  [
+    413,
+    {
+      code: "result_too_large",
+      message: "The value is larger than 1 MiB. Return less of it.",
+      bytes: 2097152,
+    },
+  ],
+  [
+    504,
+    {
+      code: "evaluation_timeout",
+      message: "The page script did not finish within 15000 ms.",
+      timeoutMs: 15000,
+    },
+  ],
+];
 
 describe("site packs", () => {
   it("reads a pack.json and reports every manifest rule", async () => {
@@ -1938,6 +2025,242 @@ export const searchRepositories = (context, args) => args;
     );
   });
 
+  it("runPageTool sends one evaluate holding the file and args, and refuses 16 KiB of args or a syntax error before sending", async () => {
+    const { env, roots } = await freshRoots();
+    const dir = await writePackIn(roots[0].path, "github", pagePack(), {
+      "tools/search-repositories.mjs":
+        "export const searchRepositories = () => [];\n",
+      "page-tools/repository-stats.js": STATS_PAGE_TOOL,
+      "page-tools/broken.js": BROKEN_PAGE_TOOL,
+    });
+    // The one request a page tool sends, over a session with an injected
+    // fetch, so every byte of the evaluate is observable.
+    const sent = [];
+    let reply = () =>
+      Response.json({
+        ok: true,
+        tab: { id: "t1" },
+        value: { fullName: "kamapathy", stars: 3 },
+      });
+    const session = new Session({
+      env,
+      fetch: async (url, init) => {
+        sent.push({
+          path: url.pathname,
+          method: init.method,
+          body: JSON.parse(init.body),
+        });
+        return reply();
+      },
+      health: { status: "ok", version: "0.2.0", apiLevel: 4 },
+    });
+    const evaluate = async (expression, limit = 1048576) => {
+      const { value } = await session.request("/tabs/t1/evaluate", {
+        method: "POST",
+        body: { expression },
+        limit,
+      });
+      return value;
+    };
+    const run = (tool, args, over = evaluate) =>
+      runPageToolIn(env, {
+        packId: "github",
+        tool,
+        args,
+        evaluate: over,
+        roots,
+      }).then(
+        (value) => value,
+        (error) => error,
+      );
+
+    // The expression is the file in parentheses, called with the arguments
+    // as JSON, and nothing else.
+    const expression = `(${STATS_PAGE_TOOL}\n)({"stars":3})`;
+    expect(await run("repository_stats", { stars: 3 })).toEqual({
+      fullName: "kamapathy",
+      stars: 3,
+    });
+    expect(sent).toEqual([
+      { path: "/tabs/t1/evaluate", method: "POST", body: { expression } },
+    ]);
+    // The same expression, built without sending anything, names the pack
+    // and the tool it came from.
+    const built = await pageToolExpression(env, {
+      packId: "github",
+      tool: "repository_stats",
+      args: { stars: 3 },
+      roots,
+    });
+    expect(built.expression).toBe(expression);
+    expect(built.pack).toMatchObject({ id: "github", dir });
+    expect(built.tool.name).toBe("repository_stats");
+    // No arguments at all reach the page as an empty object.
+    sent.length = 0;
+    await run("repository_stats", undefined);
+    expect(sent[0].body.expression).toBe(`(${STATS_PAGE_TOOL}\n)({})`);
+
+    // Arguments over 16 KiB of JSON are refused before anything is sent.
+    sent.length = 0;
+    const big = await run("repository_stats", {
+      note: "x".repeat(LIMITS.pageToolArgs),
+    });
+    expect(big).toMatchObject({
+      code: "invalid_tool_args",
+      packId: "github",
+      tool: "repository_stats",
+      problems: ["the arguments are larger than 16 KiB."],
+      expected: "{ stars?: integer, note?: string }",
+    });
+    expect(big.message).toBe(
+      "repository_stats in the github pack got invalid arguments: the arguments are larger than 16 KiB.",
+    );
+    // An undeclared argument is refused the same way the Node tools are.
+    expect(await run("repository_stats", { forks: 2 })).toMatchObject({
+      code: "invalid_tool_args",
+      problems: ["forks is not an argument of repository_stats."],
+    });
+    // A file that does not compile is the pack's own problem, with its line.
+    const broken = await run("broken", {});
+    expect(broken).toMatchObject({
+      code: "site_pack_invalid",
+      packId: "github",
+      dir,
+    });
+    expect(broken.problems.length).toBe(1);
+    expect(broken.problems[0]).toMatch(
+      /^page-tools\/broken\.js:2: does not compile \(/,
+    );
+    expect(broken.message).toMatch(
+      /^The github pack breaks its rules: page-tools\/broken\.js:2: does not compile \(/,
+    );
+    // A Node tool asked for as a page tool names the call that runs it.
+    const node = await run("search_repositories", {});
+    expect(node).toMatchObject({
+      code: "site_tool_not_found",
+      packId: "github",
+      tool: "search_repositories",
+      kind: "page",
+      available: ["repository_stats", "broken"],
+    });
+    expect(node.message).toBe(
+      "The github pack has no page tool named search_repositories. Available: repository_stats, broken. search_repositories is a Node tool. Call runSiteTool.",
+    );
+    // A name or a pack id outside its pattern is the call's own mistake.
+    expect(await run("Repository Stats", {})).toMatchObject({
+      code: "invalid_argument",
+      entry: "runPageTool",
+    });
+    expect(
+      await runPageToolIn(env, {
+        packId: "nope",
+        tool: "repository_stats",
+        args: {},
+        evaluate,
+        roots,
+      }).catch((error) => error),
+    ).toMatchObject({ code: "site_pack_not_found", packId: "nope" });
+    expect(sent).toEqual([]);
+
+    // Every failure the route raises comes back as it was, with the pack and
+    // the tool added.
+    for (const [status, error] of EVALUATE_FAILURES) {
+      reply = () => Response.json({ ok: false, error }, { status });
+      const failed = await run("repository_stats", { stars: 1 });
+      // An Error keeps its own name, so a field of that name is the one
+      // thing the transport cannot carry.
+      const { name, ...fields } = error;
+      expect(failed, error.code).toMatchObject({
+        ...fields,
+        status,
+        packId: "github",
+        tool: "repository_stats",
+      });
+      expect(failed.message, error.code).toBe(error.message);
+      expect(failed.retryable, error.code).toBeUndefined();
+    }
+    reply = () =>
+      Response.json({ ok: true, tab: { id: "t1" }, value: { stars: 0 } });
+
+    // A body over the route's limit fails before it is sent. The file and
+    // the arguments together stay well inside the route's own 1 MiB, so this
+    // takes a smaller limit to reach at all.
+    sent.length = 0;
+    const large = await run("repository_stats", { stars: 1 }, (text) =>
+      evaluate(text, 64),
+    );
+    expect(large).toMatchObject({
+      code: "request_too_large",
+      packId: "github",
+      tool: "repository_stats",
+    });
+    expect(sent).toEqual([]);
+  });
+
+  it("runPageTool reaches the page through the client, which checks the page it was given", async () => {
+    const { env, roots } = await freshRoots();
+    await writePackIn(roots[0].path, "github", pagePack(), {
+      "tools/search-repositories.mjs":
+        "export const searchRepositories = () => [];\n",
+      "page-tools/repository-stats.js": STATS_PAGE_TOOL,
+      "page-tools/broken.js": BROKEN_PAGE_TOOL,
+    });
+    let sent = 0;
+    const client = await connect({
+      env,
+      fetch: () => {
+        sent += 1;
+        throw new Error("A site pack call sent a request.");
+      },
+      health: { status: "ok", version: "0.2.0", apiLevel: 4 },
+    });
+    const page = new Page(null, {
+      id: "tab-1",
+      spaceId: "space-1",
+      url: "https://github.com/kamapathy",
+      title: "kamapathy",
+    });
+    // The method's one call on the page is the evaluate it was asked for.
+    const seen = [];
+    page.evaluate = (expression) => {
+      seen.push(expression);
+      return Promise.resolve({ fullName: "kamapathy", stars: 7 });
+    };
+    expect(
+      await client.runPageTool(
+        "github",
+        "repository_stats",
+        { stars: 7 },
+        {
+          page,
+        },
+      ),
+    ).toEqual({ fullName: "kamapathy", stars: 7 });
+    expect(seen).toEqual([`(${STATS_PAGE_TOOL}\n)({"stars":7})`]);
+
+    // The options must carry a Page from this client.
+    await expect(
+      client.runPageTool(
+        "github",
+        "repository_stats",
+        {},
+        {
+          page: { id: "tab-1" },
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      entry: "kamapathy.runPageTool",
+    });
+    await expect(
+      client.runPageTool("github", "repository_stats", {}, {}),
+    ).rejects.toMatchObject({ code: "invalid_option", option: "page" });
+    await expect(
+      client.runPageTool("github", "repository_stats", {}),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(sent).toBe(0);
+  });
+
   it("bundled packs pass the validator", async () => {
     const [, bundled] = siteRoots({ KAMAPATHY_WORKSPACE: workspace });
     expect(bundled.path).toBe(
@@ -1970,6 +2293,55 @@ export const searchRepositories = (context, args) => args;
       expect(checked.ok, id).toBe(true);
       expect(checked.source, id).toBe("bundled");
     }
+    // The samples this worktree ships; each one arrives with its own task.
+    const samples = ["github", "google-search", "x"];
+    expect(ids).toEqual(expect.arrayContaining(samples));
+    // The github sample's own tools: the names its manifest declares, and an
+    // export runSiteTool can call for each Node tool.
+    const { pack } = await readManifest(join(bundled.path, "github"), {
+      source: "bundled",
+      id: "github",
+    });
+    expect(pack.tools.map((tool) => tool.name)).toEqual([
+      "search_repositories",
+      "open_issues",
+    ]);
+    expect(pack.pageTools.map((tool) => tool.name)).toEqual([
+      "repository_stats",
+    ]);
+    for (const tool of pack.tools)
+      expect(typeof (await importToolExport(pack, tool)), tool.name).toBe(
+        "function",
+      );
+    // The google-search sample's own tools, read the same way.
+    const google = await readManifest(join(bundled.path, "google-search"), {
+      source: "bundled",
+      id: "google-search",
+    });
+    expect(google.pack.tools.map((tool) => tool.name)).toEqual(["search"]);
+    expect(google.pack.pageTools.map((tool) => tool.name)).toEqual([
+      "suggestions",
+    ]);
+    for (const tool of google.pack.tools)
+      expect(
+        typeof (await importToolExport(google.pack, tool)),
+        tool.name,
+      ).toBe("function");
+    // The x sample's own tools and its two notes, read the same way.
+    const x = await readManifest(join(bundled.path, "x"), {
+      source: "bundled",
+      id: "x",
+    });
+    expect(x.pack.tools.map((tool) => tool.name)).toEqual([
+      "timeline_posts",
+      "search_people",
+    ]);
+    expect(x.pack.pageTools.map((tool) => tool.name)).toEqual(["focused_post"]);
+    expect(x.pack.notes).toEqual(["notes/overview.md", "notes/timeline.md"]);
+    for (const tool of x.pack.tools)
+      expect(typeof (await importToolExport(x.pack, tool)), tool.name).toBe(
+        "function",
+      );
   });
 
   it("checkPack reports every rule", async () => {

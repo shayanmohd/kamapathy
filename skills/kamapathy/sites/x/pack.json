@@ -1,0 +1,55 @@
+{
+  "format": 1,
+  "id": "x",
+  "name": "X",
+  "domains": ["x.com", "twitter.com"],
+  "notes": ["notes/overview.md", "notes/timeline.md"],
+  "tools": {
+    "timeline_posts": {
+      "description": "Collect the posts of the timeline already open, scrolling as needed.",
+      "file": "tools/timeline-posts.mjs",
+      "export": "timelinePosts",
+      "args": {
+        "limit": {
+          "type": "integer",
+          "description": "How many posts to collect, 1 to 100, 20 by default."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "[{ url, author, handle, time, text }]"
+      }
+    },
+    "search_people": {
+      "description": "Search accounts and read the first results.",
+      "file": "tools/search-people.mjs",
+      "export": "searchPeople",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Words or a handle to search for."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many accounts to read, 1 to 50, 20 by default."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "[{ name, handle, url, bio }]"
+      }
+    }
+  },
+  "pageTools": {
+    "focused_post": {
+      "description": "Read the post holding focus, or the one this page is about.",
+      "file": "page-tools/focused-post.js",
+      "args": {},
+      "returns": {
+        "type": "object",
+        "description": "{ url, author, handle, time, text } or null"
+      }
+    }
+  }
+}

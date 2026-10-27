@@ -39,6 +39,7 @@ const GLOBALS = [
   "sitePacks",
   "siteContext",
   "runSiteTool",
+  "runPageTool",
 ];
 
 function deadline(value, name) {

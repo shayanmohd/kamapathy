@@ -26,7 +26,12 @@ import {
   Session,
   streamTo,
 } from "./lib/request.mjs";
-import { listSitePacks, runToolIn, siteContextFor } from "./lib/sites.mjs";
+import {
+  listSitePacks,
+  runPageToolIn,
+  runToolIn,
+  siteContextFor,
+} from "./lib/sites.mjs";
 import {
   checkBody,
   checkCall,
@@ -2180,6 +2185,29 @@ export class Client {
         args,
         page: options.page,
         client: this,
+      });
+    });
+  }
+  /**
+   * Runs a site pack's page tool in the page, through one page script.
+   * @param {string} packId
+   * @param {string} tool
+   * @param {object | undefined} args The arguments the tool declares.
+   * @param {{ page: Page }} options
+   * @returns {Promise<unknown>} What the tool's function returned.
+   */
+  runPageTool(packId, tool, args, options) {
+    return this.#local("runPageTool", [packId, tool, args, options], () => {
+      if (!(options.page instanceof Page))
+        throw new KamapathyError(
+          "invalid_argument",
+          'kamapathy.runPageTool needs options.page to be a Page from this client, such as the one space.page("p1") returns.',
+        );
+      return runPageToolIn(this.#session.env, {
+        packId,
+        tool,
+        args,
+        evaluate: (expression) => options.page.evaluate(expression),
       });
     });
   }

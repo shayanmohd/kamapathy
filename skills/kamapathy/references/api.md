@@ -78,6 +78,16 @@ Runs a site pack's Node tool in the agent's own Node.js.
 
 Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `site_tool_failed`. Since API level 4.
 
+### `runPageTool(packId, tool, args, options)`
+
+Runs a site pack's page tool in the page, through one evaluate.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `page` | page, required |  | The agent page the tool works in. |
+
+Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `agent_scripts_off`, `script_error`, `result_too_large`, `evaluation_timeout`, `request_too_large`. Since API level 4.
+
 ### `help(...names)`
 
 Prints the API, or one entry such as help("page.click"), or the topics errors and routes.
@@ -182,6 +192,16 @@ Runs a site pack's Node tool in the agent's own Node.js.
 | `page` | page, required |  | The agent page the tool works in. |
 
 Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `site_tool_failed`. Since API level 4.
+
+### `kamapathy.runPageTool(packId, tool, args, options)`
+
+Runs a site pack's page tool in the page, through one evaluate.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `page` | page, required |  | The agent page the tool works in. |
+
+Returns `Promise<unknown>`. Errors: `invalid_argument`, `site_pack_not_found`, `site_tool_not_found`, `site_pack_invalid`, `invalid_tool_args`, `agent_scripts_off`, `script_error`, `result_too_large`, `evaluation_timeout`, `request_too_large`. Since API level 4.
 
 ## Space
 

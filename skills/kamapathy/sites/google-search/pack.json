@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "id": "google-search",
+  "name": "Google Search",
+  "domains": ["google.com", "www.google.com"],
+  "notes": ["notes/overview.md"],
+  "tools": {
+    "search": {
+      "description": "Read the organic results of a Google search.",
+      "file": "tools/search.mjs",
+      "export": "search",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "What to search for."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many results to read, 1 to 20, 10 by default."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "[{ title, url, snippet }]"
+      }
+    }
+  },
+  "pageTools": {
+    "suggestions": {
+      "description": "Read the open autocomplete suggestions.",
+      "file": "page-tools/suggestions.js",
+      "args": {},
+      "returns": {
+        "type": "array",
+        "description": "The option texts of the open listbox, or []"
+      }
+    }
+  }
+}
