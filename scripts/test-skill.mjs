@@ -4883,6 +4883,95 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
     }
     passed("the skill under test lists the three samples");
   }
+  // Section 12 against the docs: the skill a launched Kamapathy offers is the
+  // repository's, file for file, and so is the copy agent setup installs,
+  // whose client prints the repository's help and whose SKILL.md links only
+  // files the copy holds.
+  {
+    const { compareSkillFolders } = await import("./check-bundled-skill.mjs");
+    const repositorySkill = resolve("skills/kamapathy");
+    const offered = (await json(["health"])).skill?.path;
+    assert.equal(typeof offered, "string", "health names no bundled skill");
+    assert.deepEqual(await compareSkillFolders(repositorySkill, offered), []);
+    const installedSetup = await chrome.evaluate(() =>
+      window.kamapathy.applyAgentSetup({
+        agents: ["claude-code"],
+        replace: [],
+        command: false,
+        path: false,
+        codexRule: false,
+      }),
+    );
+    const installedAgent = installedSetup.agents.find(
+      (agent) => agent.id === "claude-code",
+    );
+    assert.equal(
+      installedAgent?.state,
+      "linked",
+      JSON.stringify(installedSetup.agents),
+    );
+    // The folder the agent reads, through its own skills folder.
+    const installed = join(installedAgent.folder, "kamapathy");
+    try {
+      assert.deepEqual(
+        await compareSkillFolders(repositorySkill, installed),
+        [],
+      );
+      // Each client names its own SKILL.md; every other line must match.
+      const { COMMANDS: schemaCommands } = await import(
+        pathToFileURL(join(repositorySkill, "scripts/schema/index.mjs")).href
+      );
+      const helpOf = async (folder, args) =>
+        (
+          await program(
+            process.execPath,
+            [join(folder, "scripts", "kamapathy.mjs"), ...args],
+            { env: { ...environment, KAMAPATHY_PROGRAM: "1" } },
+          )
+        ).output.replace(/^ {2}.+SKILL\.md$/m, "  <SKILL.md>");
+      for (const args of [
+        ["help"],
+        ["help", "api"],
+        ...schemaCommands.map((command) => [
+          "help",
+          ...command.name.split(" "),
+        ]),
+      ])
+        assert.equal(
+          await helpOf(installed, args),
+          await helpOf(repositorySkill, args),
+          `${args.join(" ")} through the installed skill`,
+        );
+      passed(
+        "the bundled skill's help, references and generated reference equal the repository's",
+      );
+      // Every file the installed SKILL.md links, resolved inside the copy.
+      const linkedFiles = [
+        ...(await readFile(join(installed, "SKILL.md"), "utf8")).matchAll(
+          /\]\(([^)\s#]*)(?:#[^)\s]*)?\)/g,
+        ),
+      ]
+        .map((link) => link[1])
+        .filter((target) => target && !/^[a-z][a-z\d+.-]*:/i.test(target));
+      assert.ok(linkedFiles.length, "SKILL.md links no file");
+      for (const target of linkedFiles) {
+        assert.ok(
+          !target.startsWith("/") && !target.split("/").includes(".."),
+          `SKILL.md links ${target}, outside the skill`,
+        );
+        assert.ok(
+          existsSync(join(installed, decodeURIComponent(target))),
+          `SKILL.md links ${target}, which the installed skill lacks`,
+        );
+      }
+      passed(
+        "every reference the bundled SKILL.md links is in the bundled folder",
+      );
+    } finally {
+      await chrome.evaluate(() => window.kamapathy.removeAgentSetup());
+    }
+    assert.equal(existsSync(installed), false);
+  }
   const summary = {
     date: new Date().toISOString(),
     platform: process.platform,

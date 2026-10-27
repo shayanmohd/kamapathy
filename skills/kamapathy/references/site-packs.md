@@ -35,7 +35,7 @@ No file of a pack, nor any folder between its root and that file, may be a symbo
 | `tools` | Optional: up to 32 Node tools, by tool name |
 | `pageTools` | Optional: up to 32 page tools, by tool name |
 | `description` | What a tool does, 1 to 200 characters |
-| `file` | A Node tool's `tools/<name>.mjs`, at most 256 KiB, or a page tool's `page-tools/<name>.js`, at most 32 KiB |
+| `file` | A Node tool's `tools/<name>.mjs`, at most 256 KiB, or a page tool's `page-tools/<name>.js`, at most 16383 characters, since `runPageTool` sends it and a newline as one page script of at most 16384 |
 | `export` | A Node tool's exported function, an identifier; a page tool has none |
 | `args` | Optional: up to 16 arguments by name, each `{ type, required?, description }` |
 | `returns` | Required: `{ type, description }`, for the reader only, with a description of 1 to 300 characters |

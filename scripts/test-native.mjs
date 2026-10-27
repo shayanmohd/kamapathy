@@ -7,7 +7,7 @@ import { poll } from "./wait.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -725,6 +725,39 @@ try {
 
   assert.equal(identity.pdfViewerEnabled, true);
   passed("an agent tab reports Chromium's PDF viewer as available");
+
+  // The engine the docs name is the one running. Majors only, so a Chromium
+  // patch inside an Electron update fails nothing. The docs are read here, so
+  // a reworded sentence fails in one place.
+  {
+    const running = (await json("/health")).versions;
+    const docs = ["docs/automation.md", "docs/architecture.md"];
+    const texts = await Promise.all(
+      docs.map((doc) =>
+        readFile(new URL(`../${doc}`, import.meta.url), "utf8"),
+      ),
+    );
+    for (const [engine, version] of [
+      ["Chromium", running.chromium],
+      ["Electron", running.electron],
+    ]) {
+      const named = docs.flatMap((doc, at) =>
+        [...texts[at].matchAll(new RegExp(`\\b${engine} (\\d+)\\b`, "g"))].map(
+          (match) => ({ doc, major: match[1] }),
+        ),
+      );
+      assert.ok(
+        named.length,
+        `${docs.join(" and ")} name no ${engine} version`,
+      );
+      assert.deepEqual(
+        named.filter((claim) => claim.major !== version.split(".")[0]),
+        [],
+        `${engine} ${version} is running`,
+      );
+    }
+  }
+  passed("the engine versions the docs name are the ones running");
 
   // Kamapathy stops when it is told, because nothing is left at work: a
   // quit over a working agent would ask the person first, and this run

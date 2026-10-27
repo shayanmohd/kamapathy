@@ -3594,6 +3594,66 @@ try {
     helpTab.id,
   );
   checked("Help opens the FAQ in the personal space used last");
+  // Open point 6 in the window: each daily request the docs disclose is
+  // disclosed in Settings with the same party and the same "once a day",
+  // beside its switch in the section the docs send the person to. The docs
+  // are read here, so a reworded sentence fails in one place.
+  {
+    const sentencesOf = async (file) =>
+      (await readFile(new URL(`../${file}`, import.meta.url), "utf8"))
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .split(/(?<=[.!?]) /);
+    const disclosures = [
+      ["README.md", await sentencesOf("README.md")],
+      ["site/index.html", await sentencesOf("site/index.html")],
+    ];
+    await openBrowserMenu();
+    await browserMenu.getByRole("menuitem", { name: "Settings" }).click();
+    for (const [party, switchName] of [
+      ["GitHub", "Check for updates"],
+      ["Chrome Web Store", "Update extensions automatically"],
+    ]) {
+      const toggle = page.getByRole("switch", {
+        name: switchName,
+        exact: true,
+      });
+      const sectionName = await page
+        .locator(".settings-section", { has: toggle })
+        .getByRole("heading", { level: 3 })
+        .textContent();
+      const switchNote = await page
+        .locator(".setting-row", { has: toggle })
+        .locator("p")
+        .textContent();
+      assert.ok(
+        switchNote.includes(party) && /\bonce a day\b/i.test(switchNote),
+        `${switchName}: ${switchNote}`,
+      );
+      for (const [file, sentences] of disclosures) {
+        let disclosed = 0;
+        for (const [at, sentence] of sentences.entries()) {
+          if (!sentence.includes(party) || !/\bonce a day\b/i.test(sentence))
+            continue;
+          disclosed++;
+          // The sentence, or the one after it, says where to turn it off.
+          const offIn = [sentence, sentences[at + 1] ?? ""].find((text) =>
+            /\bin Settings\b/.test(text),
+          );
+          assert.ok(offIn, `${file} does not say where: ${sentence}`);
+          const under = /\bin Settings, under (\w+)/.exec(offIn)?.[1];
+          if (under) assert.equal(under, sectionName, `${file}: ${offIn}`);
+        }
+        assert.ok(disclosed, `${file} does not say how often it asks ${party}`);
+      }
+    }
+    await page
+      .getByRole("button", { name: "Close dialog", exact: true })
+      .click();
+  }
+  checked(
+    "Settings discloses both outbound requests the docs name, beside the switches they point to",
+  );
   // Section 13 in the window: Updates, with this copy running from source.
   await openBrowserMenu();
   await browserMenu.getByRole("menuitem", { name: "Settings" }).click();
