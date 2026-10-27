@@ -87,7 +87,6 @@ const TARGET = [
   "invalid_selector",
   "unknown_ref",
   "stale_ref",
-  "cross_origin_frame",
   "no_match",
   "ambiguous_match",
   "element_action_failed",
@@ -132,7 +131,6 @@ const SCOPE = [
   "invalid_cursor",
   "unknown_ref",
   "stale_ref",
-  "cross_origin_frame",
   "no_match",
   "ambiguous_match",
 ];

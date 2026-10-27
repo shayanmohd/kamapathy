@@ -13,6 +13,7 @@ import {
   COMMANDS,
   ENTRIES,
   ENVIRONMENT,
+  ERRORS,
   findCommand,
   GLOBAL_FLAGS,
 } from "../skills/kamapathy/scripts/schema/index.mjs";
@@ -161,5 +162,30 @@ describe("kamapathy help", () => {
       for (const words of row.connection)
         expect(CONNECTION, row.help).toContain(words);
     }
+  });
+});
+
+describe("what the help says frames, page scripts and runs do", () => {
+  it("names no retired code among a call's errors, and still explains each", () => {
+    const retired = Object.keys(ERRORS).filter((code) =>
+      ERRORS[code].summary.startsWith("Retired"),
+    );
+    expect(retired).toEqual(
+      expect.arrayContaining(["cross_origin_frame", "screenshot_unavailable"]),
+    );
+    for (const entry of ENTRIES)
+      expect(
+        entry.errors.filter((code) => retired.includes(code)),
+        entry.name,
+      ).toEqual([]);
+    for (const code of retired) expect(formatErrors(), code).toContain(code);
+    expect(formatErrors()).toContain(
+      "Retired: frames from other origins are read and actionable, so no route returns this.",
+    );
+    // A click works inside a frame from any web origin, and one that lands on
+    // an extension or an internal page is refused.
+    const click = helpTopic(["page.click"], "kamapathy");
+    expect(click).toContain("input_target_blocked: 403, not retryable");
+    expect(click).not.toContain("cross_origin_frame");
   });
 });
