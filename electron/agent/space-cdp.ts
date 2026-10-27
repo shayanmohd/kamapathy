@@ -46,6 +46,8 @@ export interface InputDispatcherPort {
     params: Record<string, unknown>,
     step: Step & { timeoutMs: number },
   ): Promise<unknown>;
+  /** Section 5's keyboard check: refuses while focus is in a frame agent input never reaches. */
+  checkFocus(tabId: string, session: TabSession, step: Step): Promise<void>;
 }
 /** The two protocol methods Kamapathy answers for a space, itself. */
 export const SPACE_METHODS: readonly [
@@ -88,6 +90,13 @@ export interface SpaceCdpFilter {
 // How often one tab's protocol traffic is named in Recent activity.
 const ACTIVITY_MS = 60000;
 const NO_WORLDS: ReadonlySet<string> = new Set<string>();
+// The Input methods that act wherever focus is, which the person or the page
+// may have put in a frame agent input never reaches.
+const KEY_METHODS: readonly string[] = [
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
+  "Input.imeSetComposition",
+];
 // A frame agents never reach, named by its path, an iframe entry's ref or a
 // frameId. One of the person's extensions is named for them instead.
 const OUT_OF_REACH =
@@ -419,6 +428,8 @@ export function createSpaceCdp(deps: {
         let answered: { result: unknown; newSession?: true };
         if (verdict.dispatcher) {
           await guardPoint(session, call, step);
+          if (KEY_METHODS.includes(call.method))
+            await input!.checkFocus(call.tabId, session, step);
           const dispatching = input!.dispatch(
             call.tabId,
             call.method,

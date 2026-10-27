@@ -339,6 +339,8 @@ export async function startAutomation(
         .for(session)
         .key([{ method, params } as InputCommand], step);
     },
+    checkFocus: (tabId, session, step) =>
+      actions.input.checkFocus(tabId, session, step),
   };
   // The one path a protocol command takes, with a session per live tab.
   const cdp = createSpaceCdp({

@@ -7493,6 +7493,112 @@ describe("local automation socket", () => {
     expect(attached(page)).toEqual([]);
   });
 
+  // The keys and text an agent may send while focus sits where the person,
+  // or the page, put it.
+  const RAW_KEYS: [string, Record<string, unknown>][] = [
+    [
+      "Input.dispatchKeyEvent",
+      { type: "rawKeyDown", key: "Enter", code: "Enter" },
+    ],
+    ["Input.dispatchKeyEvent", { type: "char", text: "\r" }],
+    ["Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter" }],
+    ["Input.insertText", { text: "hi" }],
+    [
+      "Input.imeSetComposition",
+      { text: "n", selectionStart: 0, selectionEnd: 1 },
+    ],
+  ];
+
+  it("raw keys and text never reach an extension's frame that holds focus", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+    });
+    framePath(page, "1");
+    // The page reports the focus in a frame it cannot read, and section 9's
+    // walk says which frame that is.
+    page.pageActions.focusedKind = {
+      ok: true,
+      kind: "other",
+      blockedFrame: true,
+    };
+    page.pageActions.activeFrame = {
+      ok: true,
+      path: "1",
+      blocked: true,
+      editable: false,
+    };
+    for (const [method, params] of RAW_KEYS) {
+      const where = `${method} ${String(params.type ?? "")}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "1",
+        extension: EXTENSION_NAME,
+      });
+    }
+    for (const method of ["Input.dispatchKeyEvent", "Input.insertText"])
+      expect(sentOn(page, method), method).toEqual([]);
+    expect(sentOn(page, "Input.imeSetComposition")).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    // With focus back in the page, the same keys go out.
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    for (const [method, params] of RAW_KEYS)
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+    expect(sentOn(page, "Input.dispatchKeyEvent")).toHaveLength(3);
+  });
+
+  it("raw keys stop where section 9's walk finds an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A page with a frame group of its own, so the walk follows the focus,
+    // and one of the person's extensions in a frame beside it.
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "1",
+      },
+    ]);
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    page.result = (code: string) =>
+      code.includes(')("activeFrame",')
+        ? { ok: true, path: "1", key: "panel", blocked: true }
+        : { ok: true };
+    for (const [method, params] of RAW_KEYS) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "1",
+        extension: EXTENSION_NAME,
+      });
+    }
+    expect(page.inputs).toEqual([]);
+    expect(sentOn(page, "Input.insertText")).toEqual([]);
+    expect(sentOn(page, "Input.imeSetComposition")).toEqual([]);
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
