@@ -727,6 +727,36 @@ for (const mode of ISOLATION)
       expect((await take()).text).toContain("Grid hit Target");
     }, 60000);
 
+    it("clicks a button two same-origin frames deep by its ref, with no frame named", async () => {
+      await open("/frames/outer", 4);
+      const listing = await take();
+      const deep = byLabel(listing, "Deep button");
+      expect(deep.frame).toBe("0/0");
+      // The ref's home is the frame the button sits in, which the page's own
+      // group reads.
+      expect(groups!.homeFrame(deep.ref)).toMatchObject({
+        path: "0/0",
+        group: "",
+      });
+      // As a route sends it: the resolver finds the world for the ref, one
+      // frame deep and two.
+      const pointOf = async (ref: string) => {
+        const found = await resolver.run(
+          "tab-1",
+          session!,
+          "actionPoint",
+          { ref, kind: "click", force: false },
+          { deadline: Date.now() + 20000, namespace: "frames" },
+        );
+        expect(found, ref).toMatchObject({ ok: true });
+        expect(found.blocked, ref).toBeUndefined();
+        return found.point as { x: number; y: number };
+      };
+      await pointOf(byLabel(listing, "Frame note").ref);
+      await sendMouse(await pointOf(deep.ref));
+      expect(labels(await take())).toContain("Deep clicked");
+    }, 60000);
+
     it("scrolls a frame 1600 px below the fold into view before clicking", async () => {
       await open("/frames/far", 2);
       const listing = await take();

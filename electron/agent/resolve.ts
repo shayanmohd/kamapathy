@@ -781,11 +781,13 @@ export function createResolver(deps: {
             ? (held as unknown as Tally)
             : undefined;
         };
-        // A ref never searches: it goes to the frame that issued it, which
-        // answers stale once that frame has loaded another document.
+        // A ref never searches: it goes to the group root whose world issued
+        // it, and answers stale once its own frame has loaded another
+        // document.
         let home: string | undefined;
-        // The path of that frame, which an answer about it names. A frame
-        // the last pass could not place keeps the path its ref was given in.
+        // The path of the ref's own frame, which an answer about it names. A
+        // frame the last pass could not place keeps the path its ref was
+        // given in.
         let homePath: string | undefined;
         if (options.frameId === undefined && frames) {
           const homes = new Set<string>();
@@ -799,7 +801,9 @@ export function createResolver(deps: {
             }
             const found = frames.homeFrame(ref);
             if (found) {
-              homes.add(found.frameId);
+              // A same-origin frame is read in the world of its group's
+              // root, which keeps the refs of that frame's controls.
+              homes.add(frames.groupOf(found.frameId)?.root ?? found.frameId);
               homePath = found.path ?? found.group;
             }
           }

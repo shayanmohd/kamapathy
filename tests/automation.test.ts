@@ -1715,6 +1715,71 @@ describe("local automation socket", () => {
     expect(ERRORS.cross_origin_frame.summary).toContain("Retired");
   });
 
+  it("routes a ref inside same-origin frames to the world of the page's own group", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Two frames of the page's own origin, one inside the other: the page's
+    // own world reads both documents and keeps the refs of their controls.
+    await addFrames([
+      {
+        frameId: "inner",
+        url: "https://example.com/inner",
+        local: "0",
+        readable: true,
+      },
+      {
+        frameId: "nested",
+        parent: "inner",
+        url: "https://example.com/nested",
+        local: "0/0",
+        readable: true,
+      },
+    ]);
+    page.result = groupRead("", {
+      text: [{ order: 0, value: "Outer page" }],
+      controls: [
+        {
+          order: 1,
+          tier: 6,
+          entry: control("Frame note", "@e1", { frame: "0" }),
+        },
+        {
+          order: 2,
+          tier: 6,
+          entry: control("Deep button", "@e2", { frame: "0/0" }),
+        },
+      ],
+    });
+    const listed = await request(`/tabs/${tab.id}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(listed.status).toBe(200);
+    page.result = { ok: true, x: 25, y: 45 };
+    for (const [route, body] of [
+      ["click", { ref: "@e2" }],
+      ["fill", { ref: "@e1", value: "hello" }],
+    ] as const)
+      expect(
+        (await request(`/tabs/${tab.id}/${route}`, "POST", body)).status,
+        route,
+      ).toBe(200);
+    // A frame's own world never gave these refs out, so every page call on
+    // them ran in the main frame's world, as the page's own group.
+    const worlds = page.debugger.sent.filter(
+      (command) => command.method === "Page.createIsolatedWorld",
+    );
+    const calls = page.debugger.sent.filter(
+      (command) =>
+        command.method === "Runtime.evaluate" &&
+        /"ref":"@e[12]"/.test(command.params.expression),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(worlds[call.params.contextId - 1].params.frameId).toBe("main");
+      expect(groupOf(call.params.expression)).toBeUndefined();
+    }
+  });
+
   it("searches the top document, then frames depth first in owner order", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
