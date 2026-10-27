@@ -105,9 +105,11 @@ const OUT_OF_REACH =
 
 type RawPoint = { x: number; y: number; press: boolean; button: Button };
 // Every point a raw pointer command lands on, in the top page's CSS pixels,
-// and whether it presses there. A touch and a tap take CSS pixels as a mouse
-// event does. An emulated touch takes the page's device-independent pixels,
-// which a probe of Electron 44 saw land at x / zoom.
+// and whether it presses there. A touch, a tap and a gesture take CSS pixels
+// as a mouse event does; a probe of Electron 44 saw a scroll or a pinch send
+// its touches or wheel events to the frame under the point it starts at. An
+// emulated touch takes the page's device-independent pixels, which the
+// probe saw land at x / zoom.
 function pointsOf(
   method: string,
   params: Record<string, unknown>,
@@ -139,6 +141,9 @@ function pointsOf(
       return at(params, pressed, params.button, zoom());
     case "Input.synthesizeTapGesture":
       return at(params, true);
+    case "Input.synthesizeScrollGesture":
+    case "Input.synthesizePinchGesture":
+      return at(params, false);
     case "Input.dispatchTouchEvent": {
       const touches = Array.isArray(params.touchPoints)
         ? params.touchPoints

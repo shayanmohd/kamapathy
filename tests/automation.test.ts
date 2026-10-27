@@ -7868,6 +7868,46 @@ describe("local automation socket", () => {
     ).toBe(200);
   });
 
+  it("raw scroll and pinch gestures never start in an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    // A probe saw each of them send touches or wheel events into the frame
+    // under the point it starts at.
+    const at = (x: number, y: number): [string, Record<string, unknown>][] => [
+      ["Input.synthesizeScrollGesture", { x, y, yDistance: -100 }],
+      [
+        "Input.synthesizeScrollGesture",
+        { x, y, yDistance: -100, gestureSourceType: "touch" },
+      ],
+      ["Input.synthesizePinchGesture", { x, y, scaleFactor: 2 }],
+    ];
+    for (const [method, params] of at(25, 45)) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    for (const [method, params] of at(300, 200))
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
