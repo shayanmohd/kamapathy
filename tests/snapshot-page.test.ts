@@ -753,8 +753,11 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
       return { text: state.t, control: state.c, line: state.l };
     };
     // The skill suite's bounds, where a part's margin is the gap's run of
-    // spaces.
-    for (const bounds of [{ maxChars: 900, maxControls: 4 }]) {
+    // spaces, then a control bound that outlasts the text.
+    for (const bounds of [
+      { maxChars: 900, maxControls: 4 },
+      { maxChars: 4000, maxControls: 3 },
+    ]) {
       const name = JSON.stringify(bounds);
       const parts = await partsOf(take, bounds);
       expect(parts.length, name).toBeGreaterThan(1);

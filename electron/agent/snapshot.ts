@@ -399,10 +399,11 @@ function composeReads(
     from: offsets.text,
   });
   // A bound of 0 cannot print its half of the page, so it never asks for it
-  // again; truncated still reports that content was left out.
+  // again; truncated still reports that content was left out. A control past
+  // this part counts wherever it is, past a group's own bound as well.
   const more =
     (spliced.next !== undefined && request.maxChars > 0) ||
-    (merged.omitted > 0 && request.maxControls > 0);
+    (omitted > 0 && request.maxControls > 0);
   return {
     text: spliced.text,
     interactables: merged.controls,
