@@ -38,6 +38,19 @@ const fixture = createServer((request, response) => {
     );
     return;
   }
+  // Section 9's page: a frame from this server's other loopback name, with a
+  // button an agent clicks inside it.
+  if (request.url === "/framed" || request.url === "/frame-widget") {
+    response.writeHead(200, {
+      "Content-Type": "text/html",
+      "Cache-Control": "no-store",
+    });
+    return response.end(
+      request.url === "/framed"
+        ? `<!doctype html><html lang="en"><head><title>Framed page</title></head><body><h1>Framed page</h1><iframe title="Remote widget" style="display:block;width:360px;height:140px" src="${origin.replace("127.0.0.1", "localhost")}/frame-widget"></iframe></body></html>`
+        : `<!doctype html><html lang="en"><head><title>Remote widget</title></head><body><button id="widget" type="button" onclick="this.textContent='Widget pressed'">Press the widget</button></body></html>`,
+    );
+  }
   // Section 7's pages: the location request, the page behind Basic auth and
   // the image behind it.
   const prompts = (request.url ?? "").split("?")[0];
@@ -2274,6 +2287,137 @@ try {
   );
   checked(
     "agent chords leave the person's tabs and developer tools alone while the person's own shortcuts still work",
+  );
+  // Section 8 in the window: Page scripts is on until the person turns it
+  // off in Settings, and agents then hear why their scripts stopped.
+  const sixSevens = () =>
+    api(`/tabs/${agentTab}/evaluate`, "POST", { expression: "6 * 7" });
+  await page.getByRole("button", { name: "Browser menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  const scriptsSwitch = page.getByRole("switch", {
+    name: "Page scripts",
+    exact: true,
+  });
+  assert.equal(await scriptsSwitch.getAttribute("aria-checked"), "true");
+  const scriptsOn = await sixSevens();
+  assert.equal(scriptsOn.status, 200);
+  assert.equal((await scriptsOn.json()).value, 42);
+  await scriptsSwitch.click();
+  await waitForState(page, (state) => state.settings.agentPageScripts === false);
+  await poll(
+    async () => (await scriptsSwitch.getAttribute("aria-checked")) === "false",
+    { label: "the Page scripts switch turned off" },
+  );
+  const scriptsOff = await sixSevens();
+  assert.equal(scriptsOff.status, 403);
+  assert.equal((await scriptsOff.json()).error.code, "agent_scripts_off");
+  await scriptsSwitch.click();
+  await waitForState(page, (state) => state.settings.agentPageScripts === true);
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  assert.equal((await sixSevens()).status, 200);
+  checked("the Page scripts switch defaults on, and turning it off returns 403");
+  // Section 9: an agent's click inside a frame from another host names that
+  // host in the activity feed, so the person can see where it worked.
+  const framedTab = (
+    await (
+      await api(`/spaces/${task}/tabs`, "POST", { url: `${origin}/framed` })
+    ).json()
+  ).tab.id;
+  const framedPage = await poll(
+    async () => {
+      const found = await (await api(`/tabs/${framedTab}/snapshot`)).json();
+      return found.interactables?.some(
+        (item) => item.label === "Press the widget",
+      )
+        ? found
+        : null;
+    },
+    { timeoutMs: 10000, label: "the button in the frame from the other host" },
+  );
+  const widget = framedPage.interactables.find(
+    (item) => item.label === "Press the widget",
+  );
+  assert.equal(typeof widget.frame, "string", JSON.stringify(widget));
+  const pressedWidget = await api(`/tabs/${framedTab}/click`, "POST", {
+    ref: widget.ref,
+  });
+  assert.equal(pressedWidget.status, 200, await pressedWidget.text());
+  assert.match(
+    (await (await api(`/tabs/${framedTab}/snapshot`)).json()).text,
+    /Widget pressed/,
+  );
+  const newestEntry = (
+    await page.evaluate(() => window.kamapathy.getState())
+  ).activity.find((item) => item.spaceId === task);
+  assert.ok(
+    newestEntry.message.endsWith(" in a frame from localhost"),
+    newestEntry.message,
+  );
+  assert.equal((await api(`/tabs/${framedTab}`, "DELETE")).status, 200);
+  checked(
+    "the activity feed names the frame host for an agent click in a cross-site frame",
+  );
+  // Section 8: clearing a site's data in a space that shares the person's
+  // sign-ins waits for them. The space needs them, a bar above the agent's
+  // page asks, other requests hear why, and Don't clear hands control back.
+  const clearHost = new URL(origin).host;
+  const clearing = api(`/tabs/${agentTab}/clear-site-data`, "POST", {
+    storage: true,
+    timeoutMs: 60000,
+  });
+  await waitForState(page, (state) => state.approvals.length === 1);
+  await poll(
+    async () =>
+      /an agent needs you/.test(await spacesButton.getAttribute("aria-label")),
+    { label: "needs-you mark for the approval" },
+  );
+  assert.equal(
+    (await page.evaluate(() => window.kamapathy.getState())).spaces.find(
+      (item) => item.id === task,
+    ).task.state,
+    "needs-you",
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
+    task,
+  );
+  await page.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    agentTab,
+  );
+  await waitForState(
+    page,
+    (state, id) => state.activeTabId === id,
+    agentTab,
+  );
+  await page.getByText(`Clear data for ${clearHost}?`, { exact: true }).waitFor();
+  const waiting = await api(`/tabs/${agentTab}/snapshot`);
+  assert.equal(waiting.status, 409);
+  assert.deepEqual(
+    (({ code, reason }) => ({ code, reason }))((await waiting.json()).error),
+    { code: "human_control", reason: "approval" },
+  );
+  await page.getByRole("button", { name: "Don't clear", exact: true }).click();
+  const declined = await clearing;
+  assert.equal(declined.status, 403);
+  assert.equal((await declined.json()).error.code, "clear_declined");
+  await waitForState(
+    page,
+    (state, id) =>
+      state.approvals.length === 0 &&
+      state.spaces.find((item) => item.id === id)?.owner === "agent",
+    task,
+  );
+  await page
+    .getByText(`Clear data for ${clearHost}?`, { exact: true })
+    .waitFor({ state: "detached" });
+  assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 200);
+  await page.evaluate(() =>
+    window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
+  );
+  await waitForState(page, (state) => state.activeSpaceId === "personal");
+  checked(
+    "a clear in a shared space shows Needs you and the bar above its tab, another request gets human_control with reason approval, and Don't clear returns clear_declined and hands control back",
   );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   assert.equal((await api(`/tabs/${agentTab}/snapshot`)).status, 409);
