@@ -1640,6 +1640,78 @@ export class Page {
       );
     });
   }
+  /**
+   * Sends one protocol command to this tab's page, or with `frame` to one of
+   * its frames that runs in its own process, and returns the result. Each
+   * command that reaches Chromium expires the tab's refs, so take a snapshot
+   * after it. Needs Page scripts on.
+   * @param {string} method Such as Page.getNavigationHistory.
+   * @param {object} [params] The command's parameters.
+   * @param {{ timeout?: number, frame?: string }} [options] `frame` is an
+   * iframe entry's contentFrame, such as "0/1", or its ref. `timeout` is
+   * 1000 to 60000 ms, 15000 by default.
+   * @returns {Promise<object>} The protocol's result.
+   */
+  cdp(method, params = {}, options = {}) {
+    return this.#call("cdp", [method, params, options], async () => {
+      const { timeout = 15000, frame } = options;
+      const { result } = await this.#post(
+        "cdp",
+        {
+          method,
+          params,
+          ...(frame === undefined ? {} : { frame }),
+          timeoutMs: timeout,
+        },
+        { limit: SCRIPT_LIMIT },
+      );
+      return result;
+    });
+  }
+  /**
+   * Takes the oldest protocol events recorded for this tab: its Page and
+   * Network events and every event of the agent's own sessions, with cookie
+   * values hidden. Needs Page scripts on.
+   * @param {{ max?: number }} [options] 1 to 10000, 10000 by default.
+   * @returns {Promise<{ events: { time: number, method: string, params?: object, frame?: string | null, omitted?: "too_large", bytes?: number }[], dropped: number, gaps: { reason: string, from: number, to: number }[], remaining: number }>}
+   * An event's frame is a frame path, null for a frame that has gone, and
+   * absent for the page itself.
+   */
+  events(options = {}) {
+    return this.#call("events", [options], async () => {
+      const { max = 10000 } = options;
+      const { events, dropped, gaps, remaining } = await this.#post(
+        "events",
+        { max },
+      );
+      return { events, dropped, gaps, remaining };
+    });
+  }
+  /**
+   * Clears one origin's cookies, storage or cache. In an isolated space it
+   * runs at once; in a space that uses the person's sign-ins it waits for
+   * their approval, and only their Clear clears anything.
+   * @param {{ origin?: string, cookies?: true | { name: string, domain?: string, path?: string } | { name: string, domain?: string, path?: string }[], storage?: true | string[], cache?: boolean, timeout?: number }} options
+   * At least one of cookies, storage and cache. `timeout` is how long the
+   * person has to answer, 1000 to 300000 ms, 60000 by default.
+   * @returns {Promise<{ ok: true, origin: string, cleared: { cookies?: { removed: number, domains: string[] }, storage?: string[], cache?: true }, approvedBy?: "person" }>}
+   */
+  clearSiteData(options = {}) {
+    return this.#call("clearSiteData", [options], async () => {
+      const { timeout = 60000, ...fields } = options;
+      if (
+        fields.cookies === undefined &&
+        fields.storage === undefined &&
+        fields.cache !== true
+      )
+        throw new KamapathyError(
+          "invalid_option",
+          "page.clearSiteData got nothing to clear. Give at least one of cookies, storage and cache.",
+          { entry: "page.clearSiteData" },
+        );
+      return this.#post("clear-site-data", { ...fields, timeoutMs: timeout });
+    });
+  }
 }
 
 /** One download Kamapathy holds for the agent in its space. */
@@ -2151,6 +2223,23 @@ export class Space {
     return this.#call("close", [], () =>
       this.#session.request(`/spaces/${this.id}`, { method: "DELETE" }),
     );
+  }
+  /**
+   * Asks Kamapathy itself for this space's pages, with Target.getTargets, or
+   * its versions, with Browser.getVersion. Nothing reaches Chromium, and
+   * every other method is refused. Needs Page scripts on.
+   * @param {string} method
+   * @param {object} [params]
+   * @returns {Promise<object>} The protocol's result.
+   */
+  cdp(method, params = {}) {
+    return this.#call("cdp", [method, params], async () => {
+      const { result } = await this.#session.request(
+        `/spaces/${this.id}/cdp`,
+        { method: "POST", body: { method, params } },
+      );
+      return result;
+    });
   }
 }
 

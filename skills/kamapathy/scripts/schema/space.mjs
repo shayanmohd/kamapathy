@@ -287,4 +287,22 @@ export const SPACE = [
     "DELETE /spaces/:id",
     ["human_control"],
   ),
+  method(
+    "Space.cdp",
+    "space.cdp(method, params?)",
+    "Asks Kamapathy for this space's pages with Target.getTargets, or its versions with Browser.getVersion. Nothing reaches Chromium, and every other method is refused.",
+    [
+      { name: "method", kind: "method" },
+      { name: "params", kind: "json", optional: true },
+    ],
+    "Promise<object>",
+    "POST /spaces/:id/cdp",
+    [
+      "invalid_field",
+      "agent_scripts_off",
+      "cdp_method_blocked",
+      "human_control",
+    ],
+    { since: 4 },
+  ),
 ];

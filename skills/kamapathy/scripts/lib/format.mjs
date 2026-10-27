@@ -383,10 +383,72 @@ export function responseLines(response) {
   else if (response.body) lines.push("", printable(response.body));
   return lines;
 }
+// A protocol command's result, and a note when it opened a new session.
+const protocolText = (data) =>
+  [
+    printable(JSON.stringify(data.result ?? {})),
+    ...(data.newSession
+      ? ["new session: enable again what earlier commands enabled"]
+      : []),
+  ].join("\n");
+const timeText = (time) =>
+  Number.isFinite(time) ? new Date(time).toISOString() : "-";
+// One line per recorded event: when, which frame (- for the page itself,
+// gone for a frame that has gone) and what; then what was not recorded and
+// what is left to take.
+function eventsText(data) {
+  const plural = (count, word) =>
+    `${Number(count)} ${word}${count === 1 ? "" : "s"}`;
+  const lines = (data.events ?? []).map((event) =>
+    [
+      timeText(event.time),
+      event.frame === undefined
+        ? "-"
+        : event.frame === null
+          ? "gone"
+          : line(event.frame),
+      line(event.method),
+      ...(event.omitted
+        ? [`(too large, ${Number(event.bytes)} bytes)`]
+        : []),
+    ].join(" "),
+  );
+  if (data.dropped > 0) lines.push(`dropped ${plural(data.dropped, "event")}`);
+  for (const gap of data.gaps ?? [])
+    lines.push(
+      `not recorded while ${line(gap.reason)} from ${timeText(gap.from)} to ${timeText(gap.to)}`,
+    );
+  if (data.remaining > 0)
+    lines.push(`${plural(data.remaining, "more event")}: run events again`);
+  return lines.length ? lines.join("\n") : "No events.";
+}
+// What a clear removed, and who approved it. Cookie names never come back.
+function clearedText(data) {
+  const { cookies, storage, cache } = data.cleared ?? {};
+  const parts = [
+    ...(cookies
+      ? [
+          `${Number(cookies.removed)} ${cookies.removed === 1 ? "cookie" : "cookies"}${
+            cookies.domains?.length
+              ? ` from ${cookies.domains.map(line).join(", ")}`
+              : ""
+          }`,
+        ]
+      : []),
+    ...(storage?.length ? [`storage ${storage.map(line).join(", ")}`] : []),
+    ...(cache ? ["cache"] : []),
+    ...(data.approvedBy === "person" ? ["approved by the person"] : []),
+  ];
+  return `ok: cleared ${line(data.origin)}${parts.length ? `: ${parts.join("; ")}` : ""}`;
+}
 // One reading per section 8 command, whose answers carry no action to sum up.
 const PAGE_SCRIPTS = {
   evaluate: valueText,
   fetch: (data) => responseLines(data.response ?? {}).join("\n"),
+  cdp: protocolText,
+  "space cdp": protocolText,
+  events: eventsText,
+  "clear-site-data": clearedText,
 };
 
 // A PDF's pages, each under its own [page N] line.

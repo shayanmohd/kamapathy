@@ -363,6 +363,12 @@ Closes the space and its tabs.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /spaces/:id`. Errors: `human_control`, `space_not_found`, `automation_stopped`. Since API level 1.
 
+### `space.cdp(method, params?)`
+
+Asks Kamapathy for this space's pages with Target.getTargets, or its versions with Browser.getVersion. Nothing reaches Chromium, and every other method is refused.
+
+Returns `Promise<object>`. Route `POST /spaces/:id/cdp`. Errors: `invalid_field`, `agent_scripts_off`, `cdp_method_blocked`, `human_control`, `space_not_found`, `automation_stopped`. Since API level 4.
+
 ## Page
 
 ### `page.id`
@@ -812,6 +818,41 @@ Fetches a URL from the page with its cookies, origin and CORS, and resolves the 
 | `saveAs` | string of at most 4096 characters |  | A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails. |
 
 Returns `Promise<{ ok, status, statusText, url, redirected, type, headers, body } or { ok, status, statusText, url, redirected, type, headers, savedPath, bytes }>`. Route `POST /tabs/:id/fetch`. Errors: `invalid_url`, `invalid_field`, `agent_scripts_off`, `fetch_failed`, `fetch_timeout`, `result_too_large`, `file_exists`, `download_interrupted`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.cdp(method, params?, options?)`
+
+Sends one protocol command to this tab's page, or to one of its frames, and returns its result. Each command that reaches Chromium expires the tab's refs, so take a snapshot after it.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 1000 to 60000 | `15000` | How long to wait for Chromium's answer. |
+| `frame` | string of at most 160 characters |  | An out-of-process frame to send the command to: an iframe entry's contentFrame path, such as 0/1, or that entry's ref. |
+
+Returns `Promise<object>`. Route `POST /tabs/:id/cdp`. Errors: `invalid_field`, `agent_scripts_off`, `cdp_method_blocked`, `cdp_error`, `cdp_timeout`, `frame_not_found`, `invalid_ref`, `unknown_ref`, `stale_ref`, `input_target_blocked`, `native_popup_blocked`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.events(options?)`
+
+Takes the oldest protocol events recorded for this tab, with how many were dropped, when recording paused and how many remain.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `max` | integer from 1 to 10000 | `10000` | How many of the oldest events to take. |
+
+Returns `Promise<{ events, dropped, gaps, remaining }>`. Route `POST /tabs/:id/events`. Errors: `invalid_field`, `agent_scripts_off`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
+### `page.clearSiteData(options)`
+
+Clears one origin's cookies, storage or cache, at least one of them. In a space that uses the person's sign-ins, the person approves it first.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `origin` | string of at most 2048 characters |  | The http or https origin to clear, such as https://example.com. Defaults to the page's own. |
+| `cookies` | JSON |  | true for every cookie the origin receives on any path, parent-domain cookies included, or {name, domain?, path?}, or a list of up to 20 of them, to pick cookies by name. |
+| `storage` | JSON |  | true, or a list of localStorage, indexedDB, cacheStorage, serviceWorkers and fileSystem. |
+| `cache` | true or false | `false` | Clear the origin's HTTP cache. |
+| `timeout` | milliseconds from 1000 to 300000 | `60000` | How long the person has to answer, in a space that uses their sign-ins. |
+
+Returns `Promise<{ ok: true, origin, cleared, approvedBy?: "person" }>`. Route `POST /tabs/:id/clear-site-data`. Errors: `invalid_field`, `origin_not_in_tab`, `clear_declined`, `approval_timeout`, `space_ended`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ## Page controllers
 
@@ -1264,6 +1305,22 @@ Run an expression in the page and print its value
 ### `fetch <tab-id> <url> [--method <m>] [--header "Name: value"]... [--stdin] [--save <file>] [--timeout <ms>]`
 
 Fetch a URL with the page's cookies and CORS
+
+### `cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]`
+
+Send one protocol command to the page or one of its frames
+
+### `space cdp <space-id> <method> [--stdin]`
+
+Ask Kamapathy for this space's pages or its versions
+
+### `events <tab-id> [--max <n>]`
+
+Drain the protocol events recorded for the page
+
+### `clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>]`
+
+Clear one site's cookies, storage or cache
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 

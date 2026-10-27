@@ -19,6 +19,9 @@ const FUNCTION_WAIT = body("POST /tabs/:id/wait-for-function");
 // Section 8's page scripts take their routes' fields the same way.
 const EVALUATE = body("POST /tabs/:id/evaluate");
 const FETCH = body("POST /tabs/:id/fetch");
+const CDP = body("POST /tabs/:id/cdp");
+const EVENTS = body("POST /tabs/:id/events");
+const CLEAR = body("POST /tabs/:id/clear-site-data");
 const timeout = (field) => ({ ...field, field: "timeoutMs" });
 // What a navigation or a wait can answer beyond the page codes.
 const NAVIGATION = [
@@ -1053,6 +1056,71 @@ export const PAGE_ENTRIES = [
           description:
             "A new file to stream the body into instead of returning it. It is never overwritten, and is removed when the stream fails.",
         },
+      },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.cdp",
+    "page.cdp(method, params?, options?)",
+    "Sends one protocol command to this tab's page, or to one of its frames, and returns its result. Each command that reaches Chromium expires the tab's refs, so take a snapshot after it.",
+    [
+      { name: "method", kind: "method" },
+      { name: "params", kind: "json", optional: true },
+      OPTIONS,
+    ],
+    "Promise<object>",
+    "POST /tabs/:id/cdp",
+    [
+      "invalid_field",
+      "agent_scripts_off",
+      "cdp_method_blocked",
+      "cdp_error",
+      "cdp_timeout",
+      "frame_not_found",
+      "invalid_ref",
+      "unknown_ref",
+      "stale_ref",
+      "input_target_blocked",
+      "native_popup_blocked",
+      "request_too_large",
+    ],
+    {
+      options: { timeout: timeout(CDP.timeoutMs), frame: CDP.frame },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.events",
+    "page.events(options?)",
+    "Takes the oldest protocol events recorded for this tab, with how many were dropped, when recording paused and how many remain.",
+    [OPTIONS],
+    "Promise<{ events, dropped, gaps, remaining }>",
+    "POST /tabs/:id/events",
+    ["invalid_field", "agent_scripts_off"],
+    { options: { max: EVENTS.max }, since: 4 },
+  ),
+  method(
+    "Page.clearSiteData",
+    "page.clearSiteData(options)",
+    "Clears one origin's cookies, storage or cache, at least one of them. In a space that uses the person's sign-ins, the person approves it first.",
+    [{ name: "options", kind: "options" }],
+    'Promise<{ ok: true, origin, cleared, approvedBy?: "person" }>',
+    "POST /tabs/:id/clear-site-data",
+    [
+      "invalid_field",
+      "origin_not_in_tab",
+      "clear_declined",
+      "approval_timeout",
+      "space_ended",
+    ],
+    {
+      options: {
+        origin: CLEAR.origin,
+        cookies: CLEAR.cookies,
+        storage: CLEAR.storage,
+        cache: CLEAR.cache,
+        timeout: timeout(CLEAR.timeoutMs),
       },
       since: 4,
     },

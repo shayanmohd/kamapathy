@@ -54,6 +54,7 @@ import {
   ERRORS,
   findCommand,
   matchRoute,
+  METHOD_PATTERN,
   outdated,
   pointFrom,
   requestBudget,
@@ -284,6 +285,24 @@ function piped(options, json = false, limit = undefined) {
     ...(limit === undefined ? {} : { limit }),
   };
   return json ? readJson(stream, read) : readInput(stream, read);
+}
+// A protocol method, checked before anything connects.
+function protocolMethod(value) {
+  const method = required(value, "method");
+  if (!METHOD_PATTERN.test(method))
+    throw new Error(
+      "method must be a protocol domain and command, such as Page.getNavigationHistory.",
+    );
+  return method;
+}
+// A protocol command's params, piped as one JSON object.
+async function protocolParams(options) {
+  const params = await piped(options, true);
+  if (!params || typeof params !== "object" || Array.isArray(params))
+    throw new Error(
+      "Standard input must be a JSON object of the command's params.",
+    );
+  return params;
 }
 
 // The session the commands that drive the client themselves work through.
@@ -1361,6 +1380,108 @@ export const PARSERS = {
       `${options.json ? JSON.stringify(saved) : responseLines(saved).join("\n")}\n`,
     );
     return 0;
+  },
+  cdp: async (args, options) => {
+    const { id, rest, body, given } = action(
+      args,
+      {
+        "--stdin": FLAGS.stdin,
+        "--frame": { field: "frame", read: (value) => value },
+        "--timeout": {
+          field: "timeoutMs",
+          read: (value, flag) => bounded(value, flag, 1000, 60000),
+        },
+      },
+      1,
+      "cdp <tab-id> <method> [--stdin] [--frame <path-or-ref>] [--timeout <ms>]",
+    );
+    return {
+      path: `/tabs/${id}/cdp`,
+      method: "POST",
+      body: {
+        method: protocolMethod(rest[1]),
+        ...(given.has("--stdin")
+          ? { params: await protocolParams(options) }
+          : {}),
+        ...body,
+      },
+      limit: SCRIPT_LIMIT,
+    };
+  },
+  "space cdp": async (args, options) => {
+    const { rest, given } = takeFlags(args, { "--stdin": FLAGS.stdin });
+    if (rest.length > 2)
+      throw new Error("Use space cdp <space-id> <method> [--stdin].");
+    return {
+      path: `/spaces/${identifier(rest[0])}/cdp`,
+      method: "POST",
+      body: {
+        method: protocolMethod(rest[1]),
+        ...(given.has("--stdin")
+          ? { params: await protocolParams(options) }
+          : {}),
+      },
+    };
+  },
+  events: (args) => {
+    const { id, body } = action(
+      args,
+      {
+        "--max": {
+          field: "max",
+          read: (value, flag) => bounded(value, flag, 1, 10000),
+        },
+      },
+      0,
+      "events <tab-id> [--max <n>]",
+    );
+    return { path: `/tabs/${id}/events`, method: "POST", body };
+  },
+  // --cookie repeats, one name each, and stands instead of --cookies.
+  "clear-site-data": (args) => {
+    const rest = [];
+    const body = {};
+    const names = [];
+    const given = new Set();
+    for (let index = 0; index < args.length; index++) {
+      const flag = args[index];
+      if (flag === "--cookie") {
+        names.push(required(args[++index], flag));
+        continue;
+      }
+      if (!flag.startsWith("--")) {
+        rest.push(flag);
+        continue;
+      }
+      if (given.has(flag))
+        throw new Error(`Give ${flag} once. Run help for usage.`);
+      given.add(flag);
+      if (["--cookies", "--storage", "--cache"].includes(flag))
+        body[flag.slice(2)] = true;
+      else if (flag === "--origin")
+        body.origin = required(args[++index], flag);
+      else if (flag === "--timeout")
+        body.timeoutMs = bounded(args[++index], flag, 1000, 300000);
+      else throw new Error(`Unknown option: ${flag}. Run help for usage.`);
+    }
+    if (rest.length > 1)
+      throw new Error(
+        "Use clear-site-data <tab-id> [--origin <o>] [--cookies | --cookie <name>]... [--storage] [--cache] [--timeout <ms>].",
+      );
+    if (names.length) {
+      if (body.cookies)
+        throw new Error("Use --cookies or --cookie <name>, not both.");
+      body.cookies = names.map((name) => ({ name }));
+    }
+    if (!body.cookies && !body.storage && !body.cache)
+      throw new Error(
+        "Say what to clear: --cookies, --cookie <name>, --storage or --cache.",
+      );
+    return {
+      path: `/tabs/${tab(rest[0])}/clear-site-data`,
+      method: "POST",
+      body,
+    };
   },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {

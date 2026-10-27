@@ -8862,6 +8862,397 @@ describe("scripted sessions", () => {
     );
     expect(existsSync(target)).toBe(false);
   });
+
+  it("page.cdp and space cdp send params from stdin", async () => {
+    const history = { entries: [], currentIndex: 0 };
+    const targets = { targetInfos: [] };
+    const answers = {
+      ...scriptAnswers,
+      "POST /tabs/tab-1/cdp": { ok: true, result: history, newSession: true },
+      "POST /spaces/space-1/cdp": { ok: true, result: targets },
+    };
+    const api = fakeApi(answers);
+    const client = await connect({ env, fetch: api.fetch, health: current });
+    const research = await client.space("space-1");
+    const page = await research.open("https://example.test/reserve");
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.cdp("Page.getNavigationHistory")).toEqual(history);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/cdp",
+        body: {
+          method: "Page.getNavigationHistory",
+          params: {},
+          timeoutMs: 15000,
+        },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(20000);
+      // A frame by its path or by its entry's ref, and a timeout of its own.
+      await page.cdp(
+        "Runtime.evaluate",
+        { expression: "1" },
+        { frame: "0/1", timeout: 5000 },
+      );
+      expect(api.requests.at(-1).body).toEqual({
+        method: "Runtime.evaluate",
+        params: { expression: "1" },
+        frame: "0/1",
+        timeoutMs: 5000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(10000);
+      await page.cdp("DOM.getDocument", undefined, { frame: "@e4" });
+      expect(api.requests.at(-1).body).toEqual({
+        method: "DOM.getDocument",
+        params: {},
+        frame: "@e4",
+        timeoutMs: 15000,
+      });
+    } finally {
+      timeouts.mockRestore();
+    }
+    expect(await research.cdp("Target.getTargets")).toEqual(targets);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/spaces/space-1/cdp",
+      body: { method: "Target.getTargets", params: {} },
+    });
+    await research.cdp("Browser.getVersion", { verbose: true });
+    expect(api.requests.at(-1).body).toEqual({
+      method: "Browser.getVersion",
+      params: { verbose: true },
+    });
+    // A method outside the pattern, params JSON cannot carry, and a bad
+    // option are refused before anything is sent.
+    const sent = api.requests.length;
+    for (const [call, code] of [
+      [() => page.cdp("getNavigationHistory"), "invalid_argument"],
+      [() => page.cdp("page.reload"), "invalid_argument"],
+      [() => page.cdp("Page.navigate", { when: 1n }), "invalid_argument"],
+      [() => page.cdp("Page.reload", {}, { timeout: 500 }), "invalid_option"],
+      [() => page.cdp("Page.reload", {}, { frames: "0" }), "invalid_option"],
+      [() => research.cdp("Target"), "invalid_argument"],
+      [() => research.cdp("Target.getTargets", { at: Number.NaN }), "invalid_argument"],
+    ])
+      await expect(call(), String(call)).rejects.toMatchObject({ code });
+    expect(api.requests).toHaveLength(sent);
+    // The commands read the params from stdin.
+    for (const [args, path, body, piped] of [
+      [
+        [
+          "cdp",
+          "tab-1",
+          "Runtime.evaluate",
+          "--stdin",
+          "--frame",
+          "0/1",
+          "--timeout",
+          "5000",
+        ],
+        "/tabs/tab-1/cdp",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          frame: "0/1",
+          timeoutMs: 5000,
+        },
+        '{"expression":"1"}',
+      ],
+      [
+        ["cdp", "tab-1", "Page.getNavigationHistory", "--frame", "@e4"],
+        "/tabs/tab-1/cdp",
+        { method: "Page.getNavigationHistory", frame: "@e4" },
+      ],
+      [
+        ["space", "cdp", "space-1", "Target.getTargets", "--stdin"],
+        "/spaces/space-1/cdp",
+        { method: "Target.getTargets", params: {} },
+        "{}",
+      ],
+      [
+        ["space", "cdp", "space-1", "Browser.getVersion"],
+        "/spaces/space-1/cdp",
+        { method: "Browser.getVersion" },
+      ],
+    ]) {
+      const cli = fakeApi(answers);
+      await runCli(args, {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+        stdout: sink(),
+      });
+      expect(cli.requests, args.join(" ")).toEqual([
+        { method: "POST", path, body },
+      ]);
+    }
+    // They print the result, and say when the command opened a new session.
+    expect(
+      await printed(["cdp", "tab-1", "Page.getNavigationHistory"], {
+        ok: true,
+        result: history,
+        newSession: true,
+      }),
+    ).toBe(
+      '{"entries":[],"currentIndex":0}\nnew session: enable again what earlier commands enabled\n',
+    );
+    expect(
+      await printed(["space", "cdp", "space-1", "Target.getTargets"], {
+        ok: true,
+        result: targets,
+      }),
+    ).toBe('{"targetInfos":[]}\n');
+    const unused = vi.fn();
+    for (const [args, piped] of [
+      [["cdp", "tab-1"]],
+      [["cdp", "tab-1", "nope"]],
+      [["cdp", "tab-1", "Page.reload", "--stdin"], "[1]"],
+      [["cdp", "tab-1", "Page.reload", "--stdin"], "not json"],
+      [["cdp", "tab-1", "Page.reload", "--timeout", "500"]],
+      [["cdp", "tab-1", "Page.reload", "Page.stop"]],
+      [["space", "cdp", "space-1"]],
+      [["space", "cdp", "space-1", "Target.getTargets", "--frame", "0"]],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from([piped ?? "{}"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("events prints one line per event", async () => {
+    const at = (seconds) => Date.UTC(2026, 9, 27, 10, 0, seconds, 5);
+    const drained = {
+      events: [
+        { time: at(0), method: "Page.frameNavigated", params: { frame: {} } },
+        {
+          time: at(1),
+          method: "Network.requestWillBeSent",
+          params: {},
+          frame: "0/1",
+        },
+        {
+          time: at(2),
+          method: "Network.responseReceived",
+          frame: null,
+          omitted: "too_large",
+          bytes: 2097152,
+        },
+      ],
+      dropped: 3,
+      gaps: [{ reason: "human_control", from: at(3), to: at(9) }],
+      remaining: 12,
+    };
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/events": { ok: true, ...drained },
+    });
+    const page = await inputPage(api);
+    expect(await page.events()).toEqual(drained);
+    expect(api.requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/tabs/tab-1/events",
+      body: { max: 10000 },
+    });
+    await page.events({ max: 50 });
+    expect(api.requests.at(-1).body).toEqual({ max: 50 });
+    const sent = api.requests.length;
+    for (const options of [{ max: 0 }, { max: 10001 }, { limit: 5 }])
+      await expect(
+        page.events(options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({ code: "invalid_option", entry: "page.events" });
+    expect(api.requests).toHaveLength(sent);
+    // The command: time, the frame path or - for the page and gone for a
+    // frame that has gone, and the method; then what was not recorded.
+    expect(
+      await printed(["events", "tab-1", "--max", "50"], {
+        ok: true,
+        ...drained,
+      }),
+    ).toBe(
+      [
+        "2026-10-27T10:00:00.005Z - Page.frameNavigated",
+        "2026-10-27T10:00:01.005Z 0/1 Network.requestWillBeSent",
+        "2026-10-27T10:00:02.005Z gone Network.responseReceived (too large, 2097152 bytes)",
+        "dropped 3 events",
+        "not recorded while human_control from 2026-10-27T10:00:03.005Z to 2026-10-27T10:00:09.005Z",
+        "12 more events: run events again",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      await printed(["events", "tab-1"], {
+        ok: true,
+        events: [],
+        dropped: 0,
+        gaps: [],
+        remaining: 0,
+      }),
+    ).toBe("No events.\n");
+    const cli = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/events": { ok: true, ...drained },
+    });
+    const json = sink();
+    await runCli(["events", "tab-1", "--max", "50", "--json"], {
+      env,
+      fetch: cli.fetch,
+      health: current,
+      stdout: json,
+    });
+    expect(cli.requests).toEqual([
+      { method: "POST", path: "/tabs/tab-1/events", body: { max: 50 } },
+    ]);
+    expect(JSON.parse(json.text())).toEqual({ ok: true, ...drained });
+    const unused = vi.fn();
+    for (const args of [
+      ["events"],
+      ["events", "tab-1", "--max", "0"],
+      ["events", "tab-1", "--max", "10001"],
+      ["events", "tab-1", "--stdin"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("clear-site-data maps its flags", async () => {
+    const cleared = {
+      ok: true,
+      origin: "https://shop.test",
+      cleared: {
+        cookies: { removed: 2, domains: ["shop.test", ".shop.test"] },
+        storage: ["localStorage", "indexedDB"],
+        cache: true,
+      },
+      approvedBy: "person",
+    };
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/clear-site-data": cleared,
+    });
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.clearSiteData({ cookies: true })).toEqual(cleared);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/clear-site-data",
+        body: { cookies: true, timeoutMs: 60000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(65000);
+      await page.clearSiteData({
+        origin: "https://shop.test",
+        cookies: [{ name: "cart", path: "/" }],
+        storage: ["localStorage"],
+        cache: true,
+        timeout: 120000,
+      });
+      expect(api.requests.at(-1).body).toEqual({
+        origin: "https://shop.test",
+        cookies: [{ name: "cart", path: "/" }],
+        storage: ["localStorage"],
+        cache: true,
+        timeoutMs: 120000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(125000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    const sent = api.requests.length;
+    for (const options of [
+      undefined,
+      {},
+      { cache: false },
+      { cookie: true },
+      { cookies: true, timeout: 500 },
+    ])
+      await expect(
+        page.clearSiteData(options),
+        JSON.stringify(options),
+      ).rejects.toMatchObject({
+        code: "invalid_option",
+        entry: "page.clearSiteData",
+      });
+    expect(api.requests).toHaveLength(sent);
+    // The command's flags build the same bodies.
+    for (const [args, body] of [
+      [["clear-site-data", "tab-1", "--cookies"], { cookies: true }],
+      [
+        [
+          "clear-site-data",
+          "tab-1",
+          "--origin",
+          "https://shop.test",
+          "--cookie",
+          "cart",
+          "--cookie",
+          "session",
+          "--storage",
+          "--cache",
+          "--timeout",
+          "120000",
+        ],
+        {
+          origin: "https://shop.test",
+          cookies: [{ name: "cart" }, { name: "session" }],
+          storage: true,
+          cache: true,
+          timeoutMs: 120000,
+        },
+      ],
+      [["clear-site-data", "tab-1", "--storage"], { storage: true }],
+    ]) {
+      const cli = fakeApi({
+        ...scriptAnswers,
+        "POST /tabs/tab-1/clear-site-data": cleared,
+      });
+      await runCli(args, {
+        env,
+        fetch: cli.fetch,
+        health: current,
+        stdout: sink(),
+      });
+      expect(cli.requests, args.join(" ")).toEqual([
+        { method: "POST", path: "/tabs/tab-1/clear-site-data", body },
+      ]);
+    }
+    // It prints what was cleared, and who approved it.
+    expect(await printed(["clear-site-data", "tab-1", "--cookies"], cleared)).toBe(
+      "ok: cleared https://shop.test: 2 cookies from shop.test, .shop.test; storage localStorage, indexedDB; cache; approved by the person\n",
+    );
+    expect(
+      await printed(["clear-site-data", "tab-1", "--cookie", "cart"], {
+        ok: true,
+        origin: "https://shop.test",
+        cleared: { cookies: { removed: 0, domains: [] } },
+      }),
+    ).toBe("ok: cleared https://shop.test: 0 cookies\n");
+    const unused = vi.fn();
+    for (const args of [
+      ["clear-site-data", "tab-1"],
+      ["clear-site-data", "tab-1", "--cookies", "--cookie", "cart"],
+      ["clear-site-data", "tab-1", "--cookie"],
+      ["clear-site-data", "tab-1", "--cache", "--timeout", "500"],
+      ["clear-site-data", "tab-1", "--cache", "--origin"],
+      ["clear-site-data", "tab-1", "--cache", "--all"],
+    ])
+      await expect(
+        runCli(args, { env, fetch: unused, health: current, stdout: sink() }),
+        args.join(" "),
+      ).rejects.toThrow();
+    expect(unused).not.toHaveBeenCalled();
+  });
 });
 
 describe("client errors and timeouts", () => {
