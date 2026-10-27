@@ -986,7 +986,7 @@ export const PAGE_ENTRIES = [
   method(
     "Page.evaluate",
     "page.evaluate(fnOrString, arg?, options?)",
-    "Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.",
+    "Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await. An expression whose value is a promise comes back as an empty object unless it is awaited, and a function's promise is awaited.",
     [
       { name: "fnOrString", kind: "pageFunction" },
       { name: "arg", kind: "json", optional: true },

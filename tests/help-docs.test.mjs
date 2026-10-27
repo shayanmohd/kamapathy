@@ -188,4 +188,21 @@ describe("what the help says frames, page scripts and runs do", () => {
     expect(click).toContain("input_target_blocked: 403, not retryable");
     expect(click).not.toContain("cross_origin_frame");
   });
+
+  it("says what evaluate gives back for a promise, in the docs' words", () => {
+    const RULE =
+      "An expression whose value is a promise comes back as an empty object unless it is awaited";
+    for (const topic of ["evaluate", "page.evaluate"])
+      expect(helpTopic([topic], "kamapathy"), topic).toContain(RULE);
+    expect(helpTopic(["page.evaluate"], "kamapathy")).toContain(
+      "a function's promise is awaited",
+    );
+    for (const path of [
+      "docs/automation.md",
+      "README.md",
+      "skills/kamapathy/references/page-scripts.md",
+      "skills/kamapathy/references/scripting.md",
+    ])
+      expect(read(path).toLowerCase(), path).toContain(RULE.toLowerCase());
+  });
 });

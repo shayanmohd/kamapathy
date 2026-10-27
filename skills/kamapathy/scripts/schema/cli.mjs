@@ -1289,7 +1289,7 @@ export const COMMANDS = [
         },
       ],
       stdin:
-        "An expression to run in the page's main frame, at most 16384 characters. It may use await.",
+        "An expression to run in the page's main frame, at most 16384 characters. It may use await. An expression whose value is a promise comes back as an empty object unless it is awaited.",
       route: "POST /tabs/:id/evaluate",
       script: "page.evaluate",
       since: 4,
