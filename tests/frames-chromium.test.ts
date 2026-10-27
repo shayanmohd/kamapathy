@@ -433,6 +433,23 @@ for (const mode of ISOLATION)
       );
     }, 60000);
 
+    it("an open dialog prints first, with its frame's lines under the iframe line", async () => {
+      await open("/frames/dialog", 2);
+      const shape = await take({ format: "outline" });
+      expect(shape.outline!.replace(/ @e\d+/g, "").split("\n")).toEqual([
+        'dialog "Pay"',
+        '  iframe "Card details"',
+        '    "Card number"',
+        '    textbox "Card number"',
+        "main",
+        '  "Order summary"',
+      ]);
+      // The frame's control is listed after its owner, as its line prints.
+      expect(
+        Array.from(shape.outline!.matchAll(/@e\d+/g)).map((found) => found[0]),
+      ).toEqual(shape.interactables.map((control) => control.ref));
+    }, 60000);
+
     it("viewport scope reads only the visible part of each frame", async () => {
       await open("/frames/far", 2);
       const whole = await take();

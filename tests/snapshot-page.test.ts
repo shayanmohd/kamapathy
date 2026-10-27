@@ -569,6 +569,63 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
     expect(many.truncated).toBe(true);
   }, 60000);
 
+  it("prints an open dialog first in a full-page outline taken as the routes take it", async () => {
+    const opened = await load("/snapshot/outline");
+    const alone = await snapshot({ format: "outline" });
+    // The routes and the CLI read the page frame group by frame group and
+    // compose what the reads report, even on a page without frames.
+    const groups = createFrameGroups(opened, { refs, tabId: "tab-1" });
+    const snapshots = createSnapshots({
+      controller: { state: { tabs: [] } } as unknown as AutomationController,
+      evaluatePage: (
+        tabId,
+        tabSession,
+        operation,
+        payload,
+        deadline,
+        inner,
+        frameId,
+      ) =>
+        resolver.run(tabId, tabSession, operation, payload, {
+          deadline,
+          namespace: "snapshots",
+          signal: inner?.signal,
+          guard: inner?.guard,
+          ...(frameId === undefined ? {} : { frameId }),
+        }),
+      resolver,
+      namespace: () => "snapshots",
+      frames: { for: () => groups, dispose: () => {} },
+    });
+    const whole = (await snapshots.take(
+      "tab-1",
+      opened,
+      {
+        mode: "full",
+        maxChars: 24000,
+        maxControls: 100,
+        scope: "page",
+        format: "outline",
+        locators: false,
+        header: false,
+      },
+      Date.now() + 15000,
+      step(),
+    )) as Listing;
+    expect(whole.outline!.split("\n").slice(0, 4)).toEqual([
+      'dialog "Confirm"',
+      '  "Dialog text"',
+      `  button "OK" ${refFor(whole, "OK")}`,
+      "banner",
+    ]);
+    // Composing one document changes nothing: the same lines, and the
+    // controls listed in the order they print.
+    expect(whole.outline).toBe(alone.outline);
+    expect(whole.interactables.map((control) => control.ref)).toEqual(
+      alone.interactables.map((control) => control.ref),
+    );
+  }, 60000);
+
   it("lists absolute http, https, mailto and tel links", async () => {
     await load("/snapshot/links");
     const listing = await snapshot();

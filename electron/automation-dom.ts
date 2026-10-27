@@ -1735,7 +1735,10 @@ export function pageOperation(
     // so the main process can place that frame's own read where its owner
     // sits. The key is the one the main process bound; an owner it has not
     // bound yet is placed by its path alone, and bound on the next pass.
-    const framePlaceholders = (ranks: ReturnType<typeof rankControls>) => {
+    const framePlaceholders = (
+      ranks: ReturnType<typeof rankControls>,
+      orderOf: (element: Element) => number,
+    ) => {
       const tiers = new Map(ranks.map((item) => [item.element, item.rank]));
       return all.filter(listedFrame).map((element) => {
         const box = placed(element);
@@ -1744,7 +1747,7 @@ export function pageOperation(
         return {
           ...(key === undefined ? {} : { key }),
           local: contentPath(element),
-          order: order.get(element) ?? 0,
+          order: orderOf(element),
           tier: tiers.get(element) ?? 0,
           box: {
             left: box.left,
@@ -1770,13 +1773,17 @@ export function pageOperation(
       });
     };
     // What the composition in the main process needs beside the listing: the
-    // group this read belongs to, and the owners inside it left to read.
-    const frameRead = (ranks: ReturnType<typeof rankControls>) =>
+    // group this read belongs to, and the owners inside it left to read, each
+    // placed in the order the listing's own items carry.
+    const frameRead = (
+      ranks: ReturnType<typeof rankControls>,
+      orderOf = (element: Element) => order.get(element) ?? 0,
+    ) =>
       frameContext === undefined
         ? {}
         : {
             group: frameContext.group,
-            placeholders: framePlaceholders(ranks),
+            placeholders: framePlaceholders(ranks, orderOf),
             ...(frameScope ? { frameScope: true as const } : {}),
           };
     const limit = options.mode === "compact" ? 80 : 200;
@@ -2148,18 +2155,14 @@ export function pageOperation(
       let used = 0;
       let taken = 0;
       let cutOptions = false;
-      // Where a line sits in the walk: its own element's position, or just
-      // after the last frame owner, so a frame's own lines nest between the
-      // lines around it.
-      let afterOwner = 0;
-      const orderOfLine = (line: Planned) => {
-        const element =
-          line.chunk === undefined ? items[line.item].element : undefined;
-        if (!element) return afterOwner;
-        const own = order.get(element) ?? afterOwner;
-        afterOwner = own + (listedFrame(element) ? 1 : 0);
-        return own;
-      };
+      // Where a line, a control or a frame owner sits in a composed outline:
+      // its item's place, which puts open popups first as this outline
+      // prints them. A frame's own lines then follow its iframe line
+      // wherever that prints.
+      const itemOf = new Map<Element, number>();
+      for (const [at, item] of items.entries())
+        if (item.element) itemOf.set(item.element, at);
+      const placeOf = (element: Element) => itemOf.get(element) ?? items.length;
       const keepLine = (
         line: Planned,
         made: {
@@ -2173,7 +2176,7 @@ export function pageOperation(
         kept.push({
           depth: line.depth,
           text: made.text,
-          order: orderOfLine(line),
+          order: line.item,
         });
         used += line.depth * 2 + made.text.length + 1;
         if (made.cut) cutOptions = true;
@@ -2234,10 +2237,10 @@ export function pageOperation(
         return {
           url: location.href,
           title: document.title,
-          ...frameRead(ranks),
+          ...frameRead(ranks, placeOf),
           text: [],
           controls: printed.map((element, index) => ({
-            order: order.get(element) ?? 0,
+            order: placeOf(element),
             tier: tiers.get(element) ?? 0,
             local: framePath(element),
             entry: interactables[index],

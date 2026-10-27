@@ -10,9 +10,11 @@
 // tracking frame, on a page that takes focus, under an overlay, far below the
 // fold, added after a wait and loading another document on demand. The
 // checkout page holds a frame from the other name beside one of this host on
-// another port, and the later pages hold twelve frames from another site and
-// a frame that blocks its own thread. {{other}} is this server under its
-// other loopback name, {{otherPort}} this name on its second port.
+// another port, the dialog page holds the card form from the other name in an
+// open dialog after the page's own content, and the later pages hold twelve
+// frames from another site and a frame that blocks its own thread. {{other}}
+// is this server under its other loopback name, {{otherPort}} this name on
+// its second port.
 export const framePages = {
   "/frames/shadow": `<!doctype html><meta charset="utf-8"><title>Shadow controls</title>
 <style>body{font:14px sans-serif;margin:16px}</style>
@@ -146,6 +148,10 @@ document.getElementById("moving").src = next();
 <p>Billing address</p>
 <label for="postcode">Postcode</label><input id="postcode" name="postcode">
 <button type="button" id="save-billing" onclick="this.textContent='Billing saved'">Save billing</button>`,
+  "/frames/dialog": `<!doctype html><meta charset="utf-8"><title>Pay in a dialog</title>
+<style>body{font:14px sans-serif;margin:0}dialog{position:static;margin:0;border:0;padding:0}iframe{display:block;width:300px;height:120px;border:0}</style>
+<main><p>Order summary</p></main>
+<dialog open aria-label="Pay"><iframe title="Card details" src="{{other}}/frames/other"></iframe></dialog>`,
   "/frames/many": `<!doctype html><meta charset="utf-8"><title>Many frames</title>
 <style>body{font:14px sans-serif;margin:0}iframe{display:block;width:200px;height:60px;border:0}</style>
 <p>Twelve frames from another site</p>
