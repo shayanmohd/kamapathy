@@ -108,8 +108,11 @@ describe("the agent guide", () => {
       "`sites check` checks every pack, or the ones named",
       "GitHub, Google Search and X come with the skill",
       "ends the run before the script with `helpers_failed`",
+      // runPageTool's one evaluate needs the level evaluate arrived with.
+      "`sitePacks`, `siteContext` and `runSiteTool` send no request of their own, so none of them needs a particular API level, while `runPageTool` sends one evaluate, which needs API level 4.",
     ])
       expect(packs).toContain(sentence);
+    expect(packs).not.toContain("None of the four calls sends a request");
   });
 
   it("says one thing per subject under Isolation and limitations", () => {
