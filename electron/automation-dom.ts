@@ -2315,32 +2315,27 @@ export function pageOperation(
     // Where the text of a frame this world cannot read belongs, so the main
     // process can place that frame's own text between the parts around it.
     const splits: { order: number; at: number }[] = [];
-    let raw = pageText(
-      scope,
-      readLimit,
-      viewport,
-      grouped
-        ? (element, length) => {
-            if (listedFrame(element))
-              splits.push({
-                order: (order.get(element) ?? 0) + 1,
-                at: length,
-              });
-          }
-        : undefined,
-    );
-    let normalized = compact(raw);
-    while (!grouped && raw.length > readLimit && normalized.length < wanted + 1) {
-      readLimit *= 2;
-      raw = pageText(scope, readLimit, viewport);
-      normalized = compact(raw);
-    }
-    const text = normalized.slice(offsets.text, wanted);
-    const textLeft = normalized.length > wanted;
+    const readText = () => {
+      splits.length = 0;
+      return pageText(
+        scope,
+        readLimit,
+        viewport,
+        grouped
+          ? (element, length) => {
+              if (listedFrame(element))
+                splits.push({
+                  order: (order.get(element) ?? 0) + 1,
+                  at: length,
+                });
+            }
+          : undefined,
+      );
+    };
     // The text in the parts the frame owners split it into, each normalized
     // on its own, as one document's text is.
-    const parts: { order: number; value: string }[] = [];
-    if (grouped) {
+    const partsOf = (raw: string) => {
+      const parts: { order: number; value: string }[] = [];
       let cut = 0;
       let at = 0;
       for (const split of [...splits, { order: 0, at: raw.length }]) {
@@ -2349,7 +2344,25 @@ export function pageOperation(
         cut = split.at;
         at = split.order;
       }
+      return parts;
+    };
+    let raw = readText();
+    let normalized = compact(raw);
+    let parts = grouped ? partsOf(raw) : [];
+    // A group read reports its parts, so they are what must reach past the
+    // part's end.
+    const reached = () =>
+      grouped
+        ? parts.reduce((total, part) => total + part.value.length, 0)
+        : normalized.length;
+    while (raw.length > readLimit && reached() < wanted + 1) {
+      readLimit *= 2;
+      raw = readText();
+      normalized = compact(raw);
+      if (grouped) parts = partsOf(raw);
     }
+    const text = normalized.slice(offsets.text, wanted);
+    const textLeft = normalized.length > wanted;
     if (grouped)
       return {
         url: location.href,

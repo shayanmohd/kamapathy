@@ -742,6 +742,46 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
     }
   }, 60000);
 
+  it("covers the page in list parts taken as the routes take them", async () => {
+    const take = routes(await load("/snapshot/parts"));
+    const whole = await take({ maxChars: 24000, maxControls: 100 });
+    const refsOf = (parts: readonly Part[]) =>
+      parts.flatMap((part) => part.interactables.map((control) => control.ref));
+    expect(refsOf([whole])).toHaveLength(12);
+    const offsetsOf = (cursor: string) => {
+      const state = readCursor(cursor, { h: optionsHash({ scope: "page" }) });
+      return { text: state.t, control: state.c, line: state.l };
+    };
+    // The skill suite's bounds, where a part's margin is the gap's run of
+    // spaces.
+    for (const bounds of [{ maxChars: 900, maxControls: 4 }]) {
+      const name = JSON.stringify(bounds);
+      const parts = await partsOf(take, bounds);
+      expect(parts.length, name).toBeGreaterThan(1);
+      expect(parts.map((part) => part.text).join(""), name).toBe(whole.text);
+      // Every control of the page, once, at most maxControls a part.
+      expect(refsOf(parts).sort(), name).toEqual(refsOf([whole]).sort());
+      for (const [index, part] of parts.entries())
+        expect(
+          part.interactables.length,
+          `${name} part ${index}`,
+        ).toBeLessThanOrEqual(bounds.maxControls);
+      // The page's own read gives the same parts.
+      let offsets: Offsets = { text: 0, control: 0, line: 0 };
+      for (const [index, part] of parts.entries()) {
+        const own = await snapshot({ mode: "compact", ...bounds, offsets });
+        expect(part.text, `${name} part ${index}`).toBe(own.text);
+        expect(refsOf([part]), `${name} part ${index}`).toEqual(
+          own.interactables.map((control) => control.ref),
+        );
+        expect(part.next && offsetsOf(part.next), `${name} part ${index}`).toEqual(
+          own.next,
+        );
+        if (own.next) offsets = own.next;
+      }
+    }
+  }, 60000);
+
   it("opens a continued outline part taken as the routes take it with its first line's ancestors", async () => {
     const take = routes(await load("/snapshot/parts"));
     const whole = (
