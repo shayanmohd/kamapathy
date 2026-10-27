@@ -4,7 +4,12 @@ import { reducedUserAgent } from "../identity";
 import { remaining, type Actions } from "./actions";
 import { createAgentCdp, type AgentCdp } from "./agent-cdp";
 import type { Authority } from "./authority";
-import { classify, type PolicyContext, type Verdict } from "./cdp-policy";
+import {
+  classify,
+  contextIds,
+  type PolicyContext,
+  type Verdict,
+} from "./cdp-policy";
 import { ApiError, fail, toApiError } from "./errors";
 import { recoverFromTimeout } from "./evaluate";
 import type { EventRecording } from "./events";
@@ -437,7 +442,18 @@ export function createSpaceCdp(deps: {
             call.frame === undefined
               ? undefined
               : await frameTarget(session, call, call.frame, step);
-          const sending = cdpOf(call.tabId, session).send(
+          // Each renderer numbers its own worlds, so on another target the
+          // same number may be another world, an extension's among them.
+          const cdp = cdpOf(call.tabId, session);
+          for (const { key, id } of contextIds(call.params))
+            if (!cdp.deliveredOn(frameId ?? "", id))
+              return refuse(call.method, {
+                block: "scope",
+                param: key,
+                message:
+                  "A context id names a context only on the page or frame that gave it.",
+              });
+          const sending = cdp.send(
             call.method,
             call.params,
             {

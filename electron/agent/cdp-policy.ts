@@ -370,6 +370,14 @@ export function collectIds(method: string, value: unknown): Id[] {
     [],
   ).map(({ kind, id }) => ({ kind, id }));
 }
+/** The context ids a command's parameters name, with the key that holds each. */
+export function contextIds(
+  params: Record<string, unknown>,
+): { key: string; id: string | number }[] {
+  return walk(params, PARAM_IDS, [])
+    .filter((found) => found.kind === "context")
+    .map(({ key, id }) => ({ key, id }));
+}
 
 // The one verdict on a command: its domain, its own row, its parameters, then
 // the identifiers it names.

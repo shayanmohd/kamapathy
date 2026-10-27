@@ -7025,6 +7025,64 @@ describe("local automation socket", () => {
     ).toBe(200);
   });
 
+  it("a context id names a context only on the page or frame that gave it", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    const evaluated = () =>
+      sentOn(page, "Runtime.evaluate").filter((id) => id?.startsWith("agent-"));
+    // The frame's own session gives the agent the frame's page world.
+    expect(
+      (await cdp(tab.id, { method: "Runtime.enable", frame: "0" })).status,
+    ).toBe(200);
+    expect(attached(page)).toEqual(["card"]);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 4,
+          uniqueId: "card-4",
+          name: "",
+          origin: "https://pay.example",
+          auxData: { frameId: "card", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    // The page's own renderer numbers its worlds by itself, so there the
+    // same number may be another world, an extension's among them.
+    for (const [params, param] of [
+      [{ expression: "1", contextId: 4 }, "contextId"],
+      [{ expression: "1", uniqueContextId: "card-4" }, "uniqueContextId"],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "Runtime.evaluate", params }),
+      );
+      expect(status, param).toBe(403);
+      expect(error, param).toEqual({
+        code: "cdp_method_blocked",
+        message:
+          "Kamapathy does not pass Runtime.evaluate. A context id names a context only on the page or frame that gave it.",
+        method: "Runtime.evaluate",
+        reason: "scope",
+        param,
+      });
+    }
+    // Nothing went out, and the top page got no session for it.
+    expect(attached(page)).toEqual(["card"]);
+    expect(evaluated()).toEqual([]);
+    // On the frame that gave it, it is the agent's.
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1", contextId: 4 },
+          frame: "0",
+        })
+      ).status,
+    ).toBe(200);
+    expect(evaluated()).toEqual(["agent-1"]);
+  });
+
   it("every call that reached Chromium expires the tab's refs", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
