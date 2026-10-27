@@ -12,6 +12,7 @@ import type { Dialogs } from "./dialogs";
 import type { Downloads } from "./downloads";
 import { ApiError, fail } from "./errors";
 import type { EventRecording } from "./events";
+import type { ExtensionNames } from "./extension-frames";
 import type { FileChoosers } from "./file-choosers";
 import type { Navigation } from "./routes/navigation";
 import type { Expectations } from "./expectations";
@@ -164,6 +165,8 @@ export interface RouteDeps {
   cdp: SpaceCdpFilter;
   /** Section 8's clearing of one site's data, with the person's approval. */
   siteData: SiteData;
+  /** Section 17's loaded extensions, which name the frames agents never reach. */
+  extensions: ExtensionNames;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

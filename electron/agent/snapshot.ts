@@ -7,7 +7,7 @@ import type { Actions } from "./actions";
 import { fail } from "./errors";
 import {
   NO_EXTENSION_NAMES,
-  blockedFrameUrls,
+  blockedFramesByPath,
   extensionFrame,
   type ExtensionNames,
 } from "./extension-frames";
@@ -425,7 +425,7 @@ function composeReads(
 function fillFrames(
   groups: FrameGroups,
   entries: readonly Record<string, unknown>[],
-  extensions: ReadonlyMap<string, string>,
+  blockedFrames: ReadonlyMap<string, BlockedFrame>,
 ): void {
   for (const entry of entries) {
     const frame = typeof entry.frame === "string" ? entry.frame : "";
@@ -451,11 +451,16 @@ function fillFrames(
     if (state === "blocked") {
       // A frame of one of the person's extensions is named for them, as
       // section 17 says. Every other blocked frame stays a plain entry.
-      const name = content === undefined ? undefined : extensions.get(content);
-      if (name !== undefined) {
-        entry.extension = name;
-        entry.label = extensionLabel(name);
+      const held =
+        content === undefined ? undefined : blockedFrames.get(content);
+      if (held?.extension !== undefined) {
+        entry.extension = held.extension;
+        entry.label = extensionLabel(held.extension);
       }
+      // Section 8's cdp route refuses this entry's ref as the frame it opens.
+      const opens = frameId ?? held?.frameId;
+      if (typeof entry.ref === "string" && opens !== undefined)
+        groups.setHome(entry.ref, groups.frameAt(frame)?.frameId ?? "", opens);
       delete entry.contentFrame;
       continue;
     }
@@ -612,7 +617,7 @@ export function createSnapshots(deps: {
         fillFrames(
           groups,
           listed,
-          await extensionsOf(session, listed, extensions, step),
+          await blockedFramesOf(session, listed, extensions, step),
         );
         // Frames the reads left pending, unavailable or past a limit, their
         // entries listed or not.
@@ -694,23 +699,30 @@ export function createSnapshots(deps: {
   };
 }
 
+/** A blocked frame a listing names, and the extension it belongs to when it is one of the person's. */
+type BlockedFrame = { frameId: string; extension?: string };
 /**
- * The extension each blocked frame of a listing belongs to, by frame path.
- * Only the registry holds the URL a blocked frame committed, so the tab's
- * frames are read once, and only for a listing that has such an entry.
+ * Each blocked frame of a listing, by frame path. Only the registry holds
+ * the URL a blocked frame committed, so the tab's frames are read once, and
+ * only for a listing that has such an entry.
  */
-async function extensionsOf(
+async function blockedFramesOf(
   session: TabSession,
   entries: readonly Record<string, unknown>[],
   names: ExtensionNames,
   step: Step,
-): Promise<ReadonlyMap<string, string>> {
-  const found = new Map<string, string>();
+): Promise<ReadonlyMap<string, BlockedFrame>> {
+  const found = new Map<string, BlockedFrame>();
   if (!entries.some((entry) => entry.blocked === true)) return found;
-  const urls = await blockedFrameUrls(session, step).catch(() => undefined);
-  for (const [path, url] of urls ?? []) {
+  const frames = await blockedFramesByPath(session, step).catch(
+    () => undefined,
+  );
+  for (const [path, { frameId, url }] of frames ?? []) {
     const extension = extensionFrame(url, names);
-    if (extension) found.set(path, extension.name);
+    found.set(path, {
+      frameId,
+      ...(extension ? { extension: extension.name } : {}),
+    });
   }
   return found;
 }

@@ -8,6 +8,14 @@ import { classify, type PolicyContext, type Verdict } from "./cdp-policy";
 import { ApiError, fail, toApiError } from "./errors";
 import { recoverFromTimeout } from "./evaluate";
 import type { EventRecording } from "./events";
+import {
+  NO_EXTENSION_NAMES,
+  blockedFrameOf,
+  blockedFramesByPath,
+  extensionFrame,
+  extensionInputMessage,
+  type ExtensionNames,
+} from "./extension-frames";
 import type { FrameGroupsByTab } from "./frames/groups";
 import type { Run } from "./http";
 import { checkPointerTarget } from "./input/guards";
@@ -75,6 +83,10 @@ export interface SpaceCdpFilter {
 // How often one tab's protocol traffic is named in Recent activity.
 const ACTIVITY_MS = 60000;
 const NO_WORLDS: ReadonlySet<string> = new Set<string>();
+// A frame agents never reach, named by its path, an iframe entry's ref or a
+// frameId. One of the person's extensions is named for them instead.
+const OUT_OF_REACH =
+  "This frame belongs to an extension or an internal page, which agents never reach.";
 
 // Electron's debugger rejects with the protocol message alone. Chromium's own
 // dispatcher writes these two, each with a fixed code of its own; a domain's
@@ -149,6 +161,8 @@ export function createSpaceCdp(deps: {
   events: Pick<EventRecording, "pause">;
   /** Without it, an Input command is refused as one Kamapathy sends itself. */
   input?: InputDispatcherPort;
+  /** Section 17's loaded extensions, which name the frames agents never reach. */
+  extensions?: ExtensionNames;
 }): SpaceCdpFilter {
   const {
     controller,
@@ -161,6 +175,7 @@ export function createSpaceCdp(deps: {
     events,
     input,
   } = deps;
+  const extensions = deps.extensions ?? NO_EXTENSION_NAMES;
   // One AgentCdp per live tab session, made on the tab's first command.
   const held = new Map<string, { session: TabSession; cdp: AgentCdp }>();
   const named = new Map<string, number>();
@@ -218,15 +233,36 @@ export function createSpaceCdp(deps: {
       platform: process.platform,
     };
   };
+  // A command aimed at a frame agents never reach, as section 17 says: the
+  // refusal names the extension whose page the frame shows when it is one of
+  // the person's.
+  const unreachable = (
+    method: string,
+    url: string | undefined,
+    param?: string,
+  ): never => {
+    const extension =
+      url === undefined ? undefined : extensionFrame(url, extensions);
+    return refuse(method, {
+      block: "scope",
+      ...(param === undefined ? {} : { param }),
+      message: extension ? extensionInputMessage(extension.name) : OUT_OF_REACH,
+    });
+  };
+  // The URL of the blocked frame around a frame, which only names it. A
+  // registry read that fails leaves the plain refusal.
+  const blockedUrl = async (session: TabSession, frameId: string, step: Step) =>
+    (await blockedFrameOf(session, frameId, step).catch(() => undefined))?.url;
   // The frame a command names, by its section 9 path or by the ref of the
   // `iframe` entry that opens it. A frame in the page's own process has no
   // session of its own to send on.
   const frameTarget = async (
-    tabId: string,
+    session: TabSession,
+    call: CdpCall,
     frame: string,
     step: Step,
   ): Promise<string> => {
-    const groups = frames.for(tabId);
+    const groups = frames.for(call.tabId);
     const missing = () =>
       fail(
         "frame_not_found",
@@ -237,10 +273,26 @@ export function createSpaceCdp(deps: {
     await groups.bind(step);
     let frameId: string | undefined;
     if (frame.startsWith("@")) {
-      refs.check(tabId, frame);
+      refs.check(call.tabId, frame);
       const home = groups.homeFrame(frame);
       frameId = home?.opens ?? home?.frameId;
-    } else frameId = groups.frameAt(frame)?.frameId;
+    } else {
+      frameId = groups.frameAt(frame)?.frameId;
+      // A blocked frame is never one of the groups: only the registry
+      // places it.
+      const blocked =
+        frameId === undefined
+          ? (
+              await blockedFramesByPath(session, step).catch(() => undefined)
+            )?.get(frame)
+          : undefined;
+      if (blocked) return unreachable(call.method, blocked.url);
+    }
+    if (frameId !== undefined && session.frameBlocked(frameId))
+      return unreachable(
+        call.method,
+        await blockedUrl(session, frameId, step),
+      );
     const path = frameId === undefined ? undefined : groups.pathOf(frameId);
     if (frameId === undefined || path === undefined) return missing();
     if (groups.frameAt(path)?.ownSession !== true)
@@ -271,6 +323,7 @@ export function createSpaceCdp(deps: {
     await checkPointerTarget(session, { x, y }, step, {
       button: (typeof button === "string" ? button : "left") as Button,
       press: type === "mousePressed",
+      extensions,
     });
   };
   // What Chromium's refusal, or its silence, means to the agent.
@@ -372,10 +425,18 @@ export function createSpaceCdp(deps: {
           // An Input command carries no result of its own.
           answered = { result: {} };
         } else {
+          // A frameId in params aims at its frame as surely as frame does.
+          const named = call.params.frameId;
+          if (typeof named === "string" && session.frameBlocked(named))
+            return unreachable(
+              call.method,
+              await blockedUrl(session, named, step),
+              "frameId",
+            );
           const frameId =
             call.frame === undefined
               ? undefined
-              : await frameTarget(call.tabId, call.frame, step);
+              : await frameTarget(session, call, call.frame, step);
           const sending = cdpOf(call.tabId, session).send(
             call.method,
             call.params,

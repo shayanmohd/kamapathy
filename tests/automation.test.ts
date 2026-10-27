@@ -6901,6 +6901,130 @@ describe("local automation socket", () => {
       ).toBe(200);
   });
 
+  it("a frame, an iframe entry's ref or a frameId naming a frame agents never reach is out of scope", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // One of the person's extensions in a frame of the page, and a local
+    // page in another, each listed as a blocked entry.
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+      { frameId: "notes", url: "file:///Users/person/notes.html", local: "1" },
+    ]);
+    page.result = groupRead("", {
+      text: [{ order: 0, value: "Shop" }],
+      controls: [
+        {
+          order: 1,
+          tier: 6,
+          entry: frameEntry("Extension panel", "@e3", "0", undefined, {
+            blocked: true,
+          }),
+        },
+        {
+          order: 2,
+          tier: 6,
+          entry: frameEntry("Notes", "@e4", "1", undefined, { blocked: true }),
+        },
+      ],
+      owners: [
+        { ...owner("0", 1), blocked: true },
+        { ...owner("1", 2), blocked: true },
+      ],
+    });
+    expect(
+      (await request(`/tabs/${tab.id}/snapshot`, "POST", { header: false }))
+        .status,
+    ).toBe(200);
+    const internal =
+      "This frame belongs to an extension or an internal page, which agents never reach.";
+    const refusal = (method: string, message: string, param?: string) => ({
+      code: "cdp_method_blocked",
+      message: `Kamapathy does not pass ${method}. ${message}`,
+      method,
+      reason: "scope",
+      ...(param === undefined ? {} : { param }),
+    });
+    // By its path, and by the ref of the entry that opens it.
+    for (const [frame, message] of [
+      ["0", EXTENSION_MESSAGE],
+      ["@e3", EXTENSION_MESSAGE],
+      ["1", internal],
+      ["@e4", internal],
+    ]) {
+      const { status, error } = await failure(
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          frame,
+        }),
+      );
+      expect(status, frame).toBe(403);
+      expect(error, frame).toEqual(refusal("Runtime.evaluate", message));
+    }
+    // By its frameId, whichever command carries it.
+    for (const [method, params, message] of [
+      [
+        "Page.createIsolatedWorld",
+        { frameId: "panel", worldName: "mine" },
+        EXTENSION_MESSAGE,
+      ],
+      ["DOM.getFrameOwner", { frameId: "notes" }, internal],
+      [
+        "Page.navigate",
+        { url: "https://example.com/next", frameId: "panel" },
+        EXTENSION_MESSAGE,
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual(refusal(method, message, "frameId"));
+    }
+    // Nothing was opened or sent, and the refs the snapshot gave out stand.
+    expect(attached(page)).toEqual([]);
+    expect(page.debugger.sent.some((command) => command.sessionId)).toBe(
+      false,
+    );
+    expect(refs.classify(tab.id, "@e3")).toBe("live");
+    // A raw press on the extension's frame names it, as section 5's routes
+    // do.
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    const pressed = await failure(
+      await cdp(tab.id, {
+        method: "Input.dispatchMouseEvent",
+        params: {
+          type: "mousePressed",
+          x: 25,
+          y: 45,
+          button: "left",
+          clickCount: 1,
+        },
+      }),
+    );
+    expect(pressed.status).toBe(403);
+    expect(pressed.error).toEqual({
+      code: "input_target_blocked",
+      message: EXTENSION_MESSAGE,
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    // A frame the tab can reach still takes its frameId.
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Page.createIsolatedWorld",
+          params: { frameId: "main", worldName: "mine" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("every call that reached Chromium expires the tab's refs", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

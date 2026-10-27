@@ -264,6 +264,7 @@ export async function startAutomation(
 ): Promise<AutomationServer> {
   const instance = randomBytes(16).toString("hex");
   const refs = options.refs ?? processRefs;
+  const extensions = options.extensions ?? NO_EXTENSION_NAMES;
   const authority = createAuthority(controller);
   const scheduler = new Scheduler();
   // Each document's HTTP method, so a PDF a form returned is never fetched
@@ -321,7 +322,7 @@ export async function startAutomation(
     dispatchers,
     refs,
     frames,
-    extensions: options.extensions ?? NO_EXTENSION_NAMES,
+    extensions,
   });
   // An Input command an agent sends goes out through section 5's dispatcher
   // on Kamapathy's own session, never on an agent session.
@@ -350,6 +351,7 @@ export async function startAutomation(
     pageScripts,
     events,
     input: inputPort,
+    extensions,
   });
   // What the agent holds on each tab, which the event redactor reads.
   events.setAgentDomains({
@@ -464,6 +466,7 @@ export async function startAutomation(
     frames,
     cdp,
     siteData,
+    extensions,
   });
   const deps: RouteDeps = {
     controller,
@@ -484,6 +487,7 @@ export async function startAutomation(
     frames,
     cdp,
     siteData,
+    extensions,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);

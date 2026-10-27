@@ -57,18 +57,20 @@ export function extensionInputMessage(name: string): string {
 type FrameReader = Pick<TabSession, "knownFrames" | "frames">;
 
 /**
- * The URL each blocked frame of a tab committed, by the path section 9 gives
- * it. Only the registry holds that URL, and only frames whose owner can be
- * read have a path, so a frame inside a blocked one is not listed.
+ * Each blocked frame of a tab, by the path section 9 gives it, with its id
+ * and the URL it committed. Only the registry holds that URL, and only frames
+ * whose owner can be read have a path, so a frame inside a blocked one is not
+ * listed.
  */
-export async function blockedFrameUrls(
+export async function blockedFramesByPath(
   session: FrameReader,
   step: Step,
-): Promise<ReadonlyMap<string, string>> {
-  const urls = new Map<string, string>();
+): Promise<ReadonlyMap<string, { frameId: string; url: string }>> {
+  const found = new Map<string, { frameId: string; url: string }>();
   for (const frame of await session.frames(step))
-    if (frame.blocked === true) urls.set(frame.path, frame.url);
-  return urls;
+    if (frame.blocked === true)
+      found.set(frame.path, { frameId: frame.frameId, url: frame.url });
+  return found;
 }
 
 /**
