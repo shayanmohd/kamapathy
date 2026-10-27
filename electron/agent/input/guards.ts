@@ -228,6 +228,30 @@ const besideWhole = (point: { x: number; y: number }) => {
   return [...found.values()];
 };
 
+// Where input at a point lands in the layout viewport, which the hit test
+// reads. Mobile emulation lets a page zoom in, and a scroll then moves the
+// visual viewport within it: a probe of Electron 44 saw mouse, touch, tap,
+// scroll and wheel input land that offset further right and down. A page
+// that cannot say is taken at its own scale, as a failed hit test is.
+async function landingPoint(
+  session: TabSession,
+  point: { x: number; y: number },
+  step: Step,
+): Promise<{ x: number; y: number }> {
+  try {
+    const metrics = await session.send<{
+      cssVisualViewport?: { offsetX?: unknown; offsetY?: unknown };
+    }>("Page.getLayoutMetrics", {}, step);
+    const { offsetX, offsetY } = metrics?.cssVisualViewport ?? {};
+    const by = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
+    return { x: point.x + by(offsetX), y: point.y + by(offsetY) };
+  } catch (error) {
+    if (toApiError(error)) throw error;
+    return point;
+  }
+}
+
 // Every press goes through this, force included, and a move with no press
 // is checked for its frame alone.
 export async function checkPointerTarget(
@@ -256,9 +280,10 @@ export async function checkPointerTarget(
         options.extensions ?? NO_EXTENSION_NAMES,
       );
   };
-  const hit = await hitNodeAt(session, point, step);
+  const at = await landingPoint(session, point, step);
+  const hit = await hitNodeAt(session, at, step);
   await checkFrame(hit);
-  for (const whole of besideWhole(point))
+  for (const whole of besideWhole(at))
     await checkFrame(await hitNodeAt(session, whole, step));
   if (!hit || !options.press) return;
   if (platform === "linux" && options.button === "middle" && hit.editable)
@@ -266,7 +291,7 @@ export async function checkPointerTarget(
       "clipboard_blocked",
       "A middle press on Linux pastes the system's primary selection, which Kamapathy never uses. Use fill or keyboard.paste instead.",
     );
-  const kind = await pickerAt(session, point, step, hit);
+  const kind = await pickerAt(session, at, step, hit);
   if (kind)
     fail(
       "native_popup_blocked",

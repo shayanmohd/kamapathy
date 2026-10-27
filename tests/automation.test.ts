@@ -8134,6 +8134,66 @@ describe("local automation socket", () => {
     }
   });
 
+  it("a raw point and a mouse route's point are checked where a zoomed page puts them", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // Mobile emulation lets a page zoom in, and a scroll then moves its
+    // visual viewport 30 pixels into the layout viewport: a probe saw input
+    // at 300, 200 land at 330, 230, where the extension's frame is.
+    Object.assign(page.metrics.cssVisualViewport, { offsetX: 30, offsetY: 30 });
+    page.hits = [{ x: 330, y: 230, nodeName: "iframe", holds: "panel" }];
+    const press = {
+      type: "mousePressed",
+      x: 300,
+      y: 200,
+      button: "left",
+      clickCount: 1,
+    };
+    for (const [method, params] of [
+      ["Input.dispatchMouseEvent", press],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x: 300, y: 200 }] },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    const routed = await failure(
+      await request(`/tabs/${tab.id}/mouse/click`, "POST", { x: 300, y: 200 }),
+    );
+    expect(routed.status).toBe(403);
+    expect(routed.error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    // Back at the page's own scale, the point is the page's again.
+    Object.assign(page.metrics.cssVisualViewport, { offsetX: 0, offsetY: 0 });
+    expect(
+      (await cdp(tab.id, { method: "Input.dispatchMouseEvent", params: press }))
+        .status,
+    ).toBe(200);
+  });
+
   it("refused Input commands stay refused", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

@@ -53,7 +53,8 @@ const flat = (attributes: Record<string, string> = {}) =>
 const step = (): Step => ({ deadline: Date.now() + 5000 });
 
 // A tab whose page answers DOM.getNodeForLocation and DOM.describeNode from
-// the spots given, and refuses every other command.
+// the spots given, Page.getLayoutMetrics from the visual viewport given, and
+// refuses every other command.
 const tab = (
   options: {
     spots?: Spot[];
@@ -63,6 +64,7 @@ const tab = (
     // test that has no use for the URLs.
     paths?: Record<string, string>;
     broken?: unknown;
+    visual?: Record<string, number>;
   } = {},
 ) => {
   const sent: { method: string; params: Record<string, any> }[] = [];
@@ -134,6 +136,8 @@ const tab = (
           },
         };
       }
+      if (method === "Page.getLayoutMetrics" && options.visual)
+        return { cssVisualViewport: options.visual };
       throw new Error(`No reply for ${method}`);
     },
   } as unknown as TabSession;
@@ -311,8 +315,10 @@ describe("the input guards", () => {
       expect(error.fields.frame).toBe(
         point.x === 10 ? "0" : point.x === 20 ? "1" : undefined,
       );
-      // Nothing but the hit test went out, so no input reached the page.
+      // Nothing but the layout read and the hit test went out, so no input
+      // reached the page.
       expect(sent.map((command) => command.method)).toEqual([
+        "Page.getLayoutMetrics",
         "DOM.getNodeForLocation",
         "DOM.describeNode",
       ]);
@@ -388,6 +394,51 @@ describe("the input guards", () => {
     expect(
       whole.sent.filter((command) => command.method === "DOM.getNodeForLocation"),
     ).toHaveLength(1);
+  });
+
+  it("checks the point input lands on while the page is zoomed in", async () => {
+    // Mobile emulation lets a page zoom in, and a scroll then moves its
+    // visual viewport within the layout viewport. A probe of Electron 44
+    // saw a press at 275, 175 land at 305, 205 with the visual viewport 30
+    // pixels in each way, while the hit test reads the layout viewport.
+    const spots: Spot[] = [
+      { x: 275, y: 175, frameId: MAIN, author: { nodeName: "button" } },
+      {
+        x: 305,
+        y: 205,
+        frameId: MAIN,
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+      // Half a pixel further in, the press lands between whole points.
+      {
+        x: 306,
+        y: 206,
+        frameId: MAIN,
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+    ];
+    const frames = [known(MAIN), known("panel", { blocked: true })];
+    for (const offset of [30, 30.5]) {
+      const zoomed = tab({
+        spots,
+        frames,
+        paths: { panel: "0" },
+        visual: { offsetX: offset, offsetY: offset, scale: 2 },
+      });
+      const error = await refusal(press(zoomed.session, { x: 275, y: 175 }));
+      expect([error.code, error.fields.frame], String(offset)).toEqual([
+        "input_target_blocked",
+        "0",
+      ]);
+    }
+    // At the page's own scale the same point is the page's, and so it is
+    // when the page cannot say.
+    for (const visual of [{ offsetX: 0, offsetY: 0, scale: 1 }, undefined]) {
+      const level = tab({ spots, frames, ...(visual ? { visual } : {}) });
+      await expect(
+        press(level.session, { x: 275, y: 175 }),
+      ).resolves.toBeUndefined();
+    }
   });
 
   it("refuses a press that would open a native select, color or date picker", async () => {
@@ -527,7 +578,10 @@ describe("the input guards", () => {
     // The protocol takes whole numbers only, so a point is rounded first.
     const { session, sent } = tab({ spots: CONTROLS });
     await refusal(press(session, { x: 10.4, y: 9.6 }));
-    expect(sent[0].params).toMatchObject({
+    expect(
+      sent.find((command) => command.method === "DOM.getNodeForLocation")
+        ?.params,
+    ).toMatchObject({
       x: 10,
       y: 10,
       includeUserAgentShadowDOM: false,
