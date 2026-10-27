@@ -70,6 +70,19 @@ describe("the agent guide", () => {
       expect(scripts).toContain(sentence);
   });
 
+  it("says what the tightened isolation refuses a protocol command", () => {
+    // The isolation fixes on phase-07, which merge before the final run.
+    const scripts = section("Page scripts and developer commands");
+    for (const sentence of [
+      "and a context id only on the page or frame that gave it.",
+      "Contexts of Kamapathy's own worlds, of Electron's preload world and of the person's extensions are never given, so none can be named, and `Runtime.addBinding` must name, with `executionContextId`, a context the agent was given.",
+      "or less than a pixel from one, answers `403 input_target_blocked`, whether a mouse, touch, tap, scroll or pinch command puts it there, and so do keys and text sent while the focus is in such a frame",
+      "A device metrics override that changes the page's scale or viewport is refused, because it would move where input lands.",
+      "a world named `kamapathy...` or `Electron Isolated Context` in any spacing or case",
+    ])
+      expect(scripts).toContain(sentence);
+  });
+
   it("reads and acts in frames from any web origin", () => {
     for (const sentence of [
       "read through open shadow roots and frames from any web origin",

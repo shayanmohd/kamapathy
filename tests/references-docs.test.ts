@@ -127,6 +127,25 @@ describe("the skill's hand-written references", () => {
       );
   });
 
+  it("page-scripts.md and actions.md say what the tightened isolation refuses", () => {
+    // The isolation fixes on phase-07, which merge before the final run.
+    const scripts = reference("page-scripts.md");
+    for (const promised of [
+      "or less than a pixel from one, answers `403 input_target_blocked`, whether a mouse, touch, tap, scroll or pinch command puts it there, and so does a key or text sent while the focus is in such a frame.",
+      "A device metrics override that changes the page's scale or viewport is refused, because it would move where input lands.",
+      "and a context id only on the page or frame that gave it.",
+      "Kamapathy's own worlds, Electron's preload world and the worlds of the person's extensions are never given to you, and the names of Kamapathy's and Electron's worlds are refused in any spacing or case.",
+      "`Runtime.addBinding` must name, with `executionContextId`, a context this tab gave you.",
+      "a world name starting with `kamapathy` or naming `Electron Isolated Context`, in any spacing or case",
+    ])
+      expect(scripts, `page-scripts.md is missing ${promised}`).toContain(
+        promised,
+      );
+    expect(reference("actions.md")).toContain(
+      "or less than a pixel from one, or a focused frame inside one, answers `403 input_target_blocked`, even with `--force`.",
+    );
+  });
+
   it("site-packs.md states the format, the calls, the codes and the rules", () => {
     const packs = reference("site-packs.md");
     for (const field of [

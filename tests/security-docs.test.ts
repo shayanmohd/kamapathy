@@ -62,6 +62,16 @@ describe("what the security model says", () => {
     ]);
   });
 
+  it("says what the tightened isolation refuses a protocol command", () => {
+    // The isolation fixes on phase-07, which merge before the final run.
+    says([
+      "Kamapathy's own worlds, Electron's preload world, which holds the channel for password forms, and the person's extensions' are never given",
+      "an agent can take neither Kamapathy's nor Electron's world names, in any spacing or case,",
+      "A mouse, touch, tap, scroll or pinch point in an extension or internal frame, or less than a pixel from one, keys and text sent while the focus is in such a frame",
+      "and emulation that changes the page's scale or viewport, which would move where input lands.",
+    ]);
+  });
+
   it("says frames from any web origin are read and worked in", () => {
     says([
       "frames from any web origin, including embedded payment and sign-in forms",
