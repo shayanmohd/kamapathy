@@ -23,6 +23,7 @@ import type {
   AgentTask,
   BrowserAction,
   BrowserState,
+  ClearSiteDataApproval,
   ClosedBy,
   HoldReason,
   Space,
@@ -724,6 +725,16 @@ export class FakeController implements AutomationController {
     this.state.spaceRequests = this.state.spaceRequests.filter(
       (request) => request.id !== id,
     );
+    this.emit();
+  }
+  addApproval(approval: ClearSiteDataApproval) {
+    this.state.approvals.push(approval);
+    this.emit();
+  }
+  removeApproval(id: string) {
+    const kept = this.state.approvals.filter((item) => item.id !== id);
+    if (kept.length === this.state.approvals.length) return;
+    this.state.approvals = kept;
     this.emit();
   }
   async keepAsPersonal(spaceId: string) {

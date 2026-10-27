@@ -149,6 +149,7 @@ export function initialState(
     spaceRequests: [],
     passwordPrompts: [],
     prompts: [],
+    approvals: [],
     sitePermissions: [],
     settings: {
       theme: "system",

@@ -208,6 +208,17 @@ export interface SpaceRequest {
   name?: string;
   at: number;
 }
+// An agent's request to clear one site's data in a session the person uses,
+// waiting for their answer: what would go, never a cookie's name or value.
+export interface ClearSiteDataApproval {
+  id: string;
+  spaceId: string;
+  tabId: string;
+  origin: string;
+  cookies?: { count: number; domains: string[] };
+  storage?: string[];
+  cache?: true;
+}
 // Saved passwords, for the person only. Summaries leave out passwords and
 // notes, and file paths stay in main.
 export type LoginKind = "form" | "http";
@@ -472,6 +483,8 @@ export interface BrowserState {
   // For this run only; never saved.
   passwordPrompts: PasswordPrompt[];
   prompts: PendingPrompt[];
+  // For this run only; never saved.
+  approvals: ClearSiteDataApproval[];
   sitePermissions: SitePermission[];
   settings: Settings;
   platform: "darwin" | "win32" | "linux" | "web";

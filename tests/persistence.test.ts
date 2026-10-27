@@ -408,6 +408,29 @@ describe("desktop session persistence", () => {
     expect(readState(path, "darwin", "0.2.0").spaceRequests).toEqual([]);
   });
 
+  it("approvals are never saved or restored", () => {
+    const path = statePath();
+    const original = initialState("darwin");
+    expect(original.approvals).toEqual([]);
+    original.approvals.push({
+      id: "approval",
+      spaceId: "personal",
+      tabId: original.tabs[0].id,
+      origin: "https://approval-shop.example",
+      cookies: { count: 2, domains: ["approval-shop.example"] },
+      storage: ["localStorage"],
+      cache: true,
+    });
+    writeState(path, original);
+    const raw = readFileSync(path, "utf8");
+    expect(JSON.parse(raw)).not.toHaveProperty("approvals");
+    expect(raw).not.toContain("approval-shop.example");
+    expect(readState(path, "darwin", "0.2.0").approvals).toEqual([]);
+    // A file that holds them anyway restores none.
+    writeFileSync(path, JSON.stringify(original));
+    expect(readState(path, "darwin", "0.2.0").approvals).toEqual([]);
+  });
+
   it("the setting defaults on and prompts are never written", () => {
     const path = statePath();
     expect(initialState().settings.offerToSavePasswords).toBe(true);

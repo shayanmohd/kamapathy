@@ -45,6 +45,7 @@ import type {
   AgentTask,
   BrowserAction,
   BrowserState,
+  ClearSiteDataApproval,
   ClosedBy,
   ContentBounds,
   FrozenFrame,
@@ -2293,6 +2294,20 @@ export class BrowserController {
       (request) => request.id !== id,
     );
     this.emit();
+  }
+
+  // An agent's request to clear a site's data, shown above its tab until it
+  // ends. The list lives for this run only, so neither change is saved.
+  addApproval(approval: ClearSiteDataApproval): void {
+    this.state.approvals.push(approval);
+    this.emit({ save: false });
+  }
+
+  removeApproval(id: string): void {
+    const kept = this.state.approvals.filter((item) => item.id !== id);
+    if (kept.length === this.state.approvals.length) return;
+    this.state.approvals = kept;
+    this.emit({ save: false });
   }
 
   async keepAsPersonal(spaceId: string): Promise<void> {

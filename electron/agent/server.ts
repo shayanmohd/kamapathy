@@ -6,6 +6,7 @@ import type {
   AgentTask,
   BrowserAction,
   BrowserState,
+  ClearSiteDataApproval,
   ClosedBy,
   HoldReason,
   Space,
@@ -182,6 +183,9 @@ export interface AutomationController {
   /** Shows the person an agent's request for one of their spaces. */
   addSpaceRequest(request: { reason: string; name?: string }): SpaceRequest;
   removeSpaceRequest(id: string): void;
+  /** Shows the person an agent's request to clear a site's data. */
+  addApproval(approval: ClearSiteDataApproval): void;
+  removeApproval(id: string): void;
 }
 export interface AutomationServer {
   /** The socket path, or named pipe on Windows, that agents connect to. */
