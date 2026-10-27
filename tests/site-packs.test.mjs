@@ -25,7 +25,7 @@ import {
   listSitePacks,
   loadPacks,
   matchPacks,
-  pageToolExpression,
+  pageToolCall,
   problemText,
   readManifest,
   readTrustedFile,
@@ -2054,10 +2054,10 @@ export const searchRepositories = (context, args) => args;
       },
       health: { status: "ok", version: "0.2.0", apiLevel: 4 },
     });
-    const evaluate = async (expression, limit = 1048576) => {
+    const evaluate = async (source, arg, limit = 1048576) => {
       const { value } = await session.request("/tabs/t1/evaluate", {
         method: "POST",
-        body: { expression },
+        body: { function: source, arg },
         limit,
       });
       return value;
@@ -2074,31 +2074,36 @@ export const searchRepositories = (context, args) => args;
         (error) => error,
       );
 
-    // The expression is the file in parentheses, called with the arguments
-    // as JSON, and nothing else.
-    const expression = `(${STATS_PAGE_TOOL}\n)({"stars":3})`;
+    // The file is the function, with a newline after it so a trailing line
+    // comment cannot swallow the call, and the arguments are its argument.
+    const source = `${STATS_PAGE_TOOL}\n`;
     expect(await run("repository_stats", { stars: 3 })).toEqual({
       fullName: "kamapathy",
       stars: 3,
     });
     expect(sent).toEqual([
-      { path: "/tabs/t1/evaluate", method: "POST", body: { expression } },
+      {
+        path: "/tabs/t1/evaluate",
+        method: "POST",
+        body: { function: source, arg: { stars: 3 } },
+      },
     ]);
-    // The same expression, built without sending anything, names the pack
-    // and the tool it came from.
-    const built = await pageToolExpression(env, {
+    // The same call, built without sending anything, names the pack and the
+    // tool it came from.
+    const built = await pageToolCall(env, {
       packId: "github",
       tool: "repository_stats",
       args: { stars: 3 },
       roots,
     });
-    expect(built.expression).toBe(expression);
+    expect(built.source).toBe(source);
+    expect(built.arg).toEqual({ stars: 3 });
     expect(built.pack).toMatchObject({ id: "github", dir });
     expect(built.tool.name).toBe("repository_stats");
     // No arguments at all reach the page as an empty object.
     sent.length = 0;
     await run("repository_stats", undefined);
-    expect(sent[0].body.expression).toBe(`(${STATS_PAGE_TOOL}\n)({})`);
+    expect(sent[0].body).toEqual({ function: source, arg: {} });
 
     // Arguments over 16 KiB of JSON are refused before anything is sent.
     sent.length = 0;
@@ -2186,8 +2191,8 @@ export const searchRepositories = (context, args) => args;
     // the arguments together stay well inside the route's own 1 MiB, so this
     // takes a smaller limit to reach at all.
     sent.length = 0;
-    const large = await run("repository_stats", { stars: 1 }, (text) =>
-      evaluate(text, 64),
+    const large = await run("repository_stats", { stars: 1 }, (source, arg) =>
+      evaluate(source, arg, 64),
     );
     expect(large).toMatchObject({
       code: "request_too_large",
@@ -2220,10 +2225,12 @@ export const searchRepositories = (context, args) => args;
       url: "https://github.com/kamapathy",
       title: "kamapathy",
     });
-    // The method's one call on the page is the evaluate it was asked for.
+    // The method's one call on the page is the evaluate it was asked for: a
+    // function, so the page sends the file as the route's function field and
+    // the arguments as its argument.
     const seen = [];
-    page.evaluate = (expression) => {
-      seen.push(expression);
+    page.evaluate = (fn, arg) => {
+      seen.push({ kind: typeof fn, source: String(fn), arg });
       return Promise.resolve({ fullName: "kamapathy", stars: 7 });
     };
     expect(
@@ -2236,7 +2243,9 @@ export const searchRepositories = (context, args) => args;
         },
       ),
     ).toEqual({ fullName: "kamapathy", stars: 7 });
-    expect(seen).toEqual([`(${STATS_PAGE_TOOL}\n)({"stars":7})`]);
+    expect(seen).toEqual([
+      { kind: "function", source: `${STATS_PAGE_TOOL}\n`, arg: { stars: 7 } },
+    ]);
 
     // The options must carry a Page from this client.
     await expect(

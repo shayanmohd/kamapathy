@@ -4,16 +4,22 @@
 // and runs everything else in the browser. Nothing here reaches the network,
 // and these tests skip when Playwright's browser is not installed.
 import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { envelope } from "../electron/agent/errors.ts";
+import { evaluateScript, scriptFields } from "../electron/agent/evaluate.ts";
+import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
 import {
   runPageToolIn,
   runToolIn,
   siteRoots,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import { KamapathyError } from "../skills/kamapathy/scripts/lib/errors.mjs";
+import { Session } from "../skills/kamapathy/scripts/lib/request.mjs";
 import {
   sitePackPages,
   sitePackPrefixes,
@@ -152,6 +158,13 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
       () => null,
       (error) => error,
     );
+  // A page tool reaches the page the way Client.runPageTool sends it: as a
+  // function whose source is the file's, called with the arguments.
+  const pageToolEvaluate = (page) => (source, arg) =>
+    page.evaluate(
+      Object.assign(() => {}, { toString: () => source }),
+      arg,
+    );
 
   it("github tools read search, issues and stats with encoded queries", async () => {
     const page = await fakePage();
@@ -167,7 +180,7 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
           packId: "github",
           tool,
           args,
-          evaluate: (expression) => page.evaluate(expression),
+          evaluate: pageToolEvaluate(page),
           roots,
         },
       );
@@ -548,7 +561,7 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
           packId,
           tool,
           args,
-          evaluate: (expression) => page.evaluate(expression),
+          evaluate: pageToolEvaluate(page),
           roots,
         },
       );
@@ -591,5 +604,125 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
     // A page that is neither reads null instead of guessing.
     await page.goto("https://x.com/search?q=a%20b&f=user");
     expect(await pageTool("x", "focused_post", undefined)).toBe(null);
+  }, 60000);
+
+  it("an async page tool returns its awaited value through the client and the evaluate route", async () => {
+    // A workspace pack of two page tools, written the way the client's file
+    // rules want them.
+    const home = await mkdtemp(join(tmpdir(), "kamapathy-page-tools-"));
+    const dir = join(home, "sites", "lab");
+    const files = {
+      "pack.json": JSON.stringify({
+        format: 1,
+        id: "lab",
+        name: "Lab",
+        domains: ["127.0.0.1"],
+        pageTools: {
+          slow_total: {
+            description: "Read the total once the page has had a turn.",
+            file: "page-tools/slow-total.js",
+            args: { add: { type: "number", description: "Added to it." } },
+            returns: { type: "number", description: "The total." },
+          },
+          missing_box: {
+            description: "Read the size of a box the page lacks.",
+            file: "page-tools/missing-box.js",
+            returns: { type: "number", description: "Nothing: it throws." },
+          },
+        },
+      }),
+      "page-tools/slow-total.js": `async (args) => {
+  await new Promise((done) => setTimeout(done, 20));
+  return Number(document.querySelector("#total").textContent) + args.add;
+}
+`,
+      "page-tools/missing-box.js": "(args) => args.box.size\n",
+    };
+    for (const [relative, text] of Object.entries(files)) {
+      await mkdir(dirname(join(dir, relative)), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(join(dir, relative), text, { mode: 0o600 });
+    }
+    const tab = await browser.newPage();
+    opened.push(tab);
+    await tab.setContent(
+      '<!doctype html><title>Lab cart</title><p id="total">16.25</p>',
+    );
+    const cdp = await tab.context().newCDPSession(tab);
+    // The evaluate route's own reading of a body and its own evaluation, on
+    // this tab: an expression runs in repl mode, a function with its argument
+    // does not.
+    const sent = [];
+    const session = new Session({
+      env: { KAMAPATHY_WORKSPACE: home },
+      health: { status: "ok", version: "0.2.0", apiLevel: 4 },
+      fetch: async (url, init) => {
+        const { timeoutMs, ...body } = JSON.parse(init.body);
+        sent.push({ path: url.pathname, body });
+        try {
+          const result = await evaluateScript(
+            { send: (method, params) => cdp.send(method, params) },
+            scriptFields(body),
+            {
+              deadline: Date.now() + timeoutMs,
+              timeoutMs,
+              replMode: true,
+              dispatch: { dispatched: false },
+            },
+          );
+          return Response.json({
+            ok: true,
+            tab: { id: "tab-1", url: tab.url(), title: await tab.title() },
+            ...result,
+          });
+        } catch (failure) {
+          const { status, error } = envelope(failure, false);
+          return Response.json({ ok: false, error }, { status });
+        }
+      },
+    });
+    try {
+      const client = await connect({ session });
+      const page = new Page(session, {
+        id: "tab-1",
+        spaceId: "space-1",
+        url: tab.url(),
+        title: "Lab cart",
+      });
+
+      // The tool's promise is awaited, so its value comes back rather than
+      // the empty object a promise reads as in repl mode.
+      expect(
+        await client.runPageTool("lab", "slow_total", { add: 1 }, { page }),
+      ).toBe(17.25);
+      expect(sent).toEqual([
+        {
+          path: "/tabs/tab-1/evaluate",
+          body: {
+            function: `${files["page-tools/slow-total.js"]}\n`,
+            arg: { add: 1 },
+          },
+        },
+      ]);
+
+      // A failure on line 1 is placed where the file has it: V8 puts a failed
+      // property read at the property's name.
+      const failed = await client
+        .runPageTool("lab", "missing_box", undefined, { page })
+        .catch((error) => error);
+      const source = files["page-tools/missing-box.js"];
+      expect(failed).toMatchObject({
+        code: "script_error",
+        packId: "lab",
+        tool: "missing_box",
+        line: 1,
+        column: source.indexOf("size") + 1,
+      });
+      expect(sent.at(-1).body).toEqual({ function: `${source}\n`, arg: {} });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   }, 60000);
 });

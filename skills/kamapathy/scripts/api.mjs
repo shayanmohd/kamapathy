@@ -2524,7 +2524,13 @@ export class Client {
         packId,
         tool,
         args,
-        evaluate: (expression) => options.page.evaluate(expression),
+        // A function whose source is the file's, so the page sends it as the
+        // route's function field with the arguments as its argument.
+        evaluate: (source, arg) =>
+          options.page.evaluate(
+            Object.assign(() => {}, { toString: () => source }),
+            arg,
+          ),
       });
     });
   }
