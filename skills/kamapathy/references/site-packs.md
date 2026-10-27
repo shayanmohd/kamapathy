@@ -46,7 +46,7 @@ A tool name is a lowercase letter, then up to 47 lowercase letters, digits and u
 
 A Node tool file is an ES module whose named export is a function `({ page, kamapathy, pack }, args) => value`, plain or `async`. It runs in your Node.js with the client: `page` is the `Page` you passed, `kamapathy` the client, `pack` is `{ id, name, dir, source }`, and `args` a copy of the checked arguments. It may use every page method, frames included, and the run's own deadline bounds it.
 
-A page tool file holds one function expression without a trailing semicolon, such as `(args) => document.title`, which runs in the page's main frame through one page script, takes the checked arguments as its one argument and returns JSON data. It sees nothing of your script. Keep it synchronous, as the bundled page tools are: the call is sent as one expression, and an expression whose value is a promise comes back as an empty object, as [page-scripts.md](page-scripts.md#run-code-in-the-page) explains.
+A page tool file holds one function expression without a trailing semicolon, such as `(args) => document.title`, which runs in the page's main frame through one page script, takes the checked arguments as its one argument and returns JSON data. It sees nothing of your script. It may be `async`: the call sends it as a function with the arguments, so the promise it returns is awaited, as [page-scripts.md](page-scripts.md#run-code-in-the-page) explains, and a failure reports its `line` and `column` in the file itself, on line 1 too. An `async` tool that throws reports line 1, column 1, because Chromium gives an awaited rejection no position, though the stack in its `description` has the real place.
 
 ## Matching
 

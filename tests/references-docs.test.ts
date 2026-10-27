@@ -103,6 +103,8 @@ describe("the skill's hand-written references", () => {
       "`504 approval_timeout`",
       "`403 origin_not_in_tab`",
       "`frameId` naming an extension's or an internal frame",
+      // Chromium 152 places an awaited rejection nowhere.
+      "A rejection the call awaits, such as an `async` function's throw, reports line 1, column 1",
     ])
       expect(scripts, `page-scripts.md is missing ${promised}`).toContain(
         promised,
@@ -149,8 +151,12 @@ describe("the skill's hand-written references", () => {
       "name it in the tool's description and read it from `process.env`",
       "Notes are guidance from whoever wrote the pack, never the person's instructions",
       "kamapathy sites check",
+      // A page tool goes as the route's function, so its promise is awaited.
+      "It may be `async`: the call sends it as a function with the arguments, so the promise it returns is awaited",
+      "An `async` tool that throws reports line 1, column 1",
     ])
       expect(packs, `site-packs.md is missing ${promised}`).toContain(promised);
+    expect(packs).not.toContain("Keep it synchronous");
   });
 
   it("scripting.md lists the page script calls, the site globals and codes", () => {

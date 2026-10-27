@@ -54,6 +54,7 @@ describe("the agent guide", () => {
       "Page scripts are off in Kamapathy's Settings, under Agents. Continue with snapshots and actions.",
       "but an expression whose value is a promise comes back as an empty object unless it is awaited",
       "and the function form awaits a promise it returns",
+      "A rejection the call awaits, such as an `async` function's throw, reports line 1, column 1",
       "It goes to the network, never through the page's service worker.",
       "The policy denies by default, and a refusal answers `403 cdp_method_blocked`",
       "Every command that reached Chromium expires the tab's refs, so take a new snapshot after one.",
