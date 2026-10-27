@@ -69,7 +69,8 @@ export function pressArguments(first, second) {
   );
 }
 // Reads standard input to its end, at most limit bytes, and gives up on a
-// pipe that stays open longer than timeoutMs.
+// pipe that stays open longer than timeoutMs. 64 KiB is every command's
+// limit except the page script ones, which take their route's 1 MiB.
 export async function readInput(
   stream,
   { limit = 65536, timeoutMs = 30000 } = {},
@@ -82,7 +83,10 @@ export async function readInput(
     for await (const chunk of stream) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.length;
-      if (size > limit) throw new Error("Standard input exceeds 64 KiB.");
+      if (size > limit)
+        throw new Error(
+          `Standard input exceeds ${limit % 1048576 ? `${limit / 1024} KiB` : `${limit / 1048576} MiB`}.`,
+        );
       chunks.push(buffer);
     }
   })();

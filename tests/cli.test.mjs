@@ -47,6 +47,7 @@ import {
   takeNotices,
 } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { workspacePath } from "../skills/kamapathy/scripts/lib/workspace.mjs";
+import { pageToolFunction } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import { agentPaths as kamapathyAgentPaths } from "../electron/agent-socket.ts";
 
 // A workspace that does not exist, so runs load no .env from the real profile.
@@ -8132,6 +8133,280 @@ describe("scripted sessions", () => {
     expect(
       api.requests.filter((item) => item.path.endsWith("/input/release")),
     ).toHaveLength(1);
+  });
+
+  // Section 8's client surface: page scripts, the page's own fetch, protocol
+  // commands, recorded events and clearing one site's data.
+  const scriptAnswers = {
+    ...inputAnswers,
+    "POST /tabs/tab-1/evaluate": { ok: true, tab: slots, value: 42 },
+  };
+  // What one evaluate answer resolves to, through a page of its own.
+  const evaluated = async (answer) => {
+    const api = fakeApi({
+      ...scriptAnswers,
+      "POST /tabs/tab-1/evaluate": { ok: true, tab: slots, ...answer },
+    });
+    const page = await inputPage(api);
+    return { page, value: await page.evaluate(() => document.title) };
+  };
+  // What a CLI command printed for one answer.
+  const printed = async (args, answer, piped) => {
+    const stdout = sink();
+    expect(
+      await runCli(args, {
+        env,
+        fetch: vi.fn(async () => Response.json(answer)),
+        health: current,
+        ...(piped === undefined ? {} : { stdin: Readable.from([piped]) }),
+        stdout,
+      }),
+      args.join(" "),
+    ).toBe(0);
+    return stdout.text();
+  };
+
+  it("page.evaluate decodes every value form", async () => {
+    const { page, value } = await evaluated({
+      value: { rows: [1, 2], name: "Avery", none: null },
+    });
+    expect(value).toEqual({ rows: [1, 2], name: "Avery", none: null });
+    // The answer carries the tab, so the page follows it.
+    expect([page.url, page.title]).toEqual([slots.url, slots.title]);
+    for (const [answer, expected] of [
+      [{ value: null }, null],
+      [{ value: "Slots" }, "Slots"],
+      [{ value: 0 }, 0],
+      [{ unserializable: "NaN" }, Number.NaN],
+      [{ unserializable: "Infinity" }, Number.POSITIVE_INFINITY],
+      [{ unserializable: "-Infinity" }, Number.NEGATIVE_INFINITY],
+      [{ unserializable: "-0" }, -0],
+      [{ unserializable: "12n" }, 12n],
+      [{ unserializable: "-9007199254740993n" }, -9007199254740993n],
+      [{}, undefined],
+    ])
+      expect(
+        Object.is((await evaluated(answer)).value, expected),
+        JSON.stringify(answer),
+      ).toBe(true);
+    await expect(evaluated({ unserializable: "Wat" })).rejects.toMatchObject({
+      code: "invalid_response",
+      entry: "page.evaluate",
+    });
+    // The CLI prints the value as JSON, and the rest as JavaScript writes them.
+    for (const [answer, text] of [
+      [{ value: { rows: 3 } }, '{"rows":3}'],
+      [{ value: "Slots" }, '"Slots"'],
+      [{ value: null }, "null"],
+      [{ unserializable: "NaN" }, "NaN"],
+      [{ unserializable: "-0" }, "-0"],
+      [{ unserializable: "12n" }, "12n"],
+      [{}, "undefined"],
+    ])
+      expect(
+        await printed(
+          ["evaluate", "tab-1", "--stdin"],
+          { ok: true, tab: slots, ...answer },
+          "document.title",
+        ),
+        JSON.stringify(answer),
+      ).toBe(`${text}\n`);
+    const json = sink();
+    await runCli(["evaluate", "tab-1", "--stdin", "--json"], {
+      env,
+      fetch: vi.fn(async () =>
+        Response.json({ ok: true, tab: slots, unserializable: "12n" }),
+      ),
+      health: current,
+      stdin: Readable.from(["10n + 2n"]),
+      stdout: json,
+    });
+    expect(JSON.parse(json.text())).toEqual({
+      ok: true,
+      tab: slots,
+      unserializable: "12n",
+    });
+  });
+
+  it("page.evaluate refuses a bad call before sending", async () => {
+    const api = fakeApi(scriptAnswers);
+    const page = await inputPage(api);
+    const sent = api.requests.length;
+    const expected = "page.evaluate(fnOrString, arg?, { timeout? })";
+    // An expression takes no argument.
+    for (const arg of [5, null, { rows: 3 }])
+      await expect(
+        page.evaluate("document.title", arg),
+        JSON.stringify(arg),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        entry: "page.evaluate",
+        expected,
+      });
+    // An argument must be JSON data, and the error names where it is not.
+    const loop = { name: "loop" };
+    loop.self = loop;
+    for (const [arg, what, path] of [
+      [{ items: [{ total: 12n }] }, "a BigInt", "arg.items[0].total"],
+      [5n, "a BigInt", "arg"],
+      [{ total: Number.POSITIVE_INFINITY }, "Infinity", "arg.total"],
+      [[1, Number.NaN], "NaN", "arg[1]"],
+      [{ run: () => 1 }, "a function", "arg.run"],
+      [{ tag: Symbol("tag") }, "a symbol", "arg.tag"],
+      [loop, "a cycle", "arg.self"],
+      [[1, undefined], "undefined", "arg[1]"],
+      [{ "first name": [undefined] }, "undefined", 'arg["first name"][0]'],
+    ]) {
+      const refused = await page.evaluate((value) => value, arg).then(
+        () => null,
+        (error) => error,
+      );
+      expect(refused, path).toMatchObject({
+        code: "invalid_argument",
+        entry: "page.evaluate",
+        expected: `JSON data at ${path}`,
+      });
+      expect(refused.message, path).toBe(
+        `page.evaluate got ${what} at ${path}, which JSON cannot carry. Pass strings, finite numbers, booleans, null, arrays and objects.`,
+      );
+    }
+    // The first argument, the options and their range are checked too.
+    for (const call of [
+      () => page.evaluate(5),
+      () => page.evaluate(""),
+      () => page.evaluate(() => 1, undefined, { timeout: 1000 }),
+      () => page.evaluate(() => 1, undefined, { timeoutMs: 5000 }),
+    ])
+      await expect(call(), String(call)).rejects.toMatchObject({
+        entry: "page.evaluate",
+      });
+    expect(api.requests).toHaveLength(sent);
+    // An undefined property is absent, and an object reached twice is no
+    // cycle.
+    const shared = { n: 1 };
+    await page.evaluate((value) => value, { a: shared, b: shared, c: undefined });
+    expect(api.requests.at(-1).body).toEqual({
+      function: "(value) => value",
+      arg: { a: { n: 1 }, b: { n: 1 } },
+      timeoutMs: 15000,
+    });
+    // The CLI needs the expression on stdin.
+    const unused = vi.fn();
+    for (const args of [
+      ["evaluate", "tab-1"],
+      ["evaluate", "tab-1", "--stdin", "--timeout", "1000"],
+      ["evaluate", "tab-1", "--stdin", "--frame", "0"],
+    ])
+      await expect(
+        runCli(args, {
+          env,
+          fetch: unused,
+          health: current,
+          stdin: Readable.from(["document.title"]),
+          stdout: sink(),
+        }),
+        args.join(" "),
+      ).rejects.toThrow();
+    await expect(
+      runCli(["evaluate", "tab-1", "--stdin"], {
+        env,
+        fetch: unused,
+        health: current,
+        stdin: Readable.from(["  \n"]),
+        stdout: sink(),
+      }),
+    ).rejects.toThrow(/expression/);
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("page.evaluate sends the function source and the argument", async () => {
+    const api = fakeApi(scriptAnswers);
+    const page = await inputPage(api);
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await page.evaluate((x) => x * 2, 21)).toBe(42);
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/evaluate",
+        body: { function: "(x) => x * 2", arg: 21, timeoutMs: 15000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(20000);
+      await page.evaluate(() => document.title);
+      expect(api.requests.at(-1).body).toEqual({
+        function: "() => document.title",
+        timeoutMs: 15000,
+      });
+      await page.evaluate(
+        "await Promise.resolve(document.title)",
+        undefined,
+        { timeout: 9000 },
+      );
+      expect(api.requests.at(-1).body).toEqual({
+        expression: "await Promise.resolve(document.title)",
+        timeoutMs: 9000,
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(14000);
+      // A site pack's page tool is a function given as text: it travels in
+      // the function field with its arguments, never as an expression, and
+      // a trailing line comment cannot swallow the call.
+      const tool = "async (args) => args.stars + 1 // the open repository";
+      await page.evaluate(pageToolFunction(tool), { stars: 3 });
+      expect(api.requests.at(-1).body).toEqual({
+        function: `${tool}\n`,
+        arg: { stars: 3 },
+        timeoutMs: 15000,
+      });
+      // The command sends the expression as it was piped.
+      await runCli(["evaluate", "tab-1", "--stdin", "--timeout", "30000"], {
+        env,
+        fetch: api.fetch,
+        health: current,
+        stdin: Readable.from(["\nawait 1\n"]),
+        stdout: sink(),
+      });
+      expect(api.requests.at(-1)).toEqual({
+        method: "POST",
+        path: "/tabs/tab-1/evaluate",
+        body: { expression: "\nawait 1\n", timeoutMs: 30000 },
+      });
+      expect(timeouts).toHaveBeenLastCalledWith(35000);
+    } finally {
+      timeouts.mockRestore();
+    }
+    // A body up to the route's 1 MiB is sent; past it nothing is.
+    await page.evaluate((value) => value.length, "x".repeat(600000));
+    expect(api.requests.at(-1).body.arg).toHaveLength(600000);
+    const sent = api.requests.length;
+    await expect(
+      page.evaluate((value) => value.length, "x".repeat(1100000)),
+    ).rejects.toMatchObject({ code: "request_too_large" });
+    expect(api.requests).toHaveLength(sent);
+  });
+
+  it("a page function's ReferenceError gets the hint about script variables", async () => {
+    const failed = await runIn(
+      `${firstPage} await page.evaluate(() => total);`,
+      {
+        ...sectionTwo,
+        "POST /tabs/tab-1/evaluate": refusal(422, {
+          code: "script_error",
+          message:
+            "The page function failed at line 1, column 7: ReferenceError: total is not defined",
+          name: "ReferenceError",
+          line: 1,
+          column: 7,
+          description: "ReferenceError: total is not defined",
+        }),
+      },
+      { options: { health: current } },
+    );
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain(
+      "error: script_error: The page function failed at line 1, column 7: ReferenceError: total is not defined\n",
+    );
+    expect(failed.stderr).toContain(
+      "hint: Page functions run in the page and cannot see script variables. Pass values as the argument: page.evaluate((x) => x * 2, x).\n",
+    );
   });
 });
 

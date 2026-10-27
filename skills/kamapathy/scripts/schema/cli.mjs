@@ -1268,6 +1268,34 @@ export const COMMANDS = [
     },
   ),
   command(
+    "evaluate",
+    "Pages",
+    "evaluate <tab-id> --stdin [--timeout <ms>]",
+    "Run an expression in the page and print its value",
+    {
+      arguments: [TAB_ID],
+      flags: [
+        {
+          name: "--stdin",
+          description: "Read the expression from stdin",
+          since: 4,
+        },
+        {
+          name: "--timeout",
+          value: "<ms>",
+          description:
+            "How long the expression may run, 2000 to 60000, default 15000.",
+          since: 4,
+        },
+      ],
+      stdin:
+        "An expression to run in the page's main frame, at most 1 MiB. It may use await.",
+      route: "POST /tabs/:id/evaluate",
+      script: "page.evaluate",
+      since: 4,
+    },
+  ),
+  command(
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",

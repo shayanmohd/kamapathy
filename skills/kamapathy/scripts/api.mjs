@@ -56,6 +56,34 @@ const PASTE_BODY_LIMIT = 192 * 1024;
 const RELEASE_ROUTE = matchRoute("POST", "/tabs/:id/input/release");
 const RELEASE_BUDGET_MS = requestBudget(RELEASE_ROUTE);
 const RELEASE_LEVEL = RELEASE_ROUTE.since;
+// The body a page script, a fetch or a protocol command may send, as their
+// routes declare it.
+const SCRIPT_LIMIT = matchRoute("POST", "/tabs/:id/evaluate").limit;
+
+// What a page script sends: a function as its source, called with its
+// argument, or an expression as written.
+function scriptSource(fnOrString) {
+  return typeof fnOrString === "function"
+    ? { function: String(fnOrString) }
+    : { expression: fnOrString };
+}
+
+// The value an evaluate answered with: JSON as it came, the values JSON
+// cannot carry rebuilt, and undefined when the answer has none.
+function decodeValue(answer) {
+  if ("value" in answer) return answer.value;
+  const token = answer.unserializable;
+  if (token === undefined) return undefined;
+  if (token === "NaN") return Number.NaN;
+  if (token === "Infinity") return Number.POSITIVE_INFINITY;
+  if (token === "-Infinity") return Number.NEGATIVE_INFINITY;
+  if (token === "-0") return -0;
+  if (/^-?\d+n$/.test(token)) return BigInt(token.slice(0, -1));
+  throw new KamapathyError(
+    "invalid_response",
+    `Kamapathy answered with a value this client cannot read: ${String(token).slice(0, 40)}.`,
+  );
+}
 
 // The label an input method was given, for its body.
 const labelOf = (options) =>
@@ -1421,6 +1449,41 @@ export class Page {
     return this.#call("close", [], () =>
       this.#session.request(`/tabs/${this.id}`, { method: "DELETE" }),
     );
+  }
+  /**
+   * Runs a function or an expression in the page's main frame and returns
+   * its value. A function is sent as its source and called with `arg`, so it
+   * cannot see this script's variables; an expression takes no argument and
+   * may use top-level await. Needs Page scripts on.
+   * @param {Function | string} fnOrString
+   * @param {unknown} [arg] JSON data: no BigInt, NaN, Infinity, function,
+   * symbol or cycle.
+   * @param {{ timeout?: number }} [options] 2000 to 60000 ms, 15000 by default.
+   * @returns {Promise<unknown>} The value, with NaN, Infinity, -0 and a
+   * BigInt as themselves, and undefined when there is none.
+   */
+  evaluate(fnOrString, arg, options = {}) {
+    return this.#call("evaluate", [fnOrString, arg, options], async () => {
+      if (typeof fnOrString === "string" && arg !== undefined) {
+        const { expected } = findEntry("Page.evaluate");
+        throw new KamapathyError(
+          "invalid_argument",
+          `page.evaluate got an argument for an expression, which takes none. Pass a function to give it one, such as page.evaluate((x) => x * 2, 21). Expected ${expected}.`,
+          { entry: "page.evaluate", expected },
+        );
+      }
+      const { timeout = 15000 } = options;
+      const answer = await this.#post(
+        "evaluate",
+        {
+          ...scriptSource(fnOrString),
+          ...(arg === undefined ? {} : { arg }),
+          timeoutMs: timeout,
+        },
+        { limit: SCRIPT_LIMIT },
+      );
+      return decodeValue(this.#refreshed(answer));
+    });
   }
 }
 

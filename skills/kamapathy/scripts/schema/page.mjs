@@ -16,6 +16,8 @@ const URL_WAIT = body("POST /tabs/:id/wait-for-url");
 const LOAD_WAIT = body("POST /tabs/:id/wait-for-load-state");
 const SELECTOR_WAIT = body("POST /tabs/:id/wait-for-selector");
 const FUNCTION_WAIT = body("POST /tabs/:id/wait-for-function");
+// Section 8's page scripts take their routes' fields the same way.
+const EVALUATE = body("POST /tabs/:id/evaluate");
 const timeout = (field) => ({ ...field, field: "timeoutMs" });
 // What a navigation or a wait can answer beyond the page codes.
 const NAVIGATION = [
@@ -976,6 +978,33 @@ export const PAGE_ENTRIES = [
         text: paste.text,
         html: paste.html,
       },
+      since: 4,
+    },
+  ),
+  method(
+    "Page.evaluate",
+    "page.evaluate(fnOrString, arg?, options?)",
+    "Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.",
+    [
+      { name: "fnOrString", kind: "pageFunction" },
+      { name: "arg", kind: "json", optional: true },
+      OPTIONS,
+    ],
+    "Promise<unknown>",
+    "POST /tabs/:id/evaluate",
+    [
+      "invalid_field",
+      "agent_scripts_off",
+      "script_error",
+      "result_too_large",
+      "evaluation_timeout",
+      "request_too_large",
+      "invalid_response",
+    ],
+    {
+      expected: "page.evaluate(fnOrString, arg?, { timeout? })",
+      options: { timeout: timeout(EVALUATE.timeoutMs) },
+      pageFunction: true,
       since: 4,
     },
   ),

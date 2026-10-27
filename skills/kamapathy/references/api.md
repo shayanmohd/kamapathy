@@ -781,6 +781,16 @@ Closes the tab.
 
 Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
+### `page.evaluate(fnOrString, arg?, options?)`
+
+Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.
+
+| Option | Kind | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | milliseconds from 2000 to 60000 | `15000` | How long the script may run. The page itself gets this less 1000 ms. |
+
+Returns `Promise<unknown>`. Route `POST /tabs/:id/evaluate`. Errors: `invalid_field`, `agent_scripts_off`, `script_error`, `result_too_large`, `evaluation_timeout`, `request_too_large`, `invalid_response`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+
 ## Page controllers
 
 ### `page.mouse.move(x, y, options?)`
@@ -1224,6 +1234,10 @@ Offer the page a paste of stdin, without the system clipboard
 ### `release-input <tab-id>`
 
 Let go of every key and mouse button the page holds
+
+### `evaluate <tab-id> --stdin [--timeout <ms>]`
+
+Run an expression in the page and print its value
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 

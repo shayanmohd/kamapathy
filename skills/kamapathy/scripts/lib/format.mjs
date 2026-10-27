@@ -349,6 +349,19 @@ const WAITS = {
         : `ok: value ${printable(JSON.stringify(data.value)).slice(0, VALUE_CHARS)}`,
 };
 
+// What a page script answered: JSON as JSON, and the values JSON cannot
+// carry as JavaScript writes them, such as NaN, -0 and 12n.
+const valueText = (data) =>
+  data.unserializable !== undefined
+    ? line(data.unserializable)
+    : data.value === undefined
+      ? "undefined"
+      : printable(JSON.stringify(data.value));
+// One reading per section 8 command, whose answers carry no action to sum up.
+const PAGE_SCRIPTS = {
+  evaluate: valueText,
+};
+
 // A PDF's pages, each under its own [page N] line.
 const pdfPages = (data) =>
   (data.pages ?? []).flatMap((page) => {
@@ -366,6 +379,8 @@ export function formatResult(data, command) {
       : `ok: status ${JSON.stringify(line(data.status))}`;
   if (command === "fail") return "ok: failure reported, the person has control";
   if (Object.hasOwn(WAITS, command ?? "")) return WAITS[command](data);
+  if (Object.hasOwn(PAGE_SCRIPTS, command ?? ""))
+    return PAGE_SCRIPTS[command](data);
   if (command === "space finish")
     return [
       `ok: space ${line(data.spaceId)} finished${data.closedSpace ? " and closed" : ""}`,

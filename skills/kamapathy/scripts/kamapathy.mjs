@@ -88,6 +88,8 @@ const POLICY = matchRoute("POST", "/tabs/:id/dialog-policy").body;
 const budgetOf = (method, path) => requestBudget(matchRoute(method, path));
 const PASTE_LIMIT = 192 * 1024;
 const LABELED = /^([a-zA-Z0-9_-]{1,128}):(p[1-9][0-9]*)$/;
+// The page script routes take 1 MiB, and so does what their commands pipe.
+const SCRIPT_LIMIT = matchRoute("POST", "/tabs/:id/evaluate").limit;
 
 // A tab ID, or <space-id>:<label>, which resolves once Kamapathy is found.
 function tab(value) {
@@ -268,10 +270,14 @@ function action(args, specs, count, usage) {
   if (rest.length > count + 1) throw new Error(`Use ${usage}.`);
   return { id: tab(rest[0]), rest, body, given };
 }
-// The text a command reads from standard input, as itself or as JSON.
-function piped(options, json = false) {
+// The text a command reads from standard input, as itself or as JSON, under
+// the shared 64 KiB limit unless the command names its route's own.
+function piped(options, json = false, limit = undefined) {
   const stream = options.stdin || process.stdin;
-  const read = { timeoutMs: options.stdinTimeoutMs };
+  const read = {
+    timeoutMs: options.stdinTimeoutMs,
+    ...(limit === undefined ? {} : { limit }),
+  };
   return json ? readJson(stream, read) : readInput(stream, read);
 }
 
@@ -1247,6 +1253,34 @@ export const PARSERS = {
   "release-input": (args) => {
     const { id } = action(args, {}, 0, "release-input <tab-id>");
     return { path: `/tabs/${id}/input/release`, method: "POST", body: {} };
+  },
+  // Section 8: the agent's own scripts and requests in the page. The
+  // expression is sent as piped, so its lines and columns stay the agent's.
+  evaluate: async (args, options) => {
+    const { id, body, given } = action(
+      args,
+      {
+        "--stdin": FLAGS.stdin,
+        "--timeout": {
+          field: "timeoutMs",
+          read: (value, flag) => bounded(value, flag, 2000, 60000),
+        },
+      },
+      0,
+      "evaluate <tab-id> --stdin",
+    );
+    if (!given.has("--stdin"))
+      throw new Error("Use evaluate <tab-id> --stdin and pipe the expression.");
+    const expression = await piped(options, false, SCRIPT_LIMIT);
+    return {
+      path: `/tabs/${id}/evaluate`,
+      method: "POST",
+      body: {
+        expression: required(expression.trim() && expression, "expression"),
+        ...body,
+      },
+      limit: SCRIPT_LIMIT,
+    };
   },
   run: (args, options) => runScript(args, options),
   repl: async (args, options) => {
