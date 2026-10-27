@@ -38,7 +38,7 @@ import { agentVisible } from "./views";
 // Every command goes through the same order here, so no route reaches a tab
 // session itself.
 
-/** The narrow port over section 5's dispatcher, so this phase needs only one adapter line. */
+/** The narrow port over section 5's dispatcher and its keyboard check, one adapter line each. */
 export interface InputDispatcherPort {
   dispatch(
     tabId: string,
