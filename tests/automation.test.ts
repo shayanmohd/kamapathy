@@ -6901,6 +6901,188 @@ describe("local automation socket", () => {
       ).toBe(200);
   });
 
+  // Electron's world for preload scripts, by the name a probe of Electron 44
+  // saw an agent session report it under, beside Kamapathy's own world.
+  const PRELOAD_WORLD = "Electron Isolated Context";
+
+  it("never gives an agent Kamapathy's world or Electron's preload world through what they report", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    const reported = (method: string, params: Record<string, unknown>) =>
+      page.debugger.event(method, params, "agent-1");
+    const created = (id: number, name: string, type = "isolated") =>
+      reported("Runtime.executionContextCreated", {
+        context: {
+          id,
+          uniqueId: `ctx-${id}`,
+          name,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: type === "default", type },
+        },
+      });
+    created(50, "kamapathy");
+    created(51, PRELOAD_WORLD);
+    created(9, "", "default");
+    // A console message or an exception names its world, and carries
+    // objects from it.
+    for (const [id, name] of [
+      [50, "own"],
+      [51, "preload"],
+    ] as const) {
+      reported("Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ type: "object", objectId: `${name}-object` }],
+        executionContextId: id,
+        timestamp: 1,
+      });
+      reported("Runtime.exceptionThrown", {
+        timestamp: 2,
+        exceptionDetails: {
+          exceptionId: id,
+          text: "Uncaught",
+          lineNumber: 0,
+          columnNumber: 0,
+          executionContextId: id,
+          exception: { type: "object", objectId: `${name}-error` },
+        },
+      });
+    }
+    const evaluated = () =>
+      sentOn(page, "Runtime.evaluate").filter((id) => id === "agent-1");
+    const refused: [string, Record<string, unknown>, string][] = [];
+    for (const [id, name] of [
+      [50, "own"],
+      [51, "preload"],
+    ] as const)
+      refused.push(
+        ["Runtime.evaluate", { expression: "1", contextId: id }, "contextId"],
+        [
+          "Runtime.evaluate",
+          { expression: "1", uniqueContextId: `ctx-${id}` },
+          "uniqueContextId",
+        ],
+        ["Runtime.getProperties", { objectId: `${name}-object` }, "objectId"],
+        [
+          "Runtime.callFunctionOn",
+          { functionDeclaration: "function () {}", objectId: `${name}-error` },
+          "objectId",
+        ],
+      );
+    for (const [method, params, param] of refused) {
+      const where = `${method} ${JSON.stringify(params)}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    expect(evaluated()).toEqual([]);
+    for (const method of ["Runtime.getProperties", "Runtime.callFunctionOn"])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    // Nothing either world reported reached the log, while the page's own
+    // world did.
+    const logged = JSON.stringify(
+      (await (await drainEvents(tab.id)).json()).events,
+    );
+    expect(logged).toContain("ctx-9");
+    for (const said of [
+      "ctx-50",
+      "ctx-51",
+      PRELOAD_WORLD,
+      "own-object",
+      "own-error",
+      "preload-object",
+      "preload-error",
+    ])
+      expect(logged, said).not.toContain(said);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1", contextId: 9 },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("an agent's world never takes the name of Kamapathy's world or Electron's preload world", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A world of the agent's own named after the preload world would be
+    // matched to it by that name.
+    for (const [method, params] of [
+      ["Page.createIsolatedWorld", { frameId: "main", worldName: PRELOAD_WORLD }],
+      [
+        "Page.addScriptToEvaluateOnNewDocument",
+        { source: "1", worldName: PRELOAD_WORLD },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param: "worldName",
+      });
+    }
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 51,
+          uniqueId: "ctx-51",
+          name: PRELOAD_WORLD,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: false, type: "isolated" },
+        },
+      },
+      "agent-1",
+    );
+    const named: [string, Record<string, unknown>, string][] = [
+      ["Runtime.evaluate", { expression: "1", contextId: 51 }, "contextId"],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: PRELOAD_WORLD },
+        "executionContextName",
+      ],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: "kamapathy" },
+        "executionContextName",
+      ],
+    ];
+    for (const [method, params, param] of named) {
+      const where = `${method} ${param}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    for (const method of [
+      "Page.createIsolatedWorld",
+      "Page.addScriptToEvaluateOnNewDocument",
+      "Runtime.addBinding",
+    ])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    expect(sentOn(page, "Runtime.evaluate")).not.toContain("agent-1");
+  });
+
   it("a frame, an iframe entry's ref or a frameId naming a frame agents never reach is out of scope", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

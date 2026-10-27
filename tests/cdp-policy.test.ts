@@ -367,6 +367,33 @@ describe("the protocol policy", () => {
     ).toEqual([{ kind: "object", id: "obj-3" }]);
   });
 
+  it("an agent never takes or names Kamapathy's worlds or Electron's preload world", () => {
+    // Electron runs every page's preload scripts in a world of this name,
+    // which a probe of Electron 44 saw every agent session report.
+    for (const method of [
+      "Page.createIsolatedWorld",
+      "Page.addScriptToEvaluateOnNewDocument",
+    ])
+      for (const worldName of [
+        "Electron Isolated Context",
+        "electron isolated context",
+      ])
+        expect(
+          verdict(method, { worldName }),
+          `${method} ${worldName}`,
+        ).toMatchObject({ block: "scope", param: "worldName" });
+    // Naming either is refused by the name itself, whatever the agent holds.
+    for (const name of ["kamapathy", "Kamapathy-2", "Electron Isolated Context"])
+      expect(
+        verdict(
+          "Runtime.addBinding",
+          { name: "b", executionContextName: name },
+          { worlds: new Set([name]) },
+        ),
+        name,
+      ).toMatchObject({ block: "scope", param: "executionContextName" });
+  });
+
   it("every Input command is marked for the dispatcher", () => {
     expect([...INPUT_METHODS].sort()).toEqual(
       PROTOCOL.domains.Input.commands.map((name) => `Input.${name}`).sort(),
@@ -645,6 +672,24 @@ describe("event redaction", () => {
     });
     expect(redact(thrown, { delivered: () => false })).toBeNull();
     expect(redact(thrown, { delivered: () => true })).toBe(thrown);
+  });
+
+  it("keeps Kamapathy's worlds and Electron's preload world out of the events", () => {
+    // Both are reported to an agent's session as the page's own origin.
+    const created = (name: string) =>
+      event("Runtime.executionContextCreated", {
+        context: {
+          id: 6,
+          uniqueId: "ctx-6",
+          name,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: false, type: "isolated" },
+        },
+      });
+    for (const name of ["kamapathy", "Electron Isolated Context"])
+      expect(redact(created(name)), name).toBeNull();
+    // A world an agent made under a name of its own is recorded as before.
+    expect(redact(created("agent-world"))).not.toBeNull();
   });
 
   it("drops Kamapathy's own copy once the agent owns the domain", () => {

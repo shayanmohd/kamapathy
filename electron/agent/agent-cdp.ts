@@ -38,10 +38,9 @@ const WORLD_METHODS = new Set([
 const OWNED: readonly string[] = ["Page", "Network"];
 
 // A context an agent may be given: the page's own world, or one the agent
-// made itself. Kamapathy's worlds report auxData.type "isolated" and are
-// never in the agent's own world names. An extension's content script may
-// share a name the agent chose, so outOfReach keeps it out by its origin
-// first.
+// made itself. outOfReach keeps Kamapathy's worlds and Electron's preload
+// world out by name first, and an extension's content script, which may
+// share a name the agent chose, by its origin.
 const addressable = (value: unknown, worlds: ReadonlySet<string>): boolean => {
   const context = (value as { context?: Record<string, unknown> })?.context;
   const auxData = context?.auxData as { type?: unknown } | undefined;

@@ -222,9 +222,18 @@ const httpUrl = (value: unknown): boolean => {
     return false;
   }
 };
-// A world name an agent may not take: Kamapathy's own worlds start with it.
-const ownWorld = (value: unknown) =>
-  typeof value === "string" && value.toLowerCase().startsWith(WORLD_NAME);
+// The world Electron runs a page's preload scripts in, Kamapathy's form
+// preload among them. A probe of Electron 44 saw an agent session report it
+// under this name, as an isolated world of the page's own origin.
+const PRELOAD_WORLD = "Electron Isolated Context";
+// A world no agent takes, names or is given: Kamapathy's own, whose names
+// start with WORLD_NAME, and Electron's preload world.
+const reservedWorld = (value: unknown) => {
+  if (typeof value !== "string") return false;
+  const name = value.toLowerCase();
+  return name.startsWith(WORLD_NAME) || name === PRELOAD_WORLD.toLowerCase();
+};
+const RESERVED_WORLD = `A world named ${WORLD_NAME} or starting with it is Kamapathy's, and ${PRELOAD_WORLD} is Electron's. Give an agent's world a name of its own.`;
 // What a command's own parameters may not say. Each check reads the params it
 // names and nothing else.
 const CHECKS: Record<
@@ -292,11 +301,8 @@ const CHECKS: Record<
   "Page.addScriptToEvaluateOnNewDocument": (params) => worldCheck(params),
 };
 function worldCheck(params: Record<string, any>): Verdict | undefined {
-  if (ownWorld(params.worldName))
-    return block("scope", {
-      param: "worldName",
-      message: `A world name may not start with ${WORLD_NAME}.`,
-    });
+  if (reservedWorld(params.worldName))
+    return block("scope", { param: "worldName", message: RESERVED_WORLD });
   if (params.grantUniveralAccess === true)
     return block("scope", {
       param: "grantUniveralAccess",
@@ -398,6 +404,8 @@ export function classify(
   const problem = CHECKS[method]?.(params, ctx);
   if (problem) return problem;
   for (const { kind, id, key } of walk(params, PARAM_IDS, [])) {
+    if (kind === "world" && reservedWorld(id))
+      return block("scope", { param: key, message: RESERVED_WORLD });
     const known =
       kind === "world" ? ctx.worlds.has(String(id)) : ctx.delivered(kind, id);
     if (known) continue;
@@ -471,10 +479,11 @@ export function redactEvent(
 /**
  * Whether a context Runtime.executionContextCreated reports is one no agent
  * is given: a world one of the person's extensions runs in, a content
- * script's own or an extension page's, or any world of a frame the tab
- * blocks. Section 17 keeps agents out of them, so the context is never
- * recorded or delivered, which leaves every command naming it out of scope
- * and drops its end with it.
+ * script's own or an extension page's, any world of a frame the tab blocks,
+ * or Kamapathy's or Electron's own world, which carry the page's origin and
+ * are known by name. Sections 8 and 17 keep agents out of them, so the
+ * context is never recorded or delivered, which leaves every command naming
+ * it out of scope and drops its end with it.
  */
 export function outOfReach(
   params: unknown,
@@ -483,11 +492,13 @@ export function outOfReach(
   const context = (
     params as {
       context?: {
+        name?: unknown;
         origin?: unknown;
         auxData?: { origin?: unknown; frameId?: unknown };
       };
     }
   )?.context;
+  if (reservedWorld(context?.name)) return true;
   const origins = [context?.origin, context?.auxData?.origin];
   if (
     origins.some(
