@@ -5554,6 +5554,46 @@ describe("agent task state", () => {
     expect(agentPage.isDestroyed()).toBe(false);
   });
 
+  it("a close while the agent's page is on its first load keeps that view loading, and it shows its address once it commits", async () => {
+    const browser = controller();
+    const space = browser.createAgentSpace("Night shift");
+    const agentTab = browser.openAgentTab(space.id, "https://example.com/");
+    const agentPage = contents(browser, agentTab.id);
+    const state = await browser.dispatch({
+      type: "tab:create",
+      url: "https://example.com/second",
+    });
+    const own = state.tabs.at(-1)!;
+    contents(browser, own.id).commit("https://example.com/second");
+    const pages = () =>
+      windowOf(browser).contentView.children.map((view) =>
+        view.webContents.getURL(),
+      );
+    const agentState = () =>
+      browser.state.tabs.find((tab) => tab.id === agentTab.id)!;
+    // The person's page has loaded; the agent's has not committed, so its
+    // view has no address yet.
+    expect(pages()).toEqual(["", "https://example.com/second"]);
+    browser.enterBackground();
+    // What the desktop check read as [""]: the agent's own view, still on
+    // its first load, which the close neither cancels nor starts again.
+    expect(windowOf(browser).contentView.children).toEqual([
+      viewFor(agentPage),
+    ]);
+    expect(pages()).toEqual([""]);
+    expect(agentPage.isDestroyed()).toBe(false);
+    expect(agentPage.loadURL).toHaveBeenCalledTimes(1);
+    expect(agentPage.pending).toHaveLength(1);
+    // The tab says so until the load ends, which is what a check can wait on.
+    expect(agentState().loading).toBe(true);
+    agentPage.commit("https://example.com/");
+    expect(pages()).toEqual(["https://example.com/"]);
+    expect(agentState()).toMatchObject({
+      url: "https://example.com/",
+      loading: false,
+    });
+  });
+
   it("agent views are created at the content area size and other views keep 1200 by 800", async () => {
     const browser = controller();
     const area = { x: 200, y: 80, width: 1000, height: 700 };
