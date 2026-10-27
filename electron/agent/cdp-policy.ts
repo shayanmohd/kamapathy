@@ -227,11 +227,17 @@ const httpUrl = (value: unknown): boolean => {
 // under this name, as an isolated world of the page's own origin.
 const PRELOAD_WORLD = "Electron Isolated Context";
 // A world no agent takes, names or is given: Kamapathy's own, whose names
-// start with WORLD_NAME, and Electron's preload world.
+// start with WORLD_NAME, and Electron's preload world. Names are compared
+// trimmed, with each run of whitespace as one space, in lower case.
+const normalName = (name: string) =>
+  name.trim().replace(/\s+/g, " ").toLowerCase();
 const reservedWorld = (value: unknown) => {
   if (typeof value !== "string") return false;
-  const name = value.toLowerCase();
-  return name.startsWith(WORLD_NAME) || name === PRELOAD_WORLD.toLowerCase();
+  const name = normalName(value);
+  return (
+    name.startsWith(normalName(WORLD_NAME)) ||
+    name === normalName(PRELOAD_WORLD)
+  );
 };
 const RESERVED_WORLD = `A world named ${WORLD_NAME} or starting with it is Kamapathy's, and ${PRELOAD_WORLD} is Electron's. Give an agent's world a name of its own.`;
 // What a command's own parameters may not say. Each check reads the params it

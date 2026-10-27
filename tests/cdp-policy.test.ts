@@ -394,6 +394,42 @@ describe("the protocol policy", () => {
       ).toMatchObject({ block: "scope", param: "executionContextName" });
   });
 
+  it("a reserved world name stays reserved whatever its whitespace or case", () => {
+    for (const name of [
+      " kamapathy",
+      "kamapathy\n",
+      "\t KAMAPATHY-2 ",
+      " Electron Isolated Context",
+      "Electron Isolated Context ",
+      "Electron  Isolated\t\tContext",
+      "\u00a0electron\nISOLATED\u3000context\r\n",
+    ]) {
+      const where = JSON.stringify(name);
+      for (const method of [
+        "Page.createIsolatedWorld",
+        "Page.addScriptToEvaluateOnNewDocument",
+      ])
+        expect(
+          verdict(method, { worldName: name }),
+          `${method} ${where}`,
+        ).toMatchObject({ block: "scope", param: "worldName" });
+      expect(
+        verdict(
+          "Runtime.addBinding",
+          { name: "b", executionContextName: name },
+          { worlds: new Set([name]) },
+        ),
+        where,
+      ).toMatchObject({ block: "scope", param: "executionContextName" });
+    }
+    // A name of the agent's own that merely holds one of them is its own.
+    for (const name of ["my kamapathy", "Electron Isolated Context 2"])
+      expect(
+        verdict("Page.createIsolatedWorld", { worldName: name }),
+        name,
+      ).toEqual({ allow: true });
+  });
+
   it("every Input command is marked for the dispatcher", () => {
     expect([...INPUT_METHODS].sort()).toEqual(
       PROTOCOL.domains.Input.commands.map((name) => `Input.${name}`).sort(),
