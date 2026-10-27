@@ -11,9 +11,6 @@ const rows = [...architecture.matchAll(/^\| `([^`]+)` +\| (.+?) +\|$/gm)].map(
   ([, path, responsibility]) => [path, responsibility] as const,
 );
 const paths = rows.map(([path]) => path);
-// Site packs' bundled packs merge before the final run. Their row is written
-// now, because this pass is the only one that documents them.
-const MERGING = ["skills/kamapathy/sites/"];
 
 describe("what the architecture says", () => {
   it("keeps what each section's docs list put on the page", () => {
@@ -116,11 +113,9 @@ describe("what the architecture says", () => {
     expect(
       paths.filter((path, index) => paths.indexOf(path) !== index),
     ).toEqual([]);
-    expect(
-      paths.filter(
-        (path) => !MERGING.includes(path) && !existsSync(new URL(path, root)),
-      ),
-    ).toEqual([]);
+    expect(paths.filter((path) => !existsSync(new URL(path, root)))).toEqual(
+      [],
+    );
   });
 
   it("no longer says what a shipped section made false", () => {

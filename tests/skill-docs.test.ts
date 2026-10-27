@@ -82,26 +82,6 @@ const RETIRED = [
   "nothing runs inside", // page.evaluate runs in the page
 ];
 
-// Taught before their code reaches this branch: phase 7's client methods and
-// commands, site packs' runPageTool and the two references task 10 writes.
-// Take a name out once it lands, after checking the skill against the code.
-const LANDING = new Set([
-  "command:evaluate",
-  "command:fetch",
-  "command:cdp",
-  "command:events",
-  "command:clear-site-data",
-  "entry:page.evaluate",
-  "entry:page.fetch",
-  "entry:page.cdp",
-  "entry:page.events",
-  "entry:page.clearSiteData",
-  "entry:space.cdp",
-  "entry:runPageTool",
-  "file:references/page-scripts.md",
-  "file:references/site-packs.md",
-]);
-
 const FLAGS = new Set([
   ...GLOBAL_FLAGS.flatMap(({ name }) => name.split(/,\s*/)),
   ...COMMANDS.flatMap(({ flags, usage }) => [
@@ -179,8 +159,7 @@ describe("what the skill tells an agent", () => {
   });
 
   it("names only commands, methods, flags and references that exist", () => {
-    const missing = taught().filter((name) => !exists(name));
-    expect(missing.filter((name) => !LANDING.has(name))).toEqual([]);
+    expect(taught().filter((name) => !exists(name))).toEqual([]);
   });
 
   it("links every reference and stays short enough to read first", () => {
