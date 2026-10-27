@@ -240,12 +240,15 @@ const reservedWorld = (value: unknown) => {
   );
 };
 const RESERVED_WORLD = `A world named ${WORLD_NAME} or starting with it is Kamapathy's, and ${PRELOAD_WORLD} is Electron's. Give an agent's world a name of its own.`;
+const DISPLACED =
+  "A scale or a viewport moves where input lands away from the point Kamapathy checks. Emulate the device with width, height, deviceScaleFactor and mobile, and for a closer image pass clip.scale to Page.captureScreenshot.";
 // What a command's own parameters may not say. Each check reads the params it
 // names and nothing else.
 const CHECKS: Record<
   string,
   (params: Record<string, any>, ctx: PolicyContext) => Verdict | undefined
 > = {
+  "Emulation.setDeviceMetricsOverride": (params) => metricsCheck(params),
   "Fetch.enable": (params) =>
     params.handleAuthRequests === true
       ? block("person", {
@@ -305,7 +308,18 @@ const CHECKS: Record<
         }),
   "Page.createIsolatedWorld": (params) => worldCheck(params),
   "Page.addScriptToEvaluateOnNewDocument": (params) => worldCheck(params),
+  "Page.setDeviceMetricsOverride": (params) => metricsCheck(params),
 };
+// A probe of Electron 44 saw a view scale, or a viewport, carry a raw mouse
+// event and a touch into an out-of-process frame where the hit test the
+// guards read found the page. Page's older name is the same command.
+function metricsCheck(params: Record<string, any>): Verdict | undefined {
+  if (params.scale !== undefined && params.scale !== 1)
+    return block("scope", { param: "scale", message: DISPLACED });
+  if (params.viewport !== undefined)
+    return block("scope", { param: "viewport", message: DISPLACED });
+  return undefined;
+}
 function worldCheck(params: Record<string, any>): Verdict | undefined {
   if (reservedWorld(params.worldName))
     return block("scope", { param: "worldName", message: RESERVED_WORLD });

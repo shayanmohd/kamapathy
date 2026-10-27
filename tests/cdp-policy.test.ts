@@ -305,6 +305,57 @@ describe("the protocol policy", () => {
     ).toMatchObject({ block: "person", param: "button" });
   });
 
+  it("a view scale or a viewport, which move where input lands, are refused", () => {
+    // A probe of Electron 44 saw either one carry a raw mouse event or touch
+    // into an out-of-process frame while the hit test named the page there,
+    // through Page's older name for the same command too.
+    const metrics = { width: 0, height: 0, deviceScaleFactor: 0, mobile: false };
+    for (const method of [
+      "Emulation.setDeviceMetricsOverride",
+      "Page.setDeviceMetricsOverride",
+    ]) {
+      for (const scale of [2, 0.5])
+        expect(
+          verdict(method, { ...metrics, scale }),
+          `${method} ${scale}`,
+        ).toMatchObject({
+          block: "scope",
+          param: "scale",
+          message: expect.stringContaining("deviceScaleFactor"),
+        });
+      for (const viewport of [
+        { x: 0, y: 0, width: 400, height: 300, scale: 2 },
+        { x: 100, y: 100, width: 800, height: 600, scale: 1 },
+      ])
+        expect(
+          verdict(method, { ...metrics, viewport }),
+          `${method} ${JSON.stringify(viewport)}`,
+        ).toMatchObject({ block: "scope", param: "viewport" });
+      // Every other field keeps working, and so does a scale of 1.
+      for (const params of [
+        { ...metrics, scale: 1 },
+        { width: 400, height: 300, deviceScaleFactor: 2, mobile: true },
+        {
+          ...metrics,
+          screenWidth: 400,
+          screenHeight: 300,
+          screenOrientation: { type: "landscapePrimary", angle: 90 },
+        },
+        {
+          width: 1600,
+          height: 1200,
+          deviceScaleFactor: 1,
+          mobile: false,
+          dontSetVisibleSize: true,
+        },
+      ])
+        expect(
+          verdict(method, params),
+          `${method} ${JSON.stringify(params)}`,
+        ).toEqual({ allow: true });
+    }
+  });
+
   it("identifiers must have been delivered", () => {
     const ids: [string, Record<string, unknown>, string][] = [
       ["Runtime.callFunctionOn", { objectId: "obj-1" }, "objectId"],

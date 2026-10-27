@@ -6730,6 +6730,68 @@ describe("local automation socket", () => {
     expect(attached(page)).toEqual([]);
   });
 
+  it("a view scale or a viewport is refused before any session opens, and the rest of the device metrics go out", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const method = "Emulation.setDeviceMetricsOverride";
+    const metrics = { width: 0, height: 0, deviceScaleFactor: 0, mobile: false };
+    // A probe saw each of them move raw input into an out-of-process frame
+    // while the hit test the guards read named the page.
+    for (const [params, param] of [
+      [{ ...metrics, scale: 2 }, "scale"],
+      [{ ...metrics, scale: 0.5 }, "scale"],
+      [
+        { ...metrics, viewport: { x: 0, y: 0, width: 400, height: 300, scale: 2 } },
+        "viewport",
+      ],
+      [
+        { ...metrics, viewport: { x: 100, y: 100, width: 800, height: 600, scale: 1 } },
+        "viewport",
+      ],
+    ] as const) {
+      const where = JSON.stringify(params);
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+        message: expect.stringContaining("deviceScaleFactor"),
+      });
+    }
+    // Page's older name for the command is the same command.
+    const older = await failure(
+      await cdp(tab.id, {
+        method: "Page.setDeviceMetricsOverride",
+        params: { ...metrics, scale: 2 },
+      }),
+    );
+    expect(older.status).toBe(403);
+    expect(older.error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Page.setDeviceMetricsOverride",
+      reason: "scope",
+      param: "scale",
+    });
+    expect(sentOn(page, method)).toEqual([]);
+    expect(sentOn(page, "Page.setDeviceMetricsOverride")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+    // Width, height, a device scale factor and mobile go out on the agent's
+    // own session, and so does a scale of 1.
+    for (const params of [
+      { width: 400, height: 300, deviceScaleFactor: 2, mobile: true },
+      { ...metrics, scale: 1 },
+    ])
+      expect(
+        (await cdp(tab.id, { method, params })).status,
+        JSON.stringify(params),
+      ).toBe(200);
+    expect(sentOn(page, method)).toEqual(["agent-1", "agent-1"]);
+  });
+
   it("ids the tab delivered are accepted", async () => {
     const { space, tab } = await createPage();
     const page = controller.contents;
