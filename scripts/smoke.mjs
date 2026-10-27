@@ -2342,16 +2342,23 @@ try {
     ref: widget.ref,
   });
   assert.equal(pressedWidget.status, 200, await pressedWidget.text());
-  assert.match(
-    (await (await api(`/tabs/${framedTab}/snapshot`)).json()).text,
-    /Widget pressed/,
-  );
   const newestEntry = (
-    await page.evaluate(() => window.kamapathy.getState())
+    await waitForState(
+      page,
+      (state, id) =>
+        state.activity
+          .find((item) => item.spaceId === id)
+          ?.message.startsWith("Agent clicked"),
+      task,
+    )
   ).activity.find((item) => item.spaceId === task);
   assert.ok(
     newestEntry.message.endsWith(" in a frame from localhost"),
     newestEntry.message,
+  );
+  assert.match(
+    (await (await api(`/tabs/${framedTab}/snapshot`)).json()).text,
+    /Widget pressed/,
   );
   assert.equal((await api(`/tabs/${framedTab}`, "DELETE")).status, 200);
   checked(
