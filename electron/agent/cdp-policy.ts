@@ -437,6 +437,8 @@ export function redactEvent(
     delivered: PolicyContext["delivered"];
     owns(domain: "Page" | "Network"): boolean;
     fromAgent: boolean;
+    /** Whether the tab's registry blocks a frame. */
+    blocked?(frameId: string): boolean;
   },
 ): CdpEvent | null {
   const domain = event.method.split(".")[0];
@@ -449,41 +451,63 @@ export function redactEvent(
     ctx.owns(domain)
   )
     return null;
-  if (namesExtensionWorld(event)) return null;
+  if (
+    event.method === "Runtime.executionContextCreated" &&
+    outOfReach(event.params, ctx.blocked)
+  )
+    return null;
   if (namesUnknownContext(event, ctx.delivered)) return null;
   const params = hide(event.params);
   return params === event.params ? event : { ...event, params };
 }
-// A world one of the person's extensions runs in: a content script's own
-// world, or an extension page's. Section 17 keeps agents out of them, so the
-// context is never recorded and so never delivered, which leaves every
-// command naming it out of scope and drops its end with it.
-function namesExtensionWorld(event: CdpEvent): boolean {
-  if (event.method !== "Runtime.executionContextCreated") return false;
+/**
+ * Whether a context Runtime.executionContextCreated reports is one no agent
+ * is given: a world one of the person's extensions runs in, a content
+ * script's own or an extension page's, or any world of a frame the tab
+ * blocks. Section 17 keeps agents out of them, so the context is never
+ * recorded or delivered, which leaves every command naming it out of scope
+ * and drops its end with it.
+ */
+export function outOfReach(
+  params: unknown,
+  blocked: (frameId: string) => boolean = () => false,
+): boolean {
   const context = (
-    event.params as {
-      context?: { origin?: unknown; auxData?: { origin?: unknown } };
+    params as {
+      context?: {
+        origin?: unknown;
+        auxData?: { origin?: unknown; frameId?: unknown };
+      };
     }
   )?.context;
   const origins = [context?.origin, context?.auxData?.origin];
-  return origins.some(
-    (origin) => typeof origin === "string" && extensionOrigin(origin),
-  );
+  if (
+    origins.some(
+      (origin) => typeof origin === "string" && extensionOrigin(origin),
+    )
+  )
+    return true;
+  const frameId = context?.auxData?.frameId;
+  return typeof frameId === "string" && blocked(frameId);
 }
-// An event about a context the agent cannot address at all.
+// An event about a context the agent cannot address at all. An exception
+// names its context inside its details.
 function namesUnknownContext(
   event: CdpEvent,
   delivered: PolicyContext["delivered"],
 ): boolean {
   if (event.method === "Runtime.executionContextCreated") return false;
   const runtime = event.method.startsWith("Runtime.");
-  for (const [key, value] of Object.entries(
-    (event.params ?? {}) as Record<string, unknown>,
-  )) {
+  const params = (event.params ?? {}) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(params)) {
     const names = CONTEXT_KEYS.has(key) || (runtime && key === "contextId");
     if (names && isId(value) && !delivered("context", value)) return true;
   }
-  return false;
+  const details = params.exceptionDetails as
+    | { executionContextId?: unknown }
+    | undefined;
+  const thrown = runtime ? details?.executionContextId : undefined;
+  return isId(thrown) && !delivered("context", thrown);
 }
 // Cookie values, in header maps, header lists, header text and the three
 // cookie lists. Every other field passes through, and an event with nothing

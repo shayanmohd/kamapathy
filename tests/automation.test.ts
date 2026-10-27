@@ -6775,6 +6775,132 @@ describe("local automation socket", () => {
     }
   });
 
+  it("never gives an agent an extension's world or a world of a frame it never reaches", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // The agent names a world of its own after the extension's content
+    // script world, which the name alone would have matched.
+    const own = await cdp(tab.id, {
+      method: "Page.createIsolatedWorld",
+      params: { frameId: "main", worldName: EXTENSION_NAME },
+    });
+    expect(own.status).toBe(200);
+    const ownContext = (await own.json()).result.executionContextId as number;
+    // A frame whose document is not the web's, so the tab blocks it.
+    frameNavigated(page.debugger, {
+      frameId: "frame-f",
+      parentId: "main",
+      loaderId: "loader-f",
+      url: "file:///Users/person/notes.html",
+    });
+    const reported = (method: string, params: Record<string, unknown>) =>
+      page.debugger.event(method, params, "agent-1");
+    const created = (id: number, context: Record<string, unknown>) =>
+      reported("Runtime.executionContextCreated", {
+        context: { id, uniqueId: `ctx-${id}`, name: "", ...context },
+      });
+    // The extension's content script, by its own origin and by the origin
+    // reported beside its frame, and the page's own world in that frame.
+    created(40, {
+      name: EXTENSION_NAME,
+      origin: `chrome-extension://${EXTENSION_ID}`,
+      auxData: { frameId: "main", isDefault: false, type: "isolated" },
+    });
+    created(41, {
+      name: EXTENSION_NAME,
+      origin: "",
+      auxData: {
+        frameId: "main",
+        isDefault: false,
+        type: "isolated",
+        origin: `chrome-extension://${EXTENSION_ID}`,
+      },
+    });
+    created(42, {
+      origin: "file://",
+      auxData: { frameId: "frame-f", isDefault: true, type: "default" },
+    });
+    // What those worlds report later names them, and what they hold.
+    reported("Runtime.consoleAPICalled", {
+      type: "log",
+      args: [{ type: "object", objectId: "ext-object" }],
+      executionContextId: 40,
+      timestamp: 1,
+    });
+    reported("Runtime.exceptionThrown", {
+      timestamp: 2,
+      exceptionDetails: {
+        exceptionId: 1,
+        text: "Uncaught",
+        lineNumber: 0,
+        columnNumber: 0,
+        executionContextId: 41,
+        exception: { type: "object", objectId: "ext-error" },
+      },
+    });
+    const refused = [
+      ["Runtime.evaluate", { expression: "1", contextId: 40 }, "contextId"],
+      [
+        "Runtime.evaluate",
+        { expression: "1", uniqueContextId: "ctx-41" },
+        "uniqueContextId",
+      ],
+      ["Runtime.evaluate", { expression: "1", contextId: 42 }, "contextId"],
+      ["Runtime.getProperties", { objectId: "ext-object" }, "objectId"],
+      [
+        "Runtime.callFunctionOn",
+        { functionDeclaration: "function () {}", objectId: "ext-error" },
+        "objectId",
+      ],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: EXTENSION_NAME },
+        "executionContextName",
+      ],
+    ] as const;
+    const evaluated = sentOn(page, "Runtime.evaluate").length;
+    for (const [method, params, param] of refused) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, `${method} ${param}`).toBe(403);
+      expect(error, `${method} ${param}`).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    expect(sentOn(page, "Runtime.evaluate").length).toBe(evaluated);
+    for (const method of [
+      "Runtime.getProperties",
+      "Runtime.callFunctionOn",
+      "Runtime.addBinding",
+    ])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    // Nothing they reported reached the log either.
+    const logged = JSON.stringify(
+      (await (await drainEvents(tab.id)).json()).events,
+    );
+    for (const said of ["ctx-40", "ctx-41", "ctx-42", "ext-object", "ext-error"])
+      expect(logged, said).not.toContain(said);
+    // The page's own world and the world the agent made stay the agent's.
+    created(9, {
+      origin: "https://example.com",
+      auxData: { frameId: "main", isDefault: true, type: "default" },
+    });
+    for (const contextId of [9, ownContext])
+      expect(
+        (
+          await cdp(tab.id, {
+            method: "Runtime.evaluate",
+            params: { expression: "1", contextId },
+          })
+        ).status,
+        String(contextId),
+      ).toBe(200);
+  });
+
   it("every call that reached Chromium expires the tab's refs", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
