@@ -1289,7 +1289,7 @@ export const COMMANDS = [
         },
       ],
       stdin:
-        "An expression to run in the page's main frame, at most 16384 characters. It may use await.",
+        "An expression to run in the page's main frame, at most 16384 characters. It may use await. An expression whose value is a promise comes back as an empty object unless it is awaited.",
       route: "POST /tabs/:id/evaluate",
       script: "page.evaluate",
       since: 4,
@@ -1487,7 +1487,7 @@ export const COMMANDS = [
     "run",
     "Scripts",
     "run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>",
-    "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself",
+    "Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces, requestSpace, sitePacks, siteContext, runSiteTool and runPageTool, plus help; run - reads it from stdin and run -e <code> runs the code itself",
     {
       arguments: [
         {

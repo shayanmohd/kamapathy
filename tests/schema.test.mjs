@@ -1712,6 +1712,23 @@ describe("API schema", () => {
     const { apiMarkdown, routesBlock, errorsBlock } = generateReference();
     expect(read("skills/kamapathy/references/api.md")).toBe(apiMarkdown);
     const docs = read("docs/automation.md");
+    // Each block is one start marker before one end marker, so a block that
+    // lost one fails here rather than as a long difference below.
+    expect(
+      ["routes", "errors"].map((name) => {
+        const start = `<!-- generated:${name} -->`;
+        const end = `<!-- /generated:${name} -->`;
+        return [
+          name,
+          docs.split(start).length,
+          docs.split(end).length,
+          docs.indexOf(start) < docs.indexOf(end),
+        ];
+      }),
+    ).toEqual([
+      ["routes", 2, 2, true],
+      ["errors", 2, 2, true],
+    ]);
     const between = (start, end) =>
       docs.slice(docs.indexOf(start) + start.length, docs.indexOf(end));
     expect(
@@ -1805,6 +1822,112 @@ describe("hand written docs", () => {
       [
         "site/index.html",
         "Canvas editors and JavaScript dialogs are out of reach too",
+      ],
+      // Agents read and act in frames from any web origin, run their own page
+      // scripts, and imports bring passwords and extensions over.
+      ["docs/automation.md", "open shadow roots and same-origin frames"],
+      ["docs/automation.md", "inside a same-origin iframe"],
+      [
+        "docs/automation.md",
+        "so an agent knows content exists that Kamapathy cannot read",
+      ],
+      [
+        "docs/automation.md",
+        "Any action on it fails with `409 cross_origin_frame`",
+      ],
+      ["docs/automation.md", "so list `tabs SPACE_ID` to find the popup"],
+      ["docs/automation.md", "then its same-origin frames depth first"],
+      [
+        "docs/automation.md",
+        "the one place where an agent's own code runs in a page",
+      ],
+      ["docs/automation.md", "today it gates this wait alone"],
+      ["docs/automation.md", "`requestSpace` and `help`, which are writable"],
+      ["docs/automation.md", "Responses are JSON except screenshots."],
+      [
+        "docs/automation.md",
+        "The only code of the agent's own that a page runs",
+      ],
+      [
+        "docs/automation.md",
+        "list a frame from another origin without reading it",
+      ],
+      [
+        "docs/automation.md",
+        "does not implement Chrome DevTools Protocol compatibility",
+      ],
+      ["docs/SECURITY.md", "downloads and permission prompts are denied"],
+      ["docs/SECURITY.md", "the only code of an agent's own that a page runs"],
+      [
+        "docs/SECURITY.md",
+        "listed by its title, name, or host and refuses every action",
+      ],
+      [
+        "docs/architecture.md",
+        "Reads bookmarks, history and sign-ins from other browsers",
+      ],
+      [
+        "README.md",
+        "list cross-origin frames so an agent knows they are there",
+      ],
+      ["README.md", "Sees shadow roots and same-origin frames"],
+      ["README.md", "no JavaScript from the script ever reaches a web page"],
+      ["README.md", "list cross-origin frames without reading them"],
+      ["README.md", "Cross-origin frames still need a handoff"],
+      ["README.md", "makes one new outbound request"],
+      ["README.md", "is the one agent code a page runs"],
+      ["site/index.html", "passwords do not come over yet"],
+      ["site/index.html", "Extensions do not come over yet"],
+      [
+        "site/index.html",
+        "your sign-ins from Chrome, Edge, Brave, Arc, Vivaldi, Opera or Firefox",
+      ],
+      ["site/index.html", "open shadow roots and same-origin frames"],
+      ["site/index.html", "so the agent asks you instead of guessing"],
+      [
+        "site/index.html",
+        "are listed in a snapshot but cannot be read or clicked",
+      ],
+      ["site/index.html", "frames from another origin still need you"],
+      ["skills/kamapathy/SKILL.md", "nothing runs inside the page"],
+      ["skills/kamapathy/SKILL.md", "same-origin iframes"],
+      ["skills/kamapathy/SKILL.md", "`requestSpace` and `help`, and connects"],
+      ["skills/kamapathy/references/actions.md", "same-origin iframes"],
+      [
+        "skills/kamapathy/references/actions.md",
+        "then its same-origin frames depth first",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "any action on it fails with `cross_origin_frame`",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "The action covers the top document only.",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "is the one code of yours a page runs",
+      ],
+      [
+        "skills/kamapathy/references/actions.md",
+        "there is no other script evaluation",
+      ],
+      [
+        "skills/kamapathy/references/connection.md",
+        "DevTools or remote-debugging port",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "so no JavaScript reaches a website through it",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "there is no other page JavaScript",
+      ],
+      [
+        "skills/kamapathy/references/scripting.md",
+        "`requestSpace` and `help` are set",
       ],
     ];
     for (const [path, sentence] of retired)

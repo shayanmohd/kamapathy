@@ -504,7 +504,7 @@ Reads bounded visible text and controls with refs.
 | `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
 | `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
-Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<Snapshot>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.text(options?)`
 
@@ -523,7 +523,7 @@ The same compact text the CLI's snapshot command prints.
 | `format` | one of list, outline | `"list"` | list reads text and controls; outline prints the page's structure instead of its text. |
 | `locators` | true or false | `false` | Give each control a locator: a selector that names it alone, which outlives refs. |
 
-Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<string>`. Route `POST /tabs/:id/snapshot`. Errors: `invalid_field`, `invalid_ref`, `invalid_selector`, `invalid_cursor`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.click(target, options?)`
 
@@ -539,7 +539,7 @@ Clicks a control, waiting until it can take the press.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/click`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.dblclick(target, options?)`
 
@@ -554,7 +554,7 @@ Double-clicks a control with one gesture of two presses.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/dblclick`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, url, point, loading?, fallback?, rebound? }>`. Route `POST /tabs/:id/dblclick`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.hover(target, options?)`
 
@@ -567,7 +567,7 @@ Moves the mouse onto a control and leaves it there.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, point, rebound? }>`. Route `POST /tabs/:id/hover`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, point, rebound? }>`. Route `POST /tabs/:id/hover`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.fill(target, value, options?)`
 
@@ -579,7 +579,7 @@ Replaces the value of a field, select or editable region, or adds to it.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, match, value?, valueHidden?, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `not_editable`, `ambiguous_field`, `fill_not_accepted`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, match, value?, valueHidden?, rebound? }>`. Route `POST /tabs/:id/fill`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_value`, `invalid_field`, `not_editable`, `ambiguous_field`, `fill_not_accepted`, `input_target_blocked`, `native_popup_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.selectOption(target, values, options?)`
 
@@ -590,7 +590,7 @@ Chooses a select's options by value, label or index. A lone choice is wrapped; n
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, values, rebound? }>`. Route `POST /tabs/:id/select`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_selectable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, values, rebound? }>`. Route `POST /tabs/:id/select`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_selectable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.focus(target, options?)`
 
@@ -601,7 +601,7 @@ Focuses a control, retargeting to the nearest one that takes focus.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/focus`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_focusable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, rebound? }>`. Route `POST /tabs/:id/focus`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `invalid_field`, `not_focusable`, `ambiguous_field`, `input_target_blocked`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.press(key, target?, options?)`
 
@@ -613,7 +613,7 @@ Presses a key name, a printable character or a chord, focusing a control first w
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, loading?, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, loading?, rebound? }>`. Route `POST /tabs/:id/press`. Errors: `invalid_key`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.scroll(direction, pixels?, target?, options?)`
 
@@ -623,7 +623,7 @@ Scrolls the page, the panel holding a control, or the panel in the middle when t
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, scrolled, selector?, x, y, moved }>`. Route `POST /tabs/:id/scroll`. Errors: `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.drag(source, target, options?)`
 
@@ -633,7 +633,7 @@ Drags one element onto another with native mouse input or HTML drag and drop.
 | --- | --- | --- | --- |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.dragAndDrop(source, target, options?)`
 
@@ -648,7 +648,7 @@ Drags one element onto another, with its own positions and a button.
 | `timeout` | milliseconds from 0 to 60000 | `3000` | How long to wait for a target that can take the input. 0 looks once. |
 | `label` | string of at most 60 characters |  | A few words naming this step, shown by the cursor and in the agent bar. |
 
-Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, url, drag, loading?, rebound? }>`. Route `POST /tabs/:id/drag`. Errors: `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `drag_out_of_view`, `drag_unavailable`, `drag_not_delivered`, `invalid_field`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.wait(options?)`
 
@@ -716,7 +716,7 @@ Returns `Promise<void>`. Since API level 4.
 
 Runs 1 to 20 actions in order and stops at the first failure.
 
-Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
+Returns `Promise<{ ok: true, results }>`. Route `POST /tabs/:id/actions`. Errors: `invalid_actions`, `invalid_action`, `invalid_field`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `element_obscured`, `input_not_delivered`, `input_target_blocked`, `native_popup_blocked`, `clipboard_blocked`, `wait_timeout`, `request_too_large`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 1.
 
 ### `page.upload(ref, files)`
 
@@ -732,7 +732,7 @@ Puts 0 to 8 local files on the file input a target names, retargeting from a lab
 | --- | --- | --- | --- |
 | `timeout` | milliseconds of at most 60000 | `3000` | How long to wait for the target. 0 looks once. |
 
-Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/set-input-files`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `multiple_file_inputs`, `upload_busy`, `file_chooser_opened`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `cross_origin_frame`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
+Returns `Promise<{ ok: true, selected }>`. Route `POST /tabs/:id/set-input-files`. Errors: `invalid_files`, `files_too_large`, `invalid_upload_target`, `invalid_file_type`, `multiple_file_inputs`, `upload_busy`, `file_chooser_opened`, `invalid_target`, `invalid_ref`, `invalid_selector`, `unknown_ref`, `stale_ref`, `no_match`, `ambiguous_match`, `element_action_failed`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 2.
 
 ### `page.screenshot(options?)`
 
@@ -809,7 +809,7 @@ Returns `Promise<{ ok: true }>`. Route `DELETE /tabs/:id`. Errors: `human_contro
 
 ### `page.evaluate(fnOrString, arg?, options?)`
 
-Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await.
+Runs a function or an expression in the page's main frame and returns its value. A function is called with arg and cannot see script variables; an expression takes no argument and may use await. An expression whose value is a promise comes back as an empty object unless it is awaited, and a function's promise is awaited.
 
 | Option | Kind | Default | Description |
 | --- | --- | --- | --- |
@@ -1344,7 +1344,7 @@ Clear one site's cookies, storage or cache
 
 ### `run [--ts] [--timeout <ms>] [--env-file <path>]... <file.mjs>`
 
-Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces and requestSpace; run - reads it from stdin and run -e <code> runs the code itself
+Run a script with the client as the globals kamapathy, createSpace, openSpace, space, spaces, requestSpace, sitePacks, siteContext, runSiteTool and runPageTool, plus help; run - reads it from stdin and run -e <code> runs the code itself
 
 ### `repl [--env-file <path>]...`
 
