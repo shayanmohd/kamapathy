@@ -44,6 +44,22 @@ export function fakePng(width: number, height: number): Buffer {
   return png;
 }
 
+// Whether a request to the URL carries the cookie: its own host, or a host
+// under its domain, its path or below, and https for a secure cookie.
+function carries(url: string, cookie: Electron.Cookie): boolean {
+  const { protocol, hostname, pathname } = new URL(url);
+  const domain = cookie.domain ?? "";
+  const path = cookie.path ?? "/";
+  const host = domain.startsWith(".")
+    ? hostname === domain.slice(1) || hostname.endsWith(domain)
+    : hostname === domain;
+  const below =
+    pathname === path ||
+    (pathname.startsWith(path) &&
+      (path.endsWith("/") || pathname[path.length] === "/"));
+  return host && below && (!cookie.secure || protocol === "https:");
+}
+
 // A node the tab's hit test finds at one point: the element itself, and the
 // frame it holds when it owns one.
 export type FakeHit = {
@@ -85,12 +101,36 @@ export class FakeContents extends FakeHost {
   // What the tab's own session was asked to fetch, as the PDF re-read does.
   fetches: { url: string; init?: RequestInit }[] = [];
   fetchPdf?: (url: string, init?: RequestInit) => Promise<Response>;
+  // The session's cookies, and each removal and clear of a site's data it
+  // was asked for.
+  jar: Electron.Cookie[] = [];
+  removedCookies: { url: string; name: string }[] = [];
+  storageClears: Electron.ClearStorageDataOptions[] = [];
+  dataClears: Electron.ClearDataOptions[] = [];
   session = {
     fetch: (url: string, init?: RequestInit) => {
       this.fetches.push({ url, init });
       return this.fetchPdf
         ? this.fetchPdf(url, init)
         : Promise.reject(new Error("No fetch in this test."));
+    },
+    cookies: {
+      get: async (_filter: Electron.CookiesGetFilter) =>
+        this.jar.map((cookie) => ({ ...cookie })),
+      // As Chromium removes them: every cookie of the name that a request
+      // to the URL carries.
+      remove: async (url: string, name: string) => {
+        this.removedCookies.push({ url, name });
+        this.jar = this.jar.filter(
+          (cookie) => cookie.name !== name || !carries(url, cookie),
+        );
+      },
+    },
+    clearStorageData: async (options: Electron.ClearStorageDataOptions) => {
+      this.storageClears.push(options);
+    },
+    clearData: async (options: Electron.ClearDataOptions) => {
+      this.dataClears.push(options);
     },
   };
   result: unknown = {

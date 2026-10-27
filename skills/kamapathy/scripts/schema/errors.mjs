@@ -103,6 +103,20 @@ export const ERRORS = {
     [],
     2,
   ),
+  origin_not_in_tab: code(
+    403,
+    false,
+    "The origin is not loaded in this tab or its frames.",
+    ["origin"],
+    4,
+  ),
+  clear_declined: code(
+    403,
+    false,
+    "The person chose not to clear the site's data.",
+    ["origin"],
+    4,
+  ),
   clipboard_blocked: code(
     403,
     false,
@@ -622,6 +636,13 @@ export const ERRORS = {
     "The person did not answer a request for a space in time. Asking again interrupts them.",
     ["awaited", "timeoutMs"],
     2,
+  ),
+  approval_timeout: code(
+    504,
+    false,
+    "The person did not answer the request to clear data in time.",
+    ["awaited", "origin", "timeoutMs"],
+    4,
   ),
   navigation_timeout: code(
     504,

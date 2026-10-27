@@ -1353,6 +1353,8 @@ Show the commands, or help on one
 | `cdp_method_blocked` | 403 | not retryable | `method`, `reason`, `param` | The protocol command reaches beyond this tab's own page and frames. |
 | `agent_scripts_off` | 403 | not retryable |  | Page scripts are off in Kamapathy's Settings. |
 | `request_declined` | 403 | not retryable |  | The person did not let an agent use a space. |
+| `origin_not_in_tab` | 403 | not retryable | `origin` | The origin is not loaded in this tab or its frames. |
+| `clear_declined` | 403 | not retryable | `origin` | The person chose not to clear the site's data. |
 | `clipboard_blocked` | 403 | not retryable |  | A copy, cut or paste chord, or a Linux middle press on an editable, is refused. |
 | `input_target_blocked` | 403 | not retryable | `frame`, `extension` | The point, or the frame holding focus, belongs to an extension or an internal page. |
 | `native_popup_blocked` | 403 | not retryable | `use` | The input would open a native select, color or date picker. |
@@ -1442,6 +1444,7 @@ Show the commands, or help on one
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
+| `approval_timeout` | 504 | not retryable | `awaited`, `origin`, `timeoutMs` | The person did not answer the request to clear data in time. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
