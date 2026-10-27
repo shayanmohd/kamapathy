@@ -4120,8 +4120,10 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
       .valueHidden,
     true,
   );
+  // A ref, a port or an id may hold four of these digits, so the check
+  // looks for the whole number.
   for (const text of [printedCheckout, JSON.stringify(checkout)])
-    assert.doesNotMatch(text, /4242|4111/);
+    assert.doesNotMatch(text, /4242424242424242|4111111111111111/);
   await cli(["click", crossTab.id, ref(checkout, "Pay now")]);
   await shownInFrame("Paid");
   passed(
