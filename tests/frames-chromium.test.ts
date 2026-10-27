@@ -33,6 +33,8 @@ import { parseSelector } from "../electron/agent/selectors";
 import type { AutomationController } from "../electron/agent/server";
 import {
   createSnapshots,
+  optionsHash,
+  readCursor,
   type SnapshotRequest,
 } from "../electron/agent/snapshot";
 import { EventBufferPool } from "../electron/agent/session/event-buffer";
@@ -448,6 +450,59 @@ for (const mode of ISOLATION)
       expect(
         Array.from(shape.outline!.matchAll(/@e\d+/g)).map((found) => found[0]),
       ).toEqual(shape.interactables.map((control) => control.ref));
+    }, 60000);
+
+    it("pages an outline through its frames within both bounds", async () => {
+      await open("/frames/pay", 3);
+      const whole = (await take({ format: "outline" })).outline!.split("\n");
+      const refsIn = (lines: readonly string[]) =>
+        lines.flatMap((line) => line.match(/@e\d+/g) ?? []);
+      const lineOf = (cursor: string) =>
+        readCursor(cursor, {
+          h: optionsHash({ scope: "page", format: "outline" }),
+        }).l;
+      for (const bounds of [
+        { maxChars: 60, maxControls: 100 },
+        { maxChars: 24000, maxControls: 1 },
+      ]) {
+        const name = JSON.stringify(bounds);
+        const parts: Listing[] = [];
+        let cursor: string | undefined;
+        do {
+          const got = await take({
+            format: "outline",
+            ...bounds,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          parts.push(got);
+          cursor = got.next;
+        } while (cursor !== undefined && parts.length < 20);
+        expect(cursor, `${name} ends`).toBeUndefined();
+        // Each part prints the lines from its cursor to the next one's,
+        // after whatever it repeats from earlier parts to place them.
+        let from = 0;
+        let inside = 0;
+        for (const [index, part] of parts.entries()) {
+          const printed = part.outline!.split("\n");
+          const to = part.next ? lineOf(part.next) : whole.length;
+          expect(to, `${name} part ${index}`).toBeGreaterThan(from);
+          const fresh = whole.slice(from, to);
+          expect(printed.slice(printed.length - fresh.length)).toEqual(fresh);
+          for (const before of printed.slice(0, printed.length - fresh.length))
+            expect(whole.slice(0, from), `${name} part ${index}`).toContain(
+              before,
+            );
+          // Frame refs count toward maxControls like any control's.
+          expect(refsIn(fresh).length, `${name} part ${index}`).toBeLessThanOrEqual(
+            bounds.maxControls,
+          );
+          if (fresh[0].startsWith("  ")) inside += 1;
+          from = to;
+        }
+        expect(from, name).toBe(whole.length);
+        // Some part starts among a frame's own lines.
+        expect(inside, name).toBeGreaterThan(0);
+      }
     }, 60000);
 
     it("viewport scope reads only the visible part of each frame", async () => {

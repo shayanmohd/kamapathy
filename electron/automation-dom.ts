@@ -2150,7 +2150,12 @@ export function pageOperation(
       const budgetFrom = grouped
         ? Math.min(offsets.line, plan.length)
         : start;
-      const kept: { depth: number; text: string; order: number }[] = [];
+      const kept: {
+        depth: number;
+        text: string;
+        order: number;
+        control?: true;
+      }[] = [];
       const printed: Element[] = [];
       let used = 0;
       let taken = 0;
@@ -2177,6 +2182,7 @@ export function pageOperation(
           depth: line.depth,
           text: made.text,
           order: line.item,
+          ...(counts(line) ? { control: true as const } : {}),
         });
         used += line.depth * 2 + made.text.length + 1;
         if (made.cut) cutOptions = true;
@@ -2204,15 +2210,15 @@ export function pageOperation(
       let at = start;
       for (; at < plan.length; at += 1) {
         const line = plan[at];
-        // The lines before this part's own offset cost it nothing.
+        // The lines before this part's own offset cost it nothing, so the
+        // bounds count from its first line on.
         if (grouped && at === budgetFrom) {
           used = 0;
           taken = 0;
         }
-        const first = at === budgetFrom;
         const made = render(line);
         const full =
-          !first &&
+          at > budgetFrom &&
           ((counts(line) && taken >= options.maxControls) ||
             used + line.depth * 2 + made.text.length + 1 > options.maxChars);
         if (full && !grouped) break;
@@ -2249,6 +2255,7 @@ export function pageOperation(
             order: line.order,
             depth: line.depth,
             line: line.text,
+            ...(line.control ? { control: true as const } : {}),
           })),
           chars: 0,
           ...locatorSources(printed, interactables),

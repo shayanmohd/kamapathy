@@ -25,6 +25,8 @@ import { parseSelector } from "../electron/agent/selectors";
 import type { AutomationController } from "../electron/agent/server";
 import {
   createSnapshots,
+  optionsHash,
+  readCursor,
   type SnapshotRequest,
 } from "../electron/agent/snapshot";
 import { EventBufferPool } from "../electron/agent/session/event-buffer";
@@ -63,6 +65,8 @@ type Listing = {
   code?: string;
   fields?: Record<string, unknown>;
 };
+// A part as the snapshot path answers it, with the cursor to the next one.
+type Part = Omit<Listing, "next"> & { next?: string };
 
 describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
   const sites: Server[] = [];
@@ -175,6 +179,69 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
   };
   const refFor = (listing: Listing, label: string) =>
     listing.interactables.find((control) => control.label === label)!.ref;
+  // Snapshots as the routes and the CLI take them: every frame group of the
+  // page read with its frame context, and the reads composed, with the
+  // routes' compact bounds unless a request gives its own.
+  const routes = (opened: TabSession) => {
+    const groups = createFrameGroups(opened, { refs, tabId: "tab-1" });
+    const snapshots = createSnapshots({
+      controller: { state: { tabs: [] } } as unknown as AutomationController,
+      evaluatePage: (
+        tabId,
+        tabSession,
+        operation,
+        payload,
+        deadline,
+        inner,
+        frameId,
+      ) =>
+        resolver.run(tabId, tabSession, operation, payload, {
+          deadline,
+          namespace: "snapshots",
+          signal: inner?.signal,
+          guard: inner?.guard,
+          ...(frameId === undefined ? {} : { frameId }),
+        }),
+      resolver,
+      namespace: () => "snapshots",
+      frames: { for: () => groups, dispose: () => {} },
+    });
+    return (request: Partial<SnapshotRequest> = {}) =>
+      snapshots.take(
+        "tab-1",
+        opened,
+        {
+          mode: "compact",
+          maxChars: 4000,
+          maxControls: 40,
+          scope: "page",
+          format: "list",
+          locators: false,
+          header: false,
+          ...request,
+        },
+        Date.now() + 15000,
+        step(),
+      ) as Promise<Part>;
+  };
+  // Every part one set of bounds gives, each from the last one's cursor.
+  const partsOf = async (
+    take: ReturnType<typeof routes>,
+    request: Partial<SnapshotRequest>,
+  ) => {
+    const parts: Part[] = [];
+    let cursor: string | undefined;
+    for (let part = 0; part < 40; part += 1) {
+      const got = await take({
+        ...request,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      parts.push(got);
+      if (!got.next) return parts;
+      cursor = got.next;
+    }
+    throw new Error(`The parts of one page must end: ${JSON.stringify(request)}`);
+  };
 
   it("keeps only on-screen content in viewport scope, frames included", async () => {
     await load("/snapshot/sections", 3);
@@ -624,6 +691,55 @@ describe.skipIf(!chromiumAvailable)("snapshots through a tab session", () => {
     expect(whole.interactables.map((control) => control.ref)).toEqual(
       alone.interactables.map((control) => control.ref),
     );
+  }, 60000);
+
+  it("covers the page in outline parts taken as the routes take them", async () => {
+    const take = routes(await load("/snapshot/parts"));
+    const whole = (
+      await take({ format: "outline", maxChars: 24000, maxControls: 100 })
+    ).outline!.split("\n");
+    const refsIn = (lines: readonly string[]) =>
+      lines.flatMap((line) => line.match(/@e\d+/g) ?? []);
+    expect(refsIn(whole)).toHaveLength(12);
+    const lineOf = (cursor: string) =>
+      readCursor(cursor, { h: optionsHash({ scope: "page", format: "outline" }) })
+        .l;
+    // The skill suite's bounds, then a control bound that binds first.
+    for (const bounds of [
+      { maxChars: 600 },
+      { maxChars: 300, maxControls: 3 },
+    ]) {
+      const name = JSON.stringify(bounds);
+      const parts = await partsOf(take, { format: "outline", ...bounds });
+      expect(parts.length, name).toBeGreaterThan(1);
+      // Each part prints the lines from its cursor to the next one's, after
+      // whatever it repeats from earlier parts to place them.
+      let from = 0;
+      for (const [index, part] of parts.entries()) {
+        const printed = part.outline!.split("\n");
+        const to = part.next ? lineOf(part.next) : whole.length;
+        expect(to, `${name} part ${index}`).toBeGreaterThan(from);
+        const fresh = whole.slice(from, to);
+        expect(printed.slice(printed.length - fresh.length)).toEqual(fresh);
+        for (const before of printed.slice(0, printed.length - fresh.length))
+          expect(whole.slice(0, from), `${name} part ${index}`).toContain(before);
+        // maxControls bounds the control lines a part adds.
+        expect(refsIn(fresh).length, `${name} part ${index}`).toBeLessThanOrEqual(
+          bounds.maxControls ?? 40,
+        );
+        // A part lists the controls it printed.
+        expect(part.interactables.map((control) => control.ref)).toEqual(
+          refsIn(printed),
+        );
+        from = to;
+      }
+      expect(from, name).toBe(whole.length);
+      // Every ref of the page comes back, once.
+      expect(
+        refsIn(parts.flatMap((part) => part.outline!.split("\n"))),
+        name,
+      ).toEqual(refsIn(whole));
+    }
   }, 60000);
 
   it("lists absolute http, https, mailto and tel links", async () => {
