@@ -4590,6 +4590,299 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   await cli(["space", "close", space.id]);
   assert.equal((await json(["spaces"])).spaces.length, 0);
   passed("skill cleanup closes only its own agent space");
+  // Section 14 in the real app: a workspace of this run's own holds a pack
+  // for the fixture's 127.0.0.1, a broken pack, a helpers.mjs and a .env.
+  // Only the commands here are given it, so no other check loads a
+  // workspace.
+  {
+    const packHome = join(temporary, "packs-workspace");
+    const packEnv = { ...environment, KAMAPATHY_WORKSPACE: packHome };
+    // The key reaches the run from the workspace's .env and nowhere else.
+    delete packEnv.FIXTURE_KEY;
+    const productsUrl = `${fixture.origin}/packs/products`;
+    const cartUrl = `${fixture.origin}/packs/cart`;
+    const labProducts = [
+      { name: "Trail mix", price: 4.5 },
+      { name: "Lamp oil", price: 12 },
+      { name: "Rope", price: 7.25 },
+    ];
+    const labExamples = [
+      'await runSiteTool("local-lab", "list_products", {}, { page })',
+      'await runPageTool("local-lab", "cart_total", {}, { page })',
+    ];
+    // list_products reads a snapshot only, so Page scripts do not gate it.
+    // cart_total is a page tool, and async, so the page must await it.
+    const listProductsTool = [
+      "// Reads the lab's products from a snapshot of its products page, so it",
+      "// needs no page script.",
+      String.raw`const LINE = /^(.+) \$(\d+\.\d{2}) Add \1$/;`,
+      "",
+      "export async function listProducts({ page }) {",
+      '  if (!/^https?:/.test(page.url ?? ""))',
+      '    throw new Error("Open a page of the lab first, so the tool knows its address.");',
+      '  await page.navigate(new URL("/packs/products", page.url).href);',
+      '  const { text = "" } = await page.snapshot({ mode: "full" });',
+      '  return text.split("\\n").flatMap((line) => {',
+      "    const found = LINE.exec(line.trim());",
+      "    return found ? [{ name: found[1], price: Number(found[2]) }] : [];",
+      "  });",
+      "}",
+      "",
+    ].join("\n");
+    const packFiles = {
+      ".env": "FIXTURE_KEY=lab-key-7\n",
+      "helpers.mjs": "export const labKey = () => process.env.FIXTURE_KEY;\n",
+      "sites/local-lab/pack.json": JSON.stringify({
+        format: 1,
+        id: "local-lab",
+        name: "Local lab",
+        domains: ["127.0.0.1"],
+        notes: ["notes/overview.md"],
+        tools: {
+          list_products: {
+            description:
+              "Open the products page and read each product's name and price.",
+            file: "tools/list-products.mjs",
+            export: "listProducts",
+            returns: { type: "array", description: "[{ name, price }]" },
+          },
+        },
+        pageTools: {
+          cart_total: {
+            description: "Read the total of the open cart page.",
+            file: "page-tools/cart-total.js",
+            returns: { type: "number", description: "The cart's total." },
+          },
+        },
+      }),
+      "sites/local-lab/notes/overview.md": [
+        "# Local lab",
+        "",
+        'Products are listed at /packs/products, one line each with a name, a price and a button such as role=button[name="Add Rope"].',
+        "The cart at /packs/cart shows its total in #total.",
+        "",
+      ].join("\n"),
+      "sites/local-lab/tools/list-products.mjs": listProductsTool,
+      "sites/local-lab/page-tools/cart-total.js":
+        'async (args) => Number(document.querySelector("#total").textContent)\n',
+      "sites/broken/pack.json": JSON.stringify({
+        format: 1,
+        id: "broken",
+        name: "Broken",
+        domains: ["broken.example"],
+        notes: ["notes/overview.md"],
+      }),
+      "sites/broken/notes/overview.md":
+        "# Broken\n\nThe Save button on the settings page is @e3.\n",
+    };
+    await mkdir(packHome, { mode: 0o700 });
+    for (const packFolder of [
+      "sites/local-lab/notes",
+      "sites/local-lab/tools",
+      "sites/local-lab/page-tools",
+      "sites/broken/notes",
+    ])
+      await mkdir(join(packHome, packFolder), { recursive: true, mode: 0o700 });
+    for (const [packPath, packText] of Object.entries(packFiles))
+      await writeFile(join(packHome, packPath), packText, { mode: 0o600 });
+
+    // The command line gives the pack's context, and a run calls both tools
+    // and a helper the workspace exports.
+    const described = (
+      await cli(["sites", productsUrl], undefined, { env: packEnv })
+    ).output;
+    const describedLines = described.split("\n");
+    assert.equal(
+      describedLines[0],
+      'local-lab "Local lab" (workspace, matches 127.0.0.1)',
+      described,
+    );
+    assert.equal(describedLines[1], join(packHome, "sites", "local-lab"));
+    assert.ok(describedLines.includes("--- notes/overview.md"), described);
+    assert.ok(
+      described.includes("The cart at /packs/cart shows its total in #total."),
+      described,
+    );
+    assert.ok(
+      describedLines.includes("cart_total (page tool, needs page scripts)"),
+      described,
+    );
+    for (const example of labExamples)
+      assert.ok(describedLines.includes(`  ${example}`), described);
+    const packRunPath = join(temporary, "site-pack-run.mjs");
+    await writeFile(
+      packRunPath,
+      [
+        'const lab = await createSpace("Site pack review");',
+        "try {",
+        `  const page = await lab.open(${JSON.stringify(productsUrl)});`,
+        "  const context = await siteContext(page);",
+        '  const listed = await runSiteTool("local-lab", "list_products", {}, { page });',
+        `  await page.goto(${JSON.stringify(cartUrl)});`,
+        '  const total = await runPageTool("local-lab", "cart_total", {}, { page });',
+        "  console.log(JSON.stringify({",
+        "    host: context.host,",
+        "    packs: context.packs.map((pack) => ({ id: pack.id, matchedBy: pack.matchedBy, notes: pack.notes.map((note) => note.file), examples: pack.tools.map((tool) => tool.example) })),",
+        "    products: listed,",
+        "    total,",
+        "    key: labKey(),",
+        "  }));",
+        "} finally {",
+        "  await lab.close();",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const packRun = JSON.parse(
+      (await cli(["run", packRunPath], undefined, { env: packEnv })).output,
+    );
+    assert.deepEqual(packRun, {
+      host: "127.0.0.1",
+      packs: [
+        {
+          id: "local-lab",
+          matchedBy: "127.0.0.1",
+          notes: ["notes/overview.md"],
+          examples: labExamples,
+        },
+      ],
+      products: labProducts,
+      total: 16.25,
+      key: "lab-key-7",
+    });
+    passed(
+      "a workspace pack for 127.0.0.1 gives context, runs a Node tool and a page tool, and helpers.mjs reads .env",
+    );
+
+    // The person turns Page scripts off: the page tool fails with an
+    // ordinary error the script catches, and the snapshot only Node tool
+    // goes on. The setting comes back on whatever happens.
+    await chrome.evaluate(() =>
+      window.kamapathy.dispatch({
+        type: "settings:update",
+        settings: { agentPageScripts: false },
+      }),
+    );
+    await waitForState(
+      chrome,
+      (state) => state.settings.agentPageScripts === false,
+    );
+    let scriptsOff;
+    try {
+      const scriptsOffPath = join(temporary, "site-pack-scripts-off.mjs");
+      await writeFile(
+        scriptsOffPath,
+        [
+          'const lab = await createSpace("Site pack scripts off");',
+          "try {",
+          `  const page = await lab.open(${JSON.stringify(cartUrl)});`,
+          "  let failure = null;",
+          "  let message = null;",
+          "  try {",
+          '    await runPageTool("local-lab", "cart_total", {}, { page });',
+          "  } catch (error) {",
+          "    failure = { code: error.code, status: error.status, packId: error.packId, tool: error.tool };",
+          "    message = error.message;",
+          "  }",
+          '  const listed = await runSiteTool("local-lab", "list_products", {}, { page });',
+          "  console.log(JSON.stringify({ failure, message, products: listed }));",
+          "} finally {",
+          "  await lab.close();",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      scriptsOff = JSON.parse(
+        (await cli(["run", scriptsOffPath], undefined, { env: packEnv }))
+          .output,
+      );
+    } finally {
+      await chrome.evaluate(() =>
+        window.kamapathy.dispatch({
+          type: "settings:update",
+          settings: { agentPageScripts: true },
+        }),
+      );
+      await waitForState(
+        chrome,
+        (state) => state.settings.agentPageScripts === true,
+      );
+    }
+    assert.deepEqual(scriptsOff.failure, {
+      code: "agent_scripts_off",
+      status: 403,
+      packId: "local-lab",
+      tool: "cart_total",
+    });
+    assert.match(scriptsOff.message, /\bSettings\b.*\bAgents\b/);
+    assert.deepEqual(scriptsOff.products, labProducts);
+    assert.equal((await json(["spaces"])).spaces.length, 0);
+    passed(
+      "with page scripts off the page tool fails with agent_scripts_off while a snapshot-only Node tool runs",
+    );
+
+    // The validator passes the good packs of both roots and names the line
+    // of the note that holds a temporary ref.
+    const packCheck = await cli(["sites", "check", "--json"], undefined, {
+      env: packEnv,
+      failure: true,
+    });
+    assert.equal(packCheck.code, 1, packCheck.errors);
+    const packReport = JSON.parse(packCheck.output);
+    assert.equal(packReport.ok, false);
+    const packById = new Map(packReport.packs.map((pack) => [pack.id, pack]));
+    assert.deepEqual([...packById.keys()].sort(), [
+      "broken",
+      "github",
+      "google-search",
+      "local-lab",
+      "x",
+    ]);
+    const brokenPack = packById.get("broken");
+    assert.equal(brokenPack.ok, false);
+    assert.deepEqual(
+      brokenPack.problems.map(({ file, line }) => ({ file, line })),
+      [{ file: "notes/overview.md", line: 3 }],
+    );
+    assert.match(brokenPack.problems[0].message, /temporary ref @e3\b/);
+    for (const id of ["local-lab", "github", "google-search", "x"])
+      assert.equal(
+        packById.get(id).ok,
+        true,
+        `${id}: ${JSON.stringify(packById.get(id).problems)}`,
+      );
+    passed("sites check reports a note holding @e3 and exits 1");
+
+    // With an empty workspace the packs are the three samples, read from the
+    // folder of the skill under test, the packaged copy included.
+    const emptyHome = join(temporary, "empty-workspace");
+    await mkdir(emptyHome, { mode: 0o700 });
+    const bundledList = JSON.parse(
+      (
+        await cli(["sites", "--json"], undefined, {
+          env: { ...environment, KAMAPATHY_WORKSPACE: emptyHome },
+        })
+      ).output,
+    );
+    assert.deepEqual(
+      bundledList.packs.map((pack) => pack.id),
+      ["github", "google-search", "x"],
+    );
+    assert.deepEqual(bundledList.skipped, []);
+    for (const pack of bundledList.packs) {
+      assert.equal(pack.source, "bundled");
+      // The same folder, however the two paths spell it.
+      const [read, shipped] = [
+        statSync(pack.dir),
+        statSync(join(skill, "sites", pack.id)),
+      ];
+      assert.ok(
+        read.dev === shipped.dev && read.ino === shipped.ino,
+        `${pack.id} came from ${pack.dir}, not from ${skill}`,
+      );
+    }
+    passed("the skill under test lists the three samples");
+  }
   const summary = {
     date: new Date().toISOString(),
     platform: process.platform,
