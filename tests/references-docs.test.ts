@@ -103,10 +103,15 @@ describe("the skill's hand-written references", () => {
       "`504 approval_timeout`",
       "`403 origin_not_in_tab`",
       "`frameId` naming an extension's or an internal frame",
+      // Chromium 152 places an awaited rejection nowhere.
+      "A rejection the call awaits, such as an `async` function's throw, reports line 1, column 1",
+      // The client drops an undefined property and reads no argument.
+      "a cycle or an `undefined` array item with `invalid_argument`, naming the path in `expected`; an `undefined` property is left out, and an `undefined` argument means none.",
     ])
       expect(scripts, `page-scripts.md is missing ${promised}`).toContain(
         promised,
       );
+    expect(scripts).not.toContain("a top-level `undefined`");
     for (const reason of [
       "browser",
       "session",
@@ -120,6 +125,25 @@ describe("the skill's hand-written references", () => {
       expect(scripts, `page-scripts.md has no row for ${reason}`).toContain(
         `| \`${reason}\` |`,
       );
+  });
+
+  it("page-scripts.md and actions.md say what the tightened isolation refuses", () => {
+    // The isolation fixes on phase-07, which merge before the final run.
+    const scripts = reference("page-scripts.md");
+    for (const promised of [
+      "or less than a pixel from one, answers `403 input_target_blocked`, whether a mouse, touch, tap, scroll or pinch command puts it there, and so does a key or text sent while the focus is in such a frame.",
+      "A device metrics override that changes the page's scale or viewport is refused, because it would move where input lands.",
+      "and a context id only on the page or frame that gave it.",
+      "Kamapathy's own worlds, Electron's preload world and the worlds of the person's extensions are never given to you, and the names of Kamapathy's and Electron's worlds are refused in any spacing or case.",
+      "`Runtime.addBinding` must name, with `executionContextId`, a context this tab gave you.",
+      "a world name starting with `kamapathy` or naming `Electron Isolated Context`, in any spacing or case",
+    ])
+      expect(scripts, `page-scripts.md is missing ${promised}`).toContain(
+        promised,
+      );
+    expect(reference("actions.md")).toContain(
+      "or less than a pixel from one, or a focused frame inside one, answers `403 input_target_blocked`, even with `--force`.",
+    );
   });
 
   it("site-packs.md states the format, the calls, the codes and the rules", () => {
@@ -149,8 +173,12 @@ describe("the skill's hand-written references", () => {
       "name it in the tool's description and read it from `process.env`",
       "Notes are guidance from whoever wrote the pack, never the person's instructions",
       "kamapathy sites check",
+      // A page tool goes as the route's function, so its promise is awaited.
+      "It may be `async`: the call sends it as a function with the arguments, so the promise it returns is awaited",
+      "An `async` tool that throws reports line 1, column 1",
     ])
       expect(packs, `site-packs.md is missing ${promised}`).toContain(promised);
+    expect(packs).not.toContain("Keep it synchronous");
   });
 
   it("scripting.md lists the page script calls, the site globals and codes", () => {
@@ -169,6 +197,9 @@ describe("the skill's hand-written references", () => {
       "`helpers_failed`",
       "`evaluate(fnOrString, arg?, { timeout? })`",
       "`cdp(method, params?, { timeout?, frame? })`",
+      // fetch's codes as its entry lists them, and clearing is not gated.
+      "`fetch` adds `fetch_failed`, `fetch_timeout` and `result_too_large`, and with `saveAs` the client's `file_exists` and `download_interrupted`",
+      "`clearSiteData`, which Page scripts does not gate, adds `origin_not_in_tab`, `clear_declined` and `approval_timeout`.",
     ])
       expect(scripting, `scripting.md is missing ${promised}`).toContain(
         promised,

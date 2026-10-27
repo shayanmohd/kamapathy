@@ -51,7 +51,7 @@ const SAYS = [
   "Every click, fill, press, scroll, drag and file action reports what it caused",
   "`requestSpace`, `help`, `sitePacks`, `siteContext`, `runSiteTool` and `runPageTool`, and connects on its first call.",
   "`opener`, `evaluate`, `fetch`, `cdp`, `events`, `clearSiteData` and `close`; a space also has `downloads`, `setHTTPCredentials` and `cdp`.",
-  "the script runs in your own Node.js; only what you pass to `evaluate` or `waitForFunction` runs in the page.",
+  "the script runs in your own Node.js; only what you pass to `evaluate`, `waitForFunction` or `cdp` runs in the page.",
   "An expression passed to `evaluate` runs with top-level `await` and may repeat declarations, but one whose value is a promise comes back as an empty object unless you `await` it; the function form awaits.",
   "Prefer snapshots and actions.",
   "A `cdp` command that reaches the page makes the tab's refs stale, so take a fresh snapshot after one.",
@@ -81,26 +81,6 @@ const RETIRED = [
   "cross_origin_frame", // no route answers it any more
   "nothing runs inside", // page.evaluate runs in the page
 ];
-
-// Taught before their code reaches this branch: phase 7's client methods and
-// commands, site packs' runPageTool and the two references task 10 writes.
-// Take a name out once it lands, after checking the skill against the code.
-const LANDING = new Set([
-  "command:evaluate",
-  "command:fetch",
-  "command:cdp",
-  "command:events",
-  "command:clear-site-data",
-  "entry:page.evaluate",
-  "entry:page.fetch",
-  "entry:page.cdp",
-  "entry:page.events",
-  "entry:page.clearSiteData",
-  "entry:space.cdp",
-  "entry:runPageTool",
-  "file:references/page-scripts.md",
-  "file:references/site-packs.md",
-]);
 
 const FLAGS = new Set([
   ...GLOBAL_FLAGS.flatMap(({ name }) => name.split(/,\s*/)),
@@ -179,8 +159,7 @@ describe("what the skill tells an agent", () => {
   });
 
   it("names only commands, methods, flags and references that exist", () => {
-    const missing = taught().filter((name) => !exists(name));
-    expect(missing.filter((name) => !LANDING.has(name))).toEqual([]);
+    expect(taught().filter((name) => !exists(name))).toEqual([]);
   });
 
   it("links every reference and stays short enough to read first", () => {
