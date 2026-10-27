@@ -943,6 +943,60 @@ describe("API schema", () => {
     }
   });
 
+  it("the body lane is declared and built", () => {
+    const item = route("POST /tabs/:id/cdp");
+    expect(item).toBeDefined();
+    expect(item.lane).toBe("body");
+    expect(item.limit).toBe(1048576);
+    expect(item.follow).toBe(true);
+    expect(item.label).toBe(false);
+    expect(item.since).toBe(4);
+    expect(item.budget).toEqual({ field: "timeoutMs" });
+    expect(Object.keys(item.body)).toEqual([
+      "method",
+      "params",
+      "frame",
+      "timeoutMs",
+    ]);
+    expect(item.body.method).toMatchObject({
+      kind: "string",
+      max: 64,
+      required: true,
+      since: 4,
+    });
+    expect(item.body.params).toMatchObject({ kind: "json", since: 4 });
+    expect(item.body.frame).toMatchObject({
+      kind: "string",
+      max: 160,
+      since: 4,
+    });
+    // The budget is the field's own maximum, as the router admits it.
+    expect(routeBudget(item)).toEqual({ budgetMs: 60000 });
+    // The router runs the lane only with a way to pick it from the body.
+    const stub = Object.fromEntries(
+      ROUTES.filter((entry) => entry.lane !== "preadmission").map((entry) => [
+        routeKey(entry),
+        {
+          handler: () => {},
+          ...(entry.lane === "body" ? { laneFor: () => "space" } : {}),
+        },
+      ]),
+    );
+    const built = buildRoutes(stub).find(
+      (entry) => entry.key === routeKey(item),
+    );
+    expect(built.lane).toBe("body");
+    expect(built.budgetMs).toBe(60000);
+    expect(() =>
+      buildRoutes({ ...stub, [routeKey(item)]: { handler: () => {} } }),
+    ).toThrow("POST /tabs/:id/cdp needs a lane for its body.");
+    // The route the client and the person read about.
+    expect(read("skills/kamapathy/references/api.md")).toContain(
+      "`/tabs/:id/cdp`",
+    );
+    expect(read("docs/automation.md")).toContain("`/tabs/:id/cdp`");
+  });
+
   it("the input routes and their batch steps declare label at level 3", () => {
     const inputs = [
       "click",

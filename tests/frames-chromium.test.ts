@@ -21,7 +21,15 @@ import {
   type FrameGroups,
 } from "../electron/agent/frames/groups";
 import { RefBook } from "../electron/agent/refs";
-import { createResolver, type Resolver } from "../electron/agent/resolve";
+import {
+  createResolver,
+  frameTargetOf,
+  inArea,
+  revealThroughFrames,
+  translatePoint,
+  type Resolver,
+} from "../electron/agent/resolve";
+import { parseSelector } from "../electron/agent/selectors";
 import type { AutomationController } from "../electron/agent/server";
 import {
   createSnapshots,
@@ -173,14 +181,26 @@ for (const mode of ISOLATION)
               { ...step(), namespace: "internal" },
             ),
           ).toEqual({ ok: true, readyState: "complete" });
-          expect(await opened.frames(step())).toHaveLength(frames);
+          const known = await opened.frames(step());
+          expect(known).toHaveLength(frames);
+          // Every frame has committed a document of its own site, so a read
+          // of it carries that document's origin rather than the empty one
+          // a frame starts with.
+          expect(
+            known.filter((frame) => /^https?:\/\//.test(frame.origin)),
+          ).toHaveLength(frames);
         },
         { timeout: 20000, interval: 100 },
       );
       refs = new RefBook();
-      resolver = createResolver({ refs });
       groups = createFrameGroups(opened, { refs, tabId: "tab-1" });
       const held = groups;
+      // The resolver searches this tab's frame groups, as it does behind a
+      // route, so a selector covers the whole page.
+      resolver = createResolver({
+        refs,
+        frames: { for: () => held, dispose: () => {} },
+      });
       snapshots = createSnapshots({
         controller: {
           state: { tabs: [{ id: "tab-1", url: origin + path, title: "" }] },
@@ -245,6 +265,37 @@ for (const mode of ISOLATION)
       listing.interactables.map((control) => control.label);
     const byLabel = (listing: Listing, label: string) =>
       listing.interactables.find((control) => control.label === label)!;
+    // One page operation with a selector, as a route runs it: the resolver
+    // picks the frame group and sends the operation to that group alone.
+    const act = (
+      operation: "fill" | "actionPoint",
+      selector: string,
+      extra: Record<string, unknown> = {},
+      mode?: "strict" | "first",
+    ) => {
+      const parsed = parseSelector(selector);
+      if (!parsed.ok || parsed.ast.kind === "ref")
+        throw new Error(`Not a search: ${selector}`);
+      return resolver.run(
+        "tab-1",
+        session!,
+        operation,
+        {
+          selector,
+          query: {
+            ast: parsed.ast,
+            ...(mode === undefined ? {} : { mode }),
+          },
+          ...extra,
+        },
+        { deadline: Date.now() + 20000, namespace: "frames" },
+      );
+    };
+    // The frame a path names, once the groups have been bound.
+    const frameAt = async (path: string) => {
+      await groups!.groups({ deadline: Date.now() + 20000 });
+      return groups!.frameAt(path)!.frameId;
+    };
 
     it("reads a cross-site frame and a same-site frame on another port with frame-bound refs", async () => {
       await open("/frames/pay", 3);
@@ -455,4 +506,269 @@ for (const mode of ISOLATION)
       expect(byLabel(next, "Busy widget").content).toBe("unavailable");
       expect(byLabel(next, "Calm widget").content).toBe("read");
     }, 120000);
+    it("searches the top document, then frames in owner order", async () => {
+      await open("/frames/pay", 3);
+      const card = await frameAt("0");
+      const billing = await frameAt("1");
+      // A selector the page's own document answers never reads a frame.
+      expect(
+        await act("actionPoint", "css=h1", { kind: "click" }),
+      ).toMatchObject({ ok: true });
+      expect(groups!.contentOf(card)).toBe("pending");
+      expect(groups!.contentOf(billing)).toBe("pending");
+      // Nothing in the page's own document: the frames follow in owner
+      // order, so the field of the first frame takes the value.
+      expect(
+        await act("fill", "css=input", { value: "4111111111111111" }, "first"),
+      ).toMatchObject({ ok: true });
+      expect(groups!.contentOf(card)).toBe("read");
+      let listing = await take();
+      // The card number is a secret, so only the frame that holds it says
+      // that it has a value at all.
+      expect(byLabel(listing, "Card number")).toMatchObject({
+        valueHidden: true,
+      });
+      expect(byLabel(listing, "Postcode").value).toBeUndefined();
+      // A selector only the second frame holds resolves there.
+      expect(
+        await act("fill", "css=#postcode", { value: "AB1 2CD" }, "first"),
+      ).toMatchObject({ ok: true });
+      listing = await take();
+      expect(byLabel(listing, "Postcode").value).toBe("AB1 2CD");
+    }, 60000);
+
+    it("a text selector passes a covered top-page duplicate for the frame's button", async () => {
+      await open("/frames/covered", 2);
+      const card = await frameAt("0");
+      // The page's own duplicate is under an overlay, so it holds nothing
+      // at the pointer level and the frame's own match answers.
+      const found = await act("actionPoint", "text=Pay now", { kind: "click" });
+      expect(found.blocked).toBeUndefined();
+      expect(found.point).toMatchObject({
+        x: expect.any(Number),
+        y: expect.any(Number),
+      });
+      expect(groups!.contentOf(card)).toBe("read");
+      // The point is inside the frame's own document, far below the overlay
+      // the page's own duplicate sits under.
+      const box = found.box as { top: number };
+      expect(box.top).toBeGreaterThan(100);
+      // The page's own duplicate is the covered one.
+      const covered = await act("actionPoint", "css=#duplicate", {
+        kind: "click",
+      });
+      expect(covered.blocked).toMatchObject({ blocker: "covered" });
+    }, 60000);
+
+    // Section 9's actions: the element's own point from the world of its
+    // frame, mapped out through every owner, and the input sent on the top
+    // page session at what comes out, as section 5's dispatcher sends it.
+    const focusEmulation = async () => {
+      const sessions = new Set<string | undefined>([undefined]);
+      for (const frame of await session!.frames(step()))
+        if (frame.sessionId !== undefined) sessions.add(frame.sessionId);
+      for (const sessionId of sessions)
+        await session!.send(
+          "Emulation.setFocusEmulationEnabled",
+          { enabled: true },
+          { ...step(), ...(sessionId === undefined ? {} : { sessionId }) },
+        );
+    };
+    // One page operation on a ref, in the world of the frame that issued it.
+    const inHome = (
+      operation: "actionPoint" | "fillPrepare" | "fillRead" | "input",
+      ref: string,
+      extra: Record<string, unknown> = {},
+    ) => {
+      const home = groups!.homeFrame(ref)!;
+      return resolver.run(
+        "tab-1",
+        session!,
+        operation,
+        { ref, ...extra },
+        {
+          deadline: Date.now() + 20000,
+          namespace: "frames",
+          frameId: home.frameId,
+        },
+      );
+    };
+    const target = (ref: string) =>
+      frameTargetOf(groups!, groups!.homeFrame(ref)!.frameId);
+    // The native input of one gesture, on the tab's own page session.
+    const sendMouse = async (point: { x: number; y: number }) => {
+      for (const type of ["mouseMoved", "mousePressed", "mouseReleased"])
+        await session!.send(
+          "Input.dispatchMouseEvent",
+          {
+            type,
+            x: point.x,
+            y: point.y,
+            button: type === "mouseMoved" ? "none" : "left",
+            buttons: type === "mousePressed" ? 1 : 0,
+            clickCount: type === "mouseMoved" ? 0 : 1,
+            modifiers: 0,
+          },
+          step(),
+        );
+    };
+    const sendKey = async (key: string, code: string) => {
+      for (const type of ["keyDown", "keyUp"])
+        await session!.send(
+          "Input.dispatchKeyEvent",
+          {
+            type,
+            key,
+            code,
+            windowsVirtualKeyCode: key === "Enter" ? 13 : 0,
+            modifiers: 0,
+          },
+          step(),
+        );
+    };
+    // Where a ref's own point lands in the top viewport, through its owners.
+    const placeOf = async (ref: string, kind = "click") => {
+      const found = await inHome("actionPoint", ref, { kind, force: false });
+      expect(found).toMatchObject({ ok: true });
+      expect(found.blocked).toBeUndefined();
+      return {
+        found,
+        placed: await translatePoint(
+          session!,
+          target(ref),
+          found.point as { x: number; y: number },
+          step(),
+        ),
+      };
+    };
+    const clickRef = async (ref: string) => {
+      const { placed } = await placeOf(ref);
+      expect(placed.covered).toBeUndefined();
+      expect(inArea(placed.point, placed.area)).toBe(true);
+      await sendMouse(placed.point);
+      return placed;
+    };
+    const counters = async (ref: string) =>
+      (await inHome("input", ref)) as {
+        mouse?: number;
+        key?: number;
+      };
+    const topCounters = () =>
+      resolver.run(
+        "tab-1",
+        session!,
+        "input",
+        {},
+        { deadline: Date.now() + 20000, namespace: "frames" },
+      ) as Promise<{ mouse?: number; key?: number }>;
+
+    it("clicks, fills and presses Enter in a cross-site frame and in a same-site frame on another port", async () => {
+      await open("/frames/pay", 3);
+      await focusEmulation();
+      const listing = await take();
+      const before = await topCounters();
+      for (const [label, button, pressed] of [
+        ["Card number", "Pay now", "Paid"],
+        ["Postcode", "Save billing", "Billing saved"],
+      ] as const) {
+        const field = byLabel(listing, label).ref;
+        const armed = await counters(field);
+        await clickRef(byLabel(listing, button).ref);
+        // The frame that holds the target counted the press, once, and the
+        // page's own document counted none of it.
+        const after = await counters(field);
+        expect((after.mouse ?? 0) - (armed.mouse ?? 0), label).toBe(1);
+        expect(await take().then((now) => labels(now)), label).toContain(
+          pressed,
+        );
+        // The field takes text at the caret the frame's own world prepared.
+        const value = label === "Card number" ? "4111 1111 1111 11" : "AB1 2CD";
+        expect(
+          await inHome("fillPrepare", field, { value }),
+          label,
+        ).toMatchObject({ ok: true });
+        await session!.send("Input.insertText", { text: value }, step());
+        expect(
+          await inHome("fillRead", field, { value, previous: "" }),
+          label,
+        ).toMatchObject({ ok: true, match: "exact" });
+      }
+      // Enter reaches the field the frame focused, and its own handler runs.
+      const card = byLabel(listing, "Card number").ref;
+      expect(
+        await inHome("fillPrepare", card, { value: "4111 1111 1111 11" }),
+      ).toMatchObject({ ok: true });
+      const keys = await counters(card);
+      await sendKey("Enter", "Enter");
+      expect((await counters(card)).key).toBe((keys.key ?? 0) + 1);
+      expect((await take()).text).toContain("Entered 17 digits");
+      // Every press and key went out on the tab's own page session, so the
+      // page's own counters never saw any of it.
+      expect((await topCounters()).mouse).toBe(before.mouse ?? 0);
+      expect((await topCounters()).key).toBe(before.key ?? 0);
+    }, 60000);
+
+    it("clicks in a nested cross-site frame scaled to 0.5", async () => {
+      await open("/frames/half", 3);
+      const listing = await take();
+      // The grid sits two boundaries in: the half size frame from another
+      // site, then a frame of this page's own name on another port.
+      const button = listing.interactables.find(
+        (control) => control.label === "Target",
+      )!;
+      expect(button.frame).toBe("0/0");
+      const inner = target(button.ref);
+      expect(inner.owners).toHaveLength(2);
+      const placed = await clickRef(button.ref);
+      // Half of the frame's own pixels, from the owner's content box.
+      expect(placed.scaleX).toBeCloseTo(0.5, 5);
+      expect(placed.point.x).toBeCloseTo(5 + 150 * 0.5, 1);
+      // The press landed on the control, not beside it.
+      expect((await take()).text).toContain("Grid hit Target");
+    }, 60000);
+
+    it("scrolls a frame 1600 px below the fold into view before clicking", async () => {
+      await open("/frames/far", 2);
+      const listing = await take();
+      const button = byLabel(listing, "Pay now").ref;
+      const scrollY = () =>
+        resolver
+          .run(
+            "tab-1",
+            session!,
+            "info",
+            {},
+            { deadline: Date.now() + 20000, namespace: "frames" },
+          )
+          .then(
+            (state) => (state as { scroll?: { y?: number } }).scroll?.y ?? 0,
+          );
+      expect(await scrollY()).toBe(0);
+      // The frame's own world sees the button, but no part of the frame is
+      // on screen, so the point maps outside every owner's visible area.
+      const first = await placeOf(button);
+      expect(inArea(first.placed.point, first.placed.area)).toBe(false);
+      // The outermost owner is brought into view first, then the element's
+      // own point is measured again and the press lands on it.
+      await revealThroughFrames(session!, target(button), step());
+      expect(await scrollY()).toBeGreaterThan(1000);
+      await clickRef(button);
+      expect((await take()).text).toContain("Paid");
+    }, 60000);
+
+    it("an element covering an owner is reported as covered with its interceptor", async () => {
+      await open("/frames/sealed", 2);
+      const listing = await take();
+      // The control sits under the veil the page draws over its frame, so
+      // the world around the owner names what covers it rather than letting
+      // the press through.
+      const { placed } = await placeOf(byLabel(listing, "Target").ref);
+      expect(placed.point).toMatchObject({ x: 150, y: 100 });
+      expect(placed.covered).toBe(true);
+      // The page's own element, not the frame it covers.
+      expect(placed.interceptor).toMatchObject({ tag: "div", role: "div" });
+      // The control below the veil, in the same frame, is reached as usual.
+      await clickRef(byLabel(listing, "Decoy").ref);
+      expect((await take()).text).toContain("Grid hit Decoy");
+    }, 60000);
   });

@@ -20,6 +20,7 @@ import type { PageScripts } from "./page-scripts";
 import type { AgentPresence } from "./presence";
 import type { Receipts } from "./receipts";
 import type { RefBook } from "./refs";
+import type { SpaceCdpFilter } from "./space-cdp";
 import type { AutomationController } from "./server";
 import type { TabSessions } from "./session/tab-sessions";
 import type { TabLog } from "./tab-log";
@@ -56,6 +57,9 @@ export interface RouteImpl {
   // segment belongs to, which the server authorizes instead of the path's.
   // Throws its own 404 when the id is unknown.
   resolve?(parts: string[]): { spaceId?: string; tabId?: string };
+  // A route whose lane its own body decides: which lane this request takes,
+  // after the body is validated.
+  laneFor?(body: Record<string, unknown> | undefined): "space" | "none";
   // Runs after admission, before the body is read.
   beforeBody?(
     call: Pick<RouteCall, "request" | "response" | "space" | "tab">,
@@ -67,7 +71,7 @@ export interface Route extends RouteImpl {
   key: string;
   method: "GET" | "POST" | "DELETE";
   path: string[];
-  lane: "space" | "server" | "none";
+  lane: "space" | "server" | "none" | "body";
   budgetMs: number;
   // A route whose budget depends on its body: what this request gets, which
   // never widens the maximum admission counted.
@@ -114,8 +118,11 @@ export function buildRoutes(impls: Record<string, RouteImpl>): Route[] {
     const key = routeKey(schema);
     const impl = impls[key];
     if (!impl) throw new Error(`${key} has no handler.`);
-    if (schema.lane === "body" || schema.lane === "preadmission")
+    if (schema.lane === "preadmission")
       throw new Error(`${key} uses a lane this router does not run.`);
+    // A body lane is picked per request, so the route has to say how.
+    if (schema.lane === "body" && !impl.laneFor)
+      throw new Error(`${key} needs a lane for its body.`);
     const { budgetMs, budgetOf } = routeBudget(schema);
     return {
       ...impl,
@@ -152,6 +159,8 @@ export interface RouteDeps {
   events: EventRecording;
   /** Section 9's frame groups, one per live tab session. */
   frames: FrameGroupsByTab;
+  /** Section 8's filter, the only path a protocol command takes. */
+  cdp: SpaceCdpFilter;
 }
 
 export function send(response: ServerResponse, status: number, data: unknown) {

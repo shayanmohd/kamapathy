@@ -441,6 +441,33 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     expect(below.interceptor).toBeUndefined();
   }, 20000);
 
+  it("the frame hit test runs again before every press", async () => {
+    await open("/frames/covered");
+    await bindOwner("f-pay", () => document.getElementById("pay"));
+    const inner = { x: 100, y: 200 };
+    const first = await operate("frameBox", { key: "f-pay", point: inner });
+    expect(first).toMatchObject({ ok: true, point: { x: 100, y: 260 } });
+    // The page moves the frame between the checks. The same point of the
+    // frame's own document now sits somewhere else, so a press at the point
+    // measured before would land beside the control: the owner is measured
+    // and hit-tested again for every press, never once per action.
+    await page.evaluate(() => {
+      (document.getElementById("pay") as HTMLElement).style.top = "180px";
+    });
+    const second = await operate("frameBox", { key: "f-pay", point: inner });
+    expect(second).toMatchObject({ ok: true, point: { x: 100, y: 380 } });
+    expect(second.box).toMatchObject({ x: 0, y: 180 });
+    // The point the first check gave is now the overlay the page draws over
+    // the top of the viewport, which the second hit test names.
+    const above = await operate("frameBox", {
+      key: "f-pay",
+      point: { x: 100, y: -120 },
+    });
+    expect(above).toMatchObject({ ok: true, point: { x: 100, y: 60 } });
+    expect(above.covered).toBe(true);
+    expect(above.interceptor).toMatchObject({ tag: "div" });
+  }, 20000);
+
   it("leaves out a 1 by 1 cross-origin frame", async () => {
     await open("/frames/tracker");
     const context = { frameContext: { group: "", tier: 0 } };

@@ -12,6 +12,7 @@ import { toApiError } from "../electron/agent/errors";
 import { CANDIDATE_REFS, REF_BLOCK, RefBook } from "../electron/agent/refs";
 import {
   LEVELS,
+  axSourcesFor,
   createResolver,
   waitMode,
   type Resolver,
@@ -310,6 +311,7 @@ describe("accessibility filtering", () => {
         parentFrameId: "main",
         origin: "https://oop.example",
         sessionId: "child-1",
+        ownSession: true,
         crossOrigin: true,
       }),
       frame({
@@ -327,6 +329,19 @@ describe("accessibility filtering", () => {
       { frameId: "same" },
       { frameId: "deep" },
     ]);
+    // A frame group's own root is read by its frame id, or in its own
+    // session when Chromium runs it in its own process, never as the top
+    // document, and the frames inside it follow on that session.
+    expect(axSourcesFor(frames, "main")).toEqual([
+      {},
+      { frameId: "same" },
+      { frameId: "deep" },
+    ]);
+    expect(axSourcesFor(frames, "other")).toEqual([
+      { frameId: "other" },
+      { frameId: "inOther" },
+    ]);
+    expect(axSourcesFor(frames, "oop")).toEqual([{ sessionId: "child-1" }]);
   });
 });
 

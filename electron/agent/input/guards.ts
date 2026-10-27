@@ -164,14 +164,27 @@ export async function blockedFrames(
   return new Set(frames.filter(refusesInput).map((frame) => frame.frameId));
 }
 
-// What agents are told about a frame their input may not reach. A frame of
-// one of the person's extensions is named for them, as section 17 says;
-// every other blocked frame answers for itself. A registry read that fails,
-// or runs out of time, leaves the plain refusal rather than another error.
+// What agents are told about a frame their input may not reach. Section 9
+// names the frame, and a frame of one of the person's extensions is named
+// for them as well, as section 17 says; every other blocked frame answers
+// for itself. A registry read that fails, or runs out of time, leaves the
+// plain refusal rather than another error.
 const POINT_MESSAGE =
   "This point belongs to an extension or an internal page, which agent input never reaches. Act on the page itself.";
 const FOCUS_MESSAGE =
   "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.";
+export function refuseFrame(
+  message: string,
+  named: { frame?: string; extension?: string },
+): never {
+  const frame = named.frame === undefined ? {} : { frame: named.frame };
+  if (named.extension === undefined)
+    return fail("input_target_blocked", message, frame);
+  return fail("input_target_blocked", extensionInputMessage(named.extension), {
+    ...frame,
+    extension: named.extension,
+  });
+}
 async function refusePoint(
   session: TabSession,
   frameId: string,
@@ -182,11 +195,9 @@ async function refusePoint(
     () => undefined,
   );
   const extension = blocked && extensionFrame(blocked.url, names);
-  if (!blocked || !extension)
-    return fail("input_target_blocked", POINT_MESSAGE);
-  return fail("input_target_blocked", extensionInputMessage(extension.name), {
-    frame: blocked.path,
-    extension: extension.name,
+  return refuseFrame(POINT_MESSAGE, {
+    ...(blocked ? { frame: blocked.path } : {}),
+    ...(extension ? { extension: extension.name } : {}),
   });
 }
 
@@ -265,14 +276,7 @@ export function checkKeyTarget(
   chord?: Chord,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (focused.blockedFrame) {
-    const name = focused.extension;
-    if (name === undefined) return fail("input_target_blocked", FOCUS_MESSAGE);
-    return fail("input_target_blocked", extensionInputMessage(name), {
-      ...(focused.frame === undefined ? {} : { frame: focused.frame }),
-      extension: name,
-    });
-  }
+  if (focused.blockedFrame) refuseFrame(FOCUS_MESSAGE, focused);
   if (!chord || !PICKER_KINDS.includes(focused.kind)) return;
   if (!opensPicker(chord, platform)) return;
   const use = pickerUse(focused.kind as PickerKind);

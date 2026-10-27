@@ -104,12 +104,14 @@ const urlTimeout = (timeoutMs: number, lastUrl: string, expected?: string) =>
     },
   );
 
-// A selector wait that ran out, with what its last check saw.
+// A selector wait that ran out, with what its last check saw and the frames
+// section 9 left out of it.
 const selectorTimeout = (
   timeoutMs: number,
   selector: string,
   state: WaitState,
   seen: SelectorCounts,
+  unread = 0,
 ) =>
   new ApiError(
     "wait_timeout",
@@ -121,6 +123,7 @@ const selectorTimeout = (
       state,
       matched: seen.matched,
       visible: seen.visible,
+      ...(unread > 0 ? { unreadFrames: unread } : {}),
     },
   );
 
@@ -385,6 +388,8 @@ export function createWaits(deps: WaitsDeps) {
         : deadline;
     // What the last check saw, which the answer and the timeout report.
     let seen: SelectorCounts = { matched: 0, visible: 0 };
+    // The frames the last check was left without, which its timeout names.
+    let unread = 0;
     // The target as the page reads it. A ref carries the state beside it; a
     // selector carries it in the query, with the mode and level that state
     // asks for, so a hidden duplicate never blocks a visible wait.
@@ -426,10 +431,15 @@ export function createWaits(deps: WaitsDeps) {
               body.selector,
               body.state,
               seen,
+              unread,
             );
           });
         const counts = observation.counts as SelectorCounts | undefined;
         if (counts) seen = counts;
+        unread =
+          typeof observation.unreadFrames === "number"
+            ? observation.unreadFrames
+            : 0;
         if (observation.matched) {
           // Authorized once more before the answer, so a takeover at the
           // last moment leaves no activity line behind.
@@ -452,6 +462,7 @@ export function createWaits(deps: WaitsDeps) {
             body.selector,
             body.state,
             seen,
+            unread,
           );
         await run.park(() =>
           nap(Math.min(TICK_MS, deadline - Date.now()), hold),

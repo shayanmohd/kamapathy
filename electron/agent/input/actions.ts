@@ -15,7 +15,15 @@
 // 1.25, 1.5 and 2 and hit the right element every time, while the same
 // point multiplied by getZoomFactor() missed above zoom 1, so nothing here
 // scales a point.
-import { finitePoint, reboundOf, remaining, type Actions } from "../actions";
+import {
+  finitePoint,
+  frameNote,
+  noteFrame,
+  reboundOf,
+  remaining,
+  type Actions,
+  type RanIn,
+} from "../actions";
 import type { Authority } from "../authority";
 import { ApiError, fail } from "../errors";
 import {
@@ -26,6 +34,14 @@ import {
 } from "../extension-frames";
 import type { FrameGroupsByTab } from "../frames/groups";
 import type { Run } from "../http";
+import {
+  frameTargetOf,
+  inArea,
+  revealThroughFrames,
+  translatePoint,
+  type FrameTarget,
+  type PlacedPoint,
+} from "../resolve";
 import type { Level } from "../dom/select";
 import {
   classifyFill,
@@ -69,6 +85,7 @@ import {
   confirmDelivery,
   runAttempts,
   settleAfterInput,
+  unreadOf,
   type AttemptContext,
   type AttemptResult,
   type LoopBlocker,
@@ -384,9 +401,12 @@ export interface InputActionDeps {
   authority: Authority;
   actions: Pick<Actions, "readyContents" | "evaluatePage" | "dispatcher">;
   dispatchers: InputDispatchers;
-  platform?: NodeJS.Platform;
-  /** Section 9's frame groups, which say which frame holds the focus. */
+  /**
+   * Section 9's frame groups, for targets and the focus inside a frame, and
+   * for the path a refused frame is named by.
+   */
   frames?: FrameGroupsByTab;
+  platform?: NodeJS.Platform;
   /** Section 17's loaded extensions, which name the frame a refusal is about. */
   extensions?: ExtensionNames;
 }
@@ -521,6 +541,9 @@ const MAX_FILL_VALUE = 200;
 const MAX_DETAIL = 200;
 // What one field action ended with: the fields of its own answer.
 type FieldOutcome = Record<string, unknown>;
+// Where section 9 puts an action's target: the frame it sits in, or the
+// blocker that frame is not ready.
+type FramePlace = { target?: FrameTarget; blocked?: LoopBlocker };
 
 export function createInputActions(deps: InputActionDeps): InputActions {
   const { authority, actions } = deps;
@@ -532,12 +555,101 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     extensions: deps.extensions ?? NO_EXTENSION_NAMES,
   };
   const platformName = deps.platform ?? process.platform;
+  // Section 9: where the target of an action sits. A target in the page's
+  // own document answers nothing here, so a page without frames pays for
+  // none of it.
+  const framePlace = async (
+    id: string,
+    session: TabSession,
+    ran: RanIn,
+    step: Step,
+  ): Promise<FramePlace> => {
+    const frames = deps.frames?.for(id);
+    if (!frames || ran.frameId === undefined) return {};
+    if (ran.frameId === (await session.mainFrameId(step))) return {};
+    const group = frames.groupOf(ran.frameId);
+    const content = frames.contentOf(ran.frameId);
+    // A frame the last pass could not place keeps the path its ref carried.
+    const path = frames.pathOf(ran.frameId) ?? group?.path ?? ran.path;
+    const named = path ? { frame: path } : {};
+    const known = (await session.knownFrames(step)).find(
+      (frame) => frame.frameId === ran.frameId,
+    );
+    if (content === "blocked" || known?.blocked)
+      fail(
+        "input_target_blocked",
+        "This point belongs to an extension or an internal page, which agent input never reaches. Act on the page itself.",
+        named,
+      );
+    const unready = (
+      detail: "attaching" | "navigating" | "not_responding",
+    ): { blocked: LoopBlocker } => ({
+      blocked: { blocker: "frame_not_ready", detail, ...named },
+    });
+    // An owner Kamapathy has not bound yet is a frame it cannot place.
+    if (!group) return unready("attaching");
+    if (!known || known.unavailable || content === "unavailable")
+      return unready("not_responding");
+    if (known.navigating) return unready("navigating");
+    const target = frameTargetOf(frames, ran.frameId);
+    return target.owners.length ? { target } : {};
+  };
+  // The frame a ref lives in, before any page call: a frame that cannot
+  // take input is answered without touching it, since a page call into a
+  // frame whose session has gone fails as a lost connection instead.
+  const refPlace = async (
+    id: string,
+    session: TabSession,
+    target: TargetPayload | undefined,
+    step: Step,
+  ): Promise<FramePlace> => {
+    const frames = deps.frames?.for(id);
+    const ref = (target as { ref?: unknown } | undefined)?.ref;
+    if (!frames || typeof ref !== "string") return {};
+    await frames.bind(step);
+    const home = frames.homeFrame(ref);
+    if (!home) return {};
+    return framePlace(
+      id,
+      session,
+      { frameId: home.frameId, path: home.path ?? home.group },
+      step,
+    );
+  };
   // The modifiers the tab is holding, which join a chord's own.
   const heldModifiers = (dispatcher: InputDispatcher): Modifier[] =>
     dispatcher.state
       .heldKeys()
       .map((key) => key.modifier)
       .filter((modifier): modifier is Modifier => modifier !== undefined);
+  // Section 9: the frame the keys reach, found by following the active
+  // element from the top document through each owner. A frame agents never
+  // reach refuses the keys before anything is sent.
+  const focusedFrame = async (
+    id: string,
+    session: TabSession,
+    step: Step,
+  ): Promise<{ frameId: string; path: string } | undefined> => {
+    const frames = deps.frames?.for(id);
+    if (!frames) return undefined;
+    // A page with no frame group of its own holds the focus itself, so
+    // nothing is read for it.
+    if ((await frames.groups(step)).length < 2) return undefined;
+    const found = await frames.focusedFrame(step);
+    // The key guards hold the one rule for a frame input never reaches, so
+    // a frame of one of the person's extensions is named for them here too.
+    if (found.blocked)
+      checkKeyTarget(
+        {
+          kind: "other",
+          blockedFrame: true,
+          ...(await blockedFrameNames(session, found.path, step)),
+        },
+        undefined,
+        platformName,
+      );
+    return found.path === "" ? undefined : found;
+  };
   // The focused control as the page reports it, which the key guards read:
   // a key that would open a native picker, or one aimed at a frame agents
   // never reach, is refused before anything is sent.
@@ -546,6 +658,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     session: TabSession,
     deadline: number,
     step: Step,
+    frameId?: string,
   ): Promise<FocusedControl> => {
     const found = await actions.evaluatePage(
       id,
@@ -554,6 +667,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       {},
       deadline,
       step,
+      frameId,
     );
     const kind = typeof found.kind === "string" ? found.kind : "none";
     if (found.blockedFrame !== true) return { kind };
@@ -563,10 +677,26 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       ...(await focusedExtension(id, session, step)),
     };
   };
-  // The extension whose page holds the focus, as section 17 names it for a
-  // refusal: which frame that is comes from section 9, and the URL it
-  // committed from the registry. Anything the two cannot answer leaves the
-  // plain refusal.
+  // How a refusal names a frame input never reaches: section 9's path for
+  // it, and section 17's extension when the page it holds is one of the
+  // person's. Only the registry holds the URL a blocked frame committed.
+  const blockedFrameNames = async (
+    session: TabSession,
+    path: string,
+    step: Step,
+  ): Promise<{ frame?: string; extension?: string }> => {
+    const named = path === "" ? {} : { frame: path };
+    // A registry read that fails, or runs out of time, leaves the plain
+    // refusal rather than another error.
+    const urls = await blockedFrameUrls(session, step).catch(() => undefined);
+    const url = urls?.get(path);
+    const extension =
+      url === undefined ? undefined : extensionFrame(url, guards.extensions);
+    return extension ? { ...named, extension: extension.name } : named;
+  };
+  // The frame holding focus, when it is one agents never reach: section 9
+  // says which frame that is, and the naming above how to answer for it.
+  // Anything the two cannot answer leaves the plain refusal.
   const focusedExtension = async (
     id: string,
     session: TabSession,
@@ -577,10 +707,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     try {
       const focus = await groups.focusedFrame(step);
       if (!focus.blocked) return {};
-      const url = (await blockedFrameUrls(session, step)).get(focus.path);
-      const extension =
-        url === undefined ? undefined : extensionFrame(url, guards.extensions);
-      return extension ? { frame: focus.path, extension: extension.name } : {};
+      return await blockedFrameNames(session, focus.path, step);
     } catch {
       return {};
     }
@@ -594,6 +721,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     action: KeyboardAction,
     deadline: number,
     step: Step,
+    frameId?: string,
   ) => {
     try {
       return await actions.evaluatePage(
@@ -606,6 +734,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         },
         deadline,
         step,
+        frameId,
       );
     } catch (error) {
       if (
@@ -669,6 +798,10 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     if (query) query.level = ACTION_LEVELS[kind];
     const selector = (action.target as { selector?: string }).selector;
 
+    // The frame the resolution ran in, which section 9 places the point
+    // through. Each read records it again, so a target that moved to
+    // another frame between attempts is followed.
+    const ran: RanIn = {};
     const read = (
       operation: "actionPoint" | "stableBox" | "scrollRequest",
       extra: Record<string, unknown> = {},
@@ -681,6 +814,8 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         { ...payload, ...extra },
         run.deadline,
         at,
+        undefined,
+        ran,
       );
     // The point and the checks, with a selector that matched nothing folded
     // into the blocker the loop waits out.
@@ -695,6 +830,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(selector === undefined ? {} : { selector }),
+            ...unreadOf(error.fields),
           },
         };
       }
@@ -758,18 +894,56 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     // with a delay in each gap. The held buttons and modifiers travel with
     // every event, so a click while the agent holds one behaves as a
     // person's would.
-    const press = async (context: AttemptContext, point: Point) => {
+    // The document a frame holds, so a new one after input started is told
+    // from the one the point was measured in.
+    const documentOf = async (frame: FrameTarget, at: Step) =>
+      (await session.knownFrames(at)).find(
+        (item) => item.frameId === frame.frameId,
+      )?.loaderId;
+    const press = async (
+      context: AttemptContext,
+      point: Point,
+      inside?: { frame: FrameTarget; local: Point; document?: string },
+    ) => {
       const bit = BUTTON_BITS[button];
       const epoch = session.epoch;
       await moveTo(point, epoch);
       for (let click = 1; click <= action.clickCount; click += 1) {
         if (click > 1) {
           if (action.delayMs) await pause(action.delayMs);
+          // A new document in the target's frame after input started is
+          // section 9's page_changed, answered before the target is looked
+          // for again in a document it no longer belongs to.
+          if (
+            inside &&
+            (await documentOf(inside.frame, gesture)) !== inside.document
+          )
+            fail(
+              "page_changed",
+              "The frame holding the target loaded another page during this action. Inspect it before continuing.",
+              inside.frame.path ? { frame: inside.frame.path } : {},
+            );
           // The checks run again before a later press. Nothing already sent
           // is repeated, so a target that is now covered ends the action.
           const again = await look(gesture);
           if (again.blocked || !finitePoint(again.point))
             context.gesture.refuse();
+          // Section 9's hit test runs again too: an owner that moved, or
+          // something drawn over it, ends the action where it stands.
+          if (inside) {
+            const now = await translatePoint(
+              session,
+              inside.frame,
+              inside.local,
+              gesture,
+            );
+            if (
+              now.covered ||
+              now.point.x !== point.x ||
+              now.point.y !== point.y
+            )
+              context.gesture.refuse();
+          }
           await aim(point, gesture);
         }
         guard();
@@ -803,11 +977,21 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     // Section 5's delivery check for this tab: the counters come from the
     // page, and the gesture goes out again only on positive evidence that no
     // frame received it.
-    const deliver = (send: () => Promise<void>) =>
+    const deliver = (send: () => Promise<void>, frame?: FrameTarget) =>
       confirmDelivery({
         kind: "mouse",
+        // The counters of the frame that holds the target: a press inside a
+        // frame never reaches the page's own document.
         counters: () =>
-          actions.evaluatePage(id, session, "input", {}, step.deadline, step),
+          actions.evaluatePage(
+            id,
+            session,
+            "input",
+            {},
+            step.deadline,
+            step,
+            frame?.frameId,
+          ),
         frames: async () => {
           await actions.evaluatePage(
             id,
@@ -816,6 +1000,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
             {},
             Math.min(step.deadline, Date.now() + 2000),
             step,
+            frame?.frameId,
           );
         },
         epoch: () => session.epoch,
@@ -855,12 +1040,47 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         done: false,
         blocked: blocked as LoopBlocker,
       });
+      // Section 9: a ref names its frame before any page call, so a frame
+      // that cannot take input is answered without being touched.
+      const early = await refPlace(id, session, action.target, step);
+      if (early.blocked) return stop(early.blocked);
       let found = await look();
       if (found.blocked) return stop(found.blocked);
+      // The frame the target sits in, which the point travels out of and
+      // which must be ready to take the input.
+      const place = early.target
+        ? early
+        : await framePlace(id, session, ran, step);
+      if (place.blocked) return stop(place.blocked);
+      const frame = place.target;
+      const named = frame?.path ? { frame: frame.path } : {};
+      if (frame) noteFrame(run, frameNote(frame, contents.getURL()));
+      // A wheel for a target inside a frame goes to the translated point,
+      // with the delta the owners scale the frame's own pixels by.
+      const gestureFor = async (request: ScrollRequest) => {
+        if (!frame) return request;
+        const at = await translatePoint(
+          session,
+          frame,
+          { x: request.x, y: request.y },
+          step,
+        );
+        return {
+          ...request,
+          x: at.point.x,
+          y: at.point.y,
+          deltaX: request.deltaX * at.scaleX,
+          deltaY: request.deltaY * at.scaleY,
+        };
+      };
       if (found.scroll) {
         let request = found.scroll as ScrollRequest;
         for (;;) {
-          await scrollToPoint({ request, dispatcher, step });
+          await scrollToPoint({
+            request: await gestureFor(request),
+            dispatcher,
+            step,
+          });
           context.scrolls += 1;
           await holdStill();
           const next = await read("scrollRequest", {
@@ -883,15 +1103,42 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         found = await look();
         if (found.blocked) return stop(found.blocked);
       }
-      const point = found.point;
-      if (!finitePoint(point)) return stop({ blocker: "outside_viewport" });
+      const local = found.point;
+      if (!finitePoint(local)) return stop({ blocker: "outside_viewport" });
+      let placed: PlacedPoint | undefined;
+      if (frame) {
+        placed = await translatePoint(session, frame, local, step);
+        if (placed.covered)
+          return stop({
+            blocker: "covered",
+            ...(placed.interceptor ? { interceptor: placed.interceptor } : {}),
+            ...named,
+          });
+        // A boundary leaves the point off screen: each owner is brought into
+        // view, outermost first, and the next attempt measures again.
+        if (!inArea(placed.point, placed.area)) {
+          await revealThroughFrames(session, frame, step);
+          context.scrolls += 1;
+          return stop({ blocker: "outside_viewport", ...named });
+        }
+      }
+      const point = placed?.point ?? local;
       await aim(point, step);
       const rest = { point, ...reboundOf(found) };
       if (kind === "hover") {
         await moveTo(point, session.epoch);
         return { done: true, value: { ...rest, pressed: false } };
       }
-      await deliver(() => press(context, point));
+      const document = frame ? await documentOf(frame, step) : undefined;
+      await deliver(
+        () =>
+          press(
+            context,
+            point,
+            frame ? { frame, local, ...(document ? { document } : {}) } : undefined,
+          ),
+        frame,
+      );
       return { done: true, value: { ...rest, pressed: true } };
     };
 
@@ -970,12 +1217,25 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         ? { targetPosition: action.targetPosition }
         : {}),
     };
+    // The frame both ends were measured in, which the two points travel
+    // out of together.
+    const ran: RanIn = {};
     const evaluate = (
       operation: "actionPoint" | "stableBox" | "input" | "frame",
       body: Record<string, unknown>,
       at: Step = step,
       deadline = run.deadline,
-    ) => actions.evaluatePage(id, session, operation, body, deadline, at);
+    ) =>
+      actions.evaluatePage(
+        id,
+        session,
+        operation,
+        body,
+        deadline,
+        at,
+        undefined,
+        ran,
+      );
     // The two points, with a selector that matched nothing folded into the
     // blocker the loop waits out. Either end's selector may be the one.
     const look = async (
@@ -997,6 +1257,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(typeof selector === "string" ? { selector } : {}),
+            ...unreadOf(error.fields),
           },
         };
       }
@@ -1075,8 +1336,31 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         if (found.blocked) return stop(found.blocked);
         if (!measured(found)) return { done: false };
       }
-      const from = found.from as Point;
-      const to = found.to as Point;
+      // Section 9: both ends were measured in one world, so both points
+      // travel out through the same owners.
+      const place = await framePlace(id, session, ran, step);
+      if (place.blocked) return stop(place.blocked);
+      if (place.target)
+        noteFrame(run, frameNote(place.target, contents.getURL()));
+      const outward = async (point: Point) => {
+        if (!place.target) return point;
+        const placed = await translatePoint(
+          session,
+          place.target,
+          point,
+          step,
+        );
+        if (placed.covered || !inArea(placed.point, placed.area))
+          return undefined;
+        return placed.point;
+      };
+      const from = await outward(found.from as Point);
+      const to = await outward(found.to as Point);
+      if (!from || !to)
+        return stop({
+          blocker: "outside_viewport",
+          ...(place.target?.path ? { frame: place.target.path } : {}),
+        });
       // The press lands on the source and the drop on the target, so both
       // points go through section 5's guards.
       await aim(from, true);
@@ -1190,6 +1474,9 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     const append = action.append === true;
     const asked = { value, append };
 
+    // The frame the resolution ran in, which section 9 places the field's
+    // own point through.
+    const ran: RanIn = {};
     const evaluate = (
       operation: FieldOperation,
       extra: Record<string, unknown> = {},
@@ -1202,6 +1489,8 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         { ...payload, ...extra },
         run.deadline,
         at,
+        undefined,
+        ran,
       );
     // A selector that matched nothing is folded into the blocker the loop
     // waits out, so a field the page draws late still gets its action.
@@ -1219,6 +1508,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           blocked: {
             blocker: "no_match",
             ...(selector === undefined ? {} : { selector }),
+            ...unreadOf(error.fields),
           },
         };
       }
@@ -1227,6 +1517,17 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       done: false,
       blocked: blocked as LoopBlocker,
     });
+    // Section 9: the frame the field sits in. A ref names it before any page
+    // call; a selector names it once the resolution has run.
+    const before = () => refPlace(id, session, action.target, step);
+    const after = async (early: FramePlace) => {
+      const place = early.target
+        ? early
+        : await framePlace(id, session, ran, step);
+      if (place.target)
+        noteFrame(run, frameNote(place.target, session.contents.getURL()));
+      return place;
+    };
     // The page the field was prepared on must still be the page the text
     // lands on.
     const onSamePage = (epoch: number) => {
@@ -1360,9 +1661,13 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     const fillAttempt = async (
       context: AttemptContext,
     ): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const epoch = session.epoch;
       const prepared = await look("fillPrepare", asked);
       if (prepared.blocked) return stop(prepared.blocked);
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       // A date, time, range or colour field takes its value from its own
       // setter instead of typing, and a single select keeps today's fill.
       if (prepared.mode === "direct") {
@@ -1389,7 +1694,21 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       // on another control, so there is nothing left to try.
       const point = prepared.point;
       if (!finitePoint(point)) return refuse(first.match, false);
-      await clickField(context, point);
+      // The click lands at top level, through the owners around the field's
+      // own frame, and a covered boundary leaves nothing to try.
+      let at = point;
+      if (place.target) {
+        const placed = await translatePoint(
+          session,
+          place.target,
+          point,
+          gesture,
+        );
+        if (placed.covered || !inArea(placed.point, placed.area))
+          return refuse(first.match, false);
+        at = placed.point;
+      }
+      await clickField(context, at);
       const again = await evaluate("fillPrepare", asked, gesture);
       if (again.blocked) return refuse(first.match, true);
       const second = await round(context, again, epoch);
@@ -1411,10 +1730,14 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       return { ...blocked, detail: options.join(", ").slice(0, MAX_DETAIL) };
     };
     const selectAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const chosen = await look("selectChoose", {
         values: action.values ?? [],
       });
       if (chosen.blocked) return stop(withOptions(chosen));
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       return {
         done: true,
         value: {
@@ -1424,8 +1747,12 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       };
     };
     const focusAttempt = async (): Promise<AttemptResult<FieldOutcome>> => {
+      const early = await before();
+      if (early.blocked) return stop(early.blocked);
       const focused = await look("focusTarget");
       if (focused.blocked) return stop(focused.blocked);
+      const place = await after(early);
+      if (place.blocked) return stop(place.blocked);
       return { done: true, value: { ...reboundOf(focused) } };
     };
 
@@ -1494,8 +1821,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           run,
         )
       : {};
+    // The keys go to the frame that holds the focus, which the target's own
+    // focus step may just have changed.
+    const focus = await focusedFrame(id, session, step);
     checkKeyTarget(
-      await focusedControl(id, session, run.deadline, step),
+      await focusedControl(id, session, run.deadline, step, focus?.frameId),
       chord,
       platformName,
     );
@@ -1518,8 +1848,18 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     };
     await confirmDelivery({
       kind: "key",
+      // The counters of the frame that holds the focus: a key inside a frame
+      // never reaches the page's own document.
       counters: () =>
-        actions.evaluatePage(id, session, "input", {}, step.deadline, step),
+        actions.evaluatePage(
+          id,
+          session,
+          "input",
+          {},
+          step.deadline,
+          step,
+          focus?.frameId,
+        ),
       frames: async () => {
         await actions.evaluatePage(
           id,
@@ -1528,6 +1868,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           {},
           Math.min(step.deadline, Date.now() + 2000),
           step,
+          focus?.frameId,
         );
       },
       epoch: () => session.epoch,
@@ -1575,7 +1916,11 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     );
     const dispatcher = actions.dispatcher(id, session);
     const state = dispatcher.state;
-    const look = () => focusedControl(id, session, run.deadline, step);
+    // Keys and inserted text act in the frame that holds the focus, so that
+    // frame's own world answers for the control and takes the paste.
+    const focus = await focusedFrame(id, session, step);
+    const look = () =>
+      focusedControl(id, session, run.deadline, step, focus?.frameId);
     const withState = () => ({ ok: true, input: state.view() });
     if (action.kind === "down" || action.kind === "up") {
       const chord = parseChord(action.key ?? "", platformName);
@@ -1636,6 +1981,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         action,
         run.deadline,
         step,
+        focus?.frameId,
       );
       if (offered.handled === "page") return { ok: true, handled: "page" };
       // The page ignored the event, so Kamapathy inserts the plain text, and

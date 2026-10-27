@@ -34,10 +34,12 @@ import {
 } from "./http";
 import { registerCounters } from "./input/counters";
 import { createDispatchers } from "./input/dispatch";
+import type { InputCommand } from "./input/keys";
 import { createPageScripts } from "./page-scripts";
 import { DocumentMethods } from "./pdf/document-method";
 import { createExtractor, forkPdfWorker, type Extractor } from "./pdf/extract";
 import { createPresence } from "./presence";
+import { createSpaceCdp, type InputDispatcherPort } from "./space-cdp";
 import { createReceipts } from "./receipts";
 import { processRefs, type RefBook } from "./refs";
 import { downloadRoutes } from "./routes/downloads";
@@ -306,6 +308,40 @@ export async function startAutomation(
     frames,
     extensions: options.extensions ?? NO_EXTENSION_NAMES,
   });
+  // An Input command an agent sends goes out through section 5's dispatcher
+  // on Kamapathy's own session, never on an agent session.
+  const inputPort: InputDispatcherPort = {
+    dispatch: (tabId, method, params, step) => {
+      const session = sessions.get(tabId);
+      if (!session)
+        return fail(
+          "debugger_busy",
+          "Kamapathy lost its connection to this tab. Try again shortly.",
+          { reason: "unavailable" },
+        );
+      return dispatchers
+        .for(session)
+        .key([{ method, params } as InputCommand], step);
+    },
+  };
+  // The one path a protocol command takes, with a session per live tab.
+  const cdp = createSpaceCdp({
+    controller,
+    authority,
+    actions,
+    sessions,
+    frames,
+    refs,
+    pageScripts,
+    events,
+    input: inputPort,
+  });
+  // What the agent holds on each tab, which the event redactor reads.
+  events.setAgentDomains({
+    owns: (tabId, domain) => cdp.cdpFor(tabId)?.owns(domain) ?? false,
+    delivered: (tabId, kind, id) =>
+      cdp.cdpFor(tabId)?.delivered(kind, id) ?? false,
+  });
   const tabLog = createTabLog();
   const receipts = createReceipts({
     tabLog,
@@ -411,6 +447,7 @@ export async function startAutomation(
     pageScripts,
     events,
     frames,
+    cdp,
   });
   const deps: RouteDeps = {
     controller,
@@ -429,6 +466,7 @@ export async function startAutomation(
     pageScripts,
     events,
     frames,
+    cdp,
   };
   const grantSpace = (id: string) => {
     const space = authority.grantSpace(id);
@@ -556,7 +594,7 @@ export async function startAutomation(
       if (scope.tab?.unseen) controller.markSeen(scope.tab.id);
       const spaceId = scope.space?.id ?? scope.tab?.spaceId;
       const ticket = scheduler.admit({
-        spaceId: route.lane === "space" ? spaceId : undefined,
+        spaceId: route.lane === "none" ? undefined : spaceId,
         budgetMs: route.budgetMs,
       });
       const abort = new AbortController();
@@ -579,10 +617,14 @@ export async function startAutomation(
         // admission counted the largest it declares.
         if (route.budgetOf) ticket.narrow(route.budgetOf(body));
         checkAgentText(route, body);
+        // A body lane is the route's own choice, made from the body it just
+        // validated.
+        const chosen =
+          route.lane === "body" ? route.laneFor!(body) : route.lane;
         const lane: Lane =
-          route.lane === "space"
+          chosen === "space"
             ? { kind: "space", spaceId: spaceId! }
-            : { kind: route.lane };
+            : { kind: chosen };
         const deadline = await ticket.start(lane);
         const current = authorize();
         // A route that reads or acts on a page makes it the one its space
@@ -680,6 +722,7 @@ export async function startAutomation(
         // of the keys it holds.
         navigation.dispose();
         forgetClosedTabs();
+        cdp.dispose();
         frames.dispose();
         events.dispose();
         pageScripts.dispose();

@@ -2,6 +2,8 @@ import { statSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { INPUT_METHODS } from "../electron/agent/cdp-policy";
+import { CONTINUATIONS } from "../electron/agent/routes/cdp";
 import { ApiError } from "../electron/agent/errors";
 import { takeWaitSlot } from "../electron/agent/expectations";
 import { WHEEL_GAP_MS } from "../electron/agent/input/actions";
@@ -1605,13 +1607,1045 @@ describe("local automation socket", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.interactables[0]).toMatchObject({
-      label: "Extension panel",
+      // Section 9 places the frame, so section 17 names the extension whose
+      // page it holds in place of the page's own label for it.
+      label: `Extension: ${EXTENSION_NAME}`,
+      extension: EXTENSION_NAME,
       crossOrigin: true,
       content: "blocked",
     });
     expect(body.interactables[0].origin).toBeUndefined();
     expect(body.interactables[0].contentFrame).toBeUndefined();
     expect(body.unreadFrames).toBeUndefined();
+  });
+
+  // Section 9's search across frame groups: a probe says what one group
+  // holds, and the operation itself runs in the one group the search picked.
+  const isProbe = (code: string) => code.includes('"tally":true');
+  const callGroup = (code: string) => groupOf(code) ?? "";
+  const tally = (
+    count: number,
+    extra: Partial<{ visible: number; hidden: number; actionable: number }> = {},
+  ) => ({
+    count,
+    visible: extra.visible ?? count,
+    hidden: extra.hidden ?? 0,
+    actionable: extra.actionable ?? count,
+  });
+  const noMatch = {
+    ok: false,
+    code: "no_match",
+    error:
+      "Nothing on the page matches this selector. Take a snapshot to check the page.",
+    fields: { selector: ".pay" },
+  };
+  // A page whose frame holds one control, listed by a snapshot so its ref
+  // has a home: @e1 names the frame itself and @e2 the control inside it.
+  const framedPage = async (tabId: string, spec: Partial<FrameSpec> = {}) => {
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0", ...spec },
+    ]);
+    page.result = (code: string) =>
+      callGroup(code) === ""
+        ? groupRead("", {
+            text: [{ order: 0, value: "Checkout" }],
+            controls: [
+              {
+                order: 1,
+                tier: 6,
+                entry: frameEntry("Card details", "@e1", "0", "card"),
+              },
+            ],
+            owners: [owner("0", 1, "card")],
+          })
+        : groupRead("0", {
+            controls: [
+              { order: 1, tier: 0, entry: control("Card number", "@e2") },
+            ],
+          });
+    const response = await request(`/tabs/${tabId}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(
+      body.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Card details", undefined],
+      ["Card number", "0"],
+    ]);
+    page.scripts.length = 0;
+    return page;
+  };
+
+  it("routes a frame ref to its group", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    page.result = { ok: true, x: 25, y: 45 };
+    // The ref goes straight to the frame that issued it: no search of the
+    // page's own document, and no probe of any group.
+    for (const [route, body] of [
+      ["click", { ref: "@e2" }],
+      ["fill", { ref: "@e2", value: "4111" }],
+    ] as const) {
+      page.scripts.length = 0;
+      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(response.status, route).toBe(200);
+      expect(page.scripts.some((script) => isProbe(script.code))).toBe(false);
+      expect(
+        page.scripts
+          .filter((script) => script.code.includes('"ref":"@e2"'))
+          .every((script) => callGroup(script.code) === "0"),
+        route,
+      ).toBe(true);
+    }
+    // A ref of the page's own document still runs in the page's own world.
+    page.scripts.length = 0;
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(payloads("actionPoint").map((item) => item.frameContext)).toEqual([
+      undefined,
+    ]);
+    // The code no route answers any more keeps its entry for older scripts.
+    expect(ERRORS.cross_origin_frame.summary).toContain("Retired");
+  });
+
+  it("searches the top document, then frames depth first in owner order", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A frame inside a frame, and a sibling after it: the order of the
+    // documents is the page, "0", "0/0", "1".
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      {
+        frameId: "inner",
+        parent: "card",
+        url: "https://deep.example/",
+        local: "0",
+      },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (isProbe(code))
+        return { ok: true, tally: tally(group === "0/0" || group === "1" ? 1 : 0) };
+      return {
+        ok: true,
+        matched: group === "0/0",
+        counts: { matched: group === "0/0" ? 1 : 0, visible: 0 },
+      };
+    };
+    const found = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 2000,
+    });
+    expect(found.status).toBe(200);
+    const checks = payloads("check");
+    // Every frame group answered what it holds, and the earliest document
+    // of the order that holds a match ran the check itself.
+    expect(
+      checks
+        .filter((item) => item.tally === true)
+        .map((item) => item.frameContext.group)
+        .sort(),
+    ).toEqual(["0", "0/0", "1"]);
+    expect(
+      checks
+        .filter((item) => item.tally !== true)
+        .map((item) => item.frameContext?.group ?? ""),
+    ).toEqual(["", "0/0"]);
+    // strict: the page's own document decides while it holds a candidate,
+    // so no frame group is read at all.
+    page.scripts.length = 0;
+    page.result = (code: string) =>
+      isProbe(code) ? { ok: true, tally: tally(1) } : { ok: true, x: 25, y: 45 };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { selector: ".save" }))
+        .status,
+    ).toBe(200);
+    expect(page.scripts.some((script) => isProbe(script.code))).toBe(false);
+    expect(payloads("actionPoint").map((item) => item.frameContext)).toEqual([
+      undefined,
+    ]);
+  });
+
+  it("count sums every document and nth counts document by document", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    // Two matches in each frame and none in the page's own document.
+    page.result = (code: string) => {
+      const matched = callGroup(code) === "" ? 0 : 2;
+      return { ok: true, matched: true, counts: { matched, visible: 0 } };
+    };
+    const hidden = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "hidden",
+      timeoutMs: 1000,
+    });
+    expect(hidden.status).toBe(200);
+    expect((await hidden.json()).matched).toBe(4);
+    expect(
+      payloads("check")
+        .map((item) => item.frameContext?.group ?? "")
+        .sort(),
+    ).toEqual(["", "0", "1"]);
+    // The third match of the page is the first match of the second frame,
+    // and the probes count without the nth.
+    page.scripts.length = 0;
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(callGroup(code) === "" ? 0 : 2) }
+        : { ok: true, x: 25, y: 45 };
+    expect(
+      (
+        await request(`/tabs/${tab.id}/click`, "POST", {
+          selector: "button >> nth=2",
+        })
+      ).status,
+    ).toBe(200);
+    const probes = payloads("check").filter((item) => item.tally === true);
+    expect(probes.map((item) => item.query.ast.nth)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(
+      payloads("actionPoint").map((item) => [
+        item.frameContext?.group,
+        item.query.ast.nth,
+      ]),
+    ).toEqual([["1", 0]]);
+  });
+
+  it("a frame's candidates keep their frame, and two frames are ambiguous", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+      { frameId: "offer", url: "https://ads.example/", local: "1" },
+    ]);
+    let candidate = 0;
+    // Only the first frame holds matches, and two of them, which its own
+    // read reports with a ref from the block it reserved.
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (isProbe(code))
+        return { ok: true, tally: tally(group === "0" ? 2 : 0) };
+      if (group === "") return noMatch;
+      candidate = Number(/"firstRef":(\d+)/.exec(code)![1]);
+      return {
+        ok: false,
+        code: "ambiguous_match",
+        error:
+          "Selector matched 2 elements (2 visible, 0 hidden). Use a ref from candidates or a more specific selector.",
+        fields: {
+          selector: ".pay",
+          count: 2,
+          visible: 2,
+          hidden: 0,
+          actionable: 2,
+          candidates: [
+            {
+              ref: `@e${candidate}`,
+              tag: "button",
+              role: "button",
+              name: "Pay",
+              context: "Card details",
+              visible: true,
+              disabled: false,
+              frame: "0",
+            },
+          ],
+        },
+        issued: [candidate],
+      };
+    };
+    const ambiguous = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(ambiguous.status).toBe(422);
+    const ref = (await ambiguous.json()).error.candidates[0].ref;
+    expect(ref).toBe(`@e${candidate}`);
+    // The candidate the frame gave out goes back to that frame alone.
+    page.scripts.length = 0;
+    page.result = { ok: true, x: 25, y: 45 };
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref })).status,
+    ).toBe(200);
+    expect(
+      payloads("actionPoint").map((item) => item.frameContext?.group),
+    ).toEqual(["0"]);
+    // A candidate at the level in each of two frames is ambiguous across
+    // them, and nothing is acted on until a snapshot names one.
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(callGroup(code) === "" ? 0 : 1) }
+        : noMatch;
+    const across = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(across.status).toBe(422);
+    expect(await across.json()).toEqual({
+      error: {
+        code: "ambiguous_match",
+        message:
+          "Selector matched 2 elements (2 visible, 0 hidden) in 2 frames. Take a snapshot and use a ref from the frame you mean.",
+        selector: ".pay",
+        count: 2,
+        visible: 2,
+        hidden: 0,
+        actionable: 2,
+        candidates: [],
+      },
+    });
+  });
+
+  it("a silent frame is left out of the attempt and counted", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    let answers = false;
+    page.result = (code: string) => {
+      if (code.includes(')("ready",'))
+        return { ok: true, readyState: "complete" };
+      if (code.includes(')("input",'))
+        return {
+          ok: true,
+          mouse: page.inputs.filter(
+            (input) => input.parameters.type === "mousePressed",
+          ).length,
+          key: 0,
+          drag: 0,
+        };
+      // The frame answers nothing at all until it is asked again.
+      if (isProbe(code))
+        return answers ? { ok: true, tally: tally(1) } : new Promise(() => {});
+      // The owner read belongs to the page's own world, whatever the group
+      // of the operation that asked for it.
+      if (code.includes(')("frameBox",')) return { ok: true };
+      return callGroup(code) === "" ? noMatch : { ok: true, x: 25, y: 45 };
+    };
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+      timeoutMs: 0,
+    });
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: "no_match",
+      unreadFrames: 1,
+    });
+    // The frame answers now, so the next attempt finds the control there.
+    answers = true;
+    page.scripts.length = 0;
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+    });
+    expect(clicked.status).toBe(200);
+    expect(payloads("actionPoint").at(-1)!.frameContext.group).toBe("0");
+  });
+
+  it("a wait finds a frame added after the last check", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(1) }
+        : {
+            ok: true,
+            matched: callGroup(code) === "0",
+            counts: { matched: 0, visible: 0 },
+          };
+    const pending = request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 4000,
+    });
+    await expect.poll(() => payloads("check").length).toBeGreaterThan(0);
+    expect(payloads("check").every((item) => !item.frameContext)).toBe(true);
+    // Nothing polls for frames: the frame joins from the registry and the
+    // next check searches it.
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    const found = await pending;
+    expect(found.status).toBe(200);
+    expect(
+      payloads("check").map((item) => item.frameContext?.group ?? ""),
+    ).toContain("0");
+  });
+
+  it("wait text matches within one group", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      { frameId: "card", url: "https://pay.example/", local: "0" },
+    ]);
+    // The text runs across the frame boundary, so no group's own text holds
+    // it and the wait never matches.
+    page.result = { ok: true, matched: false };
+    const timedOut = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Card number",
+      timeoutMs: 200,
+    });
+    expect(timedOut.status).toBe(408);
+    expect(
+      payloads("check").map((item) => item.frameContext?.group ?? ""),
+    ).toContain("0");
+    // The same text inside the frame's own document matches.
+    page.result = (code: string) => ({
+      ok: true,
+      matched: callGroup(code) === "0",
+    });
+    const found = await request(`/tabs/${tab.id}/wait`, "POST", {
+      text: "Card number",
+      timeoutMs: 1000,
+    });
+    expect(found.status).toBe(200);
+  });
+
+  it("a stale frame ref names its frame", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    page.result = { ok: true, x: 25, y: 45 };
+    // A navigation inside the frame's own document keeps both refs.
+    page.emitProtocol("Page.navigatedWithinDocument", {
+      frameId: "card",
+      url: "https://pay.example/#done",
+    });
+    for (const ref of ["@e1", "@e2"])
+      expect(
+        (await request(`/tabs/${tab.id}/click`, "POST", { ref })).status,
+        ref,
+      ).toBe(200);
+    // Another document in the frame leaves its own refs stale, and names
+    // the frame they lived in.
+    frameNavigated(page.debugger, {
+      frameId: "card",
+      parentId: "main",
+      loaderId: "loader-card-2",
+      url: "https://pay.example/again",
+    });
+    const stale = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({
+      error: {
+        code: "stale_ref",
+        message: "This element's frame changed. Take a new snapshot.",
+        ref: "@e2",
+        frame: "0",
+      },
+    });
+    // A ref of the page's own document is untouched.
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+  });
+
+  it("a wait timeout carries unreadFrames", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A frame in its own process whose session has ended: it is left out of
+    // every attempt until it attaches again.
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+    ]);
+    page.emitProtocol("Target.detachedFromTarget", {
+      sessionId: "card-session",
+      targetId: "card",
+    });
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(0) }
+        : { ok: true, matched: false, counts: { matched: 0, visible: 0 } };
+    const timedOut = await request(`/tabs/${tab.id}/wait-for-selector`, "POST", {
+      selector: ".row",
+      state: "visible",
+      timeoutMs: 200,
+    });
+    expect(timedOut.status).toBe(504);
+    expect((await timedOut.json()).error).toMatchObject({
+      code: "wait_timeout",
+      awaited: "selector",
+      unreadFrames: 1,
+    });
+    // An action that waited out a blocker reports the count too.
+    page.result = (code: string) =>
+      isProbe(code)
+        ? { ok: true, tally: tally(0) }
+        : { ok: true, box: { left: 0, top: 0, right: 10, bottom: 10 }, blocked: { blocker: "hidden" } };
+    const blocked = await request(`/tabs/${tab.id}/click`, "POST", {
+      selector: ".pay",
+      timeoutMs: 200,
+    });
+    expect(blocked.status).toBe(504);
+    expect((await blocked.json()).error).toMatchObject({
+      code: "action_timeout",
+      blocker: "hidden",
+      unreadFrames: 1,
+    });
+  });
+
+  // Section 9's actions: the frame's own world measures and checks, the
+  // owner's world maps the point outward, and section 5's dispatcher sends
+  // the input on the tab's page session at the point that came out.
+  const OWNER_BOX = {
+    box: { x: 40, y: 60, scaleX: 1, scaleY: 1, width: 400, height: 200 },
+    area: { left: 40, top: 60, right: 440, bottom: 260 },
+  };
+  // What a frame action's page calls answer: the control at 25,45 of the
+  // frame's own document, which its owner places at 65,105 in the page.
+  const framedPoint = (extra: Record<string, unknown> = {}) => (code: string) =>
+    code.includes(')("frameBox",')
+      ? { ok: true, ...OWNER_BOX, point: { x: 65, y: 105 }, ...extra }
+      : { ok: true, x: 25, y: 45 };
+  // The page calls one frame action made, with the session each ran on.
+  const callsOf = (page: FakeContents, operation: string) =>
+    page.debugger.sent.filter(
+      (command) =>
+        command.method === "Runtime.evaluate" &&
+        String(command.params.expression).includes(
+          `)(${JSON.stringify(operation)},`,
+        ),
+    );
+  // The frame whose world ran each call of one operation, from the worlds
+  // the page handed out in order.
+  const ranIn = (page: FakeContents, operation: string) => {
+    const made = page.debugger.sent
+      .filter((command) => command.method === "Page.createIsolatedWorld")
+      .map((command) => command.params.frameId as string);
+    return callsOf(page, operation).map(
+      (command) => made[Number(command.params.contextId) - 1],
+    );
+  };
+  const mouseEvents = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => [input.parameters.type, input.parameters.x, input.parameters.y]);
+
+  it("input goes out on the top page session at top-level coordinates", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    expect(await clicked.json()).toMatchObject({ point: { x: 65, y: 105 } });
+    // Every Input command went out on the tab's own page session, at the
+    // point the owner's world mapped the frame's point to.
+    const sent = page.debugger.sent.filter((command) =>
+      command.method.startsWith("Input."),
+    );
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.map((command) => command.sessionId)).toEqual(
+      sent.map(() => undefined),
+    );
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
+    // The element was measured in the frame's own world, and the owner was
+    // measured in the world around it.
+    expect(
+      callsOf(page, "actionPoint").map((command) => command.sessionId),
+    ).toEqual(["card-session"]);
+    const boxes = callsOf(page, "frameBox");
+    expect(boxes.length).toBeGreaterThan(0);
+    expect(boxes.map((command) => command.sessionId)).toEqual(
+      boxes.map(() => undefined),
+    );
+    expect(payloads("frameBox")).toEqual(
+      boxes.map(() => ({ key: "card", point: { x: 25, y: 45 } })),
+    );
+    // The hit test over the point sees the frame, not the page's own
+    // document.
+    expect(
+      page.debugger.sent
+        .filter((command) => command.method === "DOM.getNodeForLocation")
+        .map((command) => [command.params.x, command.params.y]),
+    ).toEqual([[65, 105]]);
+  });
+
+  it("delivery is confirmed in the frame that holds the target", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    let presses = 0;
+    // Only the frame's own world counts the press; the page's own counters
+    // never see it.
+    page.result = (code: string) => {
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: presses, key: 0, drag: 0 };
+      return framedPoint()(code);
+    };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type === "mousePressed") presses += 1;
+    };
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    const counters = callsOf(page, "input");
+    expect(counters.length).toBeGreaterThan(1);
+    expect(counters.map((command) => command.sessionId)).toEqual(
+      counters.map(() => "card-session"),
+    );
+    // A press no frame counted is answered as it is on the page itself.
+    page.afterInput = undefined;
+    presses = 0;
+    const missed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(missed.status).toBe(409);
+    expect((await missed.json()).error.code).toBe("input_not_delivered");
+  });
+
+  it("an action inside a frame from another host names it in the activity", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e2" })).status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe(
+      "Agent clicked an element in a frame from pay.example",
+    );
+    // The frame itself is an element of the page, so its own click says
+    // nothing about a frame.
+    expect(
+      (await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" })).status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe("Agent clicked an element");
+  });
+
+  it("an action in a frame of the page's own host adds nothing to the activity", async () => {
+    // The frame is read and acted in exactly as any other, so only its host
+    // decides whether the entry names it.
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, {
+      url: "https://example.com/card",
+      sessionId: "card-session",
+    });
+    page.result = framedPoint();
+    expect(
+      (await request(`/tabs/${tab.id}/fill`, "POST", { ref: "@e2", value: "1" }))
+        .status,
+    ).toBe(200);
+    expect(controller.activity.at(-1)?.message).toBe("Agent filled a field");
+  });
+
+  // A page whose frame holds another frame, so a ref can live two
+  // boundaries in: @e1 is the outer frame, @e2 the inner one and @e3 the
+  // control inside it.
+  const nestedFramedPage = async (tabId: string) => {
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      { frameId: "deep", parent: "card", url: "https://deep.example/", local: "0" },
+    ]);
+    page.result = (code: string) => {
+      const group = callGroup(code);
+      if (group === "")
+        return groupRead("", {
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Card details", "@e1", "0", "card"),
+            },
+          ],
+          owners: [owner("0", 1, "card")],
+        });
+      if (group === "0")
+        return groupRead("0", {
+          controls: [
+            {
+              order: 1,
+              tier: 6,
+              entry: frameEntry("Card check", "@e2", "0/0", "deep"),
+            },
+          ],
+          owners: [owner("0", 1, "deep")],
+        });
+      return groupRead("0/0", {
+        controls: [{ order: 1, tier: 0, entry: control("Code", "@e3") }],
+      });
+    };
+    const response = await request(`/tabs/${tabId}/snapshot`, "POST", {
+      header: false,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(
+      body.interactables.map((entry: Record<string, unknown>) => [
+        entry.label,
+        entry.frame,
+      ]),
+    ).toEqual([
+      ["Card details", undefined],
+      ["Card check", "0"],
+      ["Code", "0/0"],
+    ]);
+    page.scripts.length = 0;
+    return page;
+  };
+
+  it("a frame that is attaching, navigating or silent is a transient blocker", async () => {
+    // Each state is reached without touching the frame's own document, so
+    // the ref in it is not stale: the frame simply cannot take input yet.
+    const cases = [
+      {
+        detail: "attaching",
+        ref: "@e3",
+        frame: "0/0",
+        message: "The frame holding the target is still loading.",
+        // The frame around the inner one went silent, so Kamapathy has no
+        // bound way into the frame the ref lives in.
+        nested: true,
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Target.detachedFromTarget", {
+            sessionId: "card-session",
+            targetId: "card",
+          }),
+      },
+      {
+        detail: "navigating",
+        ref: "@e2",
+        frame: "0",
+        message: "The frame holding the target is loading another page.",
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Page.frameStartedNavigating", {
+            frameId: "card",
+            url: "https://pay.example/next",
+          }),
+      },
+      {
+        detail: "not_responding",
+        ref: "@e2",
+        frame: "0",
+        message: "The frame holding the target did not respond.",
+        happen: (page: FakeContents) =>
+          page.emitProtocol("Target.detachedFromTarget", {
+            sessionId: "card-session",
+            targetId: "card",
+          }),
+      },
+    ] as const;
+    for (const state of cases) {
+      const { tab } = await createPage();
+      const page = await ("nested" in state && state.nested
+        ? nestedFramedPage(tab.id)
+        : framedPage(tab.id, { sessionId: "card-session" }));
+      page.result = framedPoint();
+      state.happen(page);
+      page.inputs.length = 0;
+      page.scripts.length = 0;
+      const started = Date.now();
+      const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+        ref: state.ref,
+        timeoutMs: 200,
+      });
+      expect(refused.status, state.detail).toBe(504);
+      expect(await refused.json(), state.detail).toEqual({
+        error: {
+          code: "action_timeout",
+          message: `click timed out after 200 ms: ${state.message}`,
+          awaited: "actionable",
+          blocker: "frame_not_ready",
+          detail: state.detail,
+          frame: state.frame,
+          timeoutMs: 200,
+          retryable: true,
+        },
+      });
+      // The attempt was retried until the timeout, and nothing was sent.
+      expect(Date.now() - started, state.detail).toBeGreaterThan(150);
+      expect(page.inputs, state.detail).toEqual([]);
+    }
+  });
+
+  it("keyboard without a target and paste act in the focused frame", async () => {
+    const { tab } = await createPage();
+    const page = await nestedFramedPage(tab.id);
+    // The walk follows the active element from the top document through each
+    // owner, so the focus is two frames in.
+    let hops = 0;
+    const walked = (code: string) => {
+      if (!code.includes(')("activeFrame",')) return undefined;
+      hops += 1;
+      if (hops === 1) return { ok: true, path: "0", key: "card" };
+      if (hops === 2) return { ok: true, path: "0", key: "deep" };
+      return { ok: true, path: "", editable: true };
+    };
+    page.pageActions.focusedKind = () => ({ ok: true, kind: "editable" });
+    page.result = (code: string) =>
+      walked(code) ??
+      (code.includes(')("pasteDispatch",')
+        ? { ok: true, handled: "page" }
+        : { ok: true });
+    const typed = await request(`/tabs/${tab.id}/keyboard/insert-text`, "POST", {
+      text: "4111",
+    });
+    expect(typed.status).toBe(200);
+    expect(ranIn(page, "focusedKind")).toEqual(["deep"]);
+    // The content is offered to the frame that holds the focus, not the page.
+    hops = 0;
+    const pasted = await request(`/tabs/${tab.id}/keyboard/paste`, "POST", {
+      text: "4111 1111 1111 1111",
+    });
+    expect(pasted.status).toBe(200);
+    expect(await pasted.json()).toMatchObject({ handled: "page" });
+    expect(ranIn(page, "pasteDispatch")).toEqual(["deep"]);
+    // A press goes to the focused frame too, and its delivery is confirmed
+    // by that frame's own counters.
+    hops = 0;
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    expect(pressed.status).toBe(200);
+    expect(ranIn(page, "focusedKind").at(-1)).toBe("deep");
+    expect(ranIn(page, "input").at(-1)).toBe("deep");
+    // A frame agents never reach refuses the keys, and names itself.
+    hops = 0;
+    page.inputs.length = 0;
+    page.result = (code: string) =>
+      code.includes(')("activeFrame",')
+        ? { ok: true, path: "0", key: "panel", blocked: true }
+        : { ok: true };
+    const refused = await request(`/tabs/${tab.id}/keyboard/type`, "POST", {
+      text: "4111",
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      error: {
+        code: "input_target_blocked",
+        message:
+          "The frame holding focus belongs to an extension or an internal page, which agent input never reaches. Focus a control in the page first.",
+        frame: "0",
+      },
+    });
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("a wheel for a target inside a frame goes to the translated point with the scaled delta", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The frame is drawn at half size at 40,60, so its own pixels are worth
+    // half a page pixel each.
+    let looks = 0;
+    page.result = (code: string) => {
+      if (code.includes(')("frameBox",')) {
+        const point = /"point":\{"x":(-?[\d.]+),"y":(-?[\d.]+)\}/.exec(code);
+        return {
+          ok: true,
+          box: { x: 40, y: 60, scaleX: 0.5, scaleY: 0.5, width: 400, height: 200 },
+          area: { left: 40, top: 60, right: 240, bottom: 160 },
+          ...(point
+            ? {
+                point: {
+                  x: 40 + Number(point[1]) * 0.5,
+                  y: 60 + Number(point[2]) * 0.5,
+                },
+              }
+            : {}),
+        };
+      }
+      if (!code.includes(')("actionPoint",')) return { ok: true };
+      looks += 1;
+      // The control is below the frame's own fold at first, so the frame
+      // asks for a wheel in its own pixels.
+      return looks === 1
+        ? { ok: true, scroll: { x: 100, y: 50, deltaX: 0, deltaY: 300 } }
+        : { ok: true, x: 100, y: 50 };
+    };
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    expect(await clicked.json()).toMatchObject({ point: { x: 90, y: 85 } });
+    const wheels = page.inputs.filter(
+      (input) => input.parameters.type === "mouseWheel",
+    );
+    expect(wheels.length).toBeGreaterThan(0);
+    // Every wheel event went to the point the owner places the frame's own
+    // point at, and the deltas add up to the frame's ask at the owner's
+    // scale.
+    expect(
+      wheels.map((input) => [input.parameters.x, input.parameters.y]),
+    ).toEqual(wheels.map(() => [90, 85]));
+    expect(
+      wheels.reduce(
+        (total, input) => total + Number(input.parameters.deltaY),
+        0,
+      ),
+    ).toBe(150);
+  });
+
+  it("a fill in a frame types in it and clicks it at the translated point", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 25, y: 45 },
+    };
+    page.pageActions.fillRead = { ok: true, match: "unchanged", value: "old" };
+    page.result = framedPoint();
+    const refused = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e2",
+      value: "4111",
+    });
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: "fill_not_accepted",
+      match: "unchanged",
+    });
+    // The text went into the frame's own field, and the one retry click
+    // landed where its owner places it.
+    expect(
+      callsOf(page, "fillPrepare").map((command) => command.sessionId),
+    ).toEqual(["card-session", "card-session"]);
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
+  });
+
+  it("scroll without a target continues into the frame under the viewport centre", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The middle of the viewport lies over the frame, which can scroll even
+    // though the page cannot.
+    page.hits = [{ x: 600, y: 400, nodeName: "iframe", holds: "card" }];
+    page.result = (code: string) => {
+      if (code.includes(')("frameBox",')) return { ok: true, ...OWNER_BOX };
+      if (!code.includes(')("scroll",')) return { ok: true };
+      return code.includes('"point"')
+        ? {
+            ok: true,
+            scrolled: "element",
+            selector: ".rates",
+            x: 0,
+            y: 220,
+            moved: true,
+          }
+        : { ok: true, scrolled: "page", x: 0, y: 0, moved: false };
+    };
+    const scrolled = await request(`/tabs/${tab.id}/scroll`, "POST", {
+      direction: "down",
+      pixels: 300,
+    });
+    expect(scrolled.status).toBe(200);
+    expect(await scrolled.json()).toMatchObject({
+      scrolled: "element",
+      selector: ".rates",
+    });
+    // The frame's own world scrolled, from the point of its own document
+    // the middle of the viewport sits over.
+    expect(payloads("scroll").map((item) => item.point)).toEqual([
+      undefined,
+      { x: 560, y: 340 },
+    ]);
+    expect(callsOf(page, "scroll").map((command) => command.sessionId)).toEqual(
+      [undefined, "card-session"],
+    );
+  });
+
+  it("a frame that moved between presses ends the action where it stands", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The owner moves 40 px down once the first press has gone out, so the
+    // point the gesture was aimed at is no longer the control's.
+    let moved = 0;
+    page.result = (code: string) =>
+      code.includes(')("frameBox",')
+        ? {
+            ok: true,
+            box: { ...OWNER_BOX.box, y: 60 + moved },
+            area: { ...OWNER_BOX.area, top: 60 + moved, bottom: 260 + moved },
+            point: { x: 65, y: 105 + moved },
+          }
+        : { ok: true, x: 25, y: 45 };
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type === "mousePressed") moved = 40;
+    };
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+      clickCount: 2,
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+      dispatched: true,
+    });
+    // One press went out, at the point the frame held when it was measured.
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 65, 105],
+      ["mousePressed", 65, 105],
+      ["mouseReleased", 65, 105],
+    ]);
+  });
+
+  it("a frame that loads another document after input started answers page_changed with frame", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.result = framedPoint();
+    // The frame loads another page while the first click is in flight, so
+    // the second press is never sent.
+    page.afterInput = () => {
+      if (page.inputs.at(-1)?.parameters.type !== "mousePressed") return;
+      page.afterInput = undefined;
+      frameNavigated(page.debugger, {
+        frameId: "card",
+        parentId: "main",
+        loaderId: "loader-card-2",
+        url: "https://pay.example/next",
+      });
+    };
+    const changed = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+      clickCount: 2,
+    });
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toEqual({
+      error: {
+        code: "page_changed",
+        message:
+          "The frame holding the target loaded another page during this action. Inspect it before continuing.",
+        frame: "0",
+        dispatched: true,
+      },
+    });
+    expect(
+      page.inputs.filter((input) => input.parameters.type === "mousePressed"),
+    ).toHaveLength(1);
   });
 
   it("changes the reference namespace on document navigation and never reuses allocation ranges", async () => {
@@ -1709,7 +2743,9 @@ describe("local automation socket", () => {
     const { tab } = await createPage();
     const page = controller.contents;
     page.result = { ok: true, x: 25, y: 45 };
-    const home = { frameId: "frame-1", loaderId: "loader-1", group: "" };
+    // The home of a ref the page's own document issued, as a read records
+    // it: the main frame and the document it holds.
+    const home = { frameId: "main", loaderId: "loader-1", group: "" };
     const first = refs.reserve(MAX_HOMES + 1);
     refs.record(
       tab.id,
@@ -1719,7 +2755,7 @@ describe("local automation socket", () => {
       refs.setHome(tab.id, `@e${first + at}`, home);
     // A navigation inside the same document keeps every home.
     page.emitProtocol("Page.navigatedWithinDocument", {
-      frameId: "frame-1",
+      frameId: "main",
       url: "https://example.com/#paid",
     });
     expect(refs.home(tab.id, `@e${first + 1}`)).toEqual(home);
@@ -2210,57 +3246,6 @@ describe("local automation socket", () => {
       forms: FORMS,
     });
     expect(payloads("check")).toHaveLength(1);
-  });
-
-  it("reaches a control inside a frame from another origin", async () => {
-    const { tab } = await createPage();
-    // Section 9 reads and acts in frames from any web origin, so the page
-    // script no longer answers cross_origin_frame and the action reaches the
-    // frame's own world.
-    controller.contents.result = (code: string) =>
-      code.includes(')("fill",') ? { ok: true } : { ok: true, x: 25, y: 45 };
-    for (const [route, body] of [
-      ["click", { ref: "@e2" }],
-      ["fill", { ref: "@e2", value: "card" }],
-    ] as const) {
-      const response = await request(`/tabs/${tab.id}/${route}`, "POST", body);
-      expect(response.status).toBe(200);
-      expect((await response.json()).ok).toBe(true);
-    }
-    expect(controller.contents.inputs.length).toBeGreaterThan(0);
-    controller.contents.result = {
-      url: "https://example.com/",
-      title: "Example",
-      text: "Checkout",
-      interactables: [
-        {
-          index: 0,
-          ref: "@e1",
-          tag: "button",
-          role: "button",
-          label: "Pay",
-          selector: "button",
-          disabled: false,
-          frame: "0/1",
-        },
-        {
-          index: 1,
-          ref: "@e2",
-          tag: "iframe",
-          role: "iframe",
-          label: "Card details",
-          selector: "#card",
-          disabled: false,
-          crossOrigin: true,
-        },
-      ],
-      truncated: false,
-    };
-    const snapshot = await (await request(`/tabs/${tab.id}/snapshot`)).json();
-    expect(snapshot.interactables.map((control: any) => control.frame)).toEqual(
-      ["0/1", undefined],
-    );
-    expect(snapshot.interactables[1].crossOrigin).toBe(true);
   });
 
   it("validates an entire batch before performing any action", async () => {
@@ -5534,6 +6519,912 @@ describe("local automation socket", () => {
     });
   });
 
+  // Section 8's cdp route: one protocol command on the agent's own session,
+  // which never reaches the browser, another tab or Kamapathy's own session.
+  const cdp = (tabId: string, body: Record<string, unknown>) => {
+    const done = request(`/tabs/${tabId}/cdp`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // Every command of one method, with the session it went out on.
+  const sentOn = (page: FakeContents, method: string) =>
+    page.debugger.sent
+      .filter((command) => command.method === method)
+      .map((command) => command.sessionId);
+  const attached = (page: FakeContents) =>
+    page.debugger.sent
+      .filter((command) => command.method === "Target.attachToTarget")
+      .map((command) => command.params.targetId);
+
+  it("the first command opens an agent session and says so", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Page.getNavigationHistory", () => ({
+      currentIndex: 0,
+      entries: [{ id: 1, url: "https://example.com/" }],
+    }));
+    const first = await cdp(tab.id, { method: "Page.getNavigationHistory" });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({
+      ok: true,
+      result: {
+        currentIndex: 0,
+        entries: [{ id: 1, url: "https://example.com/" }],
+      },
+      newSession: true,
+    });
+    // The session is the tab's own target, opened once, and the command
+    // went out on it rather than on Kamapathy's own session.
+    expect(attached(page)).toEqual(["main"]);
+    expect(sentOn(page, "Page.getNavigationHistory")).toEqual(["agent-1"]);
+    // The second command reuses it and says nothing about a session.
+    const second = await cdp(tab.id, { method: "Page.getNavigationHistory" });
+    expect(await second.json()).toEqual({
+      ok: true,
+      result: {
+        currentIndex: 0,
+        entries: [{ id: 1, url: "https://example.com/" }],
+      },
+    });
+    expect(attached(page)).toEqual(["main"]);
+    expect(sentOn(page, "Page.getNavigationHistory")).toEqual([
+      "agent-1",
+      "agent-1",
+    ]);
+    // No session id ever reaches the agent.
+    expect(JSON.stringify(await (await cdp(tab.id, { method: "Page.enable" })).json())).not.toContain("agent-1");
+  });
+
+  it("commands on an agent session never touch Kamapathy's tracking", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const drained = async () =>
+      ((await (await drainEvents(tab.id)).json()).events as {
+        method: string;
+        params: { requestId?: string };
+      }[]).map((event) => [event.method, event.params.requestId]);
+    const finished = (requestId: string, sessionId?: string) =>
+      page.debugger.event(
+        "Network.loadingFinished",
+        { requestId, encodedDataLength: 5 },
+        sessionId,
+      );
+    // While the agent holds no domain, Kamapathy's own copy is the log's.
+    finished("1");
+    expect(await drained()).toEqual([["Network.loadingFinished", "1"]]);
+    // The agent turns Network on for itself: its copy replaces Kamapathy's,
+    // and the command went out on its own session alone. Kamapathy's own
+    // enable, from the session's setup, is the one before it.
+    const enables = sentOn(page, "Network.enable").length;
+    expect(sentOn(page, "Network.enable")).toEqual([undefined]);
+    expect((await cdp(tab.id, { method: "Network.enable" })).status).toBe(200);
+    expect(sentOn(page, "Network.enable").slice(enables)).toEqual(["agent-1"]);
+    finished("2");
+    finished("3", "agent-1");
+    expect(await drained()).toEqual([["Network.loadingFinished", "3"]]);
+    // Its disable reaches only its own session, so Kamapathy's tracking
+    // and its copy of the log come straight back.
+    expect((await cdp(tab.id, { method: "Network.disable" })).status).toBe(200);
+    expect(sentOn(page, "Network.disable")).toEqual(["agent-1"]);
+    expect(sentOn(page, "Network.enable").slice(enables)).toEqual(["agent-1"]);
+    finished("4");
+    expect(await drained()).toEqual([["Network.loadingFinished", "4"]]);
+  });
+
+  it("the policy refuses before anything is sent", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const blocked = [
+      ["Target.getTargets", "browser"],
+      ["Network.getAllCookies", "session"],
+      ["Page.close", "managed"],
+      ["Runtime.terminateExecution", "process"],
+      ["Storage.clearDataForOrigin", "session"],
+    ] as const;
+    for (const [method, reason] of blocked) {
+      const { status, error } = await failure(await cdp(tab.id, { method }));
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason,
+      });
+      expect(error.param, method).toBeUndefined();
+    }
+    // Nothing was sent on any session, and no session was opened.
+    expect(attached(page)).toEqual([]);
+    for (const [method] of blocked) expect(sentOn(page, method)).toEqual([]);
+  });
+
+  it("a parameter refusal names the parameter", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const refused = [
+      ["Page.navigate", { url: "file:///etc/passwd" }, "url"],
+      ["Page.createIsolatedWorld", { worldName: "kamapathy-2" }, "worldName"],
+      [
+        "Page.createIsolatedWorld",
+        { frameId: "main", grantUniveralAccess: true },
+        "grantUniveralAccess",
+      ],
+      ["Runtime.getProperties", { objectId: "never-given" }, "objectId"],
+      ["Fetch.enable", { handleAuthRequests: true }, "handleAuthRequests"],
+    ] as const;
+    for (const [method, params, param] of refused) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, `${method} ${param}`).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        param,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("ids the tab delivered are accepted", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Runtime.evaluate", () => ({
+      result: { type: "object", objectId: "obj-7" },
+    }));
+    expect((await cdp(tab.id, { method: "Runtime.evaluate", params: { expression: "window" } })).status).toBe(200);
+    // An object id from a reply, and a context id from an event of the
+    // agent's own session.
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 9,
+          name: "",
+          origin: "https://example.com",
+          uniqueId: "9.1",
+          auxData: { frameId: "main", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    page.debugger.reply("Runtime.getProperties", () => ({ result: [] }));
+    expect((await cdp(tab.id, { method: "Runtime.getProperties", params: { objectId: "obj-7" } })).status).toBe(200);
+    expect((await cdp(tab.id, { method: "Runtime.evaluate", params: { expression: "1", contextId: 9 } })).status).toBe(200);
+    // Another tab never gave them out, so they are out of its scope.
+    const other = (
+      await (
+        await request(`/spaces/${space.id}/tabs`, "POST", {
+          url: "https://example.com/other",
+        })
+      ).json()
+    ).tab as BrowserState["tabs"][number];
+    for (const params of [{ objectId: "obj-7" }, { expression: "1", contextId: 9 }]) {
+      const { status, error } = await failure(
+        await cdp(other.id, {
+          method: "objectId" in params ? "Runtime.getProperties" : "Runtime.evaluate",
+          params,
+        }),
+      );
+      expect(status).toBe(403);
+      expect(error).toMatchObject({ code: "cdp_method_blocked", reason: "scope" });
+    }
+  });
+
+  it("every call that reached Chromium expires the tab's refs", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A refusal never reached Chromium, so the page's refs stand.
+    expect((await failure(await cdp(tab.id, { method: "Target.getTargets" }))).status).toBe(403);
+    expect(refs.classify(tab.id, "@e1")).toBe("live");
+    page.debugger.reply("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    expect((await cdp(tab.id, { method: "DOM.getDocument" })).status).toBe(200);
+    expect(refs.classify(tab.id, "@e1")).toBe("retired");
+    const stale = await failure(
+      await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+    );
+    expect(stale.status).toBe(409);
+    expect(stale.error).toMatchObject({ code: "stale_ref", ref: "@e1" });
+    // A command that failed in Chromium reached it all the same.
+    refs.record(tab.id, [11]);
+    page.debugger.reply("DOM.getDocument", () => {
+      throw new Error("Could not find node with given id");
+    });
+    expect((await failure(await cdp(tab.id, { method: "DOM.getDocument" }))).status).toBe(422);
+    expect(refs.classify(tab.id, "@e11")).toBe("retired");
+  });
+
+  it("method and params are validated before the lane", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const bodies = [
+      [{ method: "page.enable" }, "method"],
+      [{ method: "Page" }, "method"],
+      [{ method: "Page.enable", params: [] }, "params"],
+      [{ method: "Page.enable", params: 7 }, "params"],
+      [{ method: "Page.enable", timeoutMs: 999 }, "timeoutMs"],
+      [{ method: "Page.enable", timeoutMs: 60001 }, "timeoutMs"],
+      [{ method: "Page.enable", frame: "" }, "frame"],
+    ] as const;
+    for (const [body, field] of bodies) {
+      const { status, error } = await failure(await cdp(tab.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error, JSON.stringify(body)).toMatchObject({
+        code: "invalid_field",
+        field,
+      });
+    }
+    expect(attached(page)).toEqual([]);
+    expect(page.debugger.sent.some((command) => command.sessionId)).toBe(false);
+    // The route takes a mebibyte of params, and refuses the byte past it.
+    expect(await declaredSize(`/tabs/${tab.id}/cdp`, 1048577)).toBe(413);
+    const large = {
+      method: "Runtime.evaluate",
+      params: { expression: "x".repeat(1000000) },
+    };
+    expect(Buffer.byteLength(JSON.stringify(large))).toBeLessThan(1048576);
+    expect((await cdp(tab.id, large)).status).toBe(200);
+  });
+
+  it("protocol errors and timeouts are mapped", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Chromium's own dispatcher names a method or parameters it has not got.
+    page.debugger.reply("Page.setFontFamilies", () => {
+      throw new Error("'Page.setFontFamilies' wasn't found");
+    });
+    const missing = await failure(
+      await cdp(tab.id, { method: "Page.setFontFamilies" }),
+    );
+    expect(missing.status).toBe(422);
+    expect(missing.error).toEqual({
+      code: "cdp_error",
+      message: expect.stringContaining("Page.setFontFamilies"),
+      method: "Page.setFontFamilies",
+      protocolCode: -32601,
+      protocolMessage: "'Page.setFontFamilies' wasn't found",
+      dispatched: true,
+    });
+    // A domain's own refusal carries its text, with no code to read.
+    page.debugger.reply("DOM.describeNode", () => {
+      throw new Error("Could not find node with given id");
+    });
+    const refused = await failure(
+      await cdp(tab.id, { method: "DOM.describeNode", params: { nodeId: 1 } }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "cdp_error",
+      method: "DOM.describeNode",
+      protocolMessage: "Could not find node with given id",
+    });
+    expect(refused.error.protocolCode).toBeUndefined();
+    // A command Chromium never answers ends as the timeout, with what the
+    // shared probe found out about the page.
+    page.debugger.reply("Page.getLayoutMetrics", () => new Promise(() => {}));
+    const started = Date.now();
+    const timed = await failure(
+      await cdp(tab.id, { method: "Page.getLayoutMetrics", timeoutMs: 1000 }),
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(timed.status).toBe(504);
+    expect(timed.error).toMatchObject({
+      code: "cdp_timeout",
+      awaited: "cdp",
+      method: "Page.getLayoutMetrics",
+      timeoutMs: 1000,
+      executionStopped: false,
+      pageResponsive: true,
+    });
+    expect(timed.error.retryable).toBeUndefined();
+  });
+
+  it("a frame path reaches that frame's own session", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.debugger.reply("DOM.getDocument", () => ({ root: { nodeId: 2 } }));
+    const document = { ok: true, result: { root: { nodeId: 2 } } };
+    // The ref of the iframe entry that opens the frame. It goes first: a
+    // call that reaches Chromium expires the refs the snapshot gave out.
+    const byRef = await cdp(tab.id, {
+      method: "DOM.getDocument",
+      frame: "@e1",
+    });
+    expect(byRef.status).toBe(200);
+    expect(await byRef.json()).toEqual({ ...document, newSession: true });
+    expect(attached(page)).toEqual(["card"]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual(["agent-1"]);
+    expect(refs.classify(tab.id, "@e2")).toBe("retired");
+    // The path that entry's contentFrame carries, on the session it opened.
+    expect(
+      await (
+        await cdp(tab.id, { method: "DOM.getDocument", frame: "0" })
+      ).json(),
+    ).toEqual(document);
+    expect(attached(page)).toEqual(["card"]);
+    // The tab's own page keeps a session of its own.
+    const top = await cdp(tab.id, { method: "DOM.getDocument" });
+    expect(await top.json()).toEqual({ ...document, newSession: true });
+    expect(attached(page)).toEqual(["card", "main"]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual([
+      "agent-1",
+      "agent-1",
+      "agent-2",
+    ]);
+  });
+
+  it("a frame in the page's own process, an unknown path and an unknown ref are refused", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    const refusal = {
+      code: "invalid_field",
+      message:
+        "This frame runs in the page's process. Leave frame out and pass this frameId, or a context id, in params instead.",
+      field: "frame",
+      frameId: "card",
+    };
+    // The frame runs in the page's process, so it has no session to send on.
+    for (const frame of ["0", "@e1", "@e2"]) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "DOM.getDocument", frame }),
+      );
+      expect(status, frame).toBe(400);
+      expect(error, frame).toEqual(refusal);
+    }
+    const unknownPath = await failure(
+      await cdp(tab.id, { method: "DOM.getDocument", frame: "7/2" }),
+    );
+    expect(unknownPath.status).toBe(404);
+    expect(unknownPath.error).toMatchObject({
+      code: "frame_not_found",
+      frame: "7/2",
+    });
+    const unknownRef = await failure(
+      await cdp(tab.id, { method: "DOM.getDocument", frame: "@e9" }),
+    );
+    expect(unknownRef.status).toBe(404);
+    expect(unknownRef.error).toMatchObject({
+      code: "unknown_ref",
+      ref: "@e9",
+    });
+    // No session was opened, nothing was sent on one, and the refs the
+    // snapshot gave out are still the page's.
+    expect(attached(page)).toEqual([]);
+    expect(sentOn(page, "DOM.getDocument")).toEqual([]);
+    expect(refs.classify(tab.id, "@e2")).toBe("live");
+  });
+
+  it("sessions close when control or the switch changes", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const closed = () =>
+      page.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId);
+    // Each command answers whether it had to open a session of its own.
+    const opened = async () => {
+      const answered = await cdp(tab.id, { method: "Page.enable" });
+      expect(answered.status).toBe(200);
+      return (await answered.json()).newSession === true;
+    };
+    expect(await opened()).toBe(true);
+    expect(await opened()).toBe(false);
+    // The person takes the space.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    expect(closed()).toEqual(["agent-1"]);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "agent",
+    });
+    expect(await opened()).toBe(true);
+    // A hold for the person, such as one a site asks for.
+    const hold = controller.holdForPerson(
+      space.id,
+      "approval",
+      "clear data for example.com",
+    );
+    expect(closed()).toEqual(["agent-1", "agent-2"]);
+    controller.releaseHold(hold);
+    expect(await opened()).toBe(true);
+    // The Page scripts switch.
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    expect(closed()).toEqual(["agent-1", "agent-2", "agent-3"]);
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    expect(await opened()).toBe(true);
+    // The person's Stop ends the space's access.
+    controller.endAccess(space.id, { by: "person", reason: "stopped" });
+    expect(closed()).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+      "agent-4",
+    ]);
+    // A grant from the app, and the page adopted again, give the agent a
+    // session of its own.
+    api.grantSpace(space.id);
+    controller.setManaged(tab.id, true);
+    expect(await opened()).toBe(true);
+  });
+
+  it("a released tab, a closed tab and a closed space keep no session", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const closed = () =>
+      page.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId);
+    const opened = async (tabId: string) => {
+      const answered = await cdp(tabId, { method: "Page.enable" });
+      expect(answered.status).toBe(200);
+      return (await answered.json()).newSession === true;
+    };
+    expect(await opened(tab.id)).toBe(true);
+    // The agent lets the page go.
+    controller.setManaged(tab.id, false);
+    expect(closed()).toEqual(["agent-1"]);
+    controller.setManaged(tab.id, true);
+    expect(await opened(tab.id)).toBe(true);
+    // The page closes.
+    controller.closeTab(tab.id, "agent");
+    expect(closed()).toEqual(["agent-1", "agent-2"]);
+    // The space closes, with a page of its own open in it.
+    const second = (
+      await (
+        await request(`/spaces/${space.id}/tabs`, "POST", {
+          url: "https://example.com/second",
+        })
+      ).json()
+    ).tab as BrowserState["tabs"][number];
+    const secondPage = controller.contents;
+    expect(await opened(second.id)).toBe(true);
+    await controller.dispatch({ type: "space:delete", id: space.id });
+    expect(
+      secondPage.debugger.sent
+        .filter((command) => command.method === "Target.detachFromTarget")
+        .map((command) => command.params.sessionId),
+    ).toEqual(["agent-1"]);
+  });
+
+  it("developer tools detaching closes the agent sessions too", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect(
+      (await (await cdp(tab.id, { method: "Page.enable" })).json()).newSession,
+    ).toBe(true);
+    const closes = page.debugger.sent.filter(
+      (command) => command.method === "Target.detachFromTarget",
+    ).length;
+    // Developer tools take the debugger: the agent's session went with it,
+    // and Kamapathy never asks Chromium to close one that is already gone.
+    page.devtools = true;
+    page.debugger.attachError = new Error(
+      "Another debugger is already attached",
+    );
+    page.debugger.lose("devtools");
+    // The loss is reported before Kamapathy finds out who holds the
+    // debugger, so the reason settles on the next attempt to attach.
+    let busy = await failure(await cdp(tab.id, { method: "Page.enable" }));
+    await expect
+      .poll(async () => {
+        busy = await failure(await cdp(tab.id, { method: "Page.enable" }));
+        return busy.error.reason;
+      })
+      .toBe("devtools");
+    expect(busy.status).toBe(409);
+    expect(busy.error).toMatchObject({
+      code: "debugger_busy",
+      reason: "devtools",
+    });
+    expect(
+      page.debugger.sent.filter(
+        (command) => command.method === "Target.detachFromTarget",
+      ),
+    ).toHaveLength(closes);
+    // Once they let go, the next command opens a session of its own.
+    page.devtools = false;
+    page.debugger.attachError = undefined;
+    page.emit("devtools-closed");
+    await expect.poll(() => page.debugger.attached).toBe(true);
+    expect(
+      (await (await cdp(tab.id, { method: "Page.enable" })).json()).newSession,
+    ).toBe(true);
+  });
+
+  // Section 12's Input path: Kamapathy sends these itself, through section
+  // 5's dispatcher on its own session.
+  const REFUSED_INPUT = [
+    "Input.setIgnoreInputEvents",
+    "Input.setInterceptDrags",
+    "Input.dispatchDragEvent",
+  ];
+
+  it("Input commands reach the dispatcher and never an agent session", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Every Input command the policy passes, with the parameters Chromium
+    // takes for it.
+    const commands: [string, Record<string, unknown>][] = [
+      ["Input.dispatchKeyEvent", { type: "keyDown", key: "a", text: "a" }],
+      ["Input.insertText", { text: "hello" }],
+      [
+        "Input.imeSetComposition",
+        { text: "n", selectionStart: 0, selectionEnd: 1 },
+      ],
+      ["Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 }],
+      ["Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }],
+      [
+        "Input.emulateTouchFromMouseEvent",
+        { type: "mousePressed", x: 1, y: 2, button: "left", clickCount: 1 },
+      ],
+      ["Input.synthesizeScrollGesture", { x: 10, y: 10, yDistance: -100 }],
+      ["Input.synthesizeTapGesture", { x: 10, y: 10 }],
+      ["Input.synthesizePinchGesture", { x: 10, y: 10, scaleFactor: 2 }],
+      ["Input.cancelDragging", {}],
+    ];
+    // The list is the policy's own, so a method added to the table is
+    // checked here too.
+    expect(commands.map(([method]) => method).sort()).toEqual(
+      INPUT_METHODS.filter((method) => !REFUSED_INPUT.includes(method)).sort(),
+    );
+    for (const [method, params] of commands) {
+      const answered = await cdp(tab.id, { method, params });
+      expect(answered.status, method).toBe(200);
+      // Chromium answers an Input command with nothing of its own.
+      expect(await answered.json(), method).toEqual({ ok: true, result: {} });
+      // Kamapathy's own session carries it, with no session id at all.
+      expect(sentOn(page, method), method).toEqual([undefined]);
+    }
+    // No agent session was opened for any of them.
+    expect(attached(page)).toEqual([]);
+    // The dispatcher's marker and the menu flag spanned each command, so
+    // the shell reacts to none of them.
+    expect(inputMarker.pointerRecent(page)).toBe(true);
+    expect(page.menuShortcuts).toEqual(
+      commands.flatMap((_command, index) => [
+        { ignore: true, inputs: index },
+        { ignore: false, inputs: index + 1 },
+      ]),
+    );
+    // The held modifiers travel with each command, as they do on the input
+    // routes: the state's own mask, not a mask the agent made up.
+    expect(
+      page.inputs
+        .filter((input) => input.method === "Input.dispatchMouseEvent")
+        .map((input) => [input.parameters.modifiers, input.parameters.buttons]),
+    ).toEqual([[0, 0]]);
+  });
+
+  it("Input with frame is refused", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Input.dispatchMouseEvent",
+        params: { type: "mouseMoved", x: 4, y: 4 },
+        frame: "0",
+      }),
+    );
+    expect(status).toBe(400);
+    expect(error).toMatchObject({
+      code: "invalid_field",
+      field: "frame",
+      message: expect.stringContaining("top page"),
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("refused Input commands stay refused", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const refused: [string, Record<string, unknown>, string, string?][] = [
+      ["Input.setIgnoreInputEvents", { ignore: true }, "person"],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "c", commands: ["copy"] },
+        "person",
+        "commands",
+      ],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "v", code: "KeyV", modifiers: 4 },
+        "person",
+        "key",
+      ],
+      [
+        "Input.dispatchKeyEvent",
+        { type: "keyDown", key: "Delete", code: "Delete", modifiers: 8 },
+        "person",
+        "key",
+      ],
+      ["Input.setInterceptDrags", { enabled: true }, "managed"],
+      [
+        "Input.dispatchDragEvent",
+        { type: "dragEnter", x: 1, y: 1, data: { items: [], dragOperationsMask: 1 } },
+        "managed",
+      ],
+    ];
+    for (const [method, params, reason, param] of refused) {
+      const { status, error } = await failure(await cdp(tab.id, { method, params }));
+      const where = `${method} ${param ?? ""}`;
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason,
+      });
+      expect(error.param, where).toBe(param);
+    }
+    // A middle press pastes the primary selection on Linux, and nowhere
+    // else, so only there is it the person's.
+    const middle = await cdp(tab.id, {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mousePressed", x: 5, y: 5, button: "middle", clickCount: 1 },
+    });
+    if (process.platform === "linux") {
+      const { status, error } = await failure(middle);
+      expect(status).toBe(403);
+      expect(error).toMatchObject({
+        code: "cdp_method_blocked",
+        reason: "person",
+        param: "button",
+      });
+    } else expect(middle.status).toBe(200);
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual(
+      process.platform === "linux" ? [] : [undefined],
+    );
+    expect(sentOn(page, "Input.dispatchDragEvent")).toEqual([]);
+    expect(sentOn(page, "Input.setInterceptDrags")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("a takeover during an Input command answers human_control", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Input.dispatchMouseEvent", () => new Promise(() => {}));
+    const sending = cdp(tab.id, {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseMoved", x: 7, y: 9 },
+    });
+    await expect
+      .poll(() => sentOn(page, "Input.dispatchMouseEvent").length)
+      .toBe(1);
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const { status, error } = await failure(await sending);
+    expect(status).toBe(409);
+    expect(error).toMatchObject({ code: "human_control", reason: "manual" });
+    // The command that was in flight is the last one: the dispatcher's own
+    // ownership check sent nothing after it.
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([undefined]);
+    expect(attached(page)).toEqual([]);
+  });
+
+  it("the Fetch continuations skip the queue", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect(CONTINUATIONS).toEqual([
+      "Fetch.continueRequest",
+      "Fetch.continueResponse",
+      "Fetch.failRequest",
+      "Fetch.fulfillRequest",
+    ]);
+    // A pending evaluate holds the space's lane for the whole check.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    for (const method of CONTINUATIONS) {
+      const answered = await within(
+        cdp(tab.id, { method, params: { requestId: "7" } }),
+        2000,
+      );
+      expect(answered, method).not.toBe("pending");
+      expect((answered as Response).status, method).toBe(200);
+      // The command still went out on the agent's own session.
+      expect(sentOn(page, method), method).toEqual(["agent-1"]);
+    }
+    // Every other command waits its turn behind the evaluate.
+    const queued = cdp(tab.id, { method: "Page.enable" });
+    expect(await within(settled(queued), 300)).toBe("pending");
+    running.release();
+    expect((await running.done).status).toBe(200);
+    expect((await queued).status).toBe(200);
+  });
+
+  it("a continuation still checks its URL", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Fetch.continueRequest",
+        params: { requestId: "7", url: "file:///etc/passwd" },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Fetch.continueRequest",
+      reason: "scope",
+      param: "url",
+    });
+    expect(sentOn(page, "Fetch.continueRequest")).toEqual([]);
+    // Skipping the queue skips no check: the person's control still answers
+    // first, even with no lane to wait in.
+    await controller.dispatch({
+      type: "space:ownership",
+      id: space.id,
+      owner: "human",
+    });
+    const taken = await failure(
+      await cdp(tab.id, {
+        method: "Fetch.continueRequest",
+        params: { requestId: "7" },
+      }),
+    );
+    expect(taken.status).toBe(409);
+    expect(taken.error).toMatchObject({ code: "human_control" });
+    expect(sentOn(page, "Fetch.continueRequest")).toEqual([]);
+  });
+
+  // Section 12's space route: the two methods Kamapathy answers about itself,
+  // outside every queue, with nothing forwarded to Chromium.
+  const spaceCdp = (spaceId: string, body: Record<string, unknown>) => {
+    const done = request(`/spaces/${spaceId}/cdp`, "POST", body);
+    void done.catch(() => {});
+    return done;
+  };
+  // Commands of the two domains Kamapathy answers itself, which no session
+  // ever carries.
+  const browserCommands = (page: FakeContents) =>
+    page.debugger.sent
+      .filter(
+        (command) =>
+          command.method.startsWith("Browser.") ||
+          command.method === "Target.getTargets",
+      )
+      .map((command) => command.method);
+
+  it("space.cdp answers Target.getTargets from this space only", async () => {
+    const { space, tab } = await createPage();
+    const page = controller.contents;
+    const blank = controller.state.tabs.find(
+      (item) => item.spaceId === space.id && item.id !== tab.id,
+    )!;
+    // A title an agent reads is cleaned like other agent text.
+    blank.title = "Checkout\u202e evil";
+    // A page the person opened in the space, and the person's own space,
+    // belong to them.
+    const person = controller.openPersonTab(space.id);
+    const personal = controller.state.tabs.find(
+      (item) => item.spaceId === "personal",
+    )!;
+    const answered = await spaceCdp(space.id, { method: "Target.getTargets" });
+    expect(answered.status).toBe(200);
+    const body = await answered.json();
+    expect(body).toEqual({
+      ok: true,
+      result: {
+        targetInfos: [
+          {
+            targetId: blank.id,
+            type: "page",
+            title: "Checkout evil",
+            url: blank.url,
+            attached: true,
+            browserContextId: space.id,
+          },
+          {
+            targetId: tab.id,
+            type: "page",
+            title: "https://example.com/",
+            url: "https://example.com/",
+            attached: true,
+            browserContextId: space.id,
+          },
+        ],
+      },
+    });
+    const listed = (result: any) =>
+      result.targetInfos.map((info: { targetId: string }) => info.targetId);
+    expect(listed(body.result)).not.toContain(person.id);
+    expect(listed(body.result)).not.toContain(personal.id);
+    // A page the agent let go of is the person's again, so it goes.
+    controller.setManaged(blank.id, false);
+    expect(
+      listed(
+        (await (await spaceCdp(space.id, { method: "Target.getTargets" })).json())
+          .result,
+      ),
+    ).toEqual([tab.id]);
+    expect(browserCommands(page)).toEqual([]);
+  });
+
+  it("space.cdp answers Browser.getVersion itself", async () => {
+    const { space } = await createPage();
+    const page = controller.contents;
+    const answered = await spaceCdp(space.id, { method: "Browser.getVersion" });
+    expect(answered.status).toBe(200);
+    const { result } = await answered.json();
+    // Chromium's version is present only in the app, as health reports it.
+    expect(result).toEqual({
+      protocolVersion: "1.3",
+      product: `Chrome/${process.versions.chrome ?? ""}`,
+      userAgent: expect.any(String),
+      jsVersion: process.versions.v8,
+    });
+    // Section 16's identity: Chrome's reduced user agent, with no Electron
+    // or app token in it.
+    expect(result.userAgent).toMatch(
+      /^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/[\d.]*0\.0\.0 Safari\/537\.36$/,
+    );
+    expect(result.userAgent).not.toMatch(/Electron|Kamapathy/);
+    expect(browserCommands(page)).toEqual([]);
+  });
+
+  it("every other space method is blocked", async () => {
+    const { space } = await createPage();
+    const page = controller.contents;
+    for (const method of [
+      "Target.attachToTarget",
+      "Target.createTarget",
+      "Target.setDiscoverTargets",
+      "Browser.close",
+      "Browser.setWindowBounds",
+      "Page.enable",
+    ]) {
+      const { status, error } = await failure(
+        await spaceCdp(space.id, { method }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "browser",
+      });
+    }
+    // A method is checked for its shape first, as the tab route checks it.
+    for (const body of [
+      { method: "target.getTargets" },
+      { method: "Target" },
+      { method: "Target.getTargets", params: [] },
+    ]) {
+      const { status, error } = await failure(await spaceCdp(space.id, body));
+      expect(status, JSON.stringify(body)).toBe(400);
+      expect(error.code, JSON.stringify(body)).toBe("invalid_field");
+    }
+    expect(browserCommands(page)).toEqual([]);
+    expect(
+      page.debugger.sent.some((command) => command.sessionId !== undefined),
+    ).toBe(false);
+  });
+
+  it("space.cdp answers 403 while Page scripts are off", async () => {
+    const { space, tab } = await createPage();
+    controller.state.settings.agentPageScripts = false;
+    api.setPageScripts(false);
+    const off = await failure(await spaceCdp(space.id, { method: "Browser.getVersion" }));
+    expect(off.status).toBe(403);
+    expect(off.error).toEqual({
+      code: "agent_scripts_off",
+      message: SCRIPTS_OFF_MESSAGE,
+    });
+    controller.state.settings.agentPageScripts = true;
+    api.setPageScripts(true);
+    // A pending evaluate holds the space's lane, and the space answers now.
+    const running = await heldEvaluate(tab.id, "a value from the page");
+    const answered = await spaceCdp(space.id, { method: "Target.getTargets" });
+    expect(answered.status).toBe(200);
+    running.release();
+    expect((await running.done).status).toBe(200);
+  });
+
   it("withholds snapshots and click coordinates that cross a document navigation", async () => {
     const { tab } = await createPage();
     for (const operation of ["snapshot", "click", "press", "drag"]) {
@@ -6100,6 +7991,14 @@ describe("local automation socket", () => {
     expect(controller.activity.map((entry) => entry.message)).not.toContain(
       "Agent clicked an element",
     );
+    // Section 9 names the frame the point belongs to, once the page can say
+    // where it sits.
+    frameOwners(page.debugger, { "frame-x": { local: "0" } });
+    expect(
+      (await failure(
+        await request(`/tabs/${tab.id}/click`, "POST", { ref: "@e1" }),
+      )).error,
+    ).toMatchObject({ code: "input_target_blocked", frame: "0" });
     // A frame the tab can read, and a hit with no frame of its own, are
     // pressed as usual.
     for (const hit of [
@@ -6185,6 +8084,45 @@ describe("local automation socket", () => {
     );
     expect(pasted.status).toBe(403);
     expect(pasted.error).toMatchObject(named);
+    expect(page.inputs).toEqual([]);
+  });
+
+  it("names the extension when section 9's walk stops at its frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A page with a frame group of its own, so the keys follow section 9's
+    // walk to the frame holding focus, and one of the person's extensions
+    // in a frame beside it.
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "1",
+      },
+    ]);
+    // The page itself reports a control with the focus, so only the walk
+    // can refuse, and it stops at the extension's frame.
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    page.result = (code: string) =>
+      code.includes(')("activeFrame",')
+        ? { ok: true, path: "1", key: "panel", blocked: true }
+        : { ok: true };
+    const refused = await failure(
+      await request(`/tabs/${tab.id}/keyboard/type`, "POST", { text: "hi" }),
+    );
+    expect(refused.status).toBe(403);
+    expect(refused.error).toMatchObject({
+      code: "input_target_blocked",
+      message: EXTENSION_MESSAGE,
+      frame: "1",
+      extension: EXTENSION_NAME,
+    });
     expect(page.inputs).toEqual([]);
   });
 
@@ -9768,6 +11706,8 @@ describe("local automation socket", () => {
       "POST /tabs/:id/evaluate": { expression: "true" },
       "POST /tabs/:id/fetch": { url: "/api/cart" },
       "POST /tabs/:id/events": { max: 10 },
+      "POST /tabs/:id/cdp": { method: "Page.enable" },
+      "POST /spaces/:id/cdp": { method: "Browser.getVersion" },
       "POST /tabs/:id/snapshot": {},
       "POST /tabs/:id/actions": { actions: [{ type: "snapshot" }] },
       "POST /tabs/:id/click": { ref: "@e1" },

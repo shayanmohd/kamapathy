@@ -78,6 +78,9 @@ export class FakeContents extends FakeHost {
   zoom = 1;
   inputs: { method: string; parameters: Record<string, unknown> }[] = [];
   afterInput?: () => void;
+  // Each setIgnoreMenuShortcuts call, with the Input commands sent by then,
+  // so a test can see the flag span an operation.
+  menuShortcuts: { ignore: boolean; inputs: number }[] = [];
   // What the tab's own session was asked to fetch, as the PDF re-read does.
   fetches: { url: string; init?: RequestInit }[] = [];
   fetchPdf?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -106,6 +109,14 @@ export class FakeContents extends FakeHost {
         ? { ...given, point: { x: given.x, y: given.y } }
         : given,
     stableBox: (given: any) => ({ ...given, moved: 0 }),
+    // Section 9's owner: at the document origin, at full scale, showing the
+    // whole viewport, so a frame action behaves like one on the page itself
+    // until a test places the owner itself.
+    frameBox: (given: any) => ({
+      box: { x: 0, y: 0, scaleX: 1, scaleY: 1, width: 1200, height: 800 },
+      area: { left: 0, top: 0, right: 1200, bottom: 800 },
+      ...given,
+    }),
     scrollRequest: (given: any) => ({ ...given, settled: true }),
     viewport: () => ({ ok: true, width: 1200, height: 800, zoom: 1 }),
     focusedKind: () => ({ ok: true, kind: "none" }),
@@ -186,6 +197,14 @@ export class FakeContents extends FakeHost {
         this.afterInput?.();
         return {};
       });
+  }
+  setIgnoreMenuShortcuts(ignore: boolean) {
+    this.menuShortcuts.push({
+      ignore,
+      inputs: this.debugger.sent.filter((command) =>
+        command.method.startsWith("Input."),
+      ).length,
+    });
   }
   async loadURL(url: string, options?: Electron.LoadURLOptions) {
     this.loads.push({ url, ...(options ? { options } : {}) });

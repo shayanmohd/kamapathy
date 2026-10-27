@@ -681,6 +681,52 @@ const FIELDS = {
       description: "How many of the oldest events to take.",
     },
   },
+  cdp: {
+    method: {
+      kind: "string",
+      max: 64,
+      required: true,
+      since: 4,
+      description:
+        "The protocol method, such as Page.getNavigationHistory. Commands that reach past this tab's own page and frames are refused.",
+    },
+    params: {
+      kind: "json",
+      since: 4,
+      description:
+        "The command's parameters as an object. Object, context and stream ids must be ones this tab gave the agent.",
+    },
+    frame: {
+      kind: "string",
+      max: 160,
+      since: 4,
+      description:
+        "An out-of-process frame to send the command to: an iframe entry's contentFrame path, such as 0/1, or that entry's ref.",
+    },
+    timeoutMs: {
+      kind: "ms",
+      min: 1000,
+      max: 60000,
+      default: 15000,
+      since: 4,
+      description: "How long to wait for Chromium's answer.",
+    },
+  },
+  spaceCdp: {
+    method: {
+      kind: "string",
+      max: 64,
+      required: true,
+      since: 4,
+      description:
+        "The protocol method. Kamapathy answers Target.getTargets and Browser.getVersion itself and refuses every other one.",
+    },
+    params: {
+      kind: "json",
+      since: 4,
+      description: "The command's parameters as an object.",
+    },
+  },
   screenshot: {
     fullPage: {
       kind: "boolean",
@@ -1110,6 +1156,28 @@ export const ROUTES = [
     "Drains the protocol events recorded for this tab.",
     "{ ok: true, events, dropped, gaps, remaining }",
     FIELDS.events,
+    { lane: "none", budget: 10000, since: 4 },
+  ),
+  route(
+    "POST",
+    "/tabs/:id/cdp",
+    "Sends one protocol command to the tab's own page or one of its frames.",
+    "{ ok: true, result, newSession? }",
+    FIELDS.cdp,
+    {
+      lane: "body",
+      limit: 1048576,
+      budget: { field: "timeoutMs" },
+      follow: true,
+      since: 4,
+    },
+  ),
+  route(
+    "POST",
+    "/spaces/:id/cdp",
+    "Answers Target.getTargets for this space's pages and Browser.getVersion.",
+    "{ ok: true, result }",
+    FIELDS.spaceCdp,
     { lane: "none", budget: 10000, since: 4 },
   ),
   route(

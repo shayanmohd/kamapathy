@@ -32,12 +32,16 @@ export interface FrameRecord {
   ownSession: boolean;
   blocked: boolean;
   unavailable: boolean;
+  /** Set while the frame has started loading another document. */
+  navigating?: true;
 }
 
 type World = Promise<{ contextId: number }>;
 // A frame inside a blocked frame is blocked too, so blocked is worked out
 // when a record is read. navigating is the URL a frame started loading.
-type Entry = Omit<FrameRecord, "blocked"> & { navigating?: string };
+type Entry = Omit<FrameRecord, "blocked" | "navigating"> & {
+  navigating?: string;
+};
 
 // The tab's frames across the page session and the sessions of
 // out-of-process frames, each with Kamapathy's world for its document.
@@ -296,7 +300,11 @@ export class FrameRegistry {
   }
 
   private record(frame: Entry): FrameRecord {
-    const { navigating: _navigating, ...record } = frame;
-    return { ...record, blocked: this.blocked(frame) };
+    const { navigating, ...record } = frame;
+    return {
+      ...record,
+      blocked: this.blocked(frame),
+      ...(navigating === undefined ? {} : { navigating: true as const }),
+    };
   }
 }

@@ -124,6 +124,13 @@ const REFUSED: Record<string, { reason: BlockReason; message?: string }> = {
   "Emulation.setCPUThrottlingRate": { reason: "process" },
   "Emulation.setTimezoneOverride": { reason: "process" },
   "Emulation.setLocaleOverride": { reason: "process" },
+  // With mouse events turned into touch events, a mouse command Kamapathy
+  // sends on its own session is delivered but never answered again.
+  "Emulation.setEmitTouchEventsForMouse": {
+    reason: "managed",
+    message:
+      "Kamapathy would lose the answer to every mouse command it sends. Send touch with Input.dispatchTouchEvent instead.",
+  },
   "Fetch.continueWithAuth": {
     reason: "person",
     message:
@@ -174,6 +181,9 @@ const REFUSED: Record<string, { reason: BlockReason; message?: string }> = {
 const CLIPBOARD_COMMANDS = /^(copy|cut|paste)/i;
 const CLIPBOARD_KEYS = /^(c|x|v|insert)$/i;
 const CLIPBOARD_CODES = /^(KeyC|KeyX|KeyV|Insert)$/i;
+// The editor's own clipboard keys, held with Shift: Insert pastes and
+// Delete cuts, both through the system clipboard.
+const CLIPBOARD_SHIFT = /^(insert|delete)$/i;
 // CDP's modifier bits: Alt 1, Control 2, Meta 4, Shift 8.
 const CONTROL = 2;
 const META = 4;
@@ -248,7 +258,8 @@ const CHECKS: Record<
     const chord = (modifiers & CONTROL) !== 0 || (modifiers & META) !== 0;
     const insert =
       (modifiers & SHIFT) !== 0 &&
-      (String(params.key) === "Insert" || String(params.code) === "Insert");
+      (CLIPBOARD_SHIFT.test(String(params.key ?? "")) ||
+        CLIPBOARD_SHIFT.test(String(params.code ?? "")));
     if (
       (chord &&
         (CLIPBOARD_KEYS.test(String(params.key ?? "")) ||

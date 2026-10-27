@@ -459,6 +459,9 @@ function fillFrames(
       delete entry.contentFrame;
       continue;
     }
+    // Section 8's cdp route takes this entry's ref for the frame it opens.
+    if (typeof entry.ref === "string" && frameId !== undefined)
+      groups.setHome(entry.ref, groups.frameAt(frame)?.frameId ?? "", frameId);
     const origin = frameId === undefined ? undefined : groups.groupOf(frameId)?.origin;
     if (origin) entry.origin = webOrigin(origin);
   }

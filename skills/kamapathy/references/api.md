@@ -1282,6 +1282,8 @@ Show the commands, or help on one
 | POST | `/tabs/:id/evaluate` | `expression?`, `function?`, `arg?`, `timeoutMs?` | Runs the agent's own expression or function in the page's main frame. Returns `{ ok: true, tab: TabView, value?: json } or { ok: true, tab: TabView, unserializable } or { ok: true, tab: TabView }`. |
 | POST | `/tabs/:id/fetch` | `url`, `method?`, `headers?`, `body?`, `cache?`, `credentials?`, `integrity?`, `keepalive?`, `mode?`, `redirect?`, `referrer?`, `referrerPolicy?`, `stream?`, `timeoutMs?` | Fetches a URL from the page, with its cookies, origin and CORS. Returns `{ ok: true, tab: TabView, response: { ok, status, statusText, url, redirected, type, headers, body } }, or NDJSON head, data and end lines with stream`. |
 | POST | `/tabs/:id/events` | `max?` | Drains the protocol events recorded for this tab. Returns `{ ok: true, events, dropped, gaps, remaining }`. |
+| POST | `/tabs/:id/cdp` | `method`, `params?`, `frame?`, `timeoutMs?` | Sends one protocol command to the tab's own page or one of its frames. Returns `{ ok: true, result, newSession? }`. |
+| POST | `/spaces/:id/cdp` | `method`, `params?` | Answers Target.getTargets for this space's pages and Browser.getVersion. Returns `{ ok: true, result }`. |
 | GET | `/tabs/:id/info` |  | Reads the viewport, scroll offsets, document size and ready state. Returns `{ tab: TabView, viewport: { width, height }, scroll: { x, y }, document: { width, height }, readyState, loading } or { tab: TabView, dialog }`. |
 | GET | `/tabs/:id/snapshot` |  | Reads a compact snapshot. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
 | POST | `/tabs/:id/snapshot` | `mode?`, `maxChars?`, `maxControls?`, `selector?`, `scope?`, `root?`, `header?`, `cursor?`, `format?`, `locators?` | Reads bounded page text and controls with refs. Returns `snapshot, where an iframe entry adds origin, contentFrame and content, and unreadFrames counts the frames left unread`. |
@@ -1361,6 +1363,7 @@ Show the commands, or help on one
 | `expectation_not_found` | 404 | not retryable |  | No live wait has this ID: it was answered, cancelled, or its time ran out. |
 | `download_not_found` | 404 | not retryable |  | No held download has this ID: it was deleted, its space closed, or an hour passed since it finished. |
 | `file_chooser_not_found` | 404 | not retryable |  | No live file chooser has this ID: it was filed, its page moved on, or its sixty seconds ran out. |
+| `frame_not_found` | 404 | not retryable | `frame` | No current frame of this tab has that path. |
 | `body_timeout` | 408 | retryable |  | The request body did not arrive in time. |
 | `human_control` | 409 | not retryable | `spaceId`, `reason`, `prompt`, `since` | The person controls this space. |
 | `tab_unmanaged` | 409 | not retryable | `tabId`, `label`, `openedBy` | The page is not the agent's yet. Adopt it before any other page route. |
@@ -1379,7 +1382,7 @@ Show the commands, or help on one
 | `empty_screenshot` | 409 | retryable |  | The page has not rendered yet. |
 | `no_web_page` | 409 | not retryable |  | The tab is not showing a web page. |
 | `debugger_busy` | 409 | retryable when reason is unavailable | `reason` | Kamapathy has no debugger connection to the tab: developer tools hold it, or the connection was lost. |
-| `page_changed` | 409 | not retryable |  | The page navigated during the operation. |
+| `page_changed` | 409 | not retryable | `frame` | The page navigated during the operation, or the frame holding the target loaded another page after input started. |
 | `navigation_interrupted` | 409 | not retryable | `url`, `by` | A newer main-frame navigation replaced the one this request started. |
 | `reload_would_resubmit` | 409 | not retryable | `url` | Reloading would send the page's form again. |
 | `url_opened_in_popup` | 409 | not retryable | `lastUrl`, `popup` | The URL opened in a popup this page opened. |
@@ -1388,11 +1391,11 @@ Show the commands, or help on one
 | `dialog_open` | 409 | not retryable | `dialog`, `started` | A JavaScript dialog is open on the page. |
 | `page_crashed` | 409 | not retryable |  | The page process stopped. |
 | `tab_closed` | 409 | not retryable |  | The tab was closed. |
-| `cross_origin_frame` | 409 | not retryable |  | The control is inside a frame from another origin. |
+| `cross_origin_frame` | 409 | not retryable |  | Retired: frames from other origins are read and actionable, so no route returns this. |
 | `drag_unavailable` | 409 | not retryable |  | Chromium could not take over the drag. |
 | `drag_not_delivered` | 409 | not retryable |  | The page started a drag Kamapathy never received. |
 | `input_not_delivered` | 409 | retryable |  | The page never received the input. |
-| `stale_ref` | 409 | not retryable | `ref` | The ref belongs to an earlier snapshot, a control the page removed, or refs the page retired. |
+| `stale_ref` | 409 | not retryable | `ref`, `frame` | The ref belongs to an earlier snapshot, a control the page removed, refs the page retired, or a frame that loaded another document. |
 | `element_obscured` | 409 | retryable | `presses` | Another element covers the target, after input the action already sent. |
 | `body_too_large` | 413 | not retryable |  | The request body is larger than the route accepts. |
 | `files_too_large` | 413 | not retryable |  | The upload files total more than 16 MiB. |
@@ -1403,8 +1406,9 @@ Show the commands, or help on one
 | `script_error` | 422 | not retryable | `name`, `line`, `column`, `description` | The page function threw or did not parse. |
 | `result_too_large` | 422 | not retryable | `bytes`, `limit`, `status`, `url`, `headers` | The result is larger than the route returns. |
 | `fetch_failed` | 422 | not retryable | `url`, `pageOrigin`, `crossOrigin`, `mode`, `name`, `corsError`, `blockedReason`, `netError` | The page could not fetch the URL. |
-| `no_match` | 422 | retryable | `selector`, `waitedMs` | Nothing matched the selector by the deadline. |
-| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates` | The selector matched more than one element the action can take. |
+| `cdp_error` | 422 | not retryable | `method`, `protocolCode`, `protocolMessage` | Chromium refused the protocol command. |
+| `no_match` | 422 | retryable | `selector`, `waitedMs`, `unreadFrames` | Nothing matched the selector by the deadline. |
+| `ambiguous_match` | 422 | not retryable | `selector`, `count`, `visible`, `hidden`, `actionable`, `candidates`, `unreadFrames` | The selector matched more than one element the action can take. |
 | `drag_out_of_view` | 422 | not retryable |  | A drag endpoint is outside the viewport. |
 | `invalid_file_type` | 422 | not retryable |  | The file input does not accept a selected file's type. |
 | `invalid_upload_target` | 422 | not retryable |  | The ref is not a file input that can take these files. |
@@ -1431,16 +1435,17 @@ Show the commands, or help on one
 | `automation_stopped` | 503 | not retryable |  | Agent access is turned off. |
 | `screenshot_failed` | 503 | retryable |  | The page could not render a screenshot. |
 | `page_timeout` | 504 | retryable | `awaited`, `timeoutMs` | The page did not respond or load in time. |
-| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor` | The request did not start in time, or its target never became ready for input. |
+| `action_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `blocker`, `detail`, `interceptor`, `frame`, `unreadFrames` | The request did not start in time, or its target never became ready for input. |
 | `evaluation_timeout` | 504 | not retryable | `awaited`, `timeoutMs`, `executionStopped`, `mayHaveLateEffects`, `pageResponsive` | The page script did not finish within the timeout. |
 | `fetch_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The fetch did not answer within the timeout. |
+| `cdp_timeout` | 504 | not retryable | `awaited`, `method`, `timeoutMs`, `executionStopped`, `pageResponsive` | The protocol command did not answer within the timeout. |
 | `pdf_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | Reading the PDF did not finish before the timeout. |
 | `control_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `reason` | Control did not return to the agent before the timeout. |
 | `request_timeout` | 504 | not retryable | `awaited`, `timeoutMs` | The person did not answer a request for a space in time. Asking again interrupts them. |
 | `navigation_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `committed`, `url`, `readyState` | The navigation did not reach the requested state before the timeout. |
 | `expectation_timeout` | 504 | not retryable | `awaited`, `event`, `timeoutMs` | No popup, download, file chooser or dialog arrived before the arm ran out. |
 | `download_timeout` | 504 | retryable | `awaited`, `downloadId`, `receivedBytes`, `totalBytes`, `timeoutMs` | The download is still running. Asking again keeps waiting for it. |
-| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `selector`, `matched`, `visible`, `title`, `popups` | The condition was not met before the timeout. |
+| `wait_timeout` | 504 | retryable | `awaited`, `timeoutMs`, `expected`, `lastUrl`, `state`, `url`, `readyState`, `inflight`, `pending`, `selector`, `matched`, `visible`, `title`, `popups`, `unreadFrames` | The condition was not met before the timeout. |
 | `update_unsupported` | 409 | not retryable | `reason`, `platform`, `arch` | No installer is published for this copy of Kamapathy. |
 | `update_check_failed` | 502 | retryable when reason is offline or network or timeout or rate_limited, or httpStatus is in range | `reason`, `httpStatus`, `retryAfterMs` | GitHub Releases gave no usable answer to the update check. |
 | `update_download_failed` | in GET /update | retryable when reason is network or stalled, or httpStatus is in range | `reason`, `httpStatus` | The installer download stopped. |

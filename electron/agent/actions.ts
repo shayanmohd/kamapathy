@@ -1,5 +1,6 @@
 import type { WebContents } from "electron";
 import { ERRORS } from "../../skills/kamapathy/scripts/schema/index.mjs";
+import { AGENT_TEXT_LIMITS, cleanAgentText } from "../../shared/agent-text";
 import type { PageOperation } from "../automation-dom";
 import type { Authority } from "./authority";
 import type { PageStateOperation } from "./dom/page-state";
@@ -19,7 +20,13 @@ import {
 } from "./input/actions";
 import type { InputDispatcher, InputDispatchers } from "./input/dispatch";
 import type { RefBook } from "./refs";
-import { createResolver } from "./resolve";
+import { hitNodeAt } from "./input/guards";
+import {
+  createResolver,
+  frameTargetOf,
+  pointInFrame,
+  type FrameTarget,
+} from "./resolve";
 import type { AutomationController } from "./server";
 import { createSnapshots, type SnapshotRequest } from "./snapshot";
 import {
@@ -34,8 +41,40 @@ import type { ToolAction } from "./validate";
 
 export type Point = { x: number; y: number };
 
+/** The frame a page operation ran in, which the caller passes in empty. */
+export type RanIn = { frameId?: string; path?: string };
+
 // The step types the pointer runner owns.
 const POINTER_KINDS: readonly PointerKind[] = ["click", "dblclick", "hover"];
+
+// The frame note one request's action earned, read by the activity line
+// after the action returns. Section 5's runner records it against the
+// request it ran for, so nothing about a frame reaches the response.
+const notes = new WeakMap<Run, string>();
+/** Records the frame a request acted in, for its activity entry. */
+export const noteFrame = (run: Run, note: string): void => {
+  if (note) notes.set(run, note);
+};
+const hostOf = (value: string): string => {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+};
+/**
+ * The activity suffix for a target in a frame from another host:
+ * " in a frame from <host>", with the host cleaned like any agent text and
+ * cut at 60 characters. A frame of the page's own host adds nothing.
+ */
+export function frameNote(target: FrameTarget, topUrl: string): string {
+  const host = cleanAgentText(hostOf(target.origin)).slice(
+    0,
+    AGENT_TEXT_LIMITS.label,
+  );
+  if (!host || host === hostOf(topUrl)) return "";
+  return ` in a frame from ${host}`;
+}
 
 export const finitePoint = (point: unknown): point is Point =>
   !!point &&
@@ -100,6 +139,8 @@ export interface Actions {
     step?: Step,
     /** The frame whose world runs it, for a read inside a frame group. */
     frameId?: string,
+    /** Filled in with the frame whose world ran it, for section 9. */
+    ran?: RanIn,
   ): Promise<Record<string, unknown>>;
   executeToolAction(
     id: string,
@@ -132,8 +173,9 @@ export function createActions(deps: {
     refs,
   } = deps;
   const { authorizeTab } = authority;
-  // Targets, refs and role nodes are the resolver's business.
-  const resolver = createResolver({ refs });
+  // Targets, refs, role nodes and section 9's search are the resolver's
+  // business.
+  const resolver = createResolver({ refs, frames: deps.frames });
   // Each page of a tab the agent controls has a debugger session from the
   // moment its view exists.
   const sessionOf = (id: string, contents: WebContents): TabSession => {
@@ -225,6 +267,7 @@ export function createActions(deps: {
     deadline: number,
     step?: Step,
     frameId?: string,
+    ran?: RanIn,
   ) => {
     authorizeTab(id);
     const epoch = session.epoch;
@@ -236,6 +279,7 @@ export function createActions(deps: {
       guard: () => authorizeTab(id),
       dispatch: step?.dispatch,
       ...(frameId === undefined ? {} : { frameId }),
+      ...(ran === undefined ? {} : { ran }),
     });
     authorizeTab(id);
     if (
@@ -277,6 +321,42 @@ export function createActions(deps: {
     frames: deps.frames,
     extensions: deps.extensions,
   });
+  // Section 9's scroll with no target: the frame the middle of the viewport
+  // lies over scrolls instead, from the point of its own document that lies
+  // there. Nothing is read when the point is not over a frame group.
+  const scrollIntoFrame = async (
+    id: string,
+    session: TabSession,
+    payload: Record<string, unknown>,
+    deadline: number,
+    step: Step,
+  ): Promise<Record<string, unknown> | undefined> => {
+    const frames = deps.frames.for(id);
+    if (!frames) return undefined;
+    const view = await evaluatePage(id, session, "viewport", {}, deadline, step);
+    const width = typeof view.width === "number" ? view.width : 0;
+    const height = typeof view.height === "number" ? view.height : 0;
+    if (!width || !height) return undefined;
+    const centre = { x: width / 2, y: height / 2 };
+    const hit = await hitNodeAt(session, centre, step);
+    if (hit?.frameId === undefined) return undefined;
+    await frames.bind(step);
+    const group = frames.groupOf(hit.frameId);
+    if (!group?.owner) return undefined;
+    const target = frameTargetOf(frames, group.root);
+    if (!target.owners.length) return undefined;
+    const point = await pointInFrame(session, target, centre, step);
+    if (!point) return undefined;
+    return evaluatePage(
+      id,
+      session,
+      "scroll",
+      { ...payload, point },
+      deadline,
+      step,
+      group.root,
+    );
+  };
   const dispatcherFor = (_id: string, session: TabSession) =>
     dispatchers.for(session);
   // Section 5's element actions, which drive the attempt loop themselves.
@@ -349,7 +429,19 @@ export function createActions(deps: {
       result = await input.press(id, payload as unknown as PressAction, run);
     } else if (action.type === "scroll") {
       result = await evaluatePage(id, session, "scroll", payload, deadline, step);
+      // Section 9: a page that cannot scroll this way continues into the
+      // frame under the middle of the viewport, which names its own panel.
+      if (
+        result.moved === false &&
+        payload.ref === undefined &&
+        payload.selector === undefined
+      )
+        result =
+          (await scrollIntoFrame(id, session, payload, deadline, step)) ??
+          result;
     } else {
+      // The frames the last check was left without, which its timeout names.
+      let unread = 0;
       for (;;) {
         authorizeTab(id);
         let observation: Record<string, unknown>;
@@ -374,9 +466,16 @@ export function createActions(deps: {
           return fail(
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
-            { awaited: "condition", timeoutMs: payload.timeoutMs },
+            {
+              awaited: "condition",
+              timeoutMs: payload.timeoutMs,
+              ...(unread > 0 ? { unreadFrames: unread } : {}),
+            },
           );
         }
+        if (typeof observation.unreadFrames === "number")
+          unread = observation.unreadFrames;
+        else unread = 0;
         if (observation.matched) {
           result = { ok: true };
           break;
@@ -385,7 +484,11 @@ export function createActions(deps: {
           return fail(
             "wait_timeout",
             "The requested page condition was not observed before the timeout.",
-            { awaited: "condition", timeoutMs: payload.timeoutMs },
+            {
+              awaited: "condition",
+              timeoutMs: payload.timeoutMs,
+              ...(unread > 0 ? { unreadFrames: unread } : {}),
+            },
           );
         await run.park(
           () =>
@@ -412,7 +515,13 @@ export function createActions(deps: {
       "mouse-click": "Agent clicked a point",
       wait: "Agent observed a page condition",
     };
-    controller.addActivity(tab.spaceId, descriptions[action.type], "info");
+    // A target inside a frame from another host says so, which is how the
+    // person sees an agent working in an embedded form.
+    controller.addActivity(
+      tab.spaceId,
+      `${descriptions[action.type]}${notes.get(run) ?? ""}`,
+      "info",
+    );
     return result;
   };
   return {

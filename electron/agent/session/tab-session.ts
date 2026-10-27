@@ -492,6 +492,7 @@ export class TabSession {
       ownSession: frame.ownSession,
       blocked: frame.blocked,
       unavailable: frame.unavailable,
+      ...(frame.navigating === undefined ? {} : { navigating: true as const }),
     }));
   }
 

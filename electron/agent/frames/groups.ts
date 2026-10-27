@@ -92,11 +92,18 @@ export interface FrameGroups {
   /**
    * Runs one read per group under the limits, newly found groups after the
    * read that found their owner. `perGroupMs` bounds each read, `from` names
-   * the frame whose group the read starts at, and the scope's own group
-   * fails the whole call rather than being listed unread.
+   * the frame whose group the read starts at, `stop` ends the plan once the
+   * caller has what it needs, leaving the groups left over untouched, and
+   * the scope's own group fails the whole call rather than being listed
+   * unread.
    */
   read<T>(
-    step: Step & { budgetMs: number; perGroupMs?: number; from?: string },
+    step: Step & {
+      budgetMs: number;
+      perGroupMs?: number;
+      from?: string;
+      stop?: () => boolean;
+    },
     run: (group: GroupInfo) => Promise<T>,
   ): Promise<{
     results: { group: GroupInfo; value: T }[];
@@ -108,9 +115,15 @@ export interface FrameGroups {
     path: string,
   ): { frameId: string; sessionId?: string; ownSession: boolean } | undefined;
   groupOf(frameId: string): GroupInfo | undefined;
-  setHome(ref: string, frameId: string): void;
-  /** Throws stale_ref with the frame path once the home moved on. */
-  homeFrame(ref: string): { frameId: string; path?: string } | undefined;
+  setHome(ref: string, frameId: string, opens?: string): void;
+  /**
+   * The frame a ref was issued in, with the path it carries now, the one it
+   * was given in and the frame an `iframe` entry's ref opens. Throws
+   * stale_ref with the frame path once the home moved on.
+   */
+  homeFrame(ref: string):
+    | { frameId: string; path?: string; group: string; opens?: string }
+    | undefined;
   dispose(): void;
 }
 
@@ -556,6 +569,12 @@ export function createFrameGroups(
         }
       };
       while (queue.length || running.size) {
+        // A caller that already has its answer leaves the groups it did not
+        // need as they were: unread, and counted by nothing.
+        if (step.stop?.()) {
+          queue.length = 0;
+          if (!running.size) break;
+        }
         while (queue.length && running.size < READ_LIMITS.inFlight) {
           const group = queue.shift()!;
           const task = readGroup(group)
@@ -585,11 +604,16 @@ export function createFrameGroups(
       };
     },
     groupOf: (frameId) => groupOfFrame.get(frameId),
-    setHome(ref, frameId) {
+    setHome(ref, frameId, opens) {
       const loaderId = loaders.get(frameId);
       const group = groupOfFrame.get(frameId);
       if (loaderId === undefined || !group) return;
-      refs.setHome(tabId, ref, { frameId, loaderId, group: group.path });
+      refs.setHome(tabId, ref, {
+        frameId,
+        loaderId,
+        group: group.path,
+        ...(opens === undefined ? {} : { opens }),
+      });
     },
     homeFrame(ref) {
       const home = refs.home(tabId, ref);
@@ -603,7 +627,12 @@ export function createFrameGroups(
           { ref, ...(frame ? { frame } : {}) },
         );
       }
-      return { frameId: home.frameId, ...(path === undefined ? {} : { path }) };
+      return {
+        frameId: home.frameId,
+        ...(path === undefined ? {} : { path }),
+        group: home.group,
+        ...(home.opens === undefined ? {} : { opens: home.opens }),
+      };
     },
     dispose() {
       stopFrames();

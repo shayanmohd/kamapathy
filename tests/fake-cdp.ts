@@ -266,7 +266,9 @@ export function frameOwners(
   }));
   debuggerFake.reply("Runtime.callFunctionOn", (params) => {
     const owner = owners[ids[Number(params.objectId.slice(6)) - 1]];
-    const binding = /__kamapathyFrames/.test(params.functionDeclaration);
+    // The binding is a function of its own; the frame index runs the page
+    // script, whose source mentions the owner table too.
+    const binding = !/"frameIndex"/.test(params.functionDeclaration);
     return {
       result: {
         type: "object",
