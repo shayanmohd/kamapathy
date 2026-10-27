@@ -6792,6 +6792,30 @@ describe("local automation socket", () => {
     expect(sentOn(page, method)).toEqual(["agent-1", "agent-1"]);
   });
 
+  it("a page scale is refused before any session opens, and resetting it goes out", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Emulation.setPageScaleFactor",
+        params: { pageScaleFactor: 2 },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Emulation.setPageScaleFactor",
+      reason: "scope",
+      param: "pageScaleFactor",
+    });
+    expect(sentOn(page, "Emulation.setPageScaleFactor")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+    expect(
+      (await cdp(tab.id, { method: "Emulation.resetPageScaleFactor" })).status,
+    ).toBe(200);
+    expect(sentOn(page, "Emulation.resetPageScaleFactor")).toEqual(["agent-1"]);
+  });
+
   it("ids the tab delivered are accepted", async () => {
     const { space, tab } = await createPage();
     const page = controller.contents;

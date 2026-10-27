@@ -249,6 +249,11 @@ const CHECKS: Record<
   (params: Record<string, any>, ctx: PolicyContext) => Verdict | undefined
 > = {
   "Emulation.setDeviceMetricsOverride": (params) => metricsCheck(params),
+  // Under mobile emulation a probe saw any page scale, 1 included, zoom the
+  // page past its fit, after which a scroll moved where input landed.
+  // Elsewhere it changes nothing.
+  "Emulation.setPageScaleFactor": () =>
+    block("scope", { param: "pageScaleFactor", message: DISPLACED }),
   "Fetch.enable": (params) =>
     params.handleAuthRequests === true
       ? block("person", {

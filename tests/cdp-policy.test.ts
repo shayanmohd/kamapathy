@@ -356,6 +356,23 @@ describe("the protocol policy", () => {
     }
   });
 
+  it("a page scale, which lets a scroll move where input lands, is refused", () => {
+    // Under mobile emulation a probe of Electron 44 saw any page scale, 1
+    // included, zoom the page past its fit, after which a wheel moved raw
+    // input into an out-of-process frame. Elsewhere it changes nothing.
+    for (const pageScaleFactor of [2, 1, 0.5])
+      expect(
+        verdict("Emulation.setPageScaleFactor", { pageScaleFactor }),
+        String(pageScaleFactor),
+      ).toMatchObject({
+        block: "scope",
+        param: "pageScaleFactor",
+        message: expect.stringContaining("deviceScaleFactor"),
+      });
+    // Going back to the page's own scale stays open.
+    expect(verdict("Emulation.resetPageScaleFactor")).toEqual({ allow: true });
+  });
+
   it("identifiers must have been delivered", () => {
     const ids: [string, Record<string, unknown>, string][] = [
       ["Runtime.callFunctionOn", { objectId: "obj-1" }, "objectId"],
