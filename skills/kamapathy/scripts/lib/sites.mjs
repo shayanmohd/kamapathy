@@ -6,14 +6,20 @@ import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { Script } from "node:vm";
 import { domainToASCII, fileURLToPath, pathToFileURL } from "node:url";
+import { matchRoute } from "../schema/index.mjs";
 import { KamapathyError } from "./errors.mjs";
 import { line } from "./format.mjs";
 import { checkWorkspace, workspacePath } from "./workspace.mjs";
 
+// A page tool reaches the page as the evaluate route's function field, with
+// the newline pageToolCall adds after it.
+const PAGE_SCRIPT = matchRoute("POST", "/tabs/:id/evaluate").body.function.max;
+
 export const LIMITS = {
   manifest: 65536,
   tool: 262144,
-  pageTool: 32768,
+  // Characters, counted as the route counts them; the other files are bytes.
+  pageTool: PAGE_SCRIPT - 1,
   note: 16384,
   packs: 200,
   skipped: 20,
@@ -160,6 +166,12 @@ export async function readTrustedFile(
 ) {
   const path = await trustedPath(root, relative, { owner });
   const refuse = (message) => new PackProblem(message, { file: relative });
+  // A page tool's limit counts characters as the route does. UTF-8 spends at
+  // most three bytes on each, so a file of more bytes is too long unread.
+  const pageTool = kind === "pageTool";
+  const tooLarge = pageTool
+    ? `${relative} must be at most ${limit} characters: runPageTool sends it and a newline as one page script, which holds at most ${PAGE_SCRIPT}.`
+    : `${relative} must be at most ${limit / 1024} KiB.`;
   let file;
   try {
     file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
@@ -173,13 +185,15 @@ export async function readTrustedFile(
   try {
     const metadata = await file.stat();
     if (!metadata.isFile()) throw refuse(`${relative} must be a regular file.`);
-    if (metadata.size > limit)
-      throw refuse(`${relative} must be at most ${limit / 1024} KiB.`);
+    if (metadata.size > (pageTool ? 3 * limit : limit)) throw refuse(tooLarge);
     // The same rules again on the open handle, as the workspace does for
     // .env, so a file swapped between the lstat and the open is refused too.
     if (owner && POSIX && !ownedPrivately(metadata))
       throw refuse(refuseOwner(relative, path));
-    return await file.readFile();
+    const buffer = await file.readFile();
+    if (pageTool && new TextDecoder().decode(buffer).length > limit)
+      throw refuse(tooLarge);
+    return buffer;
   } finally {
     await file.close();
   }

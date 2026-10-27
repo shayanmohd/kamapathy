@@ -49,6 +49,10 @@ import {
   hardStopCause,
 } from "../skills/kamapathy/scripts/lib/errors.mjs";
 import { Page, connect } from "../skills/kamapathy/scripts/api.mjs";
+import {
+  checkBody,
+  matchRoute,
+} from "../skills/kamapathy/scripts/schema/index.mjs";
 import { Session } from "../skills/kamapathy/scripts/lib/request.mjs";
 import { runCli } from "../skills/kamapathy/scripts/kamapathy.mjs";
 
@@ -840,7 +844,7 @@ describe("site packs", () => {
       },
       {
         relative: "page-tools/repository-stats.js",
-        limit: 32768,
+        limit: LIMITS.pageTool,
         kind: "pageTool",
       },
     ]);
@@ -2268,6 +2272,84 @@ export const searchRepositories = (context, args) => args;
       client.runPageTool("github", "repository_stats", {}),
     ).rejects.toMatchObject({ code: "invalid_argument" });
     expect(sent).toBe(0);
+  });
+
+  it("sites check and runPageTool hold a page tool to what the evaluate route's function field carries, counted in characters", async () => {
+    const route = matchRoute("POST", "/tabs/:id/evaluate");
+    const field = route.body.function.max;
+    // runPageTool sends the file and a newline as that field.
+    expect(LIMITS.pageTool).toBe(field - 1);
+    // A function expression exactly `length` characters long. A euro sign
+    // is one character and three bytes, so the longest file that fits holds
+    // nearly three bytes for each character the route counts.
+    const expression = (length) => `() => "${"€".repeat(length - 8)}"`;
+    const names = ["longest", "longer", "huge"];
+    const { env, roots } = await freshRoots();
+    const dir = await writePackIn(
+      roots[0].path,
+      "long",
+      {
+        format: 1,
+        id: "long",
+        name: "long",
+        domains: ["long.example"],
+        pageTools: Object.fromEntries(
+          names.map((name) => [
+            name,
+            {
+              description: "A page tool at the edge of its size.",
+              file: `page-tools/${name}.js`,
+              returns: { type: "string", description: "Its own text." },
+            },
+          ]),
+        ),
+      },
+      {
+        "page-tools/longest.js": expression(field - 1),
+        "page-tools/longer.js": expression(field),
+        // More bytes than a file that fits can hold.
+        "page-tools/huge.js": `() => "${"x".repeat(3 * field)}"`,
+      },
+    );
+    const refusal = (name) =>
+      `page-tools/${name}.js: page-tools/${name}.js must be at most ${field - 1} characters: runPageTool sends it and a newline as one page script, which holds at most ${field}.`;
+
+    const checked = await checkPack(dir, { source: "workspace", id: "long" });
+    expect(checked.problems.map(problemText)).toEqual([
+      refusal("longer"),
+      refusal("huge"),
+    ]);
+
+    // What the app checks first in every evaluate body, so a file sites
+    // check passes is one the route takes.
+    const sent = [];
+    const evaluate = async (source, arg) => {
+      const problem = checkBody(route, { function: source, arg });
+      if (problem)
+        throw new KamapathyError(problem.code, problem.message, problem.fields);
+      sent.push(source);
+      return "ran";
+    };
+    const run = (tool) =>
+      runPageToolIn(env, {
+        packId: "long",
+        tool,
+        args: {},
+        evaluate,
+        roots,
+      }).then(
+        (value) => value,
+        (error) => error,
+      );
+    expect(await run("longest")).toBe("ran");
+    expect(sent.map((source) => source.length)).toEqual([field]);
+    for (const name of ["longer", "huge"])
+      expect(await run(name)).toMatchObject({
+        code: "site_pack_invalid",
+        packId: "long",
+        problems: [refusal(name)],
+      });
+    expect(sent).toHaveLength(1);
   });
 
   it("bundled packs pass the validator", async () => {
