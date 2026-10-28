@@ -4697,6 +4697,13 @@ try {
       new Promise((resolve) => setTimeout(resolve, ms).unref()),
     ]);
   if (app) {
+    // The process is read first: a closed application no longer gives it.
+    let child;
+    try {
+      child = app.process();
+    } catch {
+      /* The application has already closed. */
+    }
     // A quit while agents are at work asks the person first, and no one is
     // here to answer it, so this run answers its own question.
     await bounded(
@@ -4706,7 +4713,7 @@ try {
       5000,
     );
     await bounded(app.close(), 20000);
-    app.process()?.kill("SIGKILL");
+    child?.kill("SIGKILL");
   }
   fixture.closeAllConnections?.();
   await bounded(new Promise((resolve) => fixture.close(resolve)), 5000);
