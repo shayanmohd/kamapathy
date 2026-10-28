@@ -12451,6 +12451,8 @@ describe("local automation socket", () => {
     expect(controller.contents.scripts).toHaveLength(1);
   });
 
+  // About 22 MB of base64 crosses the socket, which a loaded machine can
+  // take longer than the default 5 s to move.
   it("rejects decoded files exceeding the aggregate limit", async () => {
     const { tab } = await createPage();
     const data = Buffer.alloc(8 * 1024 * 1024 + 1).toString("base64");
@@ -12460,7 +12462,7 @@ describe("local automation socket", () => {
     expect(response.status).toBe(413);
     expect((await response.json()).error.code).toBe("files_too_large");
     expect(controller.contents.scripts).toEqual([]);
-  });
+  }, 20000);
 
   it("denies uploads into personal, ungranted, and handed-off tabs", async () => {
     const personal = controller.state.tabs[0];
@@ -12826,10 +12828,12 @@ describe("local automation socket", () => {
     const queued = request(`/file-choosers/${next.id}/files`, "POST", {
       files: [file],
     });
+    // A route that ignored the lane would answer within this second, even
+    // on a loaded machine.
     expect(
       await Promise.race([
         queued.then(() => "answered"),
-        new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 1000)),
       ]),
     ).toBe("waiting");
     releaseClick();
