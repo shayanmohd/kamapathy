@@ -2515,11 +2515,17 @@ try {
         ),
       { timeoutMs: 15000, label: "the site's request for the person" },
     );
+  // A click's own line names the point it pressed, which the layout decides.
+  // Every line after it is something the click caused.
+  const afterClick = (output) => {
+    assert.match(output, /^ok: clicked at [\d.]+,[\d.]+\n/);
+    return output.slice(output.indexOf("\n") + 1);
+  };
   const delayedSpace = (await json(["space", "create", "Delayed popups"])).space;
   const delayedTab = (await json(["open", delayedSpace.id, `${fixture.origin}/prompts/delayed`])).tab;
   // A page opened 400 ms later is outside the click's own window.
   const unreportedClick = await cli(["click", delayedTab.id, "#open-later"]);
-  assert.equal(unreportedClick.output, "ok\n");
+  assert.equal(afterClick(unreportedClick.output), "");
   const latePopup = await poll(
     async () =>
       (await tabsOf(delayedSpace.id)).tabs.find((item) => item.openerId === delayedTab.id),
@@ -2548,7 +2554,7 @@ try {
   const dialogSpace = (await json(["space", "create", "Dialog review"])).space;
   const dialogTab = (await json(["open", dialogSpace.id, `${fixture.origin}/prompts/dialogs`])).tab;
   const dismissedConfirm = await cli(["click", dialogTab.id, "#ask-confirm"]);
-  assert.equal(dismissedConfirm.output, 'ok\nconfirm "Delete the draft?" dismissed\n');
+  assert.equal(afterClick(dismissedConfirm.output), 'confirm "Delete the draft?" dismissed\n');
   assert.match((await observe(dialogTab.id)).text, /confirm false/);
   const dialogArm = await cli(
     ["dialog-policy", dialogTab.id, "accept", "--times", "2", "--prompt-stdin"],
@@ -2556,11 +2562,11 @@ try {
   );
   assert.equal(dialogArm.output, "policy accept 2 left\n");
   const acceptedPrompt = await cli(["click", dialogTab.id, "#ask-prompt"]);
-  assert.equal(acceptedPrompt.output, 'ok\nprompt "What is the title?" accepted\n');
+  assert.equal(afterClick(acceptedPrompt.output), 'prompt "What is the title?" accepted\n');
   assert.match((await observe(dialogTab.id)).text, /prompt Quarterly plan/);
   // An alert is answered at once and keeps the arm.
   const alerted = await cli(["click", dialogTab.id, "#ask-alert"]);
-  assert.equal(alerted.output, 'ok\nalert "A note for you" accepted\n');
+  assert.equal(afterClick(alerted.output), 'alert "A note for you" accepted\n');
   assert.deepEqual((await cli(["dialogs", dialogTab.id])).output.trim().split("\n"), [
     "policy accept 1 left",
     'confirm "Delete the draft?" dismissed',
@@ -2596,7 +2602,7 @@ try {
   );
   // A frame that shares the page's process has no binding of its own, so its
   // answer reaches the page at once and the log once something drains the tab.
-  assert.equal((await cli(["click", frameTab.id, "#ask-in-frame"])).output, "ok\n");
+  assert.equal(afterClick((await cli(["click", frameTab.id, "#ask-in-frame"])).output), "");
   assert.match((await observe(frameTab.id)).text, /frame confirm true/);
   assert.deepEqual((await cli(["dialogs", frameTab.id])).output.trim().split("\n"), [
     "policy none",
@@ -2612,7 +2618,7 @@ try {
   const downloadTab = (await json(["open", downloadSpace.id, `${fixture.origin}/prompts/download`])).tab;
   // Nothing armed: the file never arrives, and the click says so.
   const blockedClick = await cli(["click", downloadTab.id, "#attachment-link"]);
-  assert.equal(blockedClick.output, `ok\ndownload blocked ${ATTACHMENT.name}\n`);
+  assert.equal(afterClick(blockedClick.output), `download blocked ${ATTACHMENT.name}\n`);
   assert.equal((await cli(["downloads", downloadSpace.id])).output, "No downloads.\n");
   const downloadBytes = Buffer.byteLength(ATTACHMENT.body);
   const savedPath = join(temporary, "downloads", ATTACHMENT.name);
@@ -2674,7 +2680,7 @@ try {
   const holdSpace = (await json(["space", "create", "Location review"])).space;
   const holdTab = (await json(["open", holdSpace.id, `${fixture.origin}/prompts/location`])).tab;
   // The site asks inside the window the click left open.
-  assert.equal((await cli(["click", holdTab.id, "#ask-location"])).output, "ok\n");
+  assert.equal(afterClick((await cli(["click", holdTab.id, "#ask-location"])).output), "");
   const locationPrompt = await promptFor(holdSpace.id);
   assert.deepEqual(
     [locationPrompt.kind, locationPrompt.agent, locationPrompt.tabId, locationPrompt.origin],
