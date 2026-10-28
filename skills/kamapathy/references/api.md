@@ -918,7 +918,7 @@ Moves to a point and clicks there, without resolving a target.
 | `clickCount` | integer from 1 to 3 | `1` | How many presses the one gesture sends. |
 | `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
 
-Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.mouse.dblclick(x, y, options?)`
 
@@ -929,7 +929,7 @@ Clicks twice at a point in one gesture.
 | `button` | one of left, middle, right | `"left"` | Which mouse button to press. |
 | `delay` | milliseconds from 0 to 5000 | `0` | How long to hold each press, and to wait between presses. |
 
-Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
+Returns `Promise<{ ok: true, url, input, loading? }>`. Route `POST /tabs/:id/mouse/click`. Errors: `invalid_field`, `input_target_blocked`, `point_outside_viewport`, `native_popup_blocked`, `clipboard_blocked`, `element_obscured`, `input_not_delivered`, `human_control`, `tab_not_found`, `no_web_page`, `page_timeout`, `action_timeout`, `page_changed`, `dialog_open`, `debugger_busy`, `page_crashed`, `tab_closed`, `automation_stopped`. Since API level 4.
 
 ### `page.mouse.wheel(deltaX, deltaY)`
 

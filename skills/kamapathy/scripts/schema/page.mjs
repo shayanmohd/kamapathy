@@ -111,6 +111,7 @@ const MOUSE_PRESS = [
   "point_outside_viewport",
   "native_popup_blocked",
   "clipboard_blocked",
+  "element_obscured",
   "input_not_delivered",
 ];
 // The one key a raw keyboard route takes, and the paste body's fields.
