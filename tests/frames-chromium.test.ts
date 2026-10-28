@@ -848,6 +848,38 @@ for (const mode of ISOLATION)
       expect(labels(await take())).toContain("Deep clicked");
     }, 60000);
 
+    it("uploads by its ref to a file input in a same-origin frame after a key press looked for the focused frame", async () => {
+      await open("/frames/outer", 4);
+      const listing = await take();
+      const file = byLabel(listing, "Frame file");
+      expect(file.frame).toBe("0");
+      const run = (
+        operation: "focusTarget" | "upload",
+        payload: Record<string, unknown>,
+      ) =>
+        resolver.run("tab-1", session!, operation, payload, {
+          deadline: Date.now() + 20000,
+          namespace: "frames",
+        });
+      // As a press of Enter on the note sends it: the target is focused, then
+      // the frame its keys go to is found through the page's own world.
+      expect(
+        await run("focusTarget", { ref: byLabel(listing, "Frame note").ref }),
+      ).toMatchObject({ ok: true });
+      expect(await groups!.focusedFrame(step())).toMatchObject({
+        path: "0",
+        editable: true,
+      });
+      // As the upload route sends it, with the ref the snapshot gave out.
+      expect(
+        await run("upload", {
+          ref: file.ref,
+          files: [{ name: "note.txt", type: "text/plain", data: "aGk=" }],
+        }),
+      ).toEqual({ ok: true, selected: 1 });
+      expect((await take()).text).toContain("Files 1");
+    }, 60000);
+
     it("scrolls a frame 1600 px below the fold into view before clicking", async () => {
       await open("/frames/far", 2);
       const listing = await take();

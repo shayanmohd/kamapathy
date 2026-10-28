@@ -134,10 +134,9 @@ export function pageOperation(
       fingerprints: new Map(),
       secrets: new WeakSet(),
     };
-    // Kamapathy's own reads run under another namespace and leave the agent's
-    // refs in place.
-    if (operation !== "ready" && operation !== "frameIndex")
-      world.__kamapathyReferences = registry;
+    // Kamapathy's own reads run under the internal namespace and leave the
+    // agent's refs in place.
+    if (namespace !== "internal") world.__kamapathyReferences = registry;
   }
   const failure = (
     error: string,
