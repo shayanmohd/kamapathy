@@ -751,10 +751,13 @@ describe("the updater", () => {
         return reply(200, stream.body);
       });
     await stalling.updater.download();
+    // Half the stall time passes before the first bytes, which start the
+    // minute again.
+    await stalling.clock.advance(30000);
     stream.push(installerData.subarray(0, 32));
     // The stall timer restarts once the chunk is on disk, so the clock
     // moves only after that.
-    for (let step = 0; step < 50 && !stalling.updater.state.progress; step++)
+    for (let step = 0; step < 500 && !stalling.updater.state.progress; step++)
       await flush();
     expect(stalling.updater.state.progress?.receivedBytes).toBe(32);
     await stalling.clock.advance(59000);
