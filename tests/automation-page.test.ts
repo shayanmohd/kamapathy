@@ -300,6 +300,29 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     });
   }, 20000);
 
+  it("frameBox and activeFrame leave refs from a snapshot under another namespace valid", async () => {
+    await open("/frames/outer");
+    const file = byLabel(await snapshot(), "Frame file");
+    expect(file.frame).toBe("0");
+    await bindOwner("f-other", () => document.getElementById("other"));
+    // A click inside a frame measures its owner, and a key press looks for
+    // the frame holding the focus, both as Kamapathy's own reads.
+    expect(
+      await operate("frameBox", { key: "f-other" }, "internal"),
+    ).toMatchObject({ ok: true });
+    expect(await operate("activeFrame", {}, "internal")).toMatchObject({
+      ok: true,
+    });
+    // A file input is never re-bound, so only the ref the snapshot gave out
+    // can take the files.
+    expect(
+      await operate("upload", {
+        ref: file.ref,
+        files: [{ name: "note.txt", type: "text/plain", data: "aGk=" }],
+      }),
+    ).toEqual({ ok: true, selected: 1 });
+  }, 20000);
+
   // Section 9 (verify first item 2): the boundary the groups rest on. A world
   // made without universal access reads no frame from another origin, whether
   // Chromium runs it in this process or its own.

@@ -1780,6 +1780,36 @@ describe("local automation socket", () => {
     }
   });
 
+  it("files the input a retarget gave a new ref inside a frame from another origin in that frame's world", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id);
+    // The card frame's world gives the input the number the route reserved,
+    // as the page script does for the control of a label.
+    page.result = (code: string) => {
+      if (!code.includes(')("retargetFile",')) return { ok: true, selected: 1 };
+      const reserved = Number([...code.matchAll(/"firstRef":(\d+)/g)].at(-1)![1]);
+      return { ok: true, ref: `@e${reserved}`, issued: [reserved] };
+    };
+    const response = await request(`/tabs/${tab.id}/set-input-files`, "POST", {
+      ref: "@e2",
+      files: [{ name: "listing.png", type: "image/png", data: "AAEC/w==" }],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, selected: 1 });
+    // Only that world holds the new ref, so the apply runs there too.
+    const worlds = page.debugger.sent.filter(
+      (command) => command.method === "Page.createIsolatedWorld",
+    );
+    const calls = page.debugger.sent.filter(
+      (command) =>
+        command.method === "Runtime.evaluate" &&
+        /\)\("(retargetFile|applyFiles)",/.test(command.params.expression),
+    );
+    expect(calls).toHaveLength(2);
+    for (const call of calls)
+      expect(worlds[call.params.contextId - 1].params.frameId).toBe("card");
+  });
+
   it("searches the top document, then frames depth first in owner order", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

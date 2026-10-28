@@ -734,6 +734,17 @@ export function createResolver(deps: {
           }
           return body;
         };
+        // The refs an answer gave out live in the world that ran it, so a
+        // ref from them goes back to it and never searches again.
+        const homeIssued = (
+          answer: Record<string, unknown> | undefined,
+          frameId: string,
+        ) => {
+          const issued = Array.isArray(answer?.issued) ? answer.issued : [];
+          for (const number of issued)
+            if (typeof number === "number")
+              frames?.setHome(`@e${number}`, frameId);
+        };
         const runGroup = async (
           group: GroupInfo,
           context: FrameContext,
@@ -746,12 +757,7 @@ export function createResolver(deps: {
           }
           await pickRoles(group.root, body);
           const answer = await evaluate(group.root, operation, body);
-          // The candidates a group named live in that group's own world, so
-          // a ref from them goes back to it and never searches again.
-          const issued = Array.isArray(answer?.issued) ? answer.issued : [];
-          for (const number of issued)
-            if (typeof number === "number")
-              frames?.setHome(`@e${number}`, group.root);
+          homeIssued(answer, group.root);
           return answer;
         };
         // What a group holds, read without acting in it: the engine's own
@@ -868,6 +874,7 @@ export function createResolver(deps: {
           );
           await pickRoles(frameId, body);
           result = await evaluate(frameId, operation, body);
+          homeIssued(result, frameId);
         }
         return result
           ? attachUnread(
