@@ -732,10 +732,49 @@ for (const mode of ISOLATION)
         ),
       };
     };
+    // Chromium routes input to an out-of-process frame by the layout it last
+    // drew, which under load trails a scroll by seconds, so a press waits
+    // until a move at its point reaches the element's own document.
+    const routedTo = async (ref: string, point: { x: number; y: number }) => {
+      const { sessionId, contextId } = await session!.world(
+        groups!.homeFrame(ref)!.frameId,
+        step(),
+      );
+      const moves = async (expression: string) =>
+        (
+          await session!.send(
+            "Runtime.evaluate",
+            { expression, contextId, returnByValue: true },
+            { ...step(), ...(sessionId === undefined ? {} : { sessionId }) },
+          )
+        ).result?.value as number;
+      const before = await moves(
+        "if (!globalThis.__moves) { globalThis.__moves = { count: 0 }; addEventListener('mousemove', () => { globalThis.__moves.count += 1; }, true); } globalThis.__moves.count",
+      );
+      const until = Date.now() + 30000;
+      for (let attempt = 0; Date.now() < until; attempt++) {
+        await session!.send(
+          "Input.dispatchMouseEvent",
+          {
+            type: "mouseMoved",
+            x: point.x + (attempt % 2),
+            y: point.y,
+            button: "none",
+            buttons: 0,
+            modifiers: 0,
+          },
+          step(),
+        );
+        if ((await moves("globalThis.__moves.count")) > before) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`No move at ${point.x},${point.y} reached its frame.`);
+    };
     const clickRef = async (ref: string) => {
       const { placed } = await placeOf(ref);
       expect(placed.covered).toBeUndefined();
       expect(inArea(placed.point, placed.area)).toBe(true);
+      await routedTo(ref, placed.point);
       await sendMouse(placed.point);
       return placed;
     };
