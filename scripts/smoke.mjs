@@ -552,10 +552,14 @@ async function overlapsNativePage(locator) {
       view.y < box.y + box.height,
   );
 }
-async function launch() {
+// preload names a module Electron loads before Kamapathy's own code.
+async function launch(preload) {
   app = await electron.launch({
     executablePath: await prepareDesktopRuntime(),
-    args: [resolve("out/main/index.js")],
+    args: [
+      ...(preload ? ["--require", preload] : []),
+      resolve("out/main/index.js"),
+    ],
     env,
     timeout: 30000,
   });
@@ -3714,7 +3718,28 @@ try {
   );
   assert.ok(persisted.spaces.every((space) => space.kind === "personal"));
   assert.equal(persisted.automation, undefined);
-  page = await launch();
+  // Kamapathy opens a saved vault soon after its window shows, and this
+  // run's vault was sealed with the stand-in key installPasswordStubs gives.
+  // The same stand-in loads before Kamapathy does: the real keyring would
+  // wait on a dialog nobody answers here, and no later quit would finish.
+  const standInSealer = join(profile, "stand-in-sealer.cjs");
+  await writeFile(
+    standInSealer,
+    [
+      'const { safeStorage } = require("electron");',
+      "safeStorage.isAsyncEncryptionAvailable = async () => true;",
+      "safeStorage.encryptStringAsync = async (text) =>",
+      '  Buffer.from(Buffer.from(text, "utf8").reverse());',
+      "safeStorage.decryptStringAsync = async (sealed) => ({",
+      '  result: Buffer.from(sealed).reverse().toString("utf8"),',
+      "  shouldReEncrypt: false,",
+      "});",
+      'if (process.platform === "linux")',
+      '  safeStorage.getSelectedStorageBackend = () => "gnome_libsecret";',
+      "",
+    ].join("\n"),
+  );
+  page = await launch(standInSealer);
   state = await page.evaluate(() => window.kamapathy.getState());
   assert.ok(state.spaces.some((space) => space.id === project));
   assert.ok(state.spaces.every((space) => space.kind === "personal"));
@@ -4242,6 +4267,12 @@ try {
   });
   await importDialog.getByRole("checkbox", { name: "Bookmarks" }).uncheck();
   await importDialog.getByRole("checkbox", { name: "History" }).uncheck();
+  // Passwords start checked, and importing any data besides extensions ends
+  // on a summary. This import brings the extension alone.
+  await importDialog
+    .locator(".import-choices")
+    .getByRole("checkbox", { name: "Passwords" })
+    .uncheck();
   assert.equal(
     await importDialog.getByRole("checkbox", { name: "Extensions" }).isChecked(),
     true,
@@ -4666,6 +4697,13 @@ try {
       new Promise((resolve) => setTimeout(resolve, ms).unref()),
     ]);
   if (app) {
+    // The process is read first: a closed application no longer gives it.
+    let child;
+    try {
+      child = app.process();
+    } catch {
+      /* The application has already closed. */
+    }
     // A quit while agents are at work asks the person first, and no one is
     // here to answer it, so this run answers its own question.
     await bounded(
@@ -4675,7 +4713,7 @@ try {
       5000,
     );
     await bounded(app.close(), 20000);
-    app.process()?.kill("SIGKILL");
+    child?.kill("SIGKILL");
   }
   fixture.closeAllConnections?.();
   await bounded(new Promise((resolve) => fixture.close(resolve)), 5000);

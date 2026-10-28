@@ -620,16 +620,21 @@ export class BrowserController {
       : `persist:space-${space.id}`;
   }
 
-  // The extensions whose pages a space shows: those loaded in its session
-  // and any a lookup reports, and none for a space an agent can reach,
-  // whoever asks.
-  private extensionIds(space: Space): ReadonlySet<string> | undefined {
-    if (space.kind !== "personal" || agentRules(space)) return undefined;
+  // The extensions a space's session runs: those loaded in it and any a
+  // lookup reports.
+  private loadedExtensionIds(space: Space): ReadonlySet<string> {
     const partition = this.partitionFor(space);
     return new Set([
       ...this.extensions.loadedIds(partition),
       ...this.extensionLookup(partition),
     ]);
+  }
+
+  // The extensions whose pages a space shows: those its session runs, and
+  // none for a space an agent can reach, whoever asks.
+  private extensionIds(space: Space): ReadonlySet<string> | undefined {
+    if (space.kind !== "personal" || agentRules(space)) return undefined;
+    return this.loadedExtensionIds(space);
   }
 
   // What a space opens besides web pages. A space an agent can reach opens
@@ -718,7 +723,14 @@ export class BrowserController {
     if (id) {
       // Chromium's PDF viewer loads the document in a frame of its own.
       if (!mainFrame && id === PDF_VIEWER_ID) return "allow";
-      return inView(!!this.urlOptions(space).extensionIds?.includes(id));
+      // An extension's frame stays in any page whose session runs it, an
+      // agent's included, where agents never reach it (section 17). Its
+      // pages open only where extensionIds allows them.
+      return inView(
+        mainFrame
+          ? !!this.urlOptions(space).extensionIds?.includes(id)
+          : this.loadedExtensionIds(space).has(id),
+      );
     }
     // Chromium asks the permission handler before another app opens.
     if (isExternalAppUrl(url)) return agentRules(space) ? "refuse" : "external";
