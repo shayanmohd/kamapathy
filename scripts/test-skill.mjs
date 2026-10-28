@@ -3694,9 +3694,13 @@ console.log(JSON.stringify(await waiting));
   // no approval: the agent's own scripts and their values, fetch through
   // the page, protocol commands on the page and its frames, events with
   // cookie values hidden, and one site's data cleared.
-  const scriptSpace = (
-    await json(["space", "create", "Page script review", "--isolated"])
-  ).space;
+  const scriptCreated = await json([
+    "space",
+    "create",
+    "Page script review",
+    "--isolated",
+  ]);
+  const scriptSpace = scriptCreated.space;
   const scriptTab = (
     await json(["open", scriptSpace.id, `${fixture.origin}/scripts/cookie`])
   ).tab;
@@ -3998,7 +4002,7 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   const scriptSpaceTabIds = windowTabs
     .filter((item) => item.spaceId === scriptSpace.id)
     .map((item) => item.id);
-  assert.ok(scriptSpaceTabIds.includes(scriptTab.id));
+  assert.deepEqual(scriptSpaceTabIds, [scriptCreated.tab.id, scriptTab.id]);
   assert.deepEqual(
     listedTargets.map((item) => [item.targetId, item.type, item.browserContextId]),
     scriptSpaceTabIds.map((id) => [id, "page", scriptSpace.id]),
