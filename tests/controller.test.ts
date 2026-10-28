@@ -4815,15 +4815,14 @@ describe("files, extension pages and other apps", () => {
         attempt(target, "will-frame-navigate", "data:text/html,x", true),
       ).not.toHaveBeenCalled();
     }
-    // A loaded extension's frame stays in personal pages, other apps are
-    // asked for there, and an agent's page gets neither.
+    // A loaded extension's frame stays in personal pages and in an agent's
+    // page whose session runs it, where agents never reach it. Other apps
+    // are asked for in personal pages only.
     const extension = `chrome-extension://${"a".repeat(32)}/frame.html`;
-    expect(
-      attempt(page, "will-frame-navigate", extension, false),
-    ).not.toHaveBeenCalled();
-    expect(
-      attempt(agentPage, "will-frame-navigate", extension, false),
-    ).toHaveBeenCalledOnce();
+    for (const target of [page, agentPage])
+      expect(
+        attempt(target, "will-frame-navigate", extension, false),
+      ).not.toHaveBeenCalled();
     expect(
       attempt(page, "will-frame-navigate", "zoommtg://zoom.us/j/1", false),
     ).not.toHaveBeenCalled();
@@ -4850,6 +4849,50 @@ describe("files, extension pages and other apps", () => {
         false,
       ),
     ).not.toHaveBeenCalled();
+  });
+
+  it("a page keeps an extension's frame only where its session runs that extension, and an agent's tab never shows the extension's page", async () => {
+    const browser = controller();
+    const id = "a".repeat(32);
+    // Extensions load into persistent sessions only.
+    browser.setExtensionLookup((partition) =>
+      partition.startsWith("persist:") ? [id] : [],
+    );
+    const extension = `chrome-extension://${id}/frame.html`;
+    const agentPageIn = (spaceId: string) => {
+      const page = contents(
+        browser,
+        browser.openAgentTab(spaceId, "https://example.com/").id,
+      );
+      page.commit("https://example.com/");
+      return page;
+    };
+    const shared = agentPageIn(browser.createAgentSpace("Task").id);
+    const isolated = agentPageIn(
+      browser.createAgentSpace("Clean", { isolated: true }).id,
+    );
+    expect(
+      attempt(shared, "will-frame-navigate", extension, false),
+    ).not.toHaveBeenCalled();
+    expect(
+      attempt(isolated, "will-frame-navigate", extension, false),
+    ).toHaveBeenCalledOnce();
+    expect(
+      attempt(
+        shared,
+        "will-frame-navigate",
+        `chrome-extension://${"b".repeat(32)}/frame.html`,
+        false,
+      ),
+    ).toHaveBeenCalledOnce();
+    expect(attempt(shared, "will-navigate", extension)).toHaveBeenCalledOnce();
+    // A personal space shared with agents keeps the frame, not the page.
+    const { page } = await open(browser, "https://example.com/");
+    browser.grantAccess("personal");
+    expect(
+      attempt(page, "will-frame-navigate", extension, false),
+    ).not.toHaveBeenCalled();
+    expect(attempt(page, "will-navigate", extension)).toHaveBeenCalledOnce();
   });
 
   it("redirects reach web pages, and other apps only from personal tabs", async () => {
