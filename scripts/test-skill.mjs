@@ -3309,22 +3309,19 @@ console.log(JSON.stringify(await waiting));
   );
   assert.match(duplicate.errors, /422 ambiguous_match: /);
   // A same-origin frame is searched again on every check, so what it adds
-  // late is found. The frame from the other origin is left alone; section 9
-  // in phase 7 is where it joins the search.
+  // late is found, and since section 9 the frame from the other origin is
+  // searched too, so an element only it holds is found as well.
   assert.equal(
     (
       await cli(["wait-for-selector", navTab.id, "#late-in-frame"])
     ).output.trim(),
     "ok: visible 1 match",
   );
-  const across = await cli(
-    ["wait-for-selector", navTab.id, "#only-across", "--timeout", "1500"],
-    undefined,
-    { failure: true },
-  );
-  assert.match(
-    across.errors,
-    /504 wait_timeout: The selector #only-across did not reach visible within 1500 ms\. The last check matched 0 elements, 0 of them visible\./,
+  assert.equal(
+    (
+      await cli(["wait-for-selector", navTab.id, "#only-across", "--timeout", "1500"])
+    ).output.trim(),
+    "ok: visible 1 match",
   );
   passed("selector states and ambiguity behave");
   const value = await cli(
