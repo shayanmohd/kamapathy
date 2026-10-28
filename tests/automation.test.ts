@@ -12595,6 +12595,8 @@ describe("local automation socket", () => {
     };
   };
 
+  // About 22 MB of base64 crosses the socket, which a loaded machine can
+  // take longer than the default 5 s to move.
   it("set-input-files takes exactly one of ref or selector, 0 to 8 files up to 16 MiB, and answers 429 upload_busy while another transfer runs", async () => {
     const { tab } = await createPage();
     const path = `/tabs/${tab.id}/set-input-files`;
@@ -12646,7 +12648,7 @@ describe("local automation socket", () => {
       transfer.client.destroy();
     }
     expect((await request(`/tabs/${tab.id}/upload`, "POST", uploadBody())).status).toBe(200);
-  });
+  }, 20000);
 
   it("set-input-files waits for a late file input and looks once at timeoutMs 0", async () => {
     const { tab } = await createPage();
@@ -12763,6 +12765,8 @@ describe("local automation socket", () => {
     });
   };
 
+  // About 22 MB of base64 crosses the socket, which a loaded machine can
+  // take longer than the default 5 s to move.
   it("the chooser files route runs in its tab's space lane, answers 404 file_chooser_not_found and takes 0 to 8 files up to 16 MiB", async () => {
     const { tab } = await createPage();
     chooserNode();
@@ -12833,7 +12837,7 @@ describe("local automation socket", () => {
     const filed = await queued;
     expect(filed.status).toBe(200);
     expect(await filed.json()).toEqual({ ok: true, selected: 1 });
-  });
+  }, 20000);
 
   // How a request ended: its status and error code, or "closed" if its
   // connection dropped first.
