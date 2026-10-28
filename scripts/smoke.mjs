@@ -4627,6 +4627,9 @@ try {
   );
   console.log(`Desktop smoke passed: ${checks} checks.`);
 } catch (error) {
+  // Printed before anything that could block, so a run that cannot close
+  // still says why it failed.
+  console.error(error);
   if (app) {
     try {
       const diagnostic = await app.evaluate(async ({ BrowserWindow }) => {
@@ -4655,19 +4658,29 @@ try {
   }
   throw error;
 } finally {
+  // No step of the cleanup may hold the run open: a window that will not
+  // close is ended, and a server still holding a page's connection is cut.
+  const bounded = (step, ms) =>
+    Promise.race([
+      Promise.resolve(step).catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, ms).unref()),
+    ]);
   if (app) {
     // A quit while agents are at work asks the person first, and no one is
     // here to answer it, so this run answers its own question.
-    await app
-      .evaluate(({ dialog }) => {
+    await bounded(
+      app.evaluate(({ dialog }) => {
         dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
-      })
-      .catch(() => {});
-    await app.close().catch(() => {});
+      }),
+      5000,
+    );
+    await bounded(app.close(), 20000);
+    app.process()?.kill("SIGKILL");
   }
-  await new Promise((resolve) => fixture.close(resolve));
-  if (updateFeed) await updateFeed.close();
-  if (signInSite) await signInSite.close();
+  fixture.closeAllConnections?.();
+  await bounded(new Promise((resolve) => fixture.close(resolve)), 5000);
+  if (updateFeed) await bounded(updateFeed.close(), 5000);
+  if (signInSite) await bounded(signInSite.close(), 5000);
   for (const folder of [profile, updateProfile].filter(Boolean))
     await rm(folder, {
       recursive: true,
