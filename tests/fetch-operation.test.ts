@@ -70,7 +70,7 @@ describe.skipIf(!browserAvailable)("page fetch in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   // Kamapathy's world in the main frame: its own realm, with the document's
   // origin and none of the page's globals.
   const makeWorld = async () => {

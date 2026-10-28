@@ -50,7 +50,7 @@ describe.skipIf(!browserAvailable)("form script in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   // Every frame gets the script before its own scripts run, with an env that
   // records what it sends, answers hello (null refuses it, as main does for
   // a frame it does not serve) and keeps the listener main reaches the frame

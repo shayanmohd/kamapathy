@@ -66,7 +66,7 @@ describe.skipIf(!browserAvailable)("selector engine in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const open = async (path: string) => {
     await page?.close();
     page = await browser.newPage({ viewport: { width: 900, height: 700 } });
@@ -668,7 +668,7 @@ describe.skipIf(!chromiumAvailable)(
     afterAll(async () => {
       await browser?.close();
       site?.close();
-    });
+    }, 60000);
     const step = () => ({ deadline: Date.now() + 15000 });
     // A session on the page with the resolver the routes use, once every
     // frame has loaded.

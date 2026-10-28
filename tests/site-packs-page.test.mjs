@@ -52,7 +52,7 @@ describe.skipIf(!browserAvailable)("site pack samples in Chromium", () => {
     for (const tab of opened) await tab.close().catch(() => {});
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
 
   /**
    * A page as a tool sees it: `goneTo` records every URL it was sent to, the

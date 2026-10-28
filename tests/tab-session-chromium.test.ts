@@ -117,7 +117,7 @@ describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const step = () => ({ deadline: Date.now() + 10000 });
   const internal = () => ({ ...step(), namespace: "internal" });
   const agent = () => ({ ...step(), namespace: "agent" });
@@ -320,7 +320,7 @@ worker.onmessage = (event) => { document.getElementById("worker-result").textCon
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const step = (): Step => ({ deadline: Date.now() + 10000 });
   // A session attached to a fresh page, then the page loaded through it.
   const open = async (path: string) => {
@@ -420,7 +420,7 @@ describe.skipIf(!chromiumAvailable)(
     afterAll(async () => {
       await browser?.close();
       site?.close();
-    });
+    }, 60000);
     const step = (): Step => ({ deadline: Date.now() + 5000 });
     // Reads check until it returns a value, for up to 10 seconds.
     const until = async <T>(
@@ -655,7 +655,7 @@ body { margin: 0; background: #ffffff; }
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const step = (): Step => ({ deadline: Date.now() + 15000 });
 
   it("captures a CSS-scaled clip, and a region below the viewport beyond it", async () => {

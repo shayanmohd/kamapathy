@@ -77,7 +77,7 @@ describe.skipIf(!browserAvailable)("page state in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const open = async (path: string) => {
     page = await browser.newPage({ viewport: { width: 900, height: 700 } });
     // The page's own handlers read the same function the session sends.

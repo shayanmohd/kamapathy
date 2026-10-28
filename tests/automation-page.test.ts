@@ -77,7 +77,7 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     await browser?.close();
     site?.close();
     sibling?.close();
-  });
+  }, 60000);
   const open = async (path: string) => {
     page = await browser.newPage({ viewport: { width: 900, height: 700 } });
     await page.goto(origin + path);

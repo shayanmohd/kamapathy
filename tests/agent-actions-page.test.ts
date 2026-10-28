@@ -47,7 +47,7 @@ describe.skipIf(!browserAvailable)("action operations in Chromium", () => {
   afterAll(async () => {
     await browser?.close();
     site?.close();
-  });
+  }, 60000);
   const open = async (path: string, scale?: number) => {
     await page?.close();
     page = await browser.newPage({
