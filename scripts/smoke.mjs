@@ -4242,6 +4242,12 @@ try {
   });
   await importDialog.getByRole("checkbox", { name: "Bookmarks" }).uncheck();
   await importDialog.getByRole("checkbox", { name: "History" }).uncheck();
+  // Passwords start checked, and importing any data besides extensions ends
+  // on a summary. This import brings the extension alone.
+  await importDialog
+    .locator(".import-choices")
+    .getByRole("checkbox", { name: "Passwords" })
+    .uncheck();
   assert.equal(
     await importDialog.getByRole("checkbox", { name: "Extensions" }).isChecked(),
     true,
