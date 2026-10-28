@@ -207,7 +207,12 @@ export async function launchChromium(options?: {
     },
     async close() {
       browser.kill();
+      // A loaded machine can keep Chromium from exiting for longer than a
+      // hook allows, so it is killed outright after a few seconds and never
+      // outlives the file.
+      const stubborn = setTimeout(() => browser.kill("SIGKILL"), 5000);
       await exited;
+      clearTimeout(stubborn);
       rmSync(profile, { recursive: true, force: true });
     },
   };
