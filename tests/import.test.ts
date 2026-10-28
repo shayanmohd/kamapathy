@@ -3,14 +3,14 @@ import { createCipheriv } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -37,10 +37,11 @@ import {
 import { deriveKey } from "../electron/import-cookies";
 import type { BrowserAction } from "../shared/types";
 
-// One test makes the removal of the temporary copy fail.
+// One test makes the removal of the temporary copy fail, and one follows
+// the copies an import makes, since other files' imports share the folder.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, rm: vi.fn(actual.rm) };
+  return { ...actual, rm: vi.fn(actual.rm), mkdtemp: vi.fn(actual.mkdtemp) };
 });
 
 const fixtures = fileURLToPath(new URL("./fixtures/import/", import.meta.url));
@@ -545,9 +546,7 @@ describe("Chromium import", () => {
     const direct = new DatabaseSync(join(profile, "History"), { readOnly: true });
     expect(() => direct.prepare("SELECT url FROM urls").all()).toThrow(/locked/);
     direct.close();
-    const temporary = () =>
-      readdirSync(tmpdir()).filter((name) => name.startsWith("kamapathy-import-")).length;
-    const before = temporary();
+    const earlier = vi.mocked(mkdtemp).mock.results.length;
     const started = Date.now();
 
     const result = await importFrom("chrome", undefined, both, mac(home));
@@ -572,7 +571,11 @@ describe("Chromium import", () => {
       visits: 5,
     });
     expect(result.history[2].title).toBe("https://example.com/docs");
-    expect(temporary()).toBe(before);
+    const copies = await Promise.all(
+      vi.mocked(mkdtemp).mock.results.slice(earlier).map((call) => call.value),
+    );
+    expect(copies.length).toBeGreaterThan(0);
+    expect(copies.filter((copy) => existsSync(copy))).toEqual([]);
   });
   it("keeps what it read when the temporary copy cannot be removed", async () => {
     const home = folder();
