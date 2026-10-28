@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PassThrough, Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
@@ -305,6 +305,12 @@ describe("automatic connection", () => {
       await writeFile(program, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, {
         mode: 0o755,
       });
+      // macOS checks a new program before its first run, which takes about
+      // half a second on an idle machine and seconds on a busy one, longer
+      // than the wait below. It runs once first, so one started by mistake
+      // leaves the marker in time.
+      execFileSync(program);
+      await rm(marker);
       await writeFile(
         paths.launch,
         JSON.stringify({ command: program, args: [] }),
@@ -324,8 +330,7 @@ describe("automatic connection", () => {
         KAMAPATHY_USER_DATA: userData,
         PATH: process.env.PATH,
       });
-      // macOS checks a new program before its first run, which takes about
-      // half a second on an idle machine and seconds on a busy one.
+      // A busy machine can be slow to start it.
       await expect
         .poll(() => existsSync(marker), { timeout: 10000 })
         .toBe(true);
