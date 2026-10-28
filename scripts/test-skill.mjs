@@ -3987,15 +3987,21 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   const listedTargets = (
     await json(["space", "cdp", scriptSpace.id, "Target.getTargets"])
   ).result.targetInfos;
-  const personalTabIds = (
-    await chrome.evaluate(() => window.kamapathy.getState())
-  ).tabs
+  const windowTabs = (await chrome.evaluate(() => window.kamapathy.getState()))
+    .tabs;
+  const personalTabIds = windowTabs
     .filter((item) => item.spaceId === "personal")
     .map((item) => item.id);
   assert.ok(personalTabIds.length > 0);
+  // The space's own pages, as the window holds them: the page it was
+  // created with and the agent's tab.
+  const scriptSpaceTabIds = windowTabs
+    .filter((item) => item.spaceId === scriptSpace.id)
+    .map((item) => item.id);
+  assert.ok(scriptSpaceTabIds.includes(scriptTab.id));
   assert.deepEqual(
     listedTargets.map((item) => [item.targetId, item.type, item.browserContextId]),
-    [[scriptTab.id, "page", scriptSpace.id]],
+    scriptSpaceTabIds.map((id) => [id, "page", scriptSpace.id]),
   );
   assert.ok(
     personalTabIds.every((id) => !JSON.stringify(listedTargets).includes(id)),
