@@ -752,7 +752,11 @@ describe("the updater", () => {
       });
     await stalling.updater.download();
     stream.push(installerData.subarray(0, 32));
-    await flush();
+    // The stall timer restarts once the chunk is on disk, so the clock
+    // moves only after that.
+    for (let step = 0; step < 50 && !stalling.updater.state.progress; step++)
+      await flush();
+    expect(stalling.updater.state.progress?.receivedBytes).toBe(32);
     await stalling.clock.advance(59000);
     expect(stalling.updater.state.state).toBe("downloading");
     await stalling.clock.advance(1000);
