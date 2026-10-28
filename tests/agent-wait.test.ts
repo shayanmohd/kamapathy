@@ -13,6 +13,7 @@ import {
   TRANSIENT_BLOCKERS,
   confirmDelivery,
   createGesture,
+  landedAt,
   runAttempts,
   settleAfterInput,
 } from "../electron/agent/input/wait";
@@ -102,6 +103,7 @@ describe("the attempt loop", () => {
       "outside_viewport",
       "option_missing",
       "frame_not_ready",
+      "not_drawn",
     ]);
   });
 
@@ -242,6 +244,30 @@ describe("the attempt loop", () => {
       detail: "attaching",
       timeoutMs: 250,
     });
+  });
+
+  it("names a point the page has not drawn, as the latest real blocker", async () => {
+    const { park } = parker();
+    // The target passed every check, but no move at its point reached its
+    // own document, so nothing was pressed and the agent may try again.
+    const error = await ended(
+      loop({ park, timeoutMs: 250, action: "click" }, async (context) =>
+        context.attempt === 0
+          ? { done: false, blocked: { blocker: "covered" } }
+          : { done: false, blocked: { blocker: "not_drawn", frame: "0" } },
+      ),
+    );
+    expect(error.code).toBe("action_timeout");
+    expect(error.message).toBe(
+      "click timed out after 250 ms: The page has not drawn what lies at the point yet, so input there would land elsewhere.",
+    );
+    expect(error.fields).toEqual({
+      awaited: "actionable",
+      blocker: "not_drawn",
+      timeoutMs: 250,
+      frame: "0",
+    });
+    expect(envelope(error, false).error.retryable).toBe(true);
   });
 
   it("keeps the last real blocker the page reported", async () => {
@@ -445,6 +471,194 @@ describe("confirming delivery", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error.code).toBe("input_not_delivered");
     expect([deliveries, frames]).toEqual([1, 0]);
+  });
+
+  it("never sends again a press a document around the target took", async () => {
+    let deliveries = 0;
+    let around = 4;
+    const gesture = createGesture();
+    const error = (await confirmDelivery({
+      kind: "mouse",
+      counters: readings([0]),
+      strays: {
+        counters: async () => [{ mouse: around }, { mouse: 1 }],
+        refuse: () => gesture.refuse(),
+      },
+      frames: async () => {},
+      epoch: () => 1,
+      budget: Date.now() + 30000,
+      deliver: async () => {
+        deliveries += 1;
+        gesture.press();
+        // Chromium routed the press by a layout it drew before, so the page
+        // around the frame received it.
+        around += 1;
+      },
+    }).catch((raised: unknown) => raised)) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.code).toBe("element_obscured");
+    expect(error.fields).toEqual({ presses: 1 });
+    expect(deliveries).toBe(1);
+    // A press no document counted is still sent again.
+    let dropped = 0;
+    const value = await confirmDelivery({
+      kind: "mouse",
+      counters: readings([0, 0, 0, 1]),
+      strays: {
+        counters: async () => [{ mouse: 4 }],
+        refuse: () => gesture.refuse(),
+      },
+      frames: async () => {},
+      epoch: () => 1,
+      budget: Date.now() + 30000,
+      deliver: async () => {
+        dropped += 1;
+        return "pressed";
+      },
+    });
+    expect([value, dropped]).toEqual(["pressed", 2]);
+  });
+
+  it("counts a navigation before a resend as delivery, and sends nothing again", async () => {
+    let epoch = 1;
+    let deliveries = 0;
+    let checks = 0;
+    const value = await confirmDelivery({
+      kind: "mouse",
+      counters: readings([0]),
+      // The press the counters missed loads another page while the frames
+      // go by.
+      frames: async () => {
+        epoch += 1;
+      },
+      again: async () => {
+        checks += 1;
+      },
+      epoch: () => epoch,
+      budget: Date.now() + 30000,
+      deliver: async () => {
+        deliveries += 1;
+        return "pressed";
+      },
+    });
+    expect([value, deliveries, checks]).toEqual(["pressed", 1, 0]);
+  });
+
+  it("runs the checks again before every resend, and a failed one sends nothing", async () => {
+    const order: string[] = [];
+    const value = await confirmDelivery({
+      kind: "mouse",
+      counters: readings([0, 0, 0, 0, 0, 1]),
+      again: async () => {
+        order.push("checks");
+      },
+      frames: async () => {
+        order.push("frames");
+      },
+      epoch: () => 1,
+      budget: Date.now() + 30000,
+      deliver: async () => {
+        order.push("press");
+        return "pressed";
+      },
+    });
+    expect(value).toBe("pressed");
+    expect(order).toEqual([
+      "press",
+      "frames",
+      "checks",
+      "press",
+      "frames",
+      "checks",
+      "press",
+    ]);
+    let deliveries = 0;
+    const gesture = createGesture();
+    const covered = (await confirmDelivery({
+      kind: "mouse",
+      counters: readings([0]),
+      again: async () => gesture.refuse(),
+      frames: async () => {},
+      epoch: () => 1,
+      budget: Date.now() + 30000,
+      deliver: async () => {
+        deliveries += 1;
+        gesture.press();
+      },
+    }).catch((raised: unknown) => raised)) as ApiError;
+    expect(covered.code).toBe("element_obscured");
+    expect(deliveries).toBe(1);
+  });
+});
+
+describe("the routing check", () => {
+  const target = { x: 25, y: 45 };
+  const scale = { x: 1, y: 1 };
+  it("passes a move its own document saw land on the point", () => {
+    expect(
+      landedAt(
+        { move: 3 },
+        { move: 4, landing: { x: 25.4, y: 44 } },
+        target,
+        scale,
+      ),
+    ).toBe(true);
+  });
+
+  it("holds the press while no move reached the target's document", () => {
+    // The move went to the page around the frame, or nowhere yet.
+    expect(
+      landedAt(
+        { move: 3, landing: target },
+        { move: 3, landing: target },
+        target,
+        scale,
+      ),
+    ).toBe(false);
+    // A count with no place it landed proves nothing.
+    expect(landedAt({ move: 3 }, { move: 4 }, target, scale)).toBe(false);
+  });
+
+  it("holds the press while the move landed away from the point", () => {
+    // A stale route into the right frame lands the move where the frame
+    // was drawn, shifted by the scroll since.
+    expect(
+      landedAt(
+        { move: 3 },
+        { move: 4, landing: { x: 25, y: 85 } },
+        target,
+        scale,
+      ),
+    ).toBe(false);
+    expect(
+      landedAt(
+        { move: 3 },
+        { move: 4, landing: { x: 28, y: 45 } },
+        target,
+        scale,
+      ),
+    ).toBe(false);
+    // A frame drawn at half size spreads one page pixel over two of its own.
+    expect(
+      landedAt(
+        { move: 3 },
+        { move: 4, landing: { x: 28, y: 48 } },
+        target,
+        { x: 0.5, y: 0.5 },
+      ),
+    ).toBe(true);
+    expect(
+      landedAt(
+        { move: 3 },
+        { move: 4, landing: { x: 30, y: 45 } },
+        target,
+        { x: 0.5, y: 0.5 },
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a page that cannot count moves through", () => {
+    expect(landedAt({ mouse: 0 }, { mouse: 0 }, target, scale)).toBe(true);
   });
 });
 

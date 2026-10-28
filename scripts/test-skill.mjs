@@ -4174,10 +4174,16 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
   await json(["navigate", crossTab.id, `${fixture.origin}/frames/far`]);
   const farPage = await framesRead(["Pay now"]);
   await cli(["click", crossTab.id, ref(farPage, "Pay now")]);
-  await shownInFrame("Paid");
+  const farPaid = await shownInFrame("Paid");
+  // Chromium routes a press by the layout it last drew, so a press sent
+  // before the page drew its own scroll lands on the frame element in the
+  // page around the frame, which the page counts.
+  assert.match(farPaid.text, /Presses on the frame element: 0/);
   const farInfo = await json(["info", crossTab.id]);
   assert.ok(farInfo.scroll.y > 1000, JSON.stringify(farInfo.scroll));
-  passed("clicks in a frame 1600 px below the fold after wheel scrolling");
+  passed(
+    "clicks in a frame 1600 px below the fold, and no press reaches the page around it",
+  );
   // The page's own Pay now sits under an overlay, so the frame's button is
   // the one the text selector reaches.
   await json(["navigate", crossTab.id, `${fixture.origin}/frames/covered`]);

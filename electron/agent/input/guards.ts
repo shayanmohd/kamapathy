@@ -265,6 +265,8 @@ export async function checkPointerTarget(
     platform?: NodeJS.Platform;
     /** Section 17's loaded extensions, which name the frame a refusal is about. */
     extensions?: ExtensionNames;
+    /** Filled in with the frame the input would reach, which a raw press counts its delivery in. */
+    reached?: { frameId?: string };
   },
 ): Promise<void> {
   const platform = options.platform ?? process.platform;
@@ -286,6 +288,7 @@ export async function checkPointerTarget(
   await checkFrame(hit);
   for (const whole of besideWhole(at))
     await checkFrame(await hitNodeAt(session, whole, step));
+  if (options.reached) options.reached.frameId = hit?.frameId;
   if (!hit || !options.press) return;
   if (platform === "linux" && options.button === "middle" && hit.editable)
     fail(

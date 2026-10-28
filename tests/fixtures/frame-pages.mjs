@@ -102,14 +102,21 @@ document.getElementById("cross").src = location.origin.replace(location.hostname
 const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
 document.getElementById("pay").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
 </script>`,
+  // A press Chromium routes by a layout drawn before the scroll reaches this
+  // page's own frame element instead of the frame, which the page counts.
   "/frames/far": `<!doctype html><meta charset="utf-8"><title>Far frame</title>
 <style>body{font:14px sans-serif;margin:0}#spacer{height:1600px}iframe{display:block;width:400px;height:200px;border:0}</style>
 <p>Top of the far page</p>
+<p id="strays" role="status">Presses on the frame element: 0</p>
 <div id="spacer"></div>
 <iframe id="far" title="Payment form"></iframe>
 <script>
 const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
 document.getElementById("far").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
+let strays = 0;
+addEventListener("mousedown", (event) => {
+  if (event.target.id === "far") document.getElementById("strays").textContent = "Presses on the frame element: " + ++strays;
+}, true);
 </script>`,
   "/frames/late": `<!doctype html><meta charset="utf-8"><title>Late frame</title>
 <style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:400px;height:200px;border:0}</style>
@@ -255,6 +262,27 @@ document.getElementById("grid").src = location.origin.replace(location.hostname,
 <script>
 for (const button of document.querySelectorAll("button"))
   button.onclick = () => { document.getElementById("grid-hit").textContent = "Grid hit " + button.textContent; };
+</script>`,
+  // A frame from another site holding a handle a mouse drag carries to a
+  // slot, and the press counts its own document saw.
+  "/frames/drag": `<!doctype html><meta charset="utf-8"><title>Frame drag</title>
+<style>body{margin:0}iframe{display:block;width:400px;height:240px;border:0}</style>
+<iframe id="pad" title="Drag pad" src="{{other}}/frames/pad"></iframe>`,
+  "/frames/pad": `<!doctype html><meta charset="utf-8"><title>Drag pad</title>
+<style>body{margin:0}button{position:absolute;width:80px;height:40px;margin:0;padding:0}</style>
+<button type="button" id="handle" style="left:20px;top:20px">Handle</button>
+<button type="button" id="slot" style="left:260px;top:140px">Slot</button>
+<p id="pad-result" role="status" style="position:absolute;left:0;top:200px;margin:0">Pad untouched</p>
+<script>
+let held = false;
+let presses = 0;
+const result = document.getElementById("pad-result");
+document.getElementById("handle").addEventListener("mousedown", () => { held = true; });
+addEventListener("mousedown", () => { presses += 1; result.textContent = "Presses " + presses; }, true);
+addEventListener("mouseup", (event) => {
+  if (held && event.target.id === "slot") result.textContent = "Dropped on slot after " + presses + " presses";
+  held = false;
+});
 </script>`,
   "/frames/scaled": `<!doctype html><meta charset="utf-8"><title>Scaled frames</title>
 <style>body{margin:0}iframe{display:block;width:400px;height:200px;border:4px solid #666;padding:6px;margin:0 0 10px}#scaled{transform:scale(0.5);transform-origin:0 0}#zoomed{zoom:0.5}</style>

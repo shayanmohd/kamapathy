@@ -2515,10 +2515,11 @@ export function pageOperation(
     // Chromium drops native input that a page receives before it renders its
     // first frame after a navigation, so the caller counts what arrived.
     const world = globalThis as unknown as {
-      kamapathyInput?: { mouse: number; key: number; drag: number };
+      kamapathyInput?: { mouse: number; key: number; drag: number; move: number };
       kamapathyListening?: WeakSet<Document>;
+      kamapathyLanding?: { x: number; y: number; doc: Document };
     };
-    const counts = (world.kamapathyInput ||= { mouse: 0, key: 0, drag: 0 });
+    const counts = (world.kamapathyInput ||= { mouse: 0, key: 0, drag: 0, move: 0 });
     // Events inside a frame never reach the top window, so every document
     // this page can read counts its own, once per document.
     const listening = (world.kamapathyListening ||= new WeakSet());
@@ -2533,8 +2534,29 @@ export function pageOperation(
       view.addEventListener("dragstart", (event) => {
         setTimeout(() => { if (!event.defaultPrevented) counts.drag += 1; });
       }, { capture: true });
+      view.addEventListener("pointermove", (event) => {
+        counts.move += 1;
+        world.kamapathyLanding = { x: event.clientX, y: event.clientY, doc };
+      }, { capture: true });
     }
-    return { ok: true, ...counts };
+    // Where the last move landed, in this world's viewport: a move in a
+    // frame this page reads is placed through the frames around it, as an
+    // action's own point is.
+    const moved = world.kamapathyLanding;
+    const placed =
+      moved && framesOfDoc(moved.doc)
+        ? placedRect(moved.doc, {
+            left: moved.x,
+            top: moved.y,
+            right: moved.x,
+            bottom: moved.y,
+          } as DOMRect)
+        : undefined;
+    return {
+      ok: true,
+      ...counts,
+      ...(placed ? { landing: { x: placed.left, y: placed.top } } : {}),
+    };
   }
   if (operation === "frame")
     return new Promise((resolve) =>

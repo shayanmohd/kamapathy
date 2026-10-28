@@ -441,7 +441,19 @@ export async function pointInFrame(
   point: Point,
   step: Step,
 ): Promise<Point | undefined> {
+  return (await placeInFrame(session, target, point, step))?.point;
+}
+
+/** The same way in, with what the owners scale the frame's own pixels by. */
+export async function placeInFrame(
+  session: TabSession,
+  target: FrameTarget,
+  point: Point,
+  step: Step,
+): Promise<{ point: Point; scaleX: number; scaleY: number } | undefined> {
   let current = point;
+  let scaleX = 1;
+  let scaleY = 1;
   for (const [index, owner] of target.owners.entries()) {
     const around = await aroundOwner(session, target, index, step);
     const reply = await readOwner(
@@ -457,8 +469,10 @@ export async function pointInFrame(
       x: (current.x - box.x) / box.scaleX,
       y: (current.y - box.y) / box.scaleY,
     };
+    scaleX *= box.scaleX;
+    scaleY *= box.scaleY;
   }
-  return current;
+  return { point: current, scaleX, scaleY };
 }
 
 /**

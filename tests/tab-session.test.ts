@@ -3885,19 +3885,43 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     const run = () => runInNewContext(`(() => {${COUNTER_SOURCE}})()`, world);
     run();
     run();
-    expect([...listeners.keys()]).toEqual(["mousedown", "keydown", "dragstart"]);
-    expect([...listeners.values()].map((list) => list.length)).toEqual([
-      1, 1, 1,
+    expect([...listeners.keys()]).toEqual([
+      "mousedown",
+      "keydown",
+      "dragstart",
+      "pointermove",
     ]);
-    expect(world.kamapathyInput).toEqual({ mouse: 0, key: 0, drag: 0 });
+    expect([...listeners.values()].map((list) => list.length)).toEqual([
+      1, 1, 1, 1,
+    ]);
+    expect(world.kamapathyInput).toEqual({
+      mouse: 0,
+      key: 0,
+      drag: 0,
+      move: 0,
+    });
     listeners.get("mousedown")![0]({});
     listeners.get("mousedown")![0]({});
     listeners.get("keydown")![0]({});
     listeners.get("dragstart")![0]({ defaultPrevented: false });
     // A drag the page cancels in its own handler never counts.
     listeners.get("dragstart")![0]({ defaultPrevented: true });
+    listeners.get("pointermove")![0]({ clientX: 30, clientY: 12 });
+    listeners.get("pointermove")![0]({ clientX: 25.5, clientY: 44 });
     await settle();
-    expect(world.kamapathyInput).toEqual({ mouse: 2, key: 1, drag: 1 });
+    expect(world.kamapathyInput).toEqual({
+      mouse: 2,
+      key: 1,
+      drag: 1,
+      move: 2,
+    });
+    // Where the last move landed, in its document's own pixels, for the
+    // routing check to compare with the point a press is aimed at.
+    expect(world.kamapathyLanding).toEqual({
+      x: 25.5,
+      y: 44,
+      doc: world.document,
+    });
     // The input operation reads the counters and the documents this script
     // already listens to, so neither counts an event twice.
     expect(PAGE_SOURCE).toContain("kamapathyInput");

@@ -20,15 +20,22 @@ export const LOAD_WAIT_MS = 15000;
 // 55 ms, so 500 ms is room to spare.
 export const MAX_SCROLL_GESTURES = 6;
 export const SCROLL_SETTLE_MS = 500;
-// How long the page's own two frames after a gesture may take. A scroll the
-// compositor has made reaches the page at those frames, and a probe of a
-// window nobody is watching rendered about two a second, so two of them are
-// around 1100 ms apart there.
+// How long the page's own two frames after a gesture or a scroll by script
+// may take. A scroll reaches the page, and Chromium's routing of input, at
+// those frames. In a normally launched Kamapathy on an idle machine the top
+// document of an agent tab nobody watched drew 60 frames a second, while a
+// frame from another site 1600 px below the fold drew none until it was
+// scrolled into view; a loaded machine draws far fewer, so this leaves room.
 export const SCROLL_FRAMES_MS = 2000;
 // The least budget a further wait or send is worth starting with.
 const SPARE_MS = 250;
 // How many times one gesture is sent in all.
 const MAX_DELIVERIES = 3;
+// How far from its point a move may land, in the target document's own CSS
+// pixels at full scale, and still count as reaching it. A frame drawn
+// smaller spreads one page pixel over more of its own, so the slack grows
+// with it.
+export const LANDING_PX = 2;
 
 // The blockers an attempt may report, which the loop waits out.
 export const TRANSIENT_BLOCKERS: readonly string[] = [
@@ -43,6 +50,7 @@ export const TRANSIENT_BLOCKERS: readonly string[] = [
   "outside_viewport",
   "option_missing",
   "frame_not_ready",
+  "not_drawn",
 ];
 // What a blocker reads as in an action_timeout message.
 const REASONS: Readonly<Record<ActionBlocker | "no_match", string>> = {
@@ -57,6 +65,8 @@ const REASONS: Readonly<Record<ActionBlocker | "no_match", string>> = {
   outside_viewport: "The target could not be brought on screen.",
   option_missing: "The select has no matching option.",
   frame_not_ready: "The frame holding the target is still loading.",
+  not_drawn:
+    "The page has not drawn what lies at the point yet, so input there would land elsewhere.",
 };
 // What an unready frame reads as, by the detail section 9 gives it.
 const FRAME_REASONS: Readonly<Record<string, string>> = {
@@ -272,22 +282,71 @@ export async function settleAfterInput(deps: {
   return loaded ? {} : { loading: true };
 }
 
+// Section 5's routing check, on two readings of the counters of the document
+// that holds the target, taken around one move at its point. Chromium routes
+// input by the layout it last drew, so right after a scroll a move can reach
+// the page around a frame, or the frame where it was drawn before. The press
+// waits until the target's own document saw the move land on the point, in
+// its own pixels, within LANDING_PX at the owners' scale. A page whose
+// counters cannot say is let through, as the delivery check lets it through.
+export function landedAt(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  point: { x: number; y: number },
+  scale: { x: number; y: number },
+): boolean {
+  if (typeof before.move !== "number" || typeof after.move !== "number")
+    return true;
+  if (after.move <= before.move) return false;
+  const landing = after.landing as { x?: unknown; y?: unknown } | undefined;
+  if (
+    typeof landing?.x !== "number" ||
+    typeof landing.y !== "number" ||
+    !Number.isFinite(landing.x) ||
+    !Number.isFinite(landing.y)
+  )
+    return false;
+  const slack = (of: number) =>
+    LANDING_PX / Math.min(1, of > 0 && Number.isFinite(of) ? of : 1);
+  return (
+    Math.abs(landing.x - point.x) <= slack(scale.x) &&
+    Math.abs(landing.y - point.y) <= slack(scale.y)
+  );
+}
+
+const countOf = (reading: Record<string, unknown>, kind: string) =>
+  typeof reading[kind] === "number" ? (reading[kind] as number) : 0;
+
 // Chromium reports a successful dispatch for native input it drops while a
 // page has not rendered a frame since its last navigation, so a gesture is
 // repeated only on positive evidence that no frame received it. The counters
 // come from section 1's init script, and a resend that would run past the
-// request's budget is not sent.
+// request's budget is not sent. A press that one of the documents around the
+// target's own counted instead was delivered, to the wrong place, and is
+// answered by `strays` without being sent again; a resend runs `again`, the
+// checks a first press runs, before it goes out.
 export async function confirmDelivery<T>(deps: {
   kind: "mouse" | "key" | "drag";
   counters(): Promise<Record<string, unknown>>;
+  strays?: {
+    counters(): Promise<Record<string, unknown>[]>;
+    refuse(): never;
+  };
+  again?(): Promise<void>;
   frames(): Promise<void>;
   epoch(): number;
   budget: number;
   deliver(): Promise<T>;
 }): Promise<T> {
   const epoch = deps.epoch();
+  const elsewhere = async () =>
+    (await deps.strays!.counters()).reduce(
+      (sum, reading) => sum + countOf(reading, deps.kind),
+      0,
+    );
   for (let attempt = 0; ; attempt += 1) {
     const armed = await deps.counters();
+    const around = deps.strays ? await elsewhere() : 0;
     const delivered = await deps.deliver();
     // Input that already changed the page was delivered.
     if (deps.epoch() !== epoch) return delivered;
@@ -300,11 +359,14 @@ export async function confirmDelivery<T>(deps: {
       after > before
     )
       return delivered;
+    if (deps.strays && (await elsewhere()) > around) deps.strays.refuse();
     if (attempt >= MAX_DELIVERIES - 1 || deps.budget - Date.now() < SPARE_MS)
       return fail(
         "input_not_delivered",
         "The page did not accept native input. Inspect the page before retrying.",
       );
     await deps.frames().catch(() => {});
+    if (deps.epoch() !== epoch) return delivered;
+    await deps.again?.();
   }
 }

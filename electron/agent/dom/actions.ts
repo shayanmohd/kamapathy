@@ -22,7 +22,8 @@ export type ActionBlocker =
   | "covered"
   | "outside_viewport"
   | "option_missing"
-  | "frame_not_ready";
+  | "frame_not_ready"
+  | "not_drawn";
 export interface Blocked {
   blocker: ActionBlocker;
   detail?: string;

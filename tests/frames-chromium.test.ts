@@ -6,6 +6,7 @@
 // installed.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { WebContents } from "electron";
 import {
   afterAll,
   afterEach,
@@ -15,17 +16,28 @@ import {
   it,
   vi,
 } from "vitest";
+import type { Actions } from "../electron/agent/actions";
+import type { Authority } from "../electron/agent/authority";
 import { ApiError } from "../electron/agent/errors";
 import {
   createFrameGroups,
   type FrameGroups,
 } from "../electron/agent/frames/groups";
+import type { Run } from "../electron/agent/http";
+import {
+  createInputActions,
+  type InputActions,
+} from "../electron/agent/input/actions";
+import { registerCounters } from "../electron/agent/input/counters";
+import {
+  createDispatchers,
+  type InputDispatchers,
+} from "../electron/agent/input/dispatch";
 import { RefBook } from "../electron/agent/refs";
 import {
   createResolver,
   frameTargetOf,
   inArea,
-  revealThroughFrames,
   translatePoint,
   type Resolver,
 } from "../electron/agent/resolve";
@@ -132,15 +144,22 @@ for (const mode of ISOLATION)
     let resolver: Resolver;
     let refs: RefBook;
     let snapshots: ReturnType<typeof createSnapshots> | undefined;
+    // Section 5's own actions over the tab, as a route runs them: the
+    // attempt loop, the guards, the delivery check and the dispatcher.
+    let dispatchers: InputDispatchers | undefined;
+    let input: InputActions | undefined;
     beforeAll(async () => {
       pages = await startPages();
       origin = `http://127.0.0.1:${pages.ports[0]}`;
       browser = await launchChromium({ args: mode.args });
     }, 60000);
     const shut = async () => {
+      dispatchers?.dispose();
       groups?.dispose();
       await session?.release();
       await page?.close();
+      dispatchers = undefined;
+      input = undefined;
       groups = undefined;
       session = undefined;
       snapshots = undefined;
@@ -166,6 +185,9 @@ for (const mode of ISOLATION)
       });
       session = opened;
       opened.attach();
+      // Every frame counts the input it receives from its first document
+      // on, as the server registers the counters when a session opens.
+      await registerCounters(opened);
       await opened.send(
         "Emulation.setDeviceMetricsOverride",
         { width: 900, height: 700, deviceScaleFactor: 1, mobile: false },
@@ -203,49 +225,72 @@ for (const mode of ISOLATION)
         refs,
         frames: { for: () => held, dispose: () => {} },
       });
+      // The page call a route makes: the resolver's run, with the page's own
+      // refusal raised as the error a route would answer.
+      const evaluatePage: Actions["evaluatePage"] = async (
+        tabId,
+        tabSession,
+        operation,
+        payload,
+        deadline,
+        inner,
+        frameId,
+        ran,
+      ) => {
+        const result = await resolver.run(tabId, tabSession, operation, payload, {
+          deadline,
+          namespace: "frames",
+          ...(inner?.signal ? { signal: inner.signal } : {}),
+          ...(inner?.dispatch ? { dispatch: inner.dispatch } : {}),
+          ...(frameId === undefined ? {} : { frameId }),
+          ...(ran === undefined ? {} : { ran }),
+        });
+        if (result?.ok === false)
+          throw new ApiError(
+            typeof result.code === "string"
+              ? result.code
+              : "element_action_failed",
+            String(result.error),
+            (result.fields ?? {}) as Record<string, unknown>,
+          );
+        return result;
+      };
       snapshots = createSnapshots({
         controller: {
           state: { tabs: [{ id: "tab-1", url: origin + path, title: "" }] },
         } as unknown as AutomationController,
-        // The page call a route makes: the resolver's run, with the page's
-        // own refusal raised as the error a route would answer.
-        evaluatePage: async (
-          tabId,
-          tabSession,
-          operation,
-          payload,
-          deadline,
-          inner,
-          frameId,
-        ) => {
-          const result = await resolver.run(
-            tabId,
-            tabSession,
-            operation,
-            payload,
-            {
-              deadline,
-              namespace: "frames",
-              ...(inner?.signal ? { signal: inner.signal } : {}),
-              ...(frameId === undefined ? {} : { frameId }),
-            },
-          );
-          if (result?.ok === false)
-            throw new ApiError(
-              typeof result.code === "string"
-                ? result.code
-                : "element_action_failed",
-              String(result.error),
-              (result.fields ?? {}) as Record<string, unknown>,
-            );
-          return result;
-        },
+        evaluatePage,
         resolver,
         namespace: () => "frames",
         frames: { for: () => held, dispose: () => {} },
       });
+      const made = createDispatchers({ guard: () => {} });
+      dispatchers = made;
+      // The tab's page as a route's settle reads it: a load the page started
+      // is section 6's business, and none of these pages starts one.
+      const contents = Object.assign(page.host, {
+        isLoadingMainFrame: () => false,
+      }) as unknown as WebContents;
+      input = createInputActions({
+        controller: {} as AutomationController,
+        authority: { authorizeTab: () => ({}) } as unknown as Authority,
+        actions: {
+          readyContents: async () => ({ contents, session: opened }),
+          evaluatePage,
+          dispatcher: () => made.for(opened),
+        },
+        dispatchers: made,
+        frames: { for: () => held, dispose: () => {} },
+      });
       return opened;
     };
+    // A request's run, as the server gives one to a route.
+    const run = (budgetMs = 30000): Run => ({
+      deadline: Date.now() + budgetMs,
+      signal: new AbortController().signal,
+      dispatch: { dispatched: false },
+      park: (wait) => wait(),
+    });
     const take = (request: Partial<SnapshotRequest> = {}, budgetMs = 20000) =>
       snapshots!.take(
         "tab-1",
@@ -651,12 +696,10 @@ for (const mode of ISOLATION)
       expect(covered.blocked).toMatchObject({ blocker: "covered" });
     }, 60000);
 
-    // Section 9's actions: the element's own point from the world of its
-    // frame, mapped out through every owner, and the input sent on the top
-    // page session at what comes out, as section 5's dispatcher sends it.
-    // A click here also waits until Chromium routes a move to the element's
-    // frame, which the dispatcher does not, so these tests say nothing about
-    // the product's own timing after a scroll.
+    // Section 9's actions as a route runs them: section 5's attempt loop
+    // measures the element's own point in the world of its frame, maps it
+    // out through every owner, waits until a move at that point reaches the
+    // frame there, and presses on the top page session.
     const focusEmulation = async () => {
       const sessions = new Set<string | undefined>([undefined]);
       for (const frame of await session!.frames(step()))
@@ -689,23 +732,6 @@ for (const mode of ISOLATION)
     };
     const target = (ref: string) =>
       frameTargetOf(groups!, groups!.homeFrame(ref)!.frameId);
-    // The native input of one gesture, on the tab's own page session.
-    const sendMouse = async (point: { x: number; y: number }) => {
-      for (const type of ["mouseMoved", "mousePressed", "mouseReleased"])
-        await session!.send(
-          "Input.dispatchMouseEvent",
-          {
-            type,
-            x: point.x,
-            y: point.y,
-            button: type === "mouseMoved" ? "none" : "left",
-            buttons: type === "mousePressed" ? 1 : 0,
-            clickCount: type === "mouseMoved" ? 0 : 1,
-            modifiers: 0,
-          },
-          step(),
-        );
-    };
     const sendKey = async (key: string, code: string) => {
       for (const type of ["keyDown", "keyUp"])
         await session!.send(
@@ -735,51 +761,24 @@ for (const mode of ISOLATION)
         ),
       };
     };
-    // Chromium routes input to an out-of-process frame by the layout it last
-    // drew, which under load trails a scroll by seconds, so a press waits
-    // until a move at its point reaches the element's own document.
-    const routedTo = async (ref: string, point: { x: number; y: number }) => {
-      const { sessionId, contextId } = await session!.world(
-        groups!.homeFrame(ref)!.frameId,
-        step(),
+    // A click as the click route runs it, answering with the point it
+    // pressed.
+    const click = async (ref: string) => {
+      const answer = await input!.pointer(
+        "tab-1",
+        {
+          kind: "click",
+          target: { ref },
+          button: "left",
+          clickCount: 1,
+          delayMs: 0,
+          force: false,
+          timeoutMs: 15000,
+        },
+        run(),
       );
-      const moves = async (expression: string) =>
-        (
-          await session!.send(
-            "Runtime.evaluate",
-            { expression, contextId, returnByValue: true },
-            { ...step(), ...(sessionId === undefined ? {} : { sessionId }) },
-          )
-        ).result?.value as number;
-      const before = await moves(
-        "if (!globalThis.__moves) { globalThis.__moves = { count: 0 }; addEventListener('mousemove', () => { globalThis.__moves.count += 1; }, true); } globalThis.__moves.count",
-      );
-      const until = Date.now() + 30000;
-      for (let attempt = 0; Date.now() < until; attempt++) {
-        await session!.send(
-          "Input.dispatchMouseEvent",
-          {
-            type: "mouseMoved",
-            x: point.x + (attempt % 2),
-            y: point.y,
-            button: "none",
-            buttons: 0,
-            modifiers: 0,
-          },
-          step(),
-        );
-        if ((await moves("globalThis.__moves.count")) > before) return;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      throw new Error(`No move at ${point.x},${point.y} reached its frame.`);
-    };
-    const clickRef = async (ref: string) => {
-      const { placed } = await placeOf(ref);
-      expect(placed.covered).toBeUndefined();
-      expect(inArea(placed.point, placed.area)).toBe(true);
-      await routedTo(ref, placed.point);
-      await sendMouse(placed.point);
-      return placed;
+      expect(answer).toMatchObject({ ok: true });
+      return answer as { point: { x: number; y: number } };
     };
     const counters = async (ref: string) =>
       (await inHome("input", ref)) as {
@@ -806,7 +805,7 @@ for (const mode of ISOLATION)
       ] as const) {
         const field = byLabel(listing, label).ref;
         const armed = await counters(field);
-        await clickRef(byLabel(listing, button).ref);
+        await click(byLabel(listing, button).ref);
         // The frame that holds the target counted the press, once, and the
         // page's own document counted none of it.
         const after = await counters(field);
@@ -852,10 +851,11 @@ for (const mode of ISOLATION)
       expect(button.frame).toBe("0/0");
       const inner = target(button.ref);
       expect(inner.owners).toHaveLength(2);
-      const placed = await clickRef(button.ref);
       // Half of the frame's own pixels, from the owner's content box.
+      const { placed } = await placeOf(button.ref);
       expect(placed.scaleX).toBeCloseTo(0.5, 5);
-      expect(placed.point.x).toBeCloseTo(5 + 150 * 0.5, 1);
+      const { point } = await click(button.ref);
+      expect(point.x).toBeCloseTo(5 + 150 * 0.5, 1);
       // The press landed on the control, not beside it.
       expect((await take()).text).toContain("Grid hit Target");
     }, 60000);
@@ -886,7 +886,8 @@ for (const mode of ISOLATION)
         return found.point as { x: number; y: number };
       };
       await pointOf(byLabel(listing, "Frame note").ref);
-      await sendMouse(await pointOf(deep.ref));
+      await pointOf(deep.ref);
+      await click(deep.ref);
       expect(labels(await take())).toContain("Deep clicked");
     }, 60000);
 
@@ -943,12 +944,66 @@ for (const mode of ISOLATION)
       // on screen, so the point maps outside every owner's visible area.
       const first = await placeOf(button);
       expect(inArea(first.placed.point, first.placed.area)).toBe(false);
-      // The outermost owner is brought into view first, then the element's
-      // own point is measured again and the press lands on it.
-      await revealThroughFrames(session!, target(button), step());
+      // The click brings the outermost owner into view, measures the
+      // element's own point again and presses there once a move at that
+      // point reaches the frame. A press routed by the layout drawn before
+      // the scroll lands on the page's own frame element instead, which the
+      // page counts.
+      const armed = await counters(button);
+      const top = await topCounters();
+      await click(button);
       expect(await scrollY()).toBeGreaterThan(1000);
-      await clickRef(button);
-      expect((await take()).text).toContain("Paid");
+      expect((await counters(button)).mouse).toBe((armed.mouse ?? 0) + 1);
+      expect((await topCounters()).mouse).toBe(top.mouse ?? 0);
+      const paid = await take();
+      expect(paid.text).toContain("Paid");
+      expect(paid.text).toContain("Presses on the frame element: 0");
+    }, 60000);
+
+    // Section 5's delivery check reads the counters of the frame the press
+    // reaches, whichever route sent it.
+    it("a raw click inside a cross-site frame is counted there, once", async () => {
+      await open("/frames/pay", 3);
+      const listing = await take();
+      const field = byLabel(listing, "Card number").ref;
+      const { placed } = await placeOf(byLabel(listing, "Pay now").ref);
+      const armed = await counters(field);
+      const top = await topCounters();
+      const answer = await input!.mouse(
+        "tab-1",
+        {
+          kind: "click",
+          x: placed.point.x,
+          y: placed.point.y,
+          steps: 1,
+          button: "left",
+          clickCount: 1,
+          delayMs: 0,
+        },
+        run(),
+      );
+      expect(answer).toMatchObject({ ok: true });
+      expect((await counters(field)).mouse).toBe((armed.mouse ?? 0) + 1);
+      expect((await topCounters()).mouse).toBe(top.mouse ?? 0);
+      expect(labels(await take())).toContain("Paid");
+    }, 60000);
+
+    it("a drag inside a cross-site frame presses once, counted there", async () => {
+      await open("/frames/drag", 2);
+      const listing = await take();
+      const answer = await input!.drag(
+        "tab-1",
+        {
+          source: { ref: byLabel(listing, "Handle").ref },
+          target: { ref: byLabel(listing, "Slot").ref },
+          button: "left",
+          force: false,
+          timeoutMs: 10000,
+        },
+        run(),
+      );
+      expect(answer).toMatchObject({ ok: true, drag: "mouse" });
+      expect((await take()).text).toContain("Dropped on slot after 1 presses");
     }, 60000);
 
     it("an element covering an owner is reported as covered with its interceptor", async () => {
@@ -963,7 +1018,7 @@ for (const mode of ISOLATION)
       // The page's own element, not the frame it covers.
       expect(placed.interceptor).toMatchObject({ tag: "div", role: "div" });
       // The control below the veil, in the same frame, is reached as usual.
-      await clickRef(byLabel(listing, "Decoy").ref);
+      await click(byLabel(listing, "Decoy").ref);
       expect((await take()).text).toContain("Grid hit Decoy");
     }, 60000);
   });

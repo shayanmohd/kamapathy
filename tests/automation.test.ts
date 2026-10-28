@@ -2299,11 +2299,17 @@ describe("local automation socket", () => {
       ref: "@e2",
     });
     expect(clicked.status).toBe(200);
+    // The frame's own counters decide, around the move and around the
+    // press; the page's own are read once, so a press it took instead would
+    // be told from one nothing took.
     const counters = callsOf(page, "input");
-    expect(counters.length).toBeGreaterThan(1);
-    expect(counters.map((command) => command.sessionId)).toEqual(
-      counters.map(() => "card-session"),
-    );
+    expect(counters.map((command) => command.sessionId)).toEqual([
+      "card-session",
+      "card-session",
+      "card-session",
+      undefined,
+      "card-session",
+    ]);
     // A press no frame counted is answered as it is on the page itself.
     page.afterInput = undefined;
     presses = 0;
@@ -2312,6 +2318,296 @@ describe("local automation socket", () => {
     });
     expect(missed.status).toBe(409);
     expect((await missed.json()).error.code).toBe("input_not_delivered");
+  });
+
+  // Where Chromium sends a frame action's mouse input: by the layout it last
+  // drew. Until the page draws its new one, input at the frame's place goes
+  // to the page around the frame, or with `shift` to the frame itself where
+  // it was drawn, shifted by the scroll since, as it did in Chromium right
+  // after a scroll. `drawAfter` moves go out before the page draws, and
+  // `presses` sends every press to the page or to nothing instead. Each
+  // document counts the presses and moves that reached it and keeps where
+  // the last move landed in its own pixels; the frame sits at 40,60.
+  type Seen = {
+    mouse: number;
+    key: number;
+    drag: number;
+    move: number;
+    landing?: { x: number; y: number };
+  };
+  const drawnLayout = (
+    page: FakeContents,
+    options: {
+      drawAfter?: number;
+      shift?: number;
+      presses?: "page" | "nowhere";
+    } = {},
+  ) => {
+    const seen: Record<"page" | "frame", Seen> = {
+      page: { mouse: 0, key: 0, drag: 0, move: 0 },
+      frame: { mouse: 0, key: 0, drag: 0, move: 0 },
+    };
+    // Where the last move had landed in the frame when each press went out.
+    const pressedAt: unknown[] = [];
+    let moves = 0;
+    page.afterInput = () => {
+      const { method, parameters } = page.inputs.at(-1)!;
+      if (method !== "Input.dispatchMouseEvent") return;
+      const drawn = moves >= (options.drawAfter ?? 0);
+      const stale = drawn ? 0 : options.shift;
+      const world = drawn || stale !== undefined ? seen.frame : seen.page;
+      const x = Number(parameters.x);
+      const y = Number(parameters.y);
+      if (parameters.type === "mouseMoved") {
+        moves += 1;
+        world.move += 1;
+        world.landing =
+          world === seen.frame
+            ? { x: x - 40, y: y - 60 + (stale ?? 0) }
+            : { x, y };
+      }
+      if (parameters.type !== "mousePressed") return;
+      pressedAt.push(seen.frame.landing);
+      if (options.presses === "nowhere") return;
+      (options.presses === "page" ? seen.page : world).mouse += 1;
+    };
+    // A frame point the owner's world maps out to the page, 40,60 down.
+    page.result = (code: string, sessionId?: string) => {
+      if (code.includes(')("input",'))
+        return {
+          ok: true,
+          ...(sessionId === "card-session" ? seen.frame : seen.page),
+        };
+      if (code.includes(')("frameBox",')) {
+        const at = /"point":\{"x":(-?[\d.]+),"y":(-?[\d.]+)\}/.exec(code);
+        return {
+          ok: true,
+          ...OWNER_BOX,
+          ...(at
+            ? { point: { x: Number(at[1]) + 40, y: Number(at[2]) + 60 } }
+            : {}),
+        };
+      }
+      return { ok: true, x: 25, y: 45 };
+    };
+    return { seen, pressedAt };
+  };
+  const pointerTypes = (page: FakeContents) =>
+    page.inputs
+      .filter((input) => input.method === "Input.dispatchMouseEvent")
+      .map((input) => input.parameters.type);
+  const pressesOf = (page: FakeContents) =>
+    pointerTypes(page).filter((type) => type === "mousePressed").length;
+
+  it("presses into a frame only once a move at its point reaches the frame there", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The page draws its new layout only after two moves went to the old one.
+    const { seen } = drawnLayout(page, { drawAfter: 2 });
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    // The one press reached the frame, and none reached the page around it.
+    expect([seen.page.mouse, seen.frame.mouse]).toEqual([0, 1]);
+    // It went out after the third move, the first to reach the frame.
+    expect(pointerTypes(page)).toEqual([
+      "mouseMoved",
+      "mouseMoved",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+    ]);
+    expect(seen.frame.landing).toEqual({ x: 25, y: 45 });
+  });
+
+  it("an action whose point the page never draws times out without pressing", async () => {
+    for (const route of ["click", "hover"]) {
+      const { tab } = await createPage();
+      const page = await framedPage(tab.id, { sessionId: "card-session" });
+      const { seen } = drawnLayout(page, {
+        drawAfter: Number.POSITIVE_INFINITY,
+      });
+      const refused = await request(`/tabs/${tab.id}/${route}`, "POST", {
+        ref: "@e2",
+        timeoutMs: 300,
+      });
+      expect(refused.status, route).toBe(504);
+      expect(await refused.json(), route).toEqual({
+        error: {
+          code: "action_timeout",
+          message: `${route} timed out after 300 ms: The page has not drawn what lies at the point yet, so input there would land elsewhere.`,
+          awaited: "actionable",
+          blocker: "not_drawn",
+          frame: "0",
+          timeoutMs: 300,
+          retryable: true,
+        },
+      });
+      // Only moves went out, none of them counted as input sent, and every
+      // one of them reached the page around the frame.
+      expect(new Set(pointerTypes(page)), route).toEqual(
+        new Set(["mouseMoved"]),
+      );
+      expect(
+        [seen.page.mouse, seen.frame.mouse, seen.frame.move],
+        route,
+      ).toEqual([0, 0, 0]);
+    }
+  });
+
+  it("holds a press whose move reached the frame away from its point", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // Before the page draws, the frame takes input where it was drawn, 40
+    // pixels from where it is, so a move there lands on another control.
+    const { seen, pressedAt } = drawnLayout(page, { drawAfter: 2, shift: 40 });
+    const clicked = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(clicked.status).toBe(200);
+    expect(pressedAt).toEqual([{ x: 25, y: 45 }]);
+    expect(seen.frame.mouse).toBe(1);
+  });
+
+  it("never sends again a press the page around the frame took", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The move reached the frame, and the press then went to the page.
+    const { seen } = drawnLayout(page, { presses: "page" });
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toEqual({
+      code: "element_obscured",
+      message:
+        "Another element covers the target. The input Kamapathy already sent was not repeated; inspect the page before retrying.",
+      presses: 1,
+      dispatched: true,
+    });
+    expect([seen.page.mouse, seen.frame.mouse]).toEqual([1, 0]);
+    expect(pressesOf(page)).toBe(1);
+  });
+
+  it("checks the target, its frame and the guards again before sending a press again", async () => {
+    type Answer = (code: string, sessionId?: string) => unknown;
+    // Each press is lost, and something changes before the resend.
+    const changes = [
+      {
+        name: "covered",
+        status: 409,
+        code: "element_obscured",
+        change: (page: FakeContents) => {
+          const answer = page.result as Answer;
+          page.result = (code: string, sessionId?: string) =>
+            code.includes(')("actionPoint",')
+              ? {
+                  ok: true,
+                  x: 25,
+                  y: 45,
+                  blocked: {
+                    blocker: "covered",
+                    interceptor: 'div#banner "Sale"',
+                  },
+                }
+              : answer(code, sessionId);
+        },
+      },
+      {
+        name: "moved",
+        status: 409,
+        code: "element_obscured",
+        change: (page: FakeContents) => {
+          const answer = page.result as Answer;
+          page.result = (code: string, sessionId?: string) =>
+            code.includes(')("frameBox",')
+              ? { ok: true, ...OWNER_BOX, point: { x: 65, y: 145 } }
+              : answer(code, sessionId);
+        },
+      },
+      {
+        name: "extension",
+        status: 403,
+        code: "input_target_blocked",
+        change: (page: FakeContents) => {
+          // One of the person's extensions now draws its frame at the point.
+          frameNavigated(page.debugger, {
+            frameId: "frame-x",
+            parentId: "main",
+            loaderId: "loader-x",
+            url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+          });
+          page.hits = [{ x: 65, y: 105, nodeName: "iframe", holds: "frame-x" }];
+        },
+      },
+    ];
+    for (const { name, status, code, change } of changes) {
+      const { tab } = await createPage();
+      const page = await framedPage(tab.id, { sessionId: "card-session" });
+      drawnLayout(page, { presses: "nowhere" });
+      const drop = page.afterInput!;
+      page.afterInput = () => {
+        drop();
+        if (page.inputs.at(-1)?.parameters.type === "mousePressed")
+          change(page);
+      };
+      const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+        ref: "@e2",
+      });
+      expect(refused.status, name).toBe(status);
+      expect((await refused.json()).error.code, name).toBe(code);
+      expect(pressesOf(page), name).toBe(1);
+    }
+  });
+
+  it("a raw click and a drag read the counters of the frame they press in", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    const { seen } = drawnLayout(page);
+    // The point lies over the frame's owner, so the press reaches the frame.
+    page.hits = [{ x: 65, y: 105, nodeName: "iframe", holds: "card" }];
+    const clicked = await request(`/tabs/${tab.id}/mouse/click`, "POST", {
+      x: 65,
+      y: 105,
+    });
+    expect(clicked.status).toBe(200);
+    expect([seen.page.mouse, seen.frame.mouse]).toEqual([0, 1]);
+    // Both ends of a drag sit in the frame, which counts its one press.
+    const answer = page.result as (code: string, sessionId?: string) => unknown;
+    page.result = (code: string, sessionId?: string) =>
+      code.includes(')("actionPoint",') && code.includes('"kind":"drag"')
+        ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 120 } }
+        : answer(code, sessionId);
+    page.hits = [];
+    const dragged = await request(`/tabs/${tab.id}/drag`, "POST", {
+      source: { ref: "@e2" },
+      target: { ref: "@e2" },
+    });
+    expect(dragged.status).toBe(200);
+    expect([seen.page.mouse, seen.frame.mouse]).toEqual([0, 2]);
+  });
+
+  it("sends a press at once while a button is held, and never again where the held press took it", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The page has not drawn the frame where it is, so a move there would
+    // never reach it. With a button held the press goes out anyway, since
+    // every move and press then follows the press that holds the button.
+    const { seen } = drawnLayout(page, { drawAfter: Number.POSITIVE_INFINITY });
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/down`, "POST", {})).status,
+    ).toBe(200);
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e2",
+      timeoutMs: 200,
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+    });
+    expect([seen.page.mouse, seen.frame.mouse]).toEqual([2, 0]);
   });
 
   it("an action inside a frame from another host names it in the activity", async () => {
@@ -9660,7 +9956,9 @@ describe("local automation socket", () => {
       target: { selector: "#zone" },
       kind: "drag",
     });
+    // The routing check's move at the source comes first, with no button.
     expect(steps()).toEqual([
+      "mouseMoved",
       "intercept true",
       "mouseMoved",
       "mousePressed",
@@ -9671,13 +9969,14 @@ describe("local automation socket", () => {
     const mouse = controller.contents.inputs
       .filter((input) => input.method === "Input.dispatchMouseEvent")
       .map((input) => input.parameters);
-    expect(mouse[1]).toMatchObject({ x: 10, y: 20, button: "left", buttons: 1 });
+    expect(mouse[0]).toMatchObject({ x: 10, y: 20, button: "none", buttons: 0 });
+    expect(mouse[2]).toMatchObject({ x: 10, y: 20, button: "left", buttons: 1 });
     // The first pressed move goes past Chromium's 4 pixel and the pointer
     // libraries' 5 to 8 pixel thresholds.
     expect(
-      Math.hypot((mouse[2].x as number) - 10, (mouse[2].y as number) - 20),
+      Math.hypot((mouse[3].x as number) - 10, (mouse[3].y as number) - 20),
     ).toBeGreaterThanOrEqual(9);
-    expect(mouse.slice(2, -1).every((move) => move.buttons === 1)).toBe(true);
+    expect(mouse.slice(3, -1).every((move) => move.buttons === 1)).toBe(true);
     expect(mouse.at(-2)).toMatchObject({ x: 110, y: 220 });
     expect(mouse.at(-1)).toMatchObject({
       type: "mouseReleased",
@@ -9696,6 +9995,7 @@ describe("local automation socket", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).drag).toBe("html5");
     expect(steps()).toEqual([
+      "mouseMoved",
       "intercept true",
       "mouseMoved",
       "mousePressed",
@@ -9770,11 +10070,12 @@ describe("local automation socket", () => {
     const response = await request(`/tabs/${tab.id}/drag`, "POST", dragBody);
     expect(response.status).toBe(409);
     expect((await response.json()).error.code).toBe("drag_unavailable");
+    // Only the routing check's move went out before it, and nothing pressed.
     expect(
-      controller.contents.inputs.some(
-        (input) => input.method === "Input.dispatchMouseEvent",
-      ),
-    ).toBe(false);
+      controller.contents.inputs
+        .filter((input) => input.method === "Input.dispatchMouseEvent")
+        .map((input) => input.parameters.type),
+    ).toEqual(["mouseMoved"]);
     expectOneAttach();
   });
 
@@ -9820,7 +10121,7 @@ describe("local automation socket", () => {
     const mouse = page.inputs
       .filter((input) => input.method === "Input.dispatchMouseEvent")
       .map((input) => input.parameters);
-    expect(mouse[1]).toMatchObject({
+    expect(mouse[2]).toMatchObject({
       type: "mousePressed",
       x: 10,
       y: 20,
@@ -11372,7 +11673,9 @@ describe("local automation socket", () => {
       ok: true,
       input: { x: 40, y: 60, buttons: 1, keys: [], modifiers: 0 },
     });
+    // The routing check's move goes first, where the pointer already is.
     expect(mouseOf(page)).toEqual([
+      ["mouseMoved", 40, 60, "none", 0, undefined, 0],
       ["mousePressed", 40, 60, "left", 1, 1, 0],
     ]);
     page.inputs = [];
@@ -11413,6 +11716,7 @@ describe("local automation socket", () => {
       input: { x: 40, y: 60, buttons: 4, keys: ["Shift"], modifiers: 8 },
     });
     expect(mouseOf(page)).toEqual([
+      ["mouseMoved", 40, 60, "none", 0, undefined, 8],
       ["mousePressed", 40, 60, "middle", 4, 2, 8],
     ]);
     // Each raw mouse route declares the plain 10 s budget, follows its page

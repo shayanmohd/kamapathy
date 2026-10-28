@@ -1,12 +1,15 @@
 // Counts the native input every frame of an agent tab receives. It runs as
 // an isolated init script, so the counters exist from a document's first
 // frame and in out-of-process frames, where a lazily installed listener
-// never reaches. The `input` page operation reads the same two slots and
-// keeps its own installation as a fallback for documents this missed.
+// never reaches. The `input` page operation reads the same slots and keeps
+// its own installation as a fallback for documents this missed. The move
+// slot keeps where the last move landed, in its document's own pixels, for
+// section 5's routing check; a pointer event's coordinates keep the
+// fractions a mouse event's drop.
 import type { TabSession } from "../session/tab-session";
 
 export const COUNTER_SOURCE = `const world = globalThis;
-const counts = (world.kamapathyInput ||= { mouse: 0, key: 0, drag: 0 });
+const counts = (world.kamapathyInput ||= { mouse: 0, key: 0, drag: 0, move: 0 });
 const listening = (world.kamapathyListening ||= new WeakSet());
 if (!listening.has(document)) {
   listening.add(document);
@@ -16,6 +19,10 @@ if (!listening.has(document)) {
   // handlers decide after this listener runs.
   addEventListener("dragstart", (event) => {
     setTimeout(() => { if (!event.defaultPrevented) counts.drag += 1; });
+  }, { capture: true });
+  addEventListener("pointermove", (event) => {
+    counts.move += 1;
+    world.kamapathyLanding = { x: event.clientX, y: event.clientY, doc: document };
   }, { capture: true });
 }`;
 

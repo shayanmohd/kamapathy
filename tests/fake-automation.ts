@@ -177,14 +177,16 @@ export class FakeContents extends FakeHost {
       this.contextWorlds.set(executionContextId, params.worldName);
       return { executionContextId };
     });
-    this.debugger.reply("Runtime.evaluate", async (params) => {
+    // A function result also hears the session the call ran on, so a test
+    // can answer for a frame in its own process apart from the page.
+    this.debugger.reply("Runtime.evaluate", async (params, sessionId) => {
       const code: string = params.expression;
       this.scripts.push({
         world: this.contextWorlds.get(params.contextId) ?? "",
         code,
       });
       const value = await (typeof this.result === "function"
-        ? this.result(code)
+        ? this.result(code, sessionId)
         : this.result);
       return {
         result: { type: "object", value: this.actionReply(code, value) },
