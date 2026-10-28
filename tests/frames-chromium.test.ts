@@ -654,6 +654,9 @@ for (const mode of ISOLATION)
     // Section 9's actions: the element's own point from the world of its
     // frame, mapped out through every owner, and the input sent on the top
     // page session at what comes out, as section 5's dispatcher sends it.
+    // A click here also waits until Chromium routes a move to the element's
+    // frame, which the dispatcher does not, so these tests say nothing about
+    // the product's own timing after a scroll.
     const focusEmulation = async () => {
       const sessions = new Set<string | undefined>([undefined]);
       for (const frame of await session!.frames(step()))
