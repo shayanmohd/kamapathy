@@ -355,6 +355,10 @@ export class TabSession {
   get mainFrame(): string | undefined {
     return this.registry.mainFrameId;
   }
+  // Whether the registry blocks a frame, for the same synchronous listeners.
+  frameBlocked(frameId: string): boolean {
+    return this.registry.get(frameId)?.blocked === true;
+  }
 
   attach(): void {
     if (

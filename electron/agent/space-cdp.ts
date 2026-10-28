@@ -1,13 +1,27 @@
+import type { WebContents } from "electron";
 import { cleanAgentText } from "../../shared/agent-text";
 import type { Tab } from "../../shared/types";
 import { reducedUserAgent } from "../identity";
 import { remaining, type Actions } from "./actions";
 import { createAgentCdp, type AgentCdp } from "./agent-cdp";
 import type { Authority } from "./authority";
-import { classify, type PolicyContext, type Verdict } from "./cdp-policy";
+import {
+  classify,
+  contextIds,
+  type PolicyContext,
+  type Verdict,
+} from "./cdp-policy";
 import { ApiError, fail, toApiError } from "./errors";
 import { recoverFromTimeout } from "./evaluate";
 import type { EventRecording } from "./events";
+import {
+  NO_EXTENSION_NAMES,
+  blockedFrameOf,
+  blockedFramesByPath,
+  extensionFrame,
+  extensionInputMessage,
+  type ExtensionNames,
+} from "./extension-frames";
 import type { FrameGroupsByTab } from "./frames/groups";
 import type { Run } from "./http";
 import { checkPointerTarget } from "./input/guards";
@@ -25,7 +39,7 @@ import { agentVisible } from "./views";
 // Every command goes through the same order here, so no route reaches a tab
 // session itself.
 
-/** The narrow port over section 5's dispatcher, so this phase needs only one adapter line. */
+/** The narrow port over section 5's dispatcher and its keyboard check, one adapter line each. */
 export interface InputDispatcherPort {
   dispatch(
     tabId: string,
@@ -33,6 +47,8 @@ export interface InputDispatcherPort {
     params: Record<string, unknown>,
     step: Step & { timeoutMs: number },
   ): Promise<unknown>;
+  /** Section 5's keyboard check: refuses while focus is in a frame agent input never reaches. */
+  checkFocus(tabId: string, session: TabSession, step: Step): Promise<void>;
 }
 /** The two protocol methods Kamapathy answers for a space, itself. */
 export const SPACE_METHODS: readonly [
@@ -75,6 +91,89 @@ export interface SpaceCdpFilter {
 // How often one tab's protocol traffic is named in Recent activity.
 const ACTIVITY_MS = 60000;
 const NO_WORLDS: ReadonlySet<string> = new Set<string>();
+// The Input methods that act wherever focus is, which the person or the page
+// may have put in a frame agent input never reaches.
+const KEY_METHODS: readonly string[] = [
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
+  "Input.imeSetComposition",
+];
+// A frame agents never reach, named by its path, an iframe entry's ref or a
+// frameId. One of the person's extensions is named for them instead.
+const OUT_OF_REACH =
+  "This frame belongs to an extension or an internal page, which agents never reach.";
+
+type RawPoint = { x: number; y: number; press: boolean; button: Button };
+// Every point a raw pointer command lands on, in the top page's CSS pixels,
+// and whether it presses there. A touch, a tap and a gesture take CSS pixels
+// as a mouse event does; a probe of Electron 44 saw a scroll or a pinch send
+// its touches or wheel events to the frame under the point it starts at. An
+// emulated touch takes the page's device-independent pixels, which the
+// probe saw land at x / (zoom * page scale).
+function pointsOf(
+  method: string,
+  params: Record<string, unknown>,
+  dipScale: () => number,
+): RawPoint[] {
+  const at = (
+    point: unknown,
+    press: boolean,
+    button: unknown = "left",
+    scale = 1,
+  ): RawPoint[] => {
+    const { x, y } = (point ?? {}) as { x?: unknown; y?: unknown };
+    if (typeof x !== "number" || !Number.isFinite(x)) return [];
+    if (typeof y !== "number" || !Number.isFinite(y)) return [];
+    return [
+      {
+        x: x / scale,
+        y: y / scale,
+        press,
+        button: (typeof button === "string" ? button : "left") as Button,
+      },
+    ];
+  };
+  const pressed = params.type === "mousePressed";
+  switch (method) {
+    case "Input.dispatchMouseEvent":
+      return at(params, pressed, params.button);
+    case "Input.emulateTouchFromMouseEvent":
+      return at(params, pressed, params.button, dipScale());
+    case "Input.synthesizeTapGesture":
+      return at(params, true);
+    case "Input.synthesizeScrollGesture":
+    case "Input.synthesizePinchGesture":
+      return at(params, false);
+    case "Input.dispatchTouchEvent": {
+      const touches = Array.isArray(params.touchPoints)
+        ? params.touchPoints
+        : [];
+      return touches.flatMap((touch: unknown) =>
+        at(touch, params.type === "touchStart"),
+      );
+    }
+    default:
+      return [];
+  }
+}
+
+// The scale a page is shown at, which mobile emulation sets below 1 to fit a
+// wide page and a zoom sets above it. A page that cannot say is taken at 1,
+// as a failed hit test is.
+async function pageScale(session: TabSession, step: Step): Promise<number> {
+  try {
+    const metrics = await session.send<{
+      cssVisualViewport?: { scale?: unknown };
+    }>("Page.getLayoutMetrics", {}, step);
+    const scale = metrics?.cssVisualViewport?.scale;
+    return typeof scale === "number" && Number.isFinite(scale) && scale > 0
+      ? scale
+      : 1;
+  } catch (error) {
+    if (toApiError(error)) throw error;
+    return 1;
+  }
+}
 
 // Electron's debugger rejects with the protocol message alone. Chromium's own
 // dispatcher writes these two, each with a fixed code of its own; a domain's
@@ -149,6 +248,8 @@ export function createSpaceCdp(deps: {
   events: Pick<EventRecording, "pause">;
   /** Without it, an Input command is refused as one Kamapathy sends itself. */
   input?: InputDispatcherPort;
+  /** Section 17's loaded extensions, which name the frames agents never reach. */
+  extensions?: ExtensionNames;
 }): SpaceCdpFilter {
   const {
     controller,
@@ -161,6 +262,7 @@ export function createSpaceCdp(deps: {
     events,
     input,
   } = deps;
+  const extensions = deps.extensions ?? NO_EXTENSION_NAMES;
   // One AgentCdp per live tab session, made on the tab's first command.
   const held = new Map<string, { session: TabSession; cdp: AgentCdp }>();
   const named = new Map<string, number>();
@@ -218,15 +320,36 @@ export function createSpaceCdp(deps: {
       platform: process.platform,
     };
   };
+  // A command aimed at a frame agents never reach, as section 17 says: the
+  // refusal names the extension whose page the frame shows when it is one of
+  // the person's.
+  const unreachable = (
+    method: string,
+    url: string | undefined,
+    param?: string,
+  ): never => {
+    const extension =
+      url === undefined ? undefined : extensionFrame(url, extensions);
+    return refuse(method, {
+      block: "scope",
+      ...(param === undefined ? {} : { param }),
+      message: extension ? extensionInputMessage(extension.name) : OUT_OF_REACH,
+    });
+  };
+  // The URL of the blocked frame around a frame, which only names it. A
+  // registry read that fails leaves the plain refusal.
+  const blockedUrl = async (session: TabSession, frameId: string, step: Step) =>
+    (await blockedFrameOf(session, frameId, step).catch(() => undefined))?.url;
   // The frame a command names, by its section 9 path or by the ref of the
   // `iframe` entry that opens it. A frame in the page's own process has no
   // session of its own to send on.
   const frameTarget = async (
-    tabId: string,
+    session: TabSession,
+    call: CdpCall,
     frame: string,
     step: Step,
   ): Promise<string> => {
-    const groups = frames.for(tabId);
+    const groups = frames.for(call.tabId);
     const missing = () =>
       fail(
         "frame_not_found",
@@ -237,10 +360,26 @@ export function createSpaceCdp(deps: {
     await groups.bind(step);
     let frameId: string | undefined;
     if (frame.startsWith("@")) {
-      refs.check(tabId, frame);
+      refs.check(call.tabId, frame);
       const home = groups.homeFrame(frame);
       frameId = home?.opens ?? home?.frameId;
-    } else frameId = groups.frameAt(frame)?.frameId;
+    } else {
+      frameId = groups.frameAt(frame)?.frameId;
+      // A blocked frame is never one of the groups: only the registry
+      // places it.
+      if (frameId === undefined) {
+        const blocked = await blockedFramesByPath(session, step).catch(
+          () => undefined,
+        );
+        const url = blocked?.get(frame)?.url;
+        if (url !== undefined) return unreachable(call.method, url);
+      }
+    }
+    if (frameId !== undefined && session.frameBlocked(frameId))
+      return unreachable(
+        call.method,
+        await blockedUrl(session, frameId, step),
+      );
     const path = frameId === undefined ? undefined : groups.pathOf(frameId);
     if (frameId === undefined || path === undefined) return missing();
     if (groups.frameAt(path)?.ownSession !== true)
@@ -251,27 +390,33 @@ export function createSpaceCdp(deps: {
       );
     return frameId;
   };
-  // Section 5's guards on a raw pointer command: the point may belong to a
-  // frame agent input never reaches, and a press on a select, a colour or a
-  // date field would open a native picker no agent can answer.
+  // Section 5's guards on a raw pointer command, at each point it lands on:
+  // the point may belong to a frame agent input never reaches, and a press
+  // on a select, a colour or a date field would open a native picker no
+  // agent can answer.
   const guardPoint = async (
     session: TabSession,
+    contents: WebContents,
     call: CdpCall,
     step: Step,
   ): Promise<void> => {
-    if (call.method !== "Input.dispatchMouseEvent") return;
-    const { x, y, type, button } = call.params as {
-      x?: unknown;
-      y?: unknown;
-      type?: unknown;
-      button?: unknown;
-    };
-    if (typeof x !== "number" || typeof y !== "number") return;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    await checkPointerTarget(session, { x, y }, step, {
-      button: (typeof button === "string" ? button : "left") as Button,
-      press: type === "mousePressed",
-    });
+    // A probe saw an emulated touch at 100, 100 land at 250, 250 on a page
+    // mobile emulation fitted at 0.4.
+    const scale =
+      call.method === "Input.emulateTouchFromMouseEvent"
+        ? await pageScale(session, step)
+        : 1;
+    const points = pointsOf(
+      call.method,
+      call.params,
+      () => contents.getZoomFactor() * scale,
+    );
+    for (const { x, y, press, button } of points)
+      await checkPointerTarget(session, { x, y }, step, {
+        button,
+        press,
+        extensions,
+      });
   };
   // What Chromium's refusal, or its silence, means to the agent.
   const mapped = async (
@@ -335,7 +480,7 @@ export function createSpaceCdp(deps: {
               "Kamapathy sends input itself: use the click, press, scroll and drag routes.",
           });
       }
-      const { session } = await actions.readyContents(
+      const { contents, session } = await actions.readyContents(
         call.tabId,
         remaining(run.deadline),
         true,
@@ -360,7 +505,9 @@ export function createSpaceCdp(deps: {
       try {
         let answered: { result: unknown; newSession?: true };
         if (verdict.dispatcher) {
-          await guardPoint(session, call, step);
+          await guardPoint(session, contents, call, step);
+          if (KEY_METHODS.includes(call.method))
+            await input!.checkFocus(call.tabId, session, step);
           const dispatching = input!.dispatch(
             call.tabId,
             call.method,
@@ -372,11 +519,30 @@ export function createSpaceCdp(deps: {
           // An Input command carries no result of its own.
           answered = { result: {} };
         } else {
+          // A frameId in params aims at its frame as surely as frame does.
+          const aimed = call.params.frameId;
+          if (typeof aimed === "string" && session.frameBlocked(aimed))
+            return unreachable(
+              call.method,
+              await blockedUrl(session, aimed, step),
+              "frameId",
+            );
           const frameId =
             call.frame === undefined
               ? undefined
-              : await frameTarget(call.tabId, call.frame, step);
-          const sending = cdpOf(call.tabId, session).send(
+              : await frameTarget(session, call, call.frame, step);
+          // Each renderer numbers its own worlds, so on another target the
+          // same number may be another world, an extension's among them.
+          const cdp = cdpOf(call.tabId, session);
+          for (const { key, id } of contextIds(call.params))
+            if (!cdp.deliveredOn(frameId ?? "", id))
+              return refuse(call.method, {
+                block: "scope",
+                param: key,
+                message:
+                  "A context id names a context only on the page or frame that gave it.",
+              });
+          const sending = cdp.send(
             call.method,
             call.params,
             {

@@ -28,7 +28,7 @@ import type { Authority } from "../authority";
 import { ApiError, fail } from "../errors";
 import {
   NO_EXTENSION_NAMES,
-  blockedFrameUrls,
+  blockedFramesByPath,
   extensionFrame,
   type ExtensionNames,
 } from "../extension-frames";
@@ -485,6 +485,8 @@ export interface InputActions {
   ): Promise<Record<string, unknown>>;
   /** Lets go of every key and button the tab holds. */
   release(id: string, run: Run): Promise<Record<string, unknown>>;
+  /** Refuses keys and text while focus is in a frame agent input never reaches. */
+  checkFocus(id: string, session: TabSession, step: Step): Promise<void>;
   drag(
     id: string,
     action: DragAction,
@@ -688,8 +690,10 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     const named = path === "" ? {} : { frame: path };
     // A registry read that fails, or runs out of time, leaves the plain
     // refusal rather than another error.
-    const urls = await blockedFrameUrls(session, step).catch(() => undefined);
-    const url = urls?.get(path);
+    const blocked = await blockedFramesByPath(session, step).catch(
+      () => undefined,
+    );
+    const url = blocked?.get(path)?.url;
     const extension =
       url === undefined ? undefined : extensionFrame(url, guards.extensions);
     return extension ? { ...named, extension: extension.name } : named;
@@ -2262,5 +2266,15 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     });
     return { ok: true, released };
   };
-  return { pointer, drag, field, press, keyboard, mouse, release };
+  // The keyboard routes' own check on the frame holding focus, for section
+  // 8's raw keys and text.
+  const checkFocus = async (id: string, session: TabSession, step: Step) => {
+    const focus = await focusedFrame(id, session, step);
+    checkKeyTarget(
+      await focusedControl(id, session, step.deadline, step, focus?.frameId),
+      undefined,
+      platformName,
+    );
+  };
+  return { pointer, drag, field, press, keyboard, mouse, release, checkFocus };
 }

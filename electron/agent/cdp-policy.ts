@@ -222,15 +222,40 @@ const httpUrl = (value: unknown): boolean => {
     return false;
   }
 };
-// A world name an agent may not take: Kamapathy's own worlds start with it.
-const ownWorld = (value: unknown) =>
-  typeof value === "string" && value.toLowerCase().startsWith(WORLD_NAME);
+// The world Electron runs a page's preload scripts in, Kamapathy's form
+// preload among them. A probe of Electron 44 saw an agent session report it
+// under this name, as an isolated world of the page's own origin.
+const PRELOAD_WORLD = "Electron Isolated Context";
+// A world no agent takes, names or is given: Kamapathy's own, whose names
+// start with WORLD_NAME, and Electron's preload world. Names are compared
+// trimmed, with each run of whitespace as one space, in lower case.
+const normalName = (name: string) =>
+  name.trim().replace(/\s+/g, " ").toLowerCase();
+const reservedWorld = (value: unknown) => {
+  if (typeof value !== "string") return false;
+  const name = normalName(value);
+  return (
+    name.startsWith(normalName(WORLD_NAME)) ||
+    name === normalName(PRELOAD_WORLD)
+  );
+};
+const RESERVED_WORLD = `A world named ${WORLD_NAME} or starting with it is Kamapathy's, and ${PRELOAD_WORLD} is Electron's. Give an agent's world a name of its own.`;
+const DISPLACED =
+  "A scale or a viewport moves where input lands away from the point Kamapathy checks. Emulate the device with width, height, deviceScaleFactor and mobile, and for a closer image pass clip.scale to Page.captureScreenshot.";
+const BINDING =
+  "A binding with no context goes into every world of the page, and one named by a context name into every world of that name, the person's extensions included. Pass the executionContextId of a context this tab gave you, from Runtime.executionContextCreated or Page.createIsolatedWorld.";
 // What a command's own parameters may not say. Each check reads the params it
 // names and nothing else.
 const CHECKS: Record<
   string,
   (params: Record<string, any>, ctx: PolicyContext) => Verdict | undefined
 > = {
+  "Emulation.setDeviceMetricsOverride": (params) => metricsCheck(params),
+  // Under mobile emulation a probe saw any page scale, 1 included, zoom the
+  // page past its fit, after which a scroll moved where input landed.
+  // Elsewhere it changes nothing.
+  "Emulation.setPageScaleFactor": () =>
+    block("scope", { param: "pageScaleFactor", message: DISPLACED }),
   "Fetch.enable": (params) =>
     params.handleAuthRequests === true
       ? block("person", {
@@ -290,13 +315,33 @@ const CHECKS: Record<
         }),
   "Page.createIsolatedWorld": (params) => worldCheck(params),
   "Page.addScriptToEvaluateOnNewDocument": (params) => worldCheck(params),
+  "Page.setDeviceMetricsOverride": (params) => metricsCheck(params),
+  // A probe of Electron 44 saw a binding with no context land in every world
+  // of the page, Kamapathy's, Electron's preload world and an extension's
+  // among them, replacing a global of its name there, and one added by name
+  // land in an extension's world that shares the name, again after a
+  // navigation. An id names one context, which must be one the tab gave.
+  "Runtime.addBinding": (params) => {
+    if (params.executionContextName !== undefined)
+      return block("scope", { param: "executionContextName", message: BINDING });
+    if (typeof params.executionContextId !== "number")
+      return block("scope", { param: "executionContextId", message: BINDING });
+    return undefined;
+  },
 };
+// A probe of Electron 44 saw a view scale, or a viewport, carry a raw mouse
+// event and a touch into an out-of-process frame where the hit test the
+// guards read found the page. Page's older name is the same command.
+function metricsCheck(params: Record<string, any>): Verdict | undefined {
+  if (params.scale !== undefined && params.scale !== 1)
+    return block("scope", { param: "scale", message: DISPLACED });
+  if (params.viewport !== undefined)
+    return block("scope", { param: "viewport", message: DISPLACED });
+  return undefined;
+}
 function worldCheck(params: Record<string, any>): Verdict | undefined {
-  if (ownWorld(params.worldName))
-    return block("scope", {
-      param: "worldName",
-      message: `A world name may not start with ${WORLD_NAME}.`,
-    });
+  if (reservedWorld(params.worldName))
+    return block("scope", { param: "worldName", message: RESERVED_WORLD });
   if (params.grantUniveralAccess === true)
     return block("scope", {
       param: "grantUniveralAccess",
@@ -370,6 +415,14 @@ export function collectIds(method: string, value: unknown): Id[] {
     [],
   ).map(({ kind, id }) => ({ kind, id }));
 }
+/** The context ids a command's parameters name, with the key that holds each. */
+export function contextIds(
+  params: Record<string, unknown>,
+): { key: string; id: string | number }[] {
+  return walk(params, PARAM_IDS, [])
+    .filter((found) => found.kind === "context")
+    .map(({ key, id }) => ({ key, id }));
+}
 
 // The one verdict on a command: its domain, its own row, its parameters, then
 // the identifiers it names.
@@ -390,6 +443,8 @@ export function classify(
   const problem = CHECKS[method]?.(params, ctx);
   if (problem) return problem;
   for (const { kind, id, key } of walk(params, PARAM_IDS, [])) {
+    if (kind === "world" && reservedWorld(id))
+      return block("scope", { param: key, message: RESERVED_WORLD });
     const known =
       kind === "world" ? ctx.worlds.has(String(id)) : ctx.delivered(kind, id);
     if (known) continue;
@@ -437,6 +492,8 @@ export function redactEvent(
     delivered: PolicyContext["delivered"];
     owns(domain: "Page" | "Network"): boolean;
     fromAgent: boolean;
+    /** Whether the tab's registry blocks a frame. */
+    blocked?(frameId: string): boolean;
   },
 ): CdpEvent | null {
   const domain = event.method.split(".")[0];
@@ -449,41 +506,66 @@ export function redactEvent(
     ctx.owns(domain)
   )
     return null;
-  if (namesExtensionWorld(event)) return null;
+  if (
+    event.method === "Runtime.executionContextCreated" &&
+    outOfReach(event.params, ctx.blocked)
+  )
+    return null;
   if (namesUnknownContext(event, ctx.delivered)) return null;
   const params = hide(event.params);
   return params === event.params ? event : { ...event, params };
 }
-// A world one of the person's extensions runs in: a content script's own
-// world, or an extension page's. Section 17 keeps agents out of them, so the
-// context is never recorded and so never delivered, which leaves every
-// command naming it out of scope and drops its end with it.
-function namesExtensionWorld(event: CdpEvent): boolean {
-  if (event.method !== "Runtime.executionContextCreated") return false;
+/**
+ * Whether a context Runtime.executionContextCreated reports is one no agent
+ * is given: a world one of the person's extensions runs in, a content
+ * script's own or an extension page's, any world of a frame the tab blocks,
+ * or Kamapathy's or Electron's own world, which carry the page's origin and
+ * are known by name. Sections 8 and 17 keep agents out of them, so the
+ * context is never recorded or delivered, which leaves every command naming
+ * it out of scope and drops its end with it.
+ */
+export function outOfReach(
+  params: unknown,
+  blocked: (frameId: string) => boolean = () => false,
+): boolean {
   const context = (
-    event.params as {
-      context?: { origin?: unknown; auxData?: { origin?: unknown } };
+    params as {
+      context?: {
+        name?: unknown;
+        origin?: unknown;
+        auxData?: { origin?: unknown; frameId?: unknown };
+      };
     }
   )?.context;
+  if (reservedWorld(context?.name)) return true;
   const origins = [context?.origin, context?.auxData?.origin];
-  return origins.some(
-    (origin) => typeof origin === "string" && extensionOrigin(origin),
-  );
+  if (
+    origins.some(
+      (origin) => typeof origin === "string" && extensionOrigin(origin),
+    )
+  )
+    return true;
+  const frameId = context?.auxData?.frameId;
+  return typeof frameId === "string" && blocked(frameId);
 }
-// An event about a context the agent cannot address at all.
+// An event about a context the agent cannot address at all. An exception
+// names its context inside its details.
 function namesUnknownContext(
   event: CdpEvent,
   delivered: PolicyContext["delivered"],
 ): boolean {
   if (event.method === "Runtime.executionContextCreated") return false;
   const runtime = event.method.startsWith("Runtime.");
-  for (const [key, value] of Object.entries(
-    (event.params ?? {}) as Record<string, unknown>,
-  )) {
+  const params = (event.params ?? {}) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(params)) {
     const names = CONTEXT_KEYS.has(key) || (runtime && key === "contextId");
     if (names && isId(value) && !delivered("context", value)) return true;
   }
-  return false;
+  const details = params.exceptionDetails as
+    | { executionContextId?: unknown }
+    | undefined;
+  const thrown = runtime ? details?.executionContextId : undefined;
+  return isId(thrown) && !delivered("context", thrown);
 }
 // Cookie values, in header maps, header lists, header text and the three
 // cookie lists. Every other field passes through, and an event with nothing

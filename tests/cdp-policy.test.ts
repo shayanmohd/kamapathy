@@ -305,6 +305,74 @@ describe("the protocol policy", () => {
     ).toMatchObject({ block: "person", param: "button" });
   });
 
+  it("a view scale or a viewport, which move where input lands, are refused", () => {
+    // A probe of Electron 44 saw either one carry a raw mouse event or touch
+    // into an out-of-process frame while the hit test named the page there,
+    // through Page's older name for the same command too.
+    const metrics = { width: 0, height: 0, deviceScaleFactor: 0, mobile: false };
+    for (const method of [
+      "Emulation.setDeviceMetricsOverride",
+      "Page.setDeviceMetricsOverride",
+    ]) {
+      for (const scale of [2, 0.5])
+        expect(
+          verdict(method, { ...metrics, scale }),
+          `${method} ${scale}`,
+        ).toMatchObject({
+          block: "scope",
+          param: "scale",
+          message: expect.stringContaining("deviceScaleFactor"),
+        });
+      for (const viewport of [
+        { x: 0, y: 0, width: 400, height: 300, scale: 2 },
+        { x: 100, y: 100, width: 800, height: 600, scale: 1 },
+      ])
+        expect(
+          verdict(method, { ...metrics, viewport }),
+          `${method} ${JSON.stringify(viewport)}`,
+        ).toMatchObject({ block: "scope", param: "viewport" });
+      // Every other field keeps working, and so does a scale of 1.
+      for (const params of [
+        { ...metrics, scale: 1 },
+        { width: 400, height: 300, deviceScaleFactor: 2, mobile: true },
+        {
+          ...metrics,
+          screenWidth: 400,
+          screenHeight: 300,
+          screenOrientation: { type: "landscapePrimary", angle: 90 },
+        },
+        {
+          width: 1600,
+          height: 1200,
+          deviceScaleFactor: 1,
+          mobile: false,
+          dontSetVisibleSize: true,
+        },
+      ])
+        expect(
+          verdict(method, params),
+          `${method} ${JSON.stringify(params)}`,
+        ).toEqual({ allow: true });
+    }
+  });
+
+  it("a page scale, which lets a scroll move where input lands, is refused", () => {
+    // Under mobile emulation a probe of Electron 44 saw any page scale, 1
+    // included, zoom the page past its fit, after which a wheel moved raw
+    // input into an out-of-process frame. Elsewhere it changes nothing.
+    for (const pageScaleFactor of [2, 1, 0.5])
+      expect(
+        verdict("Emulation.setPageScaleFactor", { pageScaleFactor }),
+        String(pageScaleFactor),
+      ).toMatchObject({
+        block: "scope",
+        param: "pageScaleFactor",
+        message: expect.stringContaining("deviceScaleFactor"),
+      });
+    // Going back to the page's own scale stays open.
+    expect(verdict("Emulation.resetPageScaleFactor")).toEqual({ allow: true });
+  });
+
   it("identifiers must have been delivered", () => {
     const ids: [string, Record<string, unknown>, string][] = [
       ["Runtime.callFunctionOn", { objectId: "obj-1" }, "objectId"],
@@ -314,8 +382,8 @@ describe("the protocol policy", () => {
       ["Runtime.evaluate", { uniqueContextId: "ctx-1" }, "uniqueContextId"],
       [
         "Runtime.addBinding",
-        { name: "b", executionContextName: "world" },
-        "executionContextName",
+        { name: "b", executionContextId: 7 },
+        "executionContextId",
       ],
       ["IO.read", { handle: "stream-1" }, "handle"],
     ];
@@ -324,13 +392,12 @@ describe("the protocol policy", () => {
         block: "scope",
         param,
       });
-    // A delivered id passes, and so does a world the agent made itself.
+    // A delivered id passes.
     const delivered = {
       delivered: (kind: string, id: string | number) =>
         (kind === "object" && id === "obj-1") ||
         (kind === "context" && (id === 7 || id === "ctx-1")) ||
         (kind === "handle" && id === "stream-1"),
-      worlds: new Set(["world"]),
     };
     for (const [method, params] of ids)
       expect(verdict(method, params, delivered), method).toEqual(
@@ -367,6 +434,112 @@ describe("the protocol policy", () => {
     ).toEqual([{ kind: "object", id: "obj-3" }]);
   });
 
+  it("a binding goes only into a context the agent was given", () => {
+    // A probe of Electron 44 saw a binding with no context land in every
+    // world of the page, Kamapathy's, Electron's preload world and an
+    // extension's included, replacing a global of the same name there, and
+    // one added by name land in an extension's world named like the agent's.
+    const given = {
+      delivered: (kind: string, id: string | number) =>
+        kind === "context" && id === 7,
+      worlds: new Set(["agent-world"]),
+    };
+    const refused: [Record<string, unknown>, string][] = [
+      [{ name: "b" }, "executionContextId"],
+      [{ name: "b", executionContextId: null }, "executionContextId"],
+      [{ name: "b", executionContextName: "agent-world" }, "executionContextName"],
+      [{ name: "b", executionContextName: "" }, "executionContextName"],
+      [
+        { name: "b", executionContextId: 7, executionContextName: "agent-world" },
+        "executionContextName",
+      ],
+    ];
+    // Each refusal says what to pass instead.
+    for (const [params, param] of refused)
+      expect(
+        verdict("Runtime.addBinding", params, given),
+        JSON.stringify(params),
+      ).toMatchObject({
+        block: "scope",
+        param,
+        message: expect.stringContaining("executionContextId"),
+      });
+    // The id must be one the tab gave.
+    expect(
+      verdict("Runtime.addBinding", { name: "b", executionContextId: 8 }, given),
+    ).toMatchObject({ block: "scope", param: "executionContextId" });
+    expect(
+      verdict("Runtime.addBinding", { name: "b", executionContextId: 7 }, given),
+    ).toEqual({ allow: true });
+    // Removing one only stops the agent's own session hearing it.
+    expect(verdict("Runtime.removeBinding", { name: "b" })).toEqual({
+      allow: true,
+    });
+  });
+
+  it("an agent never takes or names Kamapathy's worlds or Electron's preload world", () => {
+    // Electron runs every page's preload scripts in a world of this name,
+    // which a probe of Electron 44 saw every agent session report.
+    for (const method of [
+      "Page.createIsolatedWorld",
+      "Page.addScriptToEvaluateOnNewDocument",
+    ])
+      for (const worldName of [
+        "Electron Isolated Context",
+        "electron isolated context",
+      ])
+        expect(
+          verdict(method, { worldName }),
+          `${method} ${worldName}`,
+        ).toMatchObject({ block: "scope", param: "worldName" });
+    // Naming either is refused by the name itself, whatever the agent holds.
+    for (const name of ["kamapathy", "Kamapathy-2", "Electron Isolated Context"])
+      expect(
+        verdict(
+          "Runtime.addBinding",
+          { name: "b", executionContextName: name },
+          { worlds: new Set([name]) },
+        ),
+        name,
+      ).toMatchObject({ block: "scope", param: "executionContextName" });
+  });
+
+  it("a reserved world name stays reserved whatever its whitespace or case", () => {
+    for (const name of [
+      " kamapathy",
+      "kamapathy\n",
+      "\t KAMAPATHY-2 ",
+      " Electron Isolated Context",
+      "Electron Isolated Context ",
+      "Electron  Isolated\t\tContext",
+      "\u00a0electron\nISOLATED\u3000context\r\n",
+    ]) {
+      const where = JSON.stringify(name);
+      for (const method of [
+        "Page.createIsolatedWorld",
+        "Page.addScriptToEvaluateOnNewDocument",
+      ])
+        expect(
+          verdict(method, { worldName: name }),
+          `${method} ${where}`,
+        ).toMatchObject({ block: "scope", param: "worldName" });
+      expect(
+        verdict(
+          "Runtime.addBinding",
+          { name: "b", executionContextName: name },
+          { worlds: new Set([name]) },
+        ),
+        where,
+      ).toMatchObject({ block: "scope", param: "executionContextName" });
+    }
+    // A name of the agent's own that merely holds one of them is its own.
+    for (const name of ["my kamapathy", "Electron Isolated Context 2"])
+      expect(
+        verdict("Page.createIsolatedWorld", { worldName: name }),
+        name,
+      ).toEqual({ allow: true });
+  });
+
   it("every Input command is marked for the dispatcher", () => {
     expect([...INPUT_METHODS].sort()).toEqual(
       PROTOCOL.domains.Input.commands.map((name) => `Input.${name}`).sort(),
@@ -391,6 +564,7 @@ describe("event redaction", () => {
       delivered?: (kind: string, id: string | number) => boolean;
       owns?: (domain: "Page" | "Network") => boolean;
       fromAgent?: boolean;
+      blocked?: (frameId: string) => boolean;
     } = {},
   ) =>
     redactEvent(item, {
@@ -612,6 +786,56 @@ describe("event redaction", () => {
         block: "scope",
         param,
       });
+  });
+
+  it("keeps the worlds of a frame the tab blocks and an undelivered context's exceptions out of the events", () => {
+    // The page's own world in a frame agents never reach, such as a local
+    // page, carries no extension origin.
+    const created = event("Runtime.executionContextCreated", {
+      context: {
+        id: 5,
+        uniqueId: "ctx-5",
+        name: "",
+        origin: "file://",
+        auxData: { frameId: "frame-f", isDefault: true, type: "default" },
+      },
+    });
+    const blocked = (frameId: string) => frameId === "frame-f";
+    expect(redact(created, { blocked })).toBeNull();
+    expect(redact(created, { blocked: () => false })).toBe(created);
+    expect(redact(created)).toBe(created);
+    // An exception names its context inside its details.
+    const thrown = event("Runtime.exceptionThrown", {
+      timestamp: 1,
+      exceptionDetails: {
+        exceptionId: 1,
+        text: "Uncaught",
+        lineNumber: 0,
+        columnNumber: 0,
+        executionContextId: 5,
+        exception: { type: "object", objectId: "obj-5" },
+      },
+    });
+    expect(redact(thrown, { delivered: () => false })).toBeNull();
+    expect(redact(thrown, { delivered: () => true })).toBe(thrown);
+  });
+
+  it("keeps Kamapathy's worlds and Electron's preload world out of the events", () => {
+    // Both are reported to an agent's session as the page's own origin.
+    const created = (name: string) =>
+      event("Runtime.executionContextCreated", {
+        context: {
+          id: 6,
+          uniqueId: "ctx-6",
+          name,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: false, type: "isolated" },
+        },
+      });
+    for (const name of ["kamapathy", "Electron Isolated Context"])
+      expect(redact(created(name)), name).toBeNull();
+    // A world an agent made under a name of its own is recorded as before.
+    expect(redact(created("agent-world"))).not.toBeNull();
   });
 
   it("drops Kamapathy's own copy once the agent owns the domain", () => {

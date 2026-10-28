@@ -6730,6 +6730,92 @@ describe("local automation socket", () => {
     expect(attached(page)).toEqual([]);
   });
 
+  it("a view scale or a viewport is refused before any session opens, and the rest of the device metrics go out", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const method = "Emulation.setDeviceMetricsOverride";
+    const metrics = { width: 0, height: 0, deviceScaleFactor: 0, mobile: false };
+    // A probe saw each of them move raw input into an out-of-process frame
+    // while the hit test the guards read named the page.
+    for (const [params, param] of [
+      [{ ...metrics, scale: 2 }, "scale"],
+      [{ ...metrics, scale: 0.5 }, "scale"],
+      [
+        { ...metrics, viewport: { x: 0, y: 0, width: 400, height: 300, scale: 2 } },
+        "viewport",
+      ],
+      [
+        { ...metrics, viewport: { x: 100, y: 100, width: 800, height: 600, scale: 1 } },
+        "viewport",
+      ],
+    ] as const) {
+      const where = JSON.stringify(params);
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+        message: expect.stringContaining("deviceScaleFactor"),
+      });
+    }
+    // Page's older name for the command is the same command.
+    const older = await failure(
+      await cdp(tab.id, {
+        method: "Page.setDeviceMetricsOverride",
+        params: { ...metrics, scale: 2 },
+      }),
+    );
+    expect(older.status).toBe(403);
+    expect(older.error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Page.setDeviceMetricsOverride",
+      reason: "scope",
+      param: "scale",
+    });
+    expect(sentOn(page, method)).toEqual([]);
+    expect(sentOn(page, "Page.setDeviceMetricsOverride")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+    // Width, height, a device scale factor and mobile go out on the agent's
+    // own session, and so does a scale of 1.
+    for (const params of [
+      { width: 400, height: 300, deviceScaleFactor: 2, mobile: true },
+      { ...metrics, scale: 1 },
+    ])
+      expect(
+        (await cdp(tab.id, { method, params })).status,
+        JSON.stringify(params),
+      ).toBe(200);
+    expect(sentOn(page, method)).toEqual(["agent-1", "agent-1"]);
+  });
+
+  it("a page scale is refused before any session opens, and resetting it goes out", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Emulation.setPageScaleFactor",
+        params: { pageScaleFactor: 2 },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "cdp_method_blocked",
+      method: "Emulation.setPageScaleFactor",
+      reason: "scope",
+      param: "pageScaleFactor",
+    });
+    expect(sentOn(page, "Emulation.setPageScaleFactor")).toEqual([]);
+    expect(attached(page)).toEqual([]);
+    expect(
+      (await cdp(tab.id, { method: "Emulation.resetPageScaleFactor" })).status,
+    ).toBe(200);
+    expect(sentOn(page, "Emulation.resetPageScaleFactor")).toEqual(["agent-1"]);
+  });
+
   it("ids the tab delivered are accepted", async () => {
     const { space, tab } = await createPage();
     const page = controller.contents;
@@ -6773,6 +6859,590 @@ describe("local automation socket", () => {
       expect(status).toBe(403);
       expect(error).toMatchObject({ code: "cdp_method_blocked", reason: "scope" });
     }
+  });
+
+  it("never gives an agent an extension's world or a world of a frame it never reaches", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // The agent names a world of its own after the extension's content
+    // script world, which the name alone would have matched.
+    const own = await cdp(tab.id, {
+      method: "Page.createIsolatedWorld",
+      params: { frameId: "main", worldName: EXTENSION_NAME },
+    });
+    expect(own.status).toBe(200);
+    const ownContext = (await own.json()).result.executionContextId as number;
+    // A frame whose document is not the web's, so the tab blocks it.
+    frameNavigated(page.debugger, {
+      frameId: "frame-f",
+      parentId: "main",
+      loaderId: "loader-f",
+      url: "file:///Users/person/notes.html",
+    });
+    const reported = (method: string, params: Record<string, unknown>) =>
+      page.debugger.event(method, params, "agent-1");
+    const created = (id: number, context: Record<string, unknown>) =>
+      reported("Runtime.executionContextCreated", {
+        context: { id, uniqueId: `ctx-${id}`, name: "", ...context },
+      });
+    // The extension's content script, by its own origin and by the origin
+    // reported beside its frame, and the page's own world in that frame.
+    created(40, {
+      name: EXTENSION_NAME,
+      origin: `chrome-extension://${EXTENSION_ID}`,
+      auxData: { frameId: "main", isDefault: false, type: "isolated" },
+    });
+    created(41, {
+      name: EXTENSION_NAME,
+      origin: "",
+      auxData: {
+        frameId: "main",
+        isDefault: false,
+        type: "isolated",
+        origin: `chrome-extension://${EXTENSION_ID}`,
+      },
+    });
+    created(42, {
+      origin: "file://",
+      auxData: { frameId: "frame-f", isDefault: true, type: "default" },
+    });
+    // What those worlds report later names them, and what they hold.
+    reported("Runtime.consoleAPICalled", {
+      type: "log",
+      args: [{ type: "object", objectId: "ext-object" }],
+      executionContextId: 40,
+      timestamp: 1,
+    });
+    reported("Runtime.exceptionThrown", {
+      timestamp: 2,
+      exceptionDetails: {
+        exceptionId: 1,
+        text: "Uncaught",
+        lineNumber: 0,
+        columnNumber: 0,
+        executionContextId: 41,
+        exception: { type: "object", objectId: "ext-error" },
+      },
+    });
+    const refused = [
+      ["Runtime.evaluate", { expression: "1", contextId: 40 }, "contextId"],
+      [
+        "Runtime.evaluate",
+        { expression: "1", uniqueContextId: "ctx-41" },
+        "uniqueContextId",
+      ],
+      ["Runtime.evaluate", { expression: "1", contextId: 42 }, "contextId"],
+      ["Runtime.getProperties", { objectId: "ext-object" }, "objectId"],
+      [
+        "Runtime.callFunctionOn",
+        { functionDeclaration: "function () {}", objectId: "ext-error" },
+        "objectId",
+      ],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: EXTENSION_NAME },
+        "executionContextName",
+      ],
+    ] as const;
+    const evaluated = sentOn(page, "Runtime.evaluate").length;
+    for (const [method, params, param] of refused) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, `${method} ${param}`).toBe(403);
+      expect(error, `${method} ${param}`).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    expect(sentOn(page, "Runtime.evaluate").length).toBe(evaluated);
+    for (const method of [
+      "Runtime.getProperties",
+      "Runtime.callFunctionOn",
+      "Runtime.addBinding",
+    ])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    // Nothing they reported reached the log either.
+    const logged = JSON.stringify(
+      (await (await drainEvents(tab.id)).json()).events,
+    );
+    for (const said of ["ctx-40", "ctx-41", "ctx-42", "ext-object", "ext-error"])
+      expect(logged, said).not.toContain(said);
+    // The page's own world and the world the agent made stay the agent's.
+    created(9, {
+      origin: "https://example.com",
+      auxData: { frameId: "main", isDefault: true, type: "default" },
+    });
+    for (const contextId of [9, ownContext])
+      expect(
+        (
+          await cdp(tab.id, {
+            method: "Runtime.evaluate",
+            params: { expression: "1", contextId },
+          })
+        ).status,
+        String(contextId),
+      ).toBe(200);
+  });
+
+  // Electron's world for preload scripts, by the name a probe of Electron 44
+  // saw an agent session report it under, beside Kamapathy's own world.
+  const PRELOAD_WORLD = "Electron Isolated Context";
+
+  it("never gives an agent Kamapathy's world or Electron's preload world through what they report", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    const reported = (method: string, params: Record<string, unknown>) =>
+      page.debugger.event(method, params, "agent-1");
+    const created = (id: number, name: string, type = "isolated") =>
+      reported("Runtime.executionContextCreated", {
+        context: {
+          id,
+          uniqueId: `ctx-${id}`,
+          name,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: type === "default", type },
+        },
+      });
+    created(50, "kamapathy");
+    created(51, PRELOAD_WORLD);
+    created(9, "", "default");
+    // A console message or an exception names its world, and carries
+    // objects from it.
+    for (const [id, name] of [
+      [50, "own"],
+      [51, "preload"],
+    ] as const) {
+      reported("Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ type: "object", objectId: `${name}-object` }],
+        executionContextId: id,
+        timestamp: 1,
+      });
+      reported("Runtime.exceptionThrown", {
+        timestamp: 2,
+        exceptionDetails: {
+          exceptionId: id,
+          text: "Uncaught",
+          lineNumber: 0,
+          columnNumber: 0,
+          executionContextId: id,
+          exception: { type: "object", objectId: `${name}-error` },
+        },
+      });
+    }
+    const evaluated = () =>
+      sentOn(page, "Runtime.evaluate").filter((id) => id === "agent-1");
+    const refused: [string, Record<string, unknown>, string][] = [];
+    for (const [id, name] of [
+      [50, "own"],
+      [51, "preload"],
+    ] as const)
+      refused.push(
+        ["Runtime.evaluate", { expression: "1", contextId: id }, "contextId"],
+        [
+          "Runtime.evaluate",
+          { expression: "1", uniqueContextId: `ctx-${id}` },
+          "uniqueContextId",
+        ],
+        ["Runtime.getProperties", { objectId: `${name}-object` }, "objectId"],
+        [
+          "Runtime.callFunctionOn",
+          { functionDeclaration: "function () {}", objectId: `${name}-error` },
+          "objectId",
+        ],
+      );
+    for (const [method, params, param] of refused) {
+      const where = `${method} ${JSON.stringify(params)}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    expect(evaluated()).toEqual([]);
+    for (const method of ["Runtime.getProperties", "Runtime.callFunctionOn"])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    // Nothing either world reported reached the log, while the page's own
+    // world did.
+    const logged = JSON.stringify(
+      (await (await drainEvents(tab.id)).json()).events,
+    );
+    expect(logged).toContain("ctx-9");
+    for (const said of [
+      "ctx-50",
+      "ctx-51",
+      PRELOAD_WORLD,
+      "own-object",
+      "own-error",
+      "preload-object",
+      "preload-error",
+    ])
+      expect(logged, said).not.toContain(said);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1", contextId: 9 },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("an agent's world never takes the name of Kamapathy's world or Electron's preload world", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A world of the agent's own named after the preload world would be
+    // matched to it by that name.
+    for (const [method, params] of [
+      ["Page.createIsolatedWorld", { frameId: "main", worldName: PRELOAD_WORLD }],
+      [
+        "Page.addScriptToEvaluateOnNewDocument",
+        { source: "1", worldName: PRELOAD_WORLD },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param: "worldName",
+      });
+    }
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 51,
+          uniqueId: "ctx-51",
+          name: PRELOAD_WORLD,
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: false, type: "isolated" },
+        },
+      },
+      "agent-1",
+    );
+    const named: [string, Record<string, unknown>, string][] = [
+      ["Runtime.evaluate", { expression: "1", contextId: 51 }, "contextId"],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: PRELOAD_WORLD },
+        "executionContextName",
+      ],
+      [
+        "Runtime.addBinding",
+        { name: "b", executionContextName: "kamapathy" },
+        "executionContextName",
+      ],
+    ];
+    for (const [method, params, param] of named) {
+      const where = `${method} ${param}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method,
+        reason: "scope",
+        param,
+      });
+    }
+    for (const method of [
+      "Page.createIsolatedWorld",
+      "Page.addScriptToEvaluateOnNewDocument",
+      "Runtime.addBinding",
+    ])
+      expect(sentOn(page, method), method).not.toContain("agent-1");
+    expect(sentOn(page, "Runtime.evaluate")).not.toContain("agent-1");
+  });
+
+  it("a binding goes only into a context the agent was given", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const own = await cdp(tab.id, {
+      method: "Page.createIsolatedWorld",
+      params: { frameId: "main", worldName: "agent-world" },
+    });
+    expect(own.status).toBe(200);
+    const ownContext = (await own.json()).result.executionContextId as number;
+    // With no context a binding reaches every world of the page, and by a
+    // name it reaches every world of that name, an extension's included,
+    // those made later as well.
+    const refused: [Record<string, unknown>, string][] = [
+      [{ name: "b" }, "executionContextId"],
+      [{ name: "b", executionContextName: "agent-world" }, "executionContextName"],
+      [{ name: "b", executionContextName: EXTENSION_NAME }, "executionContextName"],
+      [{ name: "b", executionContextId: 99 }, "executionContextId"],
+    ];
+    for (const [params, param] of refused) {
+      const where = JSON.stringify(params);
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "Runtime.addBinding", params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toMatchObject({
+        code: "cdp_method_blocked",
+        method: "Runtime.addBinding",
+        reason: "scope",
+        param,
+      });
+    }
+    expect(sentOn(page, "Runtime.addBinding")).not.toContain("agent-1");
+    // The page's own world and the agent's own world each take one by the
+    // id the tab gave, and what it reports reaches the log.
+    expect((await cdp(tab.id, { method: "Runtime.enable" })).status).toBe(200);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 9,
+          uniqueId: "ctx-9",
+          name: "",
+          origin: "https://example.com",
+          auxData: { frameId: "main", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    for (const executionContextId of [9, ownContext])
+      expect(
+        (
+          await cdp(tab.id, {
+            method: "Runtime.addBinding",
+            params: { name: "b", executionContextId },
+          })
+        ).status,
+        String(executionContextId),
+      ).toBe(200);
+    expect(
+      page.debugger.sent
+        .filter(
+          (command) =>
+            command.method === "Runtime.addBinding" &&
+            command.sessionId === "agent-1",
+        )
+        .map((command) => command.params),
+    ).toEqual([
+      { name: "b", executionContextId: 9 },
+      { name: "b", executionContextId: ownContext },
+    ]);
+    page.debugger.event(
+      "Runtime.bindingCalled",
+      { name: "b", payload: "hi", executionContextId: 9 },
+      "agent-1",
+    );
+    const logged = (await (await drainEvents(tab.id)).json()).events as {
+      method: string;
+      params: unknown;
+    }[];
+    expect(
+      logged
+        .filter((event) => event.method === "Runtime.bindingCalled")
+        .map((event) => event.params),
+    ).toEqual([{ name: "b", payload: "hi", executionContextId: 9 }]);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.removeBinding",
+          params: { name: "b" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("a frame, an iframe entry's ref or a frameId naming a frame agents never reach is out of scope", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // One of the person's extensions in a frame of the page, and a local
+    // page in another, each listed as a blocked entry.
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+      { frameId: "notes", url: "file:///Users/person/notes.html", local: "1" },
+    ]);
+    page.result = groupRead("", {
+      text: [{ order: 0, value: "Shop" }],
+      controls: [
+        {
+          order: 1,
+          tier: 6,
+          entry: frameEntry("Extension panel", "@e3", "0", undefined, {
+            blocked: true,
+          }),
+        },
+        {
+          order: 2,
+          tier: 6,
+          entry: frameEntry("Notes", "@e4", "1", undefined, { blocked: true }),
+        },
+      ],
+      owners: [
+        { ...owner("0", 1), blocked: true },
+        { ...owner("1", 2), blocked: true },
+      ],
+    });
+    expect(
+      (await request(`/tabs/${tab.id}/snapshot`, "POST", { header: false }))
+        .status,
+    ).toBe(200);
+    const internal =
+      "This frame belongs to an extension or an internal page, which agents never reach.";
+    const refusal = (method: string, message: string, param?: string) => ({
+      code: "cdp_method_blocked",
+      message: `Kamapathy does not pass ${method}. ${message}`,
+      method,
+      reason: "scope",
+      ...(param === undefined ? {} : { param }),
+    });
+    // By its path, and by the ref of the entry that opens it.
+    for (const [frame, message] of [
+      ["0", EXTENSION_MESSAGE],
+      ["@e3", EXTENSION_MESSAGE],
+      ["1", internal],
+      ["@e4", internal],
+    ]) {
+      const { status, error } = await failure(
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          frame,
+        }),
+      );
+      expect(status, frame).toBe(403);
+      expect(error, frame).toEqual(refusal("Runtime.evaluate", message));
+    }
+    // By its frameId, whichever command carries it.
+    for (const [method, params, message] of [
+      [
+        "Page.createIsolatedWorld",
+        { frameId: "panel", worldName: "mine" },
+        EXTENSION_MESSAGE,
+      ],
+      ["DOM.getFrameOwner", { frameId: "notes" }, internal],
+      [
+        "Page.navigate",
+        { url: "https://example.com/next", frameId: "panel" },
+        EXTENSION_MESSAGE,
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual(refusal(method, message, "frameId"));
+    }
+    // Nothing was opened or sent, and the refs the snapshot gave out stand.
+    expect(attached(page)).toEqual([]);
+    expect(page.debugger.sent.some((command) => command.sessionId)).toBe(
+      false,
+    );
+    expect(refs.classify(tab.id, "@e3")).toBe("live");
+    // A raw press on the extension's frame names it, as section 5's routes
+    // do.
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    const pressed = await failure(
+      await cdp(tab.id, {
+        method: "Input.dispatchMouseEvent",
+        params: {
+          type: "mousePressed",
+          x: 25,
+          y: 45,
+          button: "left",
+          clickCount: 1,
+        },
+      }),
+    );
+    expect(pressed.status).toBe(403);
+    expect(pressed.error).toEqual({
+      code: "input_target_blocked",
+      message: EXTENSION_MESSAGE,
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    // A frame the tab can reach still takes its frameId.
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Page.createIsolatedWorld",
+          params: { frameId: "main", worldName: "mine" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("a context id names a context only on the page or frame that gave it", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    const evaluated = () =>
+      sentOn(page, "Runtime.evaluate").filter((id) => id?.startsWith("agent-"));
+    // The frame's own session gives the agent the frame's page world.
+    expect(
+      (await cdp(tab.id, { method: "Runtime.enable", frame: "0" })).status,
+    ).toBe(200);
+    expect(attached(page)).toEqual(["card"]);
+    page.debugger.event(
+      "Runtime.executionContextCreated",
+      {
+        context: {
+          id: 4,
+          uniqueId: "card-4",
+          name: "",
+          origin: "https://pay.example",
+          auxData: { frameId: "card", isDefault: true, type: "default" },
+        },
+      },
+      "agent-1",
+    );
+    // The page's own renderer numbers its worlds by itself, so there the
+    // same number may be another world, an extension's among them.
+    for (const [params, param] of [
+      [{ expression: "1", contextId: 4 }, "contextId"],
+      [{ expression: "1", uniqueContextId: "card-4" }, "uniqueContextId"],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method: "Runtime.evaluate", params }),
+      );
+      expect(status, param).toBe(403);
+      expect(error, param).toEqual({
+        code: "cdp_method_blocked",
+        message:
+          "Kamapathy does not pass Runtime.evaluate. A context id names a context only on the page or frame that gave it.",
+        method: "Runtime.evaluate",
+        reason: "scope",
+        param,
+      });
+    }
+    // Nothing went out, and the top page got no session for it.
+    expect(attached(page)).toEqual(["card"]);
+    expect(evaluated()).toEqual([]);
+    // On the frame that gave it, it is the agent's.
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Runtime.evaluate",
+          params: { expression: "1", contextId: 4 },
+          frame: "0",
+        })
+      ).status,
+    ).toBe(200);
+    expect(evaluated()).toEqual(["agent-1"]);
   });
 
   it("every call that reached Chromium expires the tab's refs", async () => {
@@ -7183,6 +7853,463 @@ describe("local automation socket", () => {
     });
     expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
     expect(attached(page)).toEqual([]);
+  });
+
+  // The keys and text an agent may send while focus sits where the person,
+  // or the page, put it.
+  const RAW_KEYS: [string, Record<string, unknown>][] = [
+    [
+      "Input.dispatchKeyEvent",
+      { type: "rawKeyDown", key: "Enter", code: "Enter" },
+    ],
+    ["Input.dispatchKeyEvent", { type: "char", text: "\r" }],
+    ["Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter" }],
+    ["Input.insertText", { text: "hi" }],
+    [
+      "Input.imeSetComposition",
+      { text: "n", selectionStart: 0, selectionEnd: 1 },
+    ],
+  ];
+
+  it("raw keys and text never reach an extension's frame that holds focus", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+    });
+    framePath(page, "1");
+    // The page reports the focus in a frame it cannot read, and section 9's
+    // walk says which frame that is.
+    page.pageActions.focusedKind = {
+      ok: true,
+      kind: "other",
+      blockedFrame: true,
+    };
+    page.pageActions.activeFrame = {
+      ok: true,
+      path: "1",
+      blocked: true,
+      editable: false,
+    };
+    for (const [method, params] of RAW_KEYS) {
+      const where = `${method} ${String(params.type ?? "")}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "1",
+        extension: EXTENSION_NAME,
+      });
+    }
+    for (const method of ["Input.dispatchKeyEvent", "Input.insertText"])
+      expect(sentOn(page, method), method).toEqual([]);
+    expect(sentOn(page, "Input.imeSetComposition")).toEqual([]);
+    expect(page.inputs).toEqual([]);
+    // With focus back in the page, the same keys go out.
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    for (const [method, params] of RAW_KEYS)
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+    expect(sentOn(page, "Input.dispatchKeyEvent")).toHaveLength(3);
+  });
+
+  it("raw keys stop where section 9's walk finds an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A page with a frame group of its own, so the walk follows the focus,
+    // and one of the person's extensions in a frame beside it.
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "1",
+      },
+    ]);
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    page.result = (code: string) =>
+      code.includes(')("activeFrame",')
+        ? { ok: true, path: "1", key: "panel", blocked: true }
+        : { ok: true };
+    for (const [method, params] of RAW_KEYS) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toMatchObject({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "1",
+        extension: EXTENSION_NAME,
+      });
+    }
+    expect(page.inputs).toEqual([]);
+    expect(sentOn(page, "Input.insertText")).toEqual([]);
+    expect(sentOn(page, "Input.imeSetComposition")).toEqual([]);
+  });
+
+  it("raw touches, taps and emulated touches never reach an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // The extension's frame is under (25, 45), and the page under every
+    // other point.
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    const at = (x: number, y: number): [string, Record<string, unknown>][] => [
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x, y }] },
+      ],
+      // Each point a touch names, not only its first.
+      [
+        "Input.dispatchTouchEvent",
+        {
+          type: "touchStart",
+          touchPoints: [
+            { x: 600, y: 400, id: 1 },
+            { x, y, id: 2 },
+          ],
+        },
+      ],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchMove", touchPoints: [{ x, y }] },
+      ],
+      ["Input.synthesizeTapGesture", { x, y }],
+      [
+        "Input.emulateTouchFromMouseEvent",
+        { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+      ],
+    ];
+    for (const [method, params] of at(25, 45)) {
+      const where = `${method} ${String(params.type ?? "")}`;
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, where).toBe(403);
+      expect(error, where).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+    }
+    for (const [method] of at(25, 45))
+      expect(sentOn(page, method), method).toEqual([]);
+    // Anywhere else on the page each of them goes out.
+    for (const [method, params] of at(300, 200))
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+    expect(sentOn(page, "Input.dispatchTouchEvent")).toHaveLength(3);
+    // An emulated touch takes the page's device-independent pixels, which a
+    // probe saw land at x / zoom: at zoom 2 its (50, 90) is the frame's
+    // (25, 45), while a touch at (50, 90) lands on the page.
+    page.zoom = 2;
+    const emulated = await failure(
+      await cdp(tab.id, {
+        method: "Input.emulateTouchFromMouseEvent",
+        params: { type: "mousePressed", x: 50, y: 90, button: "left" },
+      }),
+    );
+    expect(emulated.status).toBe(403);
+    expect(emulated.error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.emulateTouchFromMouseEvent")).toHaveLength(1);
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Input.dispatchTouchEvent",
+          params: { type: "touchStart", touchPoints: [{ x: 50, y: 90 }] },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("raw scroll and pinch gestures never start in an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    page.hits = [{ x: 25, y: 45, nodeName: "iframe", holds: "panel" }];
+    // A probe saw each of them send touches or wheel events into the frame
+    // under the point it starts at.
+    const at = (x: number, y: number): [string, Record<string, unknown>][] => [
+      ["Input.synthesizeScrollGesture", { x, y, yDistance: -100 }],
+      [
+        "Input.synthesizeScrollGesture",
+        { x, y, yDistance: -100, gestureSourceType: "touch" },
+      ],
+      ["Input.synthesizePinchGesture", { x, y, scaleFactor: 2 }],
+    ];
+    for (const [method, params] of at(25, 45)) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    for (const [method, params] of at(300, 200))
+      expect((await cdp(tab.id, { method, params })).status, method).toBe(
+        200,
+      );
+  });
+
+  it("a raw point just inside an extension frame's edge is refused", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // The frame's right edge is at x 150: the hit test finds it at 149 and
+    // the page at 150, while input at 149.6 lands in the frame.
+    page.hits = [
+      { x: 149, y: 50, nodeName: "iframe", holds: "panel" },
+      { x: 150, y: 50, nodeName: "body" },
+    ];
+    for (const [method, params] of [
+      [
+        "Input.dispatchMouseEvent",
+        {
+          type: "mousePressed",
+          x: 149.6,
+          y: 50,
+          button: "left",
+          clickCount: 1,
+        },
+      ],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x: 149.6, y: 50 }] },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+  });
+
+  it("a raw point and a mouse route's point are checked where a zoomed page puts them", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // Mobile emulation lets a page zoom in, and a scroll then moves its
+    // visual viewport 30 pixels into the layout viewport: a probe saw input
+    // at 300, 200 land at 330, 230, where the extension's frame is. The
+    // page itself is not scrolled, so that is the document's 330, 230.
+    Object.assign(page.metrics.cssVisualViewport, {
+      offsetX: 30,
+      offsetY: 30,
+      pageX: 30,
+      pageY: 30,
+    });
+    page.hits = [{ x: 330, y: 230, nodeName: "iframe", holds: "panel" }];
+    const press = {
+      type: "mousePressed",
+      x: 300,
+      y: 200,
+      button: "left",
+      clickCount: 1,
+    };
+    for (const [method, params] of [
+      ["Input.dispatchMouseEvent", press],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x: 300, y: 200 }] },
+      ],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    const routed = await failure(
+      await request(`/tabs/${tab.id}/mouse/click`, "POST", { x: 300, y: 200 }),
+    );
+    expect(routed.status).toBe(403);
+    expect(routed.error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    // Back at the page's own scale, the point is the page's again.
+    Object.assign(page.metrics.cssVisualViewport, {
+      offsetX: 0,
+      offsetY: 0,
+      pageX: 0,
+      pageY: 0,
+    });
+    expect(
+      (await cdp(tab.id, { method: "Input.dispatchMouseEvent", params: press }))
+        .status,
+    ).toBe(200);
+  });
+
+  it("a scrolled page's raw point and mouse route point are checked where they land", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    await addFrames([
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "0",
+      },
+    ]);
+    // The hit test reads document coordinates while input lands in the
+    // viewport: scrolled 150 pixels down, input at 300, 200 lands on the
+    // document's 300, 350, where the extension's frame is.
+    page.metrics.cssVisualViewport.pageY = 150;
+    page.hits = [{ x: 300, y: 350, nodeName: "iframe", holds: "panel" }];
+    const press = {
+      type: "mousePressed",
+      x: 300,
+      y: 200,
+      button: "left",
+      clickCount: 1,
+    };
+    for (const [method, params] of [
+      ["Input.dispatchMouseEvent", press],
+      [
+        "Input.dispatchTouchEvent",
+        { type: "touchStart", touchPoints: [{ x: 300, y: 200 }] },
+      ],
+      ["Input.synthesizeTapGesture", { x: 300, y: 200 }],
+    ] as const) {
+      const { status, error } = await failure(
+        await cdp(tab.id, { method, params }),
+      );
+      expect(status, method).toBe(403);
+      expect(error, method).toEqual({
+        code: "input_target_blocked",
+        message: EXTENSION_MESSAGE,
+        frame: "0",
+        extension: EXTENSION_NAME,
+      });
+      expect(sentOn(page, method), method).toEqual([]);
+    }
+    const routed = await failure(
+      await request(`/tabs/${tab.id}/mouse/click`, "POST", { x: 300, y: 200 }),
+    );
+    expect(routed.status).toBe(403);
+    expect(routed.error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "0",
+      extension: EXTENSION_NAME,
+    });
+    expect(sentOn(page, "Input.dispatchMouseEvent")).toEqual([]);
+    // At the top of the page the same point is the page's own.
+    page.metrics.cssVisualViewport.pageY = 0;
+    expect(
+      (await cdp(tab.id, { method: "Input.dispatchMouseEvent", params: press }))
+        .status,
+    ).toBe(200);
+  });
+
+  it("an emulated touch is checked where mobile emulation's page scale puts it", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    // An emulated touch takes device-independent pixels, which the page
+    // scale stretches as well: a probe saw one at 100, 100 land at 250, 250
+    // on a page mobile emulation fitted at 0.4, where a select would open
+    // the browser's own list.
+    Object.assign(page.metrics.cssVisualViewport, { scale: 0.4 });
+    page.hits = [{ x: 250, y: 250, nodeName: "select" }];
+    const press = {
+      type: "mousePressed",
+      x: 100,
+      y: 100,
+      button: "left",
+      clickCount: 1,
+    };
+    const { status, error } = await failure(
+      await cdp(tab.id, {
+        method: "Input.emulateTouchFromMouseEvent",
+        params: press,
+      }),
+    );
+    expect(status).toBe(403);
+    expect(error).toMatchObject({
+      code: "native_popup_blocked",
+      use: "selectOption",
+    });
+    expect(sentOn(page, "Input.emulateTouchFromMouseEvent")).toEqual([]);
+    // A mouse press there lands on the point itself, and so does an
+    // emulated touch at the page's own scale.
+    expect(
+      (await cdp(tab.id, { method: "Input.dispatchMouseEvent", params: press }))
+        .status,
+    ).toBe(200);
+    Object.assign(page.metrics.cssVisualViewport, { scale: 1 });
+    expect(
+      (
+        await cdp(tab.id, {
+          method: "Input.emulateTouchFromMouseEvent",
+          params: press,
+        })
+      ).status,
+    ).toBe(200);
   });
 
   it("refused Input commands stay refused", async () => {

@@ -106,12 +106,14 @@ export function createEventRecording(deps: {
   const stopSessions = sessions.onSession((session, tab) => {
     logs.set(tab.id, session.events);
     // One redactor per tab: the policy decides, the session says whose event
-    // it is, and section 11's AgentCdp says what the agent holds.
+    // it is and which frames it blocks, and section 11's AgentCdp says what
+    // the agent holds.
     session.events.setRedactor((event, source) =>
       redactEvent(event, {
         delivered: (kind, id) => domains.delivered(tab.id, kind, id),
         owns: (domain) => domains.owns(tab.id, domain),
         fromAgent: source.fromAgent,
+        blocked: (frameId) => session.frameBlocked(frameId),
       }),
     );
     apply(session.events, tab.spaceId);

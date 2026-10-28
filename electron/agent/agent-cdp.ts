@@ -1,4 +1,4 @@
-import { collectIds } from "./cdp-policy";
+import { collectIds, outOfReach } from "./cdp-policy";
 import type { TabSession } from "./session/tab-session";
 import type { Step } from "./session/types";
 
@@ -17,9 +17,11 @@ export interface AgentCdp {
     params: Record<string, unknown>,
     step: Step & { timeoutMs: number; frameId?: string },
   ): Promise<{ result: unknown; newSession: boolean }>;
-  /** Records every id collectIds finds in a reply or an event. */
-  deliver(method: string, value: unknown): void;
+  /** Records every id collectIds finds in a reply or an event, and the target ("" or a frame id) that gave it. */
+  deliver(method: string, value: unknown, target?: string): void;
   delivered(kind: IdKind, id: string | number): boolean;
+  /** Whether a context id was given on this target: each renderer numbers its own worlds. */
+  deliveredOn(target: string, contextId: string | number): boolean;
   worlds(): ReadonlySet<string>;
   owns(domain: "Page" | "Network"): boolean;
   /** Best effort: a session whose debugger has gone is forgotten, not an error. */
@@ -36,8 +38,9 @@ const WORLD_METHODS = new Set([
 const OWNED: readonly string[] = ["Page", "Network"];
 
 // A context an agent may be given: the page's own world, or one the agent
-// made itself. Kamapathy's worlds and an extension's content scripts report
-// auxData.type "isolated" and are never in the agent's own world names.
+// made itself. outOfReach keeps Kamapathy's worlds and Electron's preload
+// world out by name first, and an extension's content script, which may
+// share a name the agent chose, by its origin.
 const addressable = (value: unknown, worlds: ReadonlySet<string>): boolean => {
   const context = (value as { context?: Record<string, unknown> })?.context;
   const auxData = context?.auxData as { type?: unknown } | undefined;
@@ -54,26 +57,52 @@ export function createAgentCdp(session: TabSession): AgentCdp {
   // Insertion ordered, so the oldest id is the one evicted.
   const ids = new Map<string, true>();
   const made = new Set<string>();
+  // The contexts and world names of an extension's worlds, and of frames the
+  // tab blocks, that the agent's sessions reported. They are never
+  // delivered, and nothing that names one of them gives anything out, since
+  // its objects live there.
+  const outside = new Set<string>();
+  const hidden = new Set<string>();
   // Which of the agent's sessions hold each domain.
   const on = new Map<string, Set<string>>();
 
-  const remember = (kind: IdKind, id: string | number) => {
-    const key = `${kind}|${id}`;
+  const keep = (key: string) => {
     ids.delete(key);
     ids.set(key, true);
     while (ids.size > MAX_DELIVERED)
       ids.delete(ids.keys().next().value as string);
   };
-  const deliver = (method: string, value: unknown) => {
-    if (
-      method === "Runtime.executionContextCreated" &&
-      !addressable(value, made)
-    )
-      return;
-    for (const found of collectIds(method, value))
+  const remember = (kind: IdKind, id: string | number, target?: string) => {
+    if (outside.has(`${kind}|${id}`)) return;
+    keep(`${kind}|${id}`);
+    // Each renderer numbers its own worlds, so a context id is the agent's
+    // only on the target that gave it.
+    if (kind === "context" && target !== undefined)
+      keep(`${kind}@${target}|${id}`);
+  };
+  const deliver = (method: string, value: unknown, target?: string) => {
+    const found = collectIds(method, value);
+    if (method === "Runtime.executionContextCreated") {
+      if (outOfReach(value, (frameId) => session.frameBlocked(frameId))) {
+        for (const { kind, id } of found) {
+          if (kind === "world") {
+            hidden.add(String(id));
+            continue;
+          }
+          ids.delete(`${kind}|${id}`);
+          outside.add(`${kind}|${id}`);
+          while (outside.size > MAX_DELIVERED)
+            outside.delete(outside.values().next().value as string);
+        }
+        return;
+      }
+      if (!addressable(value, made)) return;
+    }
+    if (found.some(({ kind, id }) => outside.has(`${kind}|${id}`))) return;
+    for (const { kind, id } of found)
       // A world is the agent's only when the agent made it, never because
       // an event named one.
-      if (found.kind !== "world") remember(found.kind, found.id);
+      if (kind !== "world") remember(kind, id, target);
   };
   const open = (key: string) => {
     const held = opening.get(key);
@@ -106,9 +135,14 @@ export function createAgentCdp(session: TabSession): AgentCdp {
     else holders.delete(sessionId);
     on.set(domain, holders);
   };
+  // The target an agent session was opened for.
+  const targetOf = (sessionId?: string) => {
+    for (const [key, held] of sessions) if (held === sessionId) return key;
+    return undefined;
+  };
   // Every event of the agent's own sessions delivers the ids it names.
   const stopEvents = session.on("agent", (event) => {
-    deliver(event.method, event.params);
+    deliver(event.method, event.params, targetOf(event.sessionId));
   });
   // A new document leaves no object, context or stream of the old one.
   const stopNavigation = session.on("Page.frameNavigated", (event) => {
@@ -116,8 +150,10 @@ export function createAgentCdp(session: TabSession): AgentCdp {
       event.sessionId === undefined &&
       (event.params as { frame?: { parentId?: string } })?.frame?.parentId ===
         undefined
-    )
+    ) {
       ids.clear();
+      outside.clear();
+    }
   });
   // A lost debugger took every session with it, domains and all.
   const stopDetached = session.on("detached", () => {
@@ -133,12 +169,20 @@ export function createAgentCdp(session: TabSession): AgentCdp {
       const sessionId = held ?? (await open(key));
       const result = await session.send(method, params, { ...rest, sessionId });
       note(method, params, sessionId);
-      deliver(method, result);
+      deliver(method, result, key);
       return { result, newSession: held === undefined };
     },
     deliver,
     delivered: (kind, id) => ids.has(`${kind}|${id}`),
-    worlds: () => made,
+    deliveredOn: (target, contextId) =>
+      !outside.has(`context|${contextId}`) &&
+      ids.has(`context@${target}|${contextId}`),
+    // A name the agent made that an extension's world also has names that
+    // world too.
+    worlds: () =>
+      hidden.size === 0
+        ? made
+        : new Set([...made].filter((name) => !hidden.has(name))),
     owns: (domain) => (on.get(domain)?.size ?? 0) > 0,
     async close() {
       const held = [...sessions.values()];
@@ -159,6 +203,8 @@ export function createAgentCdp(session: TabSession): AgentCdp {
       opening.clear();
       ids.clear();
       made.clear();
+      outside.clear();
+      hidden.clear();
       on.clear();
     },
   };
