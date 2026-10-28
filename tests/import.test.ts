@@ -3,9 +3,9 @@ import { createCipheriv } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -52,6 +52,7 @@ function folder(): string {
   return directory;
 }
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
 });
@@ -546,6 +547,10 @@ describe("Chromium import", () => {
     const direct = new DatabaseSync(join(profile, "History"), { readOnly: true });
     expect(() => direct.prepare("SELECT url FROM urls").all()).toThrow(/locked/);
     direct.close();
+    // The import's temporary copies go to a folder of this test's own, as
+    // other files' imports share the system's.
+    const temporary = folder();
+    vi.stubEnv("TMPDIR", temporary);
     const earlier = vi.mocked(mkdtemp).mock.results.length;
     const started = Date.now();
 
@@ -571,11 +576,12 @@ describe("Chromium import", () => {
       visits: 5,
     });
     expect(result.history[2].title).toBe("https://example.com/docs");
+    // One copy, of the history, and nothing of it or anything else left.
     const copies = await Promise.all(
       vi.mocked(mkdtemp).mock.results.slice(earlier).map((call) => call.value),
     );
-    expect(copies.length).toBeGreaterThan(0);
-    expect(copies.filter((copy) => existsSync(copy))).toEqual([]);
+    expect(copies.map((copy) => dirname(copy))).toEqual([temporary]);
+    expect(readdirSync(temporary)).toEqual([]);
   });
   it("keeps what it read when the temporary copy cannot be removed", async () => {
     const home = folder();
