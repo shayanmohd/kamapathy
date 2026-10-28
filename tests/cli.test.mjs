@@ -324,8 +324,13 @@ describe("automatic connection", () => {
         KAMAPATHY_USER_DATA: userData,
         PATH: process.env.PATH,
       });
-      await expect.poll(() => existsSync(marker)).toBe(true);
+      // macOS checks a new program before its first run, which takes about
+      // half a second on an idle machine and seconds on a busy one.
+      await expect
+        .poll(() => existsSync(marker), { timeout: 10000 })
+        .toBe(true);
     },
+    20000,
   );
 
   it("on macOS, does not start the default profile for a named profile Kamapathy never recorded", async () => {
@@ -385,9 +390,12 @@ describe("automatic connection", () => {
           { PATH, HOME: home, KAMAPATHY_USER_DATA: userData },
           { platform: "linux" },
         );
+      // Each stub is a new program, which macOS checks before its first run.
       const started = async (name) => {
         await expect
-          .poll(() => readFile(marker, "utf8").catch(() => ""))
+          .poll(() => readFile(marker, "utf8").catch(() => ""), {
+            timeout: 10000,
+          })
           .toBe(`${name} ${userData}`);
         await rm(marker);
       };
@@ -412,6 +420,7 @@ describe("automatic connection", () => {
       await rm(appImage);
       expect(await refusal(start(""))).toEqual(notInstalled);
     },
+    30000,
   );
 
   it.skipIf(!posix)(
