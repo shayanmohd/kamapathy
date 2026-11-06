@@ -8271,6 +8271,38 @@ describe("local automation socket", () => {
     expect(timed.error.retryable).toBeUndefined();
   });
 
+  it("a timeout on a loaded page that answers its probe slowly stops nothing", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.debugger.reply("Page.getLayoutMetrics", () => new Promise(() => {}));
+    // The page answers Kamapathy's probe 400 ms after it is asked.
+    const replies = (
+      page.debugger as unknown as {
+        replies: Map<string, (params: any, sessionId?: string) => any>;
+      }
+    ).replies;
+    const evaluate = replies.get("Runtime.evaluate") ?? (() => ({}));
+    page.debugger.reply("Runtime.evaluate", (params, sessionId) =>
+      params.expression === "1" && sessionId === undefined
+        ? new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ result: { type: "number", value: 1 } }),
+              400,
+            ),
+          )
+        : evaluate(params, sessionId),
+    );
+    const timed = await failure(
+      await cdp(tab.id, { method: "Page.getLayoutMetrics", timeoutMs: 1000 }),
+    );
+    expect(timed.error).toMatchObject({
+      code: "cdp_timeout",
+      executionStopped: false,
+      pageResponsive: true,
+    });
+    expect(page.debugger.methods()).not.toContain("Runtime.terminateExecution");
+  });
+
   it("a frame path reaches that frame's own session", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });
