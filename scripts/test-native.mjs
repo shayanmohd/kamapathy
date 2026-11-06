@@ -5,11 +5,13 @@
 import { prepareDesktopRuntime } from "./desktop-runtime.mjs";
 import { poll } from "./wait.mjs";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import {
   resolveSocket,
   socketFetch,
@@ -19,9 +21,11 @@ import { promptPages, ATTACHMENT } from "../tests/fixtures/prompt-pages.mjs";
 
 const page = (body, script = "") =>
   `<!doctype html><html><body style="margin:20px">${body}<script>${script}</script></body></html>`;
-// Counts a 16 ms interval's ticks for two seconds and reports how long the
-// page itself measured, since a throttled page's timeout fires late.
-const countTicks = `const start=performance.now();let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks+' in '+Math.round(performance.now()-start)+' ms';},2000);`;
+// Counts a 16 ms interval's ticks for two seconds of the page's own clock,
+// since a throttled page's timeout fires late, then shows the count and posts
+// it to the site with the machine's time when counting began and when the
+// timeout fired, the longest wait between two ticks and the page's visibility.
+const countTicks = `const began=Date.now();const start=performance.now();let ticks=0,last=start,longest=0;const timer=setInterval(()=>{const now=performance.now();longest=Math.max(longest,now-last);last=now;ticks++;},16);setTimeout(()=>{clearInterval(timer);const fired=Date.now();const elapsed=Math.round(performance.now()-start);document.getElementById('ticks').textContent='ticks '+ticks+' in '+elapsed+' ms';fetch('/ticks',{method:'POST',body:JSON.stringify({page:location.pathname,ticks,elapsed,longest:Math.round(longest),began,fired,visibility:document.visibilityState})});},2000);`;
 const pages = {
   "/animated": page(
     `<style>@keyframes fade{to{opacity:1}}#go{opacity:0;animation:fade .3s forwards}</style><button id="go">Animated button</button>`,
@@ -83,6 +87,8 @@ const IDENTITY_PATHS = [
 ];
 const seen = new Map();
 let identity;
+// Each timer page's count by its path, with the time it reached this server.
+const counts = new Map();
 // The late page waits for this request before it adds its control, so the
 // control arrives while the selector wait is sleeping.
 let releaseControl;
@@ -135,6 +141,14 @@ const site = createServer(async (request, response) => {
     response.writeHead(200, { "Content-Type": "text/plain" });
     return response.end("ok");
   }
+  if (path === "/ticks") {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const count = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    counts.set(count.page, { ...count, received: Date.now() });
+    response.writeHead(204);
+    return response.end();
+  }
   if (path === "/identity/pixel.png") {
     response.writeHead(200, { "Content-Type": "image/png" });
     return response.end(pixel);
@@ -178,10 +192,40 @@ const exited = (ms) =>
       done();
     });
   });
+// On macOS, the scheduling priority of every thread of each of Kamapathy's
+// renderers, main thread first, as `ps -M -o pri` lists them. Chromium drops
+// a renderer it moves to the background to 4.
+const rendererPriorities = async () => {
+  if (process.platform !== "darwin") return "";
+  const run = promisify(execFile);
+  const renderers = (await run("ps", ["-A", "-o", "pid=,ppid=,comm="])).stdout
+    .split("\n")
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter(
+      (found) =>
+        found &&
+        Number(found[2]) === kamapathy.pid &&
+        found[3].endsWith("Kamapathy Helper (Renderer)"),
+    )
+    .map((found) => found[1]);
+  if (!renderers.length) return "no renderers";
+  const threads = new Map(renderers.map((pid) => [pid, []]));
+  for (const line of (
+    await run("ps", ["-M", "-o", "pid=,pri=", "-p", renderers.join(",")])
+  ).stdout.split("\n")) {
+    const [pid, priority] = line.trim().split(/\s+/).slice(-2);
+    threads.get(pid)?.push(priority);
+  }
+  return [...threads]
+    .map(([pid, priorities]) => `${pid} ${priorities.join(" ")}`)
+    .join("; ");
+};
 const checks = [];
-const passed = (name) => {
+// A detail goes on its own line, for a check whose numbers a run should show.
+const passed = (name, detail) => {
   checks.push(name);
   console.log(`PASS ${name}`);
+  if (detail) console.log(`  ${detail}`);
 };
 // The teardown uses these too: a quit over working agents asks the person
 // first, and no one is here to answer a native box.
@@ -206,7 +250,16 @@ try {
   const open = async (path) =>
     (await json(`/spaces/${space.id}/tabs`, "POST", { url: `${origin}${path}` }))
       .tab.id;
-  const snapshot = (tab, extra = "") => json(`/tabs/${tab}/snapshot${extra}`);
+  // How long each snapshot took, for a timer check that fails.
+  const snapshotTimes = [];
+  const snapshot = async (tab, extra = "") => {
+    const asked = Date.now();
+    try {
+      return await json(`/tabs/${tab}/snapshot${extra}`);
+    } finally {
+      snapshotTimes.push(Date.now() - asked);
+    }
+  };
   const controls = async (tab) =>
     (await snapshot(tab)).interactables.map((control) => control.label);
 
@@ -533,22 +586,53 @@ try {
     "a normally launched Kamapathy navigates, reads the page state and waits for a late control in an unwatched agent tab",
   );
 
-  // Chromium wakes a hidden page's timers once a second, so there a 16 ms
-  // interval ticks about once a second. Unthrottled it ticks dozens of times
-  // a second, fewer on a busy machine; ten a second sits clear of both.
-  const assertUnthrottled = ([, ticks, elapsed], where) =>
-    assert.ok(
-      Number(ticks) >= Number(elapsed) / 100,
-      `Only ${ticks} ticks of a 16 ms interval ran in ${elapsed} ms in ${where}, fewer than ten a second`,
+  // Nothing reads a tab while it counts, since each read wakes its renderer.
+  // Unread on a Mac, a 16 ms interval ticked once or twice a second in an
+  // agent tab Chromium throttled as a hidden page, 2.5 to 13 times a second
+  // in one whose renderer Chromium left at background priority, and 62
+  // times a second in an agent tab as Kamapathy keeps it, with the window
+  // frontmost, covered, hidden, closed or minimized and under load. Read
+  // every 50 ms, the background renderer ticked 13 to 21 times a second.
+  // 25 a second lies between. The tab is read once the count is in.
+  const countedTicks = async (tab, path, where, asked, existed) => {
+    const sampled = sleep(1000).then(rendererPriorities).catch(String);
+    const { ticks, elapsed, longest, began, fired, received, visibility } =
+      await poll(() => counts.get(path), {
+        timeoutMs: 30000,
+        label: `the timer count from ${where}`,
+      });
+    const priorities = await sampled;
+    const earlier = snapshotTimes.slice(-5);
+    const reading = Date.now();
+    const shown = await snapshot(tab).then(
+      (result) => result.text,
+      (failure) => String(failure),
     );
+    const readMs = Date.now() - reading;
+    assert.ok(
+      ticks * 1000 >= elapsed * 25,
+      `Only ${ticks} ticks of a 16 ms interval ran in ${elapsed} ms in ${where}, fewer than 25 a second. ` +
+        `From the request for it, the page existed at ${existed - asked} ms, began counting at ${began - asked} ms, ` +
+        `fired its two second timeout at ${fired - asked} ms and its count reached the site at ${received - asked} ms. ` +
+        `It was ${visibility}, and its longest wait between ticks was ${longest} ms. ` +
+        `Snapshots before the count took ${earlier.join(", ")} ms and the one after it ${readMs} ms.` +
+        (priorities ? ` Renderer thread priorities by pid: ${priorities}.` : ""),
+    );
+    assert.match(shown, new RegExp(`ticks ${ticks} in ${elapsed} ms`));
+    return `${ticks} ticks in ${elapsed} ms, at most ${longest} ms apart; read back in ${readMs} ms`;
+  };
+  const timersAsked = Date.now();
   const timers = await open("/timers");
-  const ticked = await poll(
-    async () => /ticks (\d+) in (\d+) ms/.exec((await snapshot(timers)).text),
-    { timeoutMs: 10000, label: "two seconds of timer ticks in an unwatched agent tab" },
+  const timersCounted = await countedTicks(
+    timers,
+    "/timers",
+    "an unwatched agent tab",
+    timersAsked,
+    Date.now(),
   );
-  assertUnthrottled(ticked, "an unwatched agent tab");
   passed(
-    "an unwatched agent tab's timers are not held to one wake-up a second with its session attached",
+    "an unwatched agent tab's timers are throttled neither as a hidden page nor as a background renderer, with its session attached",
+    timersCounted,
   );
 
   const audio = await open("/audio");
@@ -574,6 +658,7 @@ try {
     timeoutMs: 10000,
     label: "the popup opener",
   });
+  const popupAsked = Date.now();
   const opened = await api(`/tabs/${opener}/click`, "POST", { selector: "#open" });
   assert.equal(opened.status, 200, JSON.stringify(await opened.response.json()));
   const popup = await poll(
@@ -585,16 +670,19 @@ try {
   );
   assert.equal(popup.managed, true);
   assert.equal(popup.openerId, opener);
-  const popupTicks = await poll(
-    async () => /ticks (\d+) in (\d+) ms/.exec((await snapshot(popup.id)).text),
-    { timeoutMs: 10000, label: "two seconds of timer ticks in the popup" },
+  const popupCounted = await countedTicks(
+    popup.id,
+    "/popup-timers",
+    "the popup",
+    popupAsked,
+    Date.now(),
   );
-  assertUnthrottled(popupTicks, "the popup");
   const popupClick = await api(`/tabs/${popup.id}/click`, "POST", { selector: "#go" });
   assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
   assert.ok((await controls(popup.id)).includes("popup clicked"));
   passed(
-    "a background popup from an unwatched agent tab is not held to one timer wake-up a second and takes a native click",
+    "a background popup from an unwatched agent tab is throttled neither as a hidden page nor as a background renderer, and takes a native click",
+    popupCounted,
   );
 
   // Section 7: a download an agent armed in a tab nobody watches is kept,
