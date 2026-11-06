@@ -780,6 +780,7 @@ describe("shell probe", () => {
     };
     const env = environment({
       platform: "darwin",
+      home: "/Users/avery",
       shell: "/bin/zsh",
       run: timesOut,
       env: {
