@@ -54,6 +54,13 @@ describe("what the site says", () => {
     );
   });
 
+  it("names no device among the requests that wait in the bar", () => {
+    expect(html).toContain(
+      "A site's request for your location, your camera or your microphone waits for you in Kamapathy's own bar",
+    );
+    expect(html).not.toContain("your camera or a device");
+  });
+
   it("defines every icon it uses in the sprite", () => {
     for (const [, id] of html.matchAll(/<use href="#([\w-]+)"/g))
       expect(html, id).toContain(`<symbol id="${id}"`);

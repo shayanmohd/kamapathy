@@ -47,9 +47,21 @@ describe("what the security model says", () => {
 
   it("says which requests in an agent tab reach the person", () => {
     says([
-      "In a tab an agent controls, a location, notification, camera or microphone request reaches the person only when it arrives within 5000 ms of one of the agent's own routes; every other request is refused, MIDI included",
+      "In a tab an agent controls, an answer the person already gave that site in that space is used first. Otherwise a location, notification, camera or microphone request reaches the person only when it arrives within 5000 ms of one of the agent's own routes, and every other request is refused, MIDI included, since Chromium 152 asks for MIDI with system-exclusive access. The agent learns no more than a refused request's origin and permission.",
     ]);
     expect(security).not.toContain("microphone or MIDI request");
+    expect(security).not.toContain(
+      "system-exclusive access, and the agent learns",
+    );
+  });
+
+  it("says no site opens a device chooser in this build", () => {
+    says([
+      "Kamapathy opens no device chooser in this build: USB, HID, serial and Bluetooth requests are refused in every space.",
+      "Waiting requests and anything typed into a sign-in prompt are never written to disk.",
+    ]);
+    expect(security).not.toContain("A USB or HID chooser grants");
+    expect(security).not.toContain("device grants");
   });
 
   it("says what page scripts and protocol commands reach", () => {

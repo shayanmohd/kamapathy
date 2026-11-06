@@ -133,6 +133,13 @@ describe("what the README says", () => {
     expect(readme).not.toContain("every platform now has a Help menu");
   });
 
+  it("says USB and HID requests are still refused", () => {
+    expect(changed).toContain(
+      "USB and HID requests are still refused, before any chooser opens and without a report.",
+    );
+    expect(readme).not.toContain("every USB or HID chooser");
+  });
+
   it("brings sign-ins over only from the Chrome-based browsers", () => {
     expect(readme).toContain(
       "From the Chrome-based browsers your sign-ins can come too, into your shared sign-ins or a new space for each profile.",

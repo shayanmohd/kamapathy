@@ -431,6 +431,32 @@ describe("the prompt center", () => {
     expect(center.prompts()).toHaveLength(1);
   });
 
+  it("a MIDI request in an agent tab gets the person's earlier answer for that site in that space, and is otherwise refused and reported", async () => {
+    const { controller, center, receipts, space, tab, ask } = setup();
+    // Chromium 152 asks with system-exclusive access, which no tab may hold.
+    const refused = await receipts.with(tab.id, async () => {
+      expect(ask("midiSysex")).toHaveBeenCalledExactlyOnceWith(false);
+      return {};
+    });
+    expect(refused).toEqual({
+      deniedRequests: [
+        { origin: "https://example.com", permission: "midi-sysex" },
+      ],
+    });
+    // While the person has the space the site asks them, and their answer
+    // stands once the agent has it again.
+    controller.registry.handOver(space.id, { reason: "manual" });
+    const asked = ask("midiSysex");
+    expect(center.prompts()).toMatchObject([
+      { kind: "midi-sysex", agent: false },
+    ]);
+    center.answer({ id: center.prompts()[0].id, allow: true });
+    expect(asked).toHaveBeenCalledExactlyOnceWith(true);
+    controller.registry.takeBack(space.id, null);
+    expect(ask("midiSysex")).toHaveBeenCalledExactlyOnceWith(true);
+    expect(center.prompts()).toEqual([]);
+  });
+
   it("denies held requests on navigation and releases the hold", async () => {
     const { controller, center, receipts, space, tab, page, ask } = setup();
     let callback!: ReturnType<typeof vi.fn>;
