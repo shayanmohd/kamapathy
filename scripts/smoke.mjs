@@ -575,6 +575,10 @@ try {
   let state = await page.evaluate(() => window.kamapathy.getState());
   assert.equal(state.platform, process.platform);
   checked("desktop bridge and platform detection");
+  const enabledFeatures = (target) =>
+    target.evaluate(({ app }) => app.commandLine.getSwitchValue("enable-features"));
+  assert.equal(await enabledFeatures(app), "CDPScreenshotNewSurface");
+  checked("Chromium copies screenshots from a new surface");
   // The dialog's name follows its step, so it is found by class.
   const welcome = page.locator(".welcome-modal");
   await welcome.getByRole("heading", { name: "Welcome to Kamapathy" }).waitFor();
@@ -658,13 +662,19 @@ try {
   assert.equal(await whatsNew(page).count(), 0);
   // A first run closed partway through is still over.
   const secondProfile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-second-"));
+  // This launch also passes features of its own, as a launcher may.
   const secondApp = await electron.launch({
     executablePath: await prepareDesktopRuntime(),
-    args: [resolve("out/main/index.js")],
+    args: ["--enable-features=SmokeLauncherFeature", resolve("out/main/index.js")],
     env: { ...env, KAMAPATHY_USER_DATA: secondProfile },
     timeout: 30000,
   });
   try {
+    assert.equal(
+      await enabledFeatures(secondApp),
+      "SmokeLauncherFeature,CDPScreenshotNewSurface",
+    );
+    checked("features a launcher enables stay beside the one Kamapathy enables");
     const secondPage = await secondApp.firstWindow();
     await secondPage.waitForSelector(".home-page, .web-page");
     await secondPage.waitForFunction(() => !!window.kamapathy);

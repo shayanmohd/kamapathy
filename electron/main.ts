@@ -6,6 +6,7 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BackgroundService } from "./background";
+import { withFeature } from "./chromium-features";
 import {
   BrowserController,
   NO_EXTENSIONS,
@@ -119,6 +120,16 @@ if (process.platform === "linux") app.setDesktopName("app.kamapathy.browser.desk
 // root, where Chromium needs --no-sandbox, this switch would reach the
 // network service and other helpers, which then refuse to start.
 if (process.getuid?.() !== 0) app.enableSandbox();
+// Chromium answers a page screenshot only once a fresh frame has reached the
+// screen, which on Windows and Linux never happens for a tab that no shown
+// window holds. This feature has it copy the fresh frame from a new surface.
+app.commandLine.appendSwitch(
+  "enable-features",
+  withFeature(
+    app.commandLine.getSwitchValue("enable-features"),
+    "CDPScreenshotNewSurface",
+  ),
+);
 // Every session, worker and service worker presents Chrome's reduced user agent.
 app.userAgentFallback = chromeUserAgent(
   app.userAgentFallback,
