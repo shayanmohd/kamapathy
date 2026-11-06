@@ -4085,6 +4085,25 @@ try {
     { label: "the badge the extension's worker sets" },
   );
   checked("Load unpacked shows the button and badge");
+  // The popup stays on its button's display. A runner's display can be
+  // narrower than this window, which would leave the button off it, so the
+  // window is fitted to the display first.
+  const fittedWidth = await app.evaluate(({ BrowserWindow, screen }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const bounds = window.getBounds();
+    const { workArea } = screen.getDisplayMatching(bounds);
+    window.setBounds({
+      x: workArea.x,
+      y: workArea.y,
+      width: Math.min(bounds.width, workArea.width),
+      height: Math.min(bounds.height, workArea.height),
+    });
+    return window.getContentSize()[0];
+  });
+  await poll(
+    async () => (await page.evaluate(() => innerWidth)) === fittedWidth,
+    { label: "the window inside its display" },
+  );
   // The popup belongs to the tab the person is looking at.
   const shownTab = (await page.evaluate(() => window.kamapathy.getState()))
     .activeTabId;
@@ -4110,7 +4129,10 @@ try {
   const popupOpened = app.waitForEvent("window");
   await markerButton.click();
   const popup = await popupOpened;
-  await popup.waitForSelector("#shown");
+  // Kamapathy keeps the window hidden until it places it, and on some Macs a
+  // page in a window never shown has no size, so this waits for the page
+  // here and for its text to show once the window is placed.
+  await popup.waitForSelector("#shown", { state: "attached" });
   // A popup sizes itself from its page, which Chromium reports to the window
   // as a preferred size. That report never arrives while the end-to-end
   // runner holds the application, so this run makes it, and Kamapathy places
@@ -4141,6 +4163,7 @@ try {
     Math.abs(placed.x + placed.width - (shellBounds.x + buttonBox.right)) <= 2,
     `The popup ends at ${placed.x + placed.width}, the button at ${shellBounds.x + buttonBox.right}`,
   );
+  await popup.waitForSelector("#shown");
   await popup.waitForFunction(
     () => document.getElementById("shown").textContent !== "waiting",
   );
@@ -4338,11 +4361,14 @@ try {
     });
     const listenersAfterClose = await app.evaluate(
       ({ BrowserWindow, app, session }) => {
-        BrowserWindow.getAllWindows()[0].close();
+        const closing = BrowserWindow.getAllWindows()[0];
+        // The person clicks the Dock icon once the window has gone, however
+        // long the close takes.
+        closing.once("closed", () => app.emit("activate"));
+        closing.close();
         const listeners = session
           .fromPartition("persist:space-personal")
           .listenerCount("will-download");
-        setTimeout(() => app.emit("activate"), 50);
         return listeners;
       },
     );
