@@ -112,6 +112,13 @@ if (process.env.KAMAPATHY_USER_DATA)
 app.setName("Kamapathy");
 if (process.platform === "win32") app.setAppUserModelId("app.kamapathy.browser");
 if (process.platform === "linux") app.setDesktopName("app.kamapathy.browser.desktop");
+// Electron runs service worker preloads only in sandboxed renderers. Every
+// window here asks for the sandbox, but a process holding only an extension's
+// worker has no window to ask for it, so with --no-sandbox, which the AppImage
+// adds where user namespaces are off, the worker would get no chrome.*. As
+// root, where Chromium needs --no-sandbox, this switch would reach the
+// network service and other helpers, which then refuse to start.
+if (process.getuid?.() !== 0) app.enableSandbox();
 // Every session, worker and service worker presents Chrome's reduced user agent.
 app.userAgentFallback = chromeUserAgent(
   app.userAgentFallback,
