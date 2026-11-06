@@ -1055,16 +1055,17 @@ export class BrowserController {
   }
 
   // Runs an agent's capture with Chromium painting the tab's view, in any
-  // window state: the shown view where it is, every other view lent to the
-  // capture window. Nothing is shown or focused, and the active space and
-  // the window keep their own state.
+  // window state: the shown view of a window on screen where it is, every
+  // other view lent to the capture window, since a hidden or minimized
+  // window draws nothing. Nothing is shown or focused, and the active space
+  // and the window keep their own state.
   async withVisibleView<T>(
     tabId: string,
     capture: () => Promise<T>,
   ): Promise<T> {
     const view = this.views.get(tabId);
     if (!view) return capture();
-    if (view.getVisible() && !this.window.isMinimized()) return capture();
+    if (view.getVisible() && this.canCapturePage()) return capture();
     try {
       return await this.captureHost.present(
         view,

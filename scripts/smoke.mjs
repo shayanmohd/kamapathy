@@ -575,6 +575,10 @@ try {
   let state = await page.evaluate(() => window.kamapathy.getState());
   assert.equal(state.platform, process.platform);
   checked("desktop bridge and platform detection");
+  const enabledFeatures = (target) =>
+    target.evaluate(({ app }) => app.commandLine.getSwitchValue("enable-features"));
+  assert.equal(await enabledFeatures(app), "CDPScreenshotNewSurface");
+  checked("Chromium copies screenshots from a new surface");
   // The dialog's name follows its step, so it is found by class.
   const welcome = page.locator(".welcome-modal");
   await welcome.getByRole("heading", { name: "Welcome to Kamapathy" }).waitFor();
@@ -658,13 +662,19 @@ try {
   assert.equal(await whatsNew(page).count(), 0);
   // A first run closed partway through is still over.
   const secondProfile = await mkdtemp(join(tmpdir(), "kamapathy-smoke-second-"));
+  // This launch also passes features of its own, as a launcher may.
   const secondApp = await electron.launch({
     executablePath: await prepareDesktopRuntime(),
-    args: [resolve("out/main/index.js")],
+    args: ["--enable-features=SmokeLauncherFeature", resolve("out/main/index.js")],
     env: { ...env, KAMAPATHY_USER_DATA: secondProfile },
     timeout: 30000,
   });
   try {
+    assert.equal(
+      await enabledFeatures(secondApp),
+      "SmokeLauncherFeature,CDPScreenshotNewSurface",
+    );
+    checked("features a launcher enables stay beside the one Kamapathy enables");
     const secondPage = await secondApp.firstWindow();
     await secondPage.waitForSelector(".home-page, .web-page");
     await secondPage.waitForFunction(() => !!window.kamapathy);
@@ -2713,12 +2723,53 @@ try {
   );
   assert.deepEqual(await pageMetrics(), metricsBefore);
   assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  checked(
+    "a full-page capture of the shown agent tab leaves its view bounds and scroll unchanged",
+  );
+  // Background mode hides the window and leaves this view visible in it. A
+  // hidden window draws nothing, so the capture goes through the capture
+  // window, and shows the page as it is at that moment.
+  const windowVisible = () =>
+    app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible());
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
+  await poll(async () => !(await windowVisible()), { label: "the hidden window" });
+  assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  await app.evaluate(
+    ({ webContents }, url) =>
+      webContents
+        .getAllWebContents()
+        .find((contents) => contents.getURL() === url)
+        .executeJavaScript(
+          `document.body.insertAdjacentHTML("beforeend", '<div style="position:fixed;inset:0;background:rgb(0,160,0)"></div>')`,
+        ),
+    tallPage,
+  );
+  const hiddenShot = await api(`/tabs/${agentTab}/screenshot`);
+  const hiddenPng = Buffer.from(await hiddenShot.arrayBuffer());
+  assert.equal(hiddenShot.status, 200, hiddenPng.toString("utf8").slice(0, 300));
+  const hiddenCentre = await app.evaluate(({ nativeImage }, base64) => {
+    const image = nativeImage.createFromBuffer(Buffer.from(base64, "base64"));
+    const { width, height } = image.getSize();
+    // toBitmap gives blue, green, red and alpha per pixel.
+    const [b, g, r] = image
+      .crop({ x: Math.floor(width / 2), y: Math.floor(height / 2), width: 1, height: 1 })
+      .toBitmap();
+    return [r, g, b];
+  }, hiddenPng.toString("base64"));
+  assert.ok(
+    hiddenCentre[1] > hiddenCentre[0] + 60 && hiddenCentre[1] > hiddenCentre[2] + 60,
+    `A capture with the window hidden shows ${hiddenCentre}, not the green the page turned`,
+  );
+  assert.equal(await windowVisible(), false);
+  assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+  await poll(windowVisible, { label: "the shown window" });
   assert.equal(
     (await api(`/tabs/${agentTab}/navigate`, "POST", { url: origin })).status,
     200,
   );
   checked(
-    "a full-page capture of the shown agent tab leaves its view bounds and scroll unchanged",
+    "the shown agent tab of a hidden window, as background mode leaves it, is captured as it is now",
   );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   await agentBar.getByText("Research helper · You're in control").waitFor();

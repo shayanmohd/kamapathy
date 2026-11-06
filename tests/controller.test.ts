@@ -2904,6 +2904,42 @@ describe("agent captures", () => {
     expect(view.visible).toBe(true);
   });
 
+  it("the shown tab of a hidden window, as background mode leaves it, is lent", async () => {
+    const browser = controller();
+    const window = windowOf(browser);
+    const id = browser.state.activeTabId;
+    await browser.dispatch({
+      type: "tab:navigate",
+      id,
+      url: "https://example.com/",
+    });
+    const view = viewFor(contents(browser, id));
+    expect(view.visible).toBe(true);
+    // A hidden window draws nothing, so a capture where the view is never
+    // answers.
+    window.isVisible = () => false;
+    let during: Record<string, unknown> = {};
+    expect(
+      await browser.withVisibleView(id, async () => {
+        during = {
+          inMain: window.contentView.children.includes(view),
+          inHost:
+            vi.mocked(BaseWindow).mock.results.length > 0 &&
+            captureWindow().contentView.children.includes(view),
+          visible: view.visible,
+        };
+        return "lent";
+      }),
+    ).toBe("lent");
+    expect(during).toEqual({ inMain: false, inHost: true, visible: true });
+    expect(BaseWindow).toHaveBeenCalledTimes(1);
+    expect(captureWindow().contentView.children).toEqual([]);
+    expect(window.contentView.children).toContain(view);
+    expect(view.visible).toBe(true);
+    for (const spy of [window.show, window.focus, captureWindow().show])
+      expect(spy).not.toHaveBeenCalled();
+  });
+
   it("a tab closed during a capture is not put back, and dispose destroys the capture window", async () => {
     const browser = controller();
     const window = windowOf(browser);
