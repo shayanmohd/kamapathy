@@ -3886,7 +3886,7 @@ describe("dialogs, init scripts, agent sessions and events", () => {
     run();
     run();
     expect([...listeners.keys()]).toEqual([
-      "mousedown",
+      "pointerdown",
       "keydown",
       "dragstart",
       "pointermove",
@@ -3900,20 +3900,50 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       drag: 0,
       move: 0,
     });
-    listeners.get("mousedown")![0]({});
-    listeners.get("mousedown")![0]({});
-    listeners.get("keydown")![0]({});
-    listeners.get("dragstart")![0]({ defaultPrevented: false });
+    const trusted = { isTrusted: true };
+    listeners.get("pointerdown")![0]({ ...trusted, button: 0, buttons: 1 });
+    listeners.get("keydown")![0](trusted);
+    listeners.get("dragstart")![0]({ ...trusted, defaultPrevented: false });
     // A drag the page cancels in its own handler never counts.
-    listeners.get("dragstart")![0]({ defaultPrevented: true });
-    listeners.get("pointermove")![0]({ clientX: 30, clientY: 12 });
-    listeners.get("pointermove")![0]({ clientX: 25.5, clientY: 44 });
+    listeners.get("dragstart")![0]({ ...trusted, defaultPrevented: true });
+    listeners.get("pointermove")![0]({
+      ...trusted,
+      clientX: 30,
+      clientY: 12,
+      button: -1,
+      buttons: 1,
+    });
+    // A right press while the left is held comes as a move that names the
+    // right button, and its release as one that no longer holds it.
+    listeners.get("pointermove")![0]({
+      ...trusted,
+      clientX: 25.5,
+      clientY: 44,
+      button: 2,
+      buttons: 3,
+    });
+    listeners.get("pointermove")![0]({
+      ...trusted,
+      clientX: 25.5,
+      clientY: 44,
+      button: 2,
+      buttons: 1,
+    });
+    // Events the page dispatches itself never count, and a move of its own
+    // never moves the landing.
+    for (const [name, event] of [
+      ["pointerdown", { button: 0, buttons: 1 }],
+      ["keydown", {}],
+      ["dragstart", { defaultPrevented: false }],
+      ["pointermove", { clientX: 300, clientY: 200, button: 2, buttons: 3 }],
+    ] as const)
+      listeners.get(name)![0]({ ...event, isTrusted: false });
     await settle();
     expect(world.kamapathyInput).toEqual({
       mouse: 2,
       key: 1,
       drag: 1,
-      move: 2,
+      move: 3,
     });
     // Where the last move landed, in its document's own pixels, for the
     // routing check to compare with the point a press is aimed at.

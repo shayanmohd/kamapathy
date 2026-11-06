@@ -295,6 +295,50 @@ addEventListener("mouseup", (event) => {
   held = false;
 });
 </script>`,
+  // Controls that cancel their pointerdown, as drawing and dragging widgets
+  // do, so Chromium fires no mousedown for a press on them: a button and a
+  // drag handle here, and a button in a frame from another site.
+  "/frames/cancel": `<!doctype html><meta charset="utf-8"><title>Cancelled presses</title>
+<style>body{margin:0}button{position:absolute;width:100px;height:40px;margin:0;padding:0}p{position:absolute;left:0;margin:0}iframe{position:absolute;left:0;top:240px;width:400px;height:120px;border:0}</style>
+<button type="button" id="hold" style="left:20px;top:20px">Hold</button>
+<button type="button" id="handle" style="left:20px;top:100px">Handle</button>
+<button type="button" id="slot" style="left:260px;top:100px">Slot</button>
+<p id="hold-result" role="status" style="top:170px">Hold untouched</p>
+<p id="drag-result" role="status" style="top:200px">Handle untouched</p>
+<iframe id="grab-frame" title="Grab frame" src="{{other}}/frames/grab"></iframe>
+<script>
+let held = false;
+let presses = 0;
+let clicks = 0;
+for (const button of document.querySelectorAll("button"))
+  button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    held = button.id === "handle";
+    if (held) presses += 1;
+  });
+document.getElementById("hold").addEventListener("click", () => {
+  clicks += 1;
+  document.getElementById("hold-result").textContent = "Hold clicked " + clicks + " times";
+});
+addEventListener("pointerup", (event) => {
+  if (held && event.target.id === "slot")
+    document.getElementById("drag-result").textContent = "Dropped on slot after " + presses + " presses";
+  held = false;
+});
+</script>`,
+  "/frames/grab": `<!doctype html><meta charset="utf-8"><title>Grab</title>
+<style>body{margin:0}button{position:absolute;left:20px;top:20px;width:100px;height:40px;margin:0;padding:0}p{position:absolute;left:0;top:70px;margin:0}</style>
+<button type="button" id="grab">Grab</button>
+<p id="grab-result" role="status">Grab untouched</p>
+<script>
+let clicks = 0;
+const grab = document.getElementById("grab");
+grab.addEventListener("pointerdown", (event) => event.preventDefault());
+grab.addEventListener("click", () => {
+  clicks += 1;
+  document.getElementById("grab-result").textContent = "Grab clicked " + clicks + " times";
+});
+</script>`,
   "/frames/scaled": `<!doctype html><meta charset="utf-8"><title>Scaled frames</title>
 <style>body{margin:0}iframe{display:block;width:400px;height:200px;border:4px solid #666;padding:6px;margin:0 0 10px}#scaled{transform:scale(0.5);transform-origin:0 0}#zoomed{zoom:0.5}</style>
 <iframe id="scaled" title="Scaled grid" src="/frames/grid"></iframe>

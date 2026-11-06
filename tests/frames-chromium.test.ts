@@ -1006,6 +1006,47 @@ for (const mode of ISOLATION)
       expect((await take()).text).toContain("Dropped on slot after 1 presses");
     }, 60000);
 
+    // A page that cancels pointerdown gets no mousedown, yet the press
+    // arrived, so the delivery check sends it once, on the page and in a
+    // frame from another site alike.
+    it("a press whose pointerdown the page cancels goes out once", async () => {
+      await open("/frames/cancel", 2);
+      const listing = await take();
+      const { point } = await click(byLabel(listing, "Hold").ref);
+      await click(byLabel(listing, "Grab").ref);
+      expect(
+        await input!.mouse(
+          "tab-1",
+          {
+            kind: "click",
+            x: point.x,
+            y: point.y,
+            steps: 1,
+            button: "left",
+            clickCount: 1,
+            delayMs: 0,
+          },
+          run(),
+        ),
+      ).toMatchObject({ ok: true });
+      const dragged = await input!.drag(
+        "tab-1",
+        {
+          source: { ref: byLabel(listing, "Handle").ref },
+          target: { ref: byLabel(listing, "Slot").ref },
+          button: "left",
+          force: false,
+          timeoutMs: 10000,
+        },
+        run(),
+      );
+      expect(dragged).toMatchObject({ ok: true, drag: "mouse" });
+      const { text } = await take();
+      expect(text).toContain("Hold clicked 2 times");
+      expect(text).toContain("Grab clicked 1 times");
+      expect(text).toContain("Dropped on slot after 1 presses");
+    }, 60000);
+
     it("an element covering an owner is reported as covered with its interceptor", async () => {
       await open("/frames/sealed", 2);
       const listing = await take();

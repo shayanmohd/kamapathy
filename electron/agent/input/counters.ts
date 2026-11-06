@@ -13,15 +13,24 @@ const counts = (world.kamapathyInput ||= { mouse: 0, key: 0, drag: 0, move: 0 })
 const listening = (world.kamapathyListening ||= new WeakSet());
 if (!listening.has(document)) {
   listening.add(document);
-  addEventListener("mousedown", () => { counts.mouse += 1; }, { capture: true });
-  addEventListener("keydown", () => { counts.key += 1; }, { capture: true });
+  // Only trusted events count, since a page can dispatch its own. A press
+  // counts by its pointerdown, which Chromium fires even where it fires no
+  // mousedown: on a control that cancels its pointerdown or is disabled.
+  addEventListener("pointerdown", (event) => { if (event.isTrusted) counts.mouse += 1; }, { capture: true });
+  addEventListener("keydown", (event) => { if (event.isTrusted) counts.key += 1; }, { capture: true });
   // An HTML5 drag starts unless the page cancels dragstart, which its own
   // handlers decide after this listener runs.
   addEventListener("dragstart", (event) => {
+    if (!event.isTrusted) return;
     setTimeout(() => { if (!event.defaultPrevented) counts.drag += 1; });
   }, { capture: true });
   addEventListener("pointermove", (event) => {
+    if (!event.isTrusted) return;
     counts.move += 1;
+    // A press while another button is held fires no pointerdown, only a
+    // move whose button names it and whose buttons include it.
+    const bit = [1, 4, 2][event.button];
+    if (bit && event.buttons & bit) counts.mouse += 1;
     world.kamapathyLanding = { x: event.clientX, y: event.clientY, doc: document };
   }, { capture: true });
 }`;
