@@ -1,3 +1,4 @@
+import { sep } from "node:path";
 import { utilityProcess } from "electron";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiError } from "../electron/agent/errors";
@@ -162,6 +163,21 @@ describe("pdf text", () => {
     });
   }, 20000);
 
+  it("a CMap folder pdf.js takes on Windows", async () => {
+    // Windows joins the folder with "\", and pdf.js refuses one that does not
+    // end in "/" before it reads a page.
+    const folder = cMapDirectory("win32");
+    expect(folder).toMatch(/\\pdfjs-dist\\cmaps\/$/);
+    const reply = ok(
+      await readPdf(textPdf(PAGES), {
+        from: 1,
+        maxChars: 20000,
+        cMapUrl: folder,
+      }),
+    );
+    expect(reply.pages).toHaveLength(3);
+  }, 20000);
+
   it("text assembly", () => {
     expect(
       pageText([{ str: "Line one", hasEOL: true }, { str: "Line two" }]),
@@ -194,7 +210,7 @@ describe("pdf extraction", () => {
     fork.mockReturnValue(new FakeChild() as never);
     forkPdfWorker();
     const [entry, args, options] = fork.mock.calls[0];
-    expect(entry.endsWith("/pdf-worker.js")).toBe(true);
+    expect(entry.endsWith(`${sep}pdf-worker.js`)).toBe(true);
     expect(args).toEqual([]);
     // Electron keeps the parent's environment when env is empty, and reads
     // a heap cap only through --js-flags.

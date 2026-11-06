@@ -35,6 +35,7 @@ import {
   siteContextFor,
   siteRoots,
   summarize,
+  toolFrame,
 } from "../skills/kamapathy/scripts/lib/sites.mjs";
 import {
   checkAll,
@@ -2027,6 +2028,24 @@ export const searchRepositories = (context, args) => args;
     expect(missing.message).toBe(
       `No site pack named "nope" is in Kamapathy's workspace or the skill. Looked in ${roots[0].path} (ok) and ${bundled} (missing).`,
     );
+  });
+
+  it("a tool's frame on Windows is read from Node's URL or a path in either slash", () => {
+    const pack = { dir: "C:\\Users\\Ada\\workspace\\sites\\github" };
+    for (const file of [
+      "file:///C:/Users/Ada/workspace/sites/github/tools/thrower.mjs?v=4bafb22d8884fa14",
+      "C:\\Users\\Ada\\workspace\\sites\\github\\tools\\thrower.mjs",
+      // Vite's loader, which Vitest runs.
+      "C:/Users/Ada/workspace/sites/github/tools/thrower.mjs?v=4bafb22d8884fa14",
+    ])
+      expect(
+        toolFrame(
+          `TypeError: no 1\n    at thrower (${file}:3:9)`,
+          pack,
+          "win32",
+        ),
+        file,
+      ).toBe("tools/thrower.mjs:3:9");
   });
 
   it("runPageTool sends one evaluate holding the file and args, and refuses 16 KiB of args or a syntax error before sending", async () => {
