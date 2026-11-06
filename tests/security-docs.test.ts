@@ -45,6 +45,13 @@ describe("what the security model says", () => {
     ]);
   });
 
+  it("says which requests in an agent tab reach the person", () => {
+    says([
+      "In a tab an agent controls, a location, notification, camera or microphone request reaches the person only when it arrives within 5000 ms of one of the agent's own routes; every other request is refused, MIDI included",
+    ]);
+    expect(security).not.toContain("microphone or MIDI request");
+  });
+
   it("says what page scripts and protocol commands reach", () => {
     says([
       "Agents can now also run their own scripts in the tabs they manage, while **Page scripts**",

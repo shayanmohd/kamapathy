@@ -114,6 +114,25 @@ describe("what the README says", () => {
       expect(readme, sentence).not.toContain(sentence);
   });
 
+  it("says where Set up agents is and what Remove setup leaves", () => {
+    expect(section("Bring your own agent")).toContain(
+      "The quickest way is **Set up agents**, in Settings under Agents, in the ⋯ menu or, on macOS, in the Help menu.",
+    );
+    expect(readme).toContain(
+      "**Remove setup** removes what it added. It does not put back an agent's own copy of the skill that you chose to replace: that copy stays in the agent's skills folder under a name that starts with `.kamapathy-backup-`, and renaming it to `kamapathy` restores it.",
+    );
+    expect(readme).not.toContain("takes it all back");
+  });
+
+  it("names the menu bar only for macOS", () => {
+    // Off macOS the window has no frame, so it shows no menu bar.
+    expect(changed).toContain(
+      "The command menu gains Set up agents, Help, Privacy and Report an issue, and the macOS menu bar gains a Help menu.",
+    );
+    expect(changed).toContain("**View > Passwords** opens the list on macOS");
+    expect(readme).not.toContain("every platform now has a Help menu");
+  });
+
   it("brings sign-ins over only from the Chrome-based browsers", () => {
     expect(readme).toContain(
       "From the Chrome-based browsers your sign-ins can come too, into your shared sign-ins or a new space for each profile.",

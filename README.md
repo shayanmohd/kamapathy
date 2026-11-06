@@ -92,7 +92,7 @@ Kamapathy also runs your extensions. Add one from the Chrome Web Store with the 
 
 ## Take the tour
 
-Each section opens to a screenshot. Want to click around instead? The [live demo](https://kamapathy.app/#demo) runs a working copy of the interface in your browser, agent included.
+Each section opens to a screenshot. Want to click around instead? The [live demo](https://kamapathy.app/#demo) is a clickable model of the interface that runs in your browser, with an agent that plays a scripted dinner booking you can take over, hand back or stop.
 
 <details open>
 <summary><strong>An agent at work</strong>: a ring around its page and a bar to stop it</summary>
@@ -244,7 +244,7 @@ sequenceDiagram
     Note over Y,K: Take over or Stop at any time
 ```
 
-The quickest way is **Set up agents**, in Settings under Agents, in the ⋯ menu or in the Help menu. It finds the agents on this computer, gives the ones you tick Kamapathy's own copy of the skill, which every start keeps in step with the browser, and can add a `kamapathy` command to your PATH so `kamapathy health` works in any terminal. Nothing changes until you choose **Set up**, and **Remove setup** takes it all back.
+The quickest way is **Set up agents**, in Settings under Agents, in the ⋯ menu or, on macOS, in the Help menu. It finds the agents on this computer, gives the ones you tick Kamapathy's own copy of the skill, which every start keeps in step with the browser, and can add a `kamapathy` command to your PATH so `kamapathy health` works in any terminal. Nothing changes until you choose **Set up**, and **Remove setup** removes what it added. It does not put back an agent's own copy of the skill that you chose to replace: that copy stays in the agent's skills folder under a name that starts with `.kamapathy-backup-`, and renaming it to `kamapathy` restores it.
 
 Or install the skill yourself:
 
@@ -359,7 +359,7 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - `upgrade` checks for a newer Kamapathy and downloads its installer, with `--check`, `--timeout <ms>` and `--json`. It never installs: only the person does that.
 - Kamapathy makes two new outbound requests. Once a day it asks GitHub Releases for a newer version, with no ID or usage data; it is on by default and switchable in Settings, under Updates. Once you add extensions, it also asks the Chrome Web Store once a day whether they have updates, sending their IDs and versions; that is on by default too and switchable in Settings, under Extensions.
 - Help usage and examples say `kamapathy` when you run the command Set up agents adds, and `node scripts/kamapathy.mjs` otherwise.
-- The ⋯ menu gains **Set up agents** and **Help** after Settings, and **Update Kamapathy** at the top while an update waits. The command menu gains Set up agents, Help, Privacy and Report an issue, and every platform now has a Help menu.
+- The ⋯ menu gains **Set up agents** and **Help** after Settings, and **Update Kamapathy** at the top while an update waits. The command menu gains Set up agents, Help, Privacy and Report an issue, and the macOS menu bar gains a Help menu.
 - A packaged macOS build started from a disk image offers to move itself to Applications before the window opens.
 - Every page and request now sees Chrome's reduced user agent, `Mozilla/5.0 (<platform>) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36`, with no Electron or Kamapathy token and the minor, build and patch numbers zeroed. Client hints are unchanged.
 - `pdf-text <tab-id>` and `page.pdfText()` read a PDF's text by page, up to 500 pages and 20000 characters a call, with the codes `not_pdf`, `pdf_not_refetchable`, `pdf_too_large`, `pdf_locked`, `pdf_unreadable`, `pdf_fetch_failed`, `page_out_of_range` and `pdf_timeout`. `/health` answers API level 4.
@@ -389,7 +389,7 @@ Since Kamapathy 0.2.0, a script or agent written for it can notice these changes
 - The person's extensions run in agent spaces that share their sign-ins, so their content scripts can change agent pages. Isolated agent spaces never run them.
 - A frame of one of the person's extensions is a blocked `iframe` entry with `extension` and the label `Extension: <name>`, and input there returns `403 input_target_blocked` with `frame` and `extension`.
 - CDP commands aimed at an extension's frame or content-script world return `403 cdp_method_blocked` with `reason: "scope"`.
-- Kamapathy saves passwords now: it offers after you sign in, fills from a native menu under the field, and keeps them in an encrypted vault in your profile. **View > Passwords** opens the list, after Downloads, and the ⋯ menu and the command menu list it too; **Settings > Passwords**, after Browsing, holds **Offer to save passwords** and **Manage...**.
+- Kamapathy saves passwords now: it offers after you sign in, fills from a native menu under the field, and keeps them in an encrypted vault in your profile. **View > Passwords** opens the list on macOS, after Downloads, and the ⋯ menu and the command menu list it too; **Settings > Passwords**, after Browsing, holds **Offer to save passwords** and **Manage...**.
 - The import panel gains a **Passwords** checkbox, on by default for Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera, so an import from one of those now also brings its saved passwords, reading that browser's key when it has rows to decrypt. Safari's exported file brings them too, Firefox's come from a CSV file you import under Passwords, and the line at the end counts passwords only when it saved some, so an import without them reads as before.
 - A site's own sign-in box, the one that asks for a name and password, lists your saved sign-ins for it as `Sign in as <username>` and offers a **Save password** box, ticked, which saves what you typed once the sign-in works.
 - Nothing about saved passwords is on the agent API: no route, method, command, field, option or error code changes, and a path such as `GET /passwords` answers `404 route_not_found` like any other unknown route. A script that calls a password, credential or autofill method it imagined now gets one hint first, `Saved passwords are for the person only. Hand the space to them with handoff() and say what to sign in to.`

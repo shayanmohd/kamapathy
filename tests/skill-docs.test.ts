@@ -58,6 +58,8 @@ const SAYS = [
   "Read [page-scripts.md](references/page-scripts.md) before clearing anything with `clear-site-data TAB_ID` (`page.clearSiteData`); outside an isolated agent space, the person approves each clear, and `clear_declined` means they said no.",
   "Snapshots read through open shadow roots and iframes from any site; a frame from another origin is also an `iframe` entry with `origin` and `content`, where `pending` means snapshot again shortly. Use refs inside frames.",
   "Never put a field value, a secret or personal data in a label or a status.",
+  "Closing the window does not stop you: Kamapathy keeps running, and snapshots, actions and screenshots keep working.",
+  "The Kamapathy window may be closed, hidden or minimized, and a capture never brings it forward.",
   "they stopped the work on purpose: ask them before starting it again",
   'Check `help("page.click")` instead of guessing, because unknown options are refused.',
   "When it has `dispatched: true`, the action reached the page before it failed, so inspect the page first.",
@@ -80,6 +82,7 @@ const RETIRED = [
   "same-origin iframes", // frames from any site are read
   "cross_origin_frame", // no route answers it any more
   "nothing runs inside", // page.evaluate runs in the page
+  "only screenshots wait", // a capture works with the window closed
 ];
 
 const FLAGS = new Set([

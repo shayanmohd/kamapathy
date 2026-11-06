@@ -15,8 +15,9 @@ const SITE_PACKS =
 describe("what the site says", () => {
   it("reads and acts in frames from any site, and says what stays out of reach", () => {
     expect(html).toContain(
-      "Agent snapshots read open shadow roots and frames from any site, so an agent can fill an embedded checkout or sign-in form.",
+      "Agent snapshots read open shadow roots and frames from any site, so an agent can fill an embedded checkout form. For a sign-in it hands the space to you, since agents never get your saved passwords.",
     );
+    expect(html).not.toContain("checkout or sign-in form");
     expect(html).toContain(
       "Snapshots read open shadow roots and frames, including ones from other sites.",
     );
@@ -86,5 +87,12 @@ describe("what the site says", () => {
     expect(html).not.toContain("Agents never see your tabs.");
     expect(html).not.toContain("automatic updates");
     expect(html).not.toContain("a password manager");
+  });
+
+  it("says Remove setup leaves an agent's replaced copy of the skill in its backup", () => {
+    expect(html).toContain(
+      "<b>Remove setup</b> removes what it added. It doesn't put back an agent's own copy of the skill that you chose to replace: that copy stays in the agent's skills folder under a name that starts with <code>.kamapathy-backup-</code>.",
+    );
+    expect(html).not.toContain("takes every change back");
   });
 });

@@ -115,6 +115,38 @@ describe("the agent guide", () => {
     expect(packs).not.toContain("None of the four calls sends a request");
   });
 
+  it("says MIDI is refused in agent tabs, in the table and below it", () => {
+    const requests = section("Requests for the person");
+    for (const sentence of [
+      "| Location, notifications, camera, microphone, camera and microphone together | Held for the person when it arrives inside the tab's request window, and otherwise refused this once and reported |",
+      "| MIDI | Refused and reported |",
+      "so a MIDI request in an agent tab is refused and reported, while a personal space asks the person for it.",
+    ])
+      expect(requests).toContain(sentence);
+    expect(requests).not.toContain("`midi`");
+  });
+
+  it("sends a plan from PowerShell with every character intact", () => {
+    const batch = section("Batch a short interaction");
+    expect(batch).toContain(
+      "Windows PowerShell 5.1 pipes text to a program in ASCII",
+    );
+    expect(batch).toContain(
+      '`cmd /c "node scripts/kamapathy.mjs batch <tab-id> < plan.json"`',
+    );
+    expect(guide).not.toContain("Get-Content -Raw plan.json |");
+  });
+
+  it("says which control reasons this version records", () => {
+    expect(section("Human handoff")).toContain(
+      "This version of Kamapathy records every reason in the table. `approval` holds the space while a bar asks the person whether an agent may clear a site's data",
+    );
+    expect(section("Errors")).toContain(
+      "`approval` for a request for a space or a clear of a site's data.",
+    );
+    expect(guide).not.toContain("`approval` is part of the API");
+  });
+
   it("says one thing per subject under Isolation and limitations", () => {
     const isolation = section("Isolation and limitations");
     for (const sentence of [
