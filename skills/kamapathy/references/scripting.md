@@ -184,7 +184,7 @@ A `FileChooser` comes from `waitForEvent("filechooser")`. Every file chooser in 
 
 ## Mouse and keyboard
 
-`page.mouse` and `page.keyboard` drive a tab directly, for a canvas or a custom widget no ref can name. They resolve no target and check no actionability, so verify what they did on the page yourself. `page.mouse.down`, `click` and `dblclick` still press only once a move at their point reached the document there, waiting up to 3000 ms and then throwing `action_timeout` with the blocker `not_drawn`. Each agent tab has one input state, kept in Kamapathy and shared by its `Page` objects: the pointer's position, which starts at 0,0, the buttons and keys it holds and the modifier mask. Every call below but `press`, `insertText` and `paste` returns it as `input: { x, y, buttons, keys, modifiers }`.
+`page.mouse` and `page.keyboard` drive a tab directly, for a canvas or a custom widget no ref can name. They resolve no target and check no actionability, so verify what they did on the page yourself. `page.mouse.down`, `click` and `dblclick` still press only once a move at their point reached the document there, waiting up to 3000 ms and then throwing `action_timeout` with the blocker `not_drawn`; while a button is held, they press at once. Each agent tab has one input state, kept in Kamapathy and shared by its `Page` objects: the pointer's position, which starts at 0,0, the buttons and keys it holds and the modifier mask. Every call below but `press`, `insertText` and `paste` returns it as `input: { x, y, buttons, keys, modifiers }`.
 
 | Call | Returns | Route |
 | --- | --- | --- |

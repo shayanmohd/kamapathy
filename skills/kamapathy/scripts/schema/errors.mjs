@@ -504,7 +504,7 @@ export const ERRORS = {
   fill_not_accepted: code(
     422,
     false,
-    "The field kept its old value after one retry.",
+    "The field kept its old value after one retry, or a click to retry would not land on it.",
     ["match"],
     4,
   ),
