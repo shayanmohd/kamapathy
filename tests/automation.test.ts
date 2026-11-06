@@ -2659,6 +2659,69 @@ describe("local automation socket", () => {
     }
   });
 
+  it("checks a raw click and a drag again before sending a lost press again", async () => {
+    type Answer = (code: string, sessionId?: string) => unknown;
+    // Each press is lost, and something changes before the resend.
+    const changes = [
+      {
+        name: "extension",
+        routes: ["mouse/click", "drag"],
+        status: 403,
+        code: "input_target_blocked",
+        change: (page: FakeContents) => {
+          // One of the person's extensions now draws its frame at the points
+          // the raw click and the drag press.
+          frameNavigated(page.debugger, {
+            frameId: "frame-x",
+            parentId: "main",
+            loaderId: "loader-x",
+            url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+          });
+          page.hits = [
+            { x: 65, y: 105, nodeName: "iframe", holds: "frame-x" },
+            { x: 50, y: 80, nodeName: "iframe", holds: "frame-x" },
+          ];
+        },
+      },
+      {
+        name: "moved",
+        routes: ["drag"],
+        status: 409,
+        code: "element_obscured",
+        change: (page: FakeContents) => {
+          const answer = page.result as Answer;
+          page.result = (code: string, sessionId?: string) =>
+            code.includes(')("frameBox",')
+              ? { ok: true, ...OWNER_BOX, point: { x: 65, y: 145 } }
+              : answer(code, sessionId);
+        },
+      },
+    ];
+    for (const { name, routes, status, code, change } of changes)
+      for (const route of routes) {
+        const { tab } = await createPage();
+        const page = await framedPage(tab.id, { sessionId: "card-session" });
+        drawnLayout(page, { presses: "nowhere" });
+        gesturesInFrame(page);
+        const drop = page.afterInput!;
+        page.afterInput = () => {
+          drop();
+          if (page.inputs.at(-1)?.parameters.type === "mousePressed")
+            change(page);
+        };
+        const refused = await request(
+          `/tabs/${tab.id}/${route}`,
+          "POST",
+          FRAME_GESTURES[route],
+        );
+        expect(refused.status, `${name} ${route}`).toBe(status);
+        expect((await refused.json()).error.code, `${name} ${route}`).toBe(
+          code,
+        );
+        expect(pressesOf(page), `${name} ${route}`).toBe(1);
+      }
+  });
+
   it("mouse/down and mouse/click wait for their move to land and time out without pressing", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });
