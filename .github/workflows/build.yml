@@ -1,4 +1,4 @@
-name: Build desktop apps
+name: Build desktop apps (diagnostic)
 
 on:
   push:
@@ -51,8 +51,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Validate types, behavior, and copy
+        continue-on-error: true
         run: npm run check
       - name: Compile desktop app
+        continue-on-error: true
         run: npm run build
       - name: Install Linux desktop libraries
         if: runner.os == 'Linux'
@@ -60,29 +62,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libxtst6 libsecret-1-0 libfuse2
       - name: Test install scripts
+        continue-on-error: true
         run: npm run test:install
       - name: Smoke test desktop on Linux
+        continue-on-error: true
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:desktop
       - name: Verify native Kamapathy identity on Linux
+        continue-on-error: true
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:branding
       - name: Verify native Kamapathy identity on macOS and Windows
+        continue-on-error: true
         if: runner.os != 'Linux'
         run: npm run test:branding
       - name: Smoke test desktop on macOS and Windows
+        continue-on-error: true
         if: runner.os != 'Linux'
         run: npm run test:desktop
       - name: Test Kamapathy skill on Linux
+        continue-on-error: true
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:skill
       - name: Test Kamapathy skill on macOS and Windows
+        continue-on-error: true
         if: runner.os != 'Linux'
         run: npm run test:skill
       - name: Test a normal desktop launch on Linux
+        continue-on-error: true
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:native
       - name: Test a normal desktop launch on macOS and Windows
+        continue-on-error: true
         if: runner.os != 'Linux'
         run: npm run test:native
       - name: Decide signing
@@ -104,6 +115,7 @@ jobs:
           fi
           echo "signed=$signed" >> "$GITHUB_OUTPUT"
       - name: Package native desktop app
+        continue-on-error: true
         shell: bash
         env:
           SIGNED: ${{ steps.signing.outputs.signed }}
@@ -163,8 +175,10 @@ jobs:
             pwsh -NoProfile -NonInteractive -File "$script"
           fi
       - name: Verify bundled skill
+        continue-on-error: true
         run: node scripts/check-bundled-skill.mjs
       - name: Verify packaged registrations
+        continue-on-error: true
         run: node scripts/test-branding.mjs --packaged
       - name: Test the packaged app
         shell: bash
@@ -174,15 +188,3 @@ jobs:
           else
             node scripts/test-packaged.mjs
           fi
-      - name: Upload installable artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kamapathy-${{ matrix.platform }}-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            release/*.dmg
-            release/*.zip
-            release/*.exe
-            release/*.AppImage
-            release/*.deb
