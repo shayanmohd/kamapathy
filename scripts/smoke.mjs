@@ -4111,7 +4111,9 @@ try {
   const popupOpened = app.waitForEvent("window");
   await markerButton.click();
   const popup = await popupOpened;
-  await popup.waitForSelector("#shown");
+  // The popup stays hidden and at its smallest size until it is sized below,
+  // where #shown can lay out to no width, so this waits for it to exist.
+  await popup.waitForSelector("#shown", { state: "attached" });
   // A popup sizes itself from its page, which Chromium reports to the window
   // as a preferred size. That report never arrives while the end-to-end
   // runner holds the application, so this run makes it, and Kamapathy places
