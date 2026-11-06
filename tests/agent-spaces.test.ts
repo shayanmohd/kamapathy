@@ -71,6 +71,7 @@ describe("agent spaces", () => {
   afterEach(async () => {
     await api.close();
     socket.cleanup();
+    FakeController.cleanup();
   });
 
   it("the first tab is p1, agent-opened and managed", async () => {

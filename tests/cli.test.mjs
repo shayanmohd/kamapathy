@@ -4761,6 +4761,7 @@ describe("scripted sessions", () => {
 
   it("env files cannot set the variables that locate the profile or the installed app", async () => {
     const home = await mkdtemp(join(tmpdir(), "kamapathy-cli-home-"));
+    directories.push(home);
     const runEnv = { HOME: home, USERPROFILE: home, KAMAPATHY_NO_LAUNCH: "1" };
     const { userData } = agentPaths(runEnv);
     const workspace = join(userData, "workspace");
