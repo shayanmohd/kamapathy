@@ -27,19 +27,28 @@ function Stop-Install($text, $code) {
 }
 
 # Where Kamapathy is, or $null. The installer lets the person choose a folder,
-# so its uninstall entry decides when the default folder holds nothing.
+# for themselves or for everyone, and names it in the uninstall entry it
+# writes: DisplayName "Kamapathy <version>" and UninstallString
+# '"<folder>\Uninstall Kamapathy.exe" /currentuser' (or /allusers).
 function Find-Kamapathy {
   $default = Join-Path $env:LOCALAPPDATA 'Programs\Kamapathy\Kamapathy.exe'
-  if (Test-Path -LiteralPath $default) { return $default }
-  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
-  if (Test-Path -LiteralPath $key) {
-    foreach ($entry in Get-ChildItem -LiteralPath $key) {
+  if (Test-Path -LiteralPath $default -PathType Leaf) { return $default }
+  $keys = @(
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+  )
+  # Tests keep their uninstall entries under a throwaway HKCU subkey.
+  if ($env:KAMAPATHY_UNINSTALL_KEY) { $keys = @("HKCU:\$env:KAMAPATHY_UNINSTALL_KEY") }
+  foreach ($key in $keys) {
+    if (-not (Test-Path -LiteralPath $key)) { continue }
+    foreach ($entry in Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue) {
       $properties = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
-      if ($properties.DisplayName -ne 'Kamapathy') { continue }
-      if ($properties.InstallLocation) {
-        return (Join-Path $properties.InstallLocation 'Kamapathy.exe')
+      if ([string]$properties.DisplayName -match '^Kamapathy \d+\.\d+\.\d+\S*$' -and
+        [string]$properties.UninstallString -match '^"([^"]+)\\Uninstall Kamapathy\.exe"') {
+        # Join-Path fails on a drive that is not there, such as an unplugged one.
+        $exe = $Matches[1] + '\Kamapathy.exe'
+        if (Test-Path -LiteralPath $exe -PathType Leaf) { return $exe }
       }
-      return $default
     }
   }
   return $null
@@ -48,6 +57,20 @@ function Find-Kamapathy {
 function Start-Kamapathy($path) {
   if (Test-Path -LiteralPath $path) {
     Start-Process -FilePath $path | Out-Null
+  }
+}
+
+# The file's SHA-256 in hex. Windows PowerShell started by another program
+# that PowerShell 7 started, such as an agent, inherits PowerShell 7's module
+# folders first in PSModulePath and then cannot load Get-FileHash.
+function Get-Sha256($file) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $stream = [IO.File]::OpenRead($file)
+  try {
+    return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
+  } finally {
+    $stream.Dispose()
+    $sha.Dispose()
   }
 }
 
@@ -136,7 +159,7 @@ $path = Join-Path $downloads $name
 Say "downloading $name"
 Invoke-Download $installer { Invoke-WebRequest -Uri $installer -OutFile $path -UseBasicParsing }
 $text = Invoke-Download $sums { (Invoke-WebRequest -Uri $sums -UseBasicParsing).Content }
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+$hash = Get-Sha256 $path
 $expected = $null
 foreach ($line in ([string]$text) -split "`n") {
   $fields = $line.Trim() -split '\s+'
@@ -147,6 +170,10 @@ if (-not $expected -or $expected -ne $hash) {
   Stop-Install "$name does not match SHA256SUMS.txt, so nothing was installed. Report this instead of running the script again." 1
 }
 if ($PUBLISHER) {
+  # Those module folders also hold a PowerShell 7 copy of this command's
+  # module that Windows PowerShell cannot load, so load the copy that ships
+  # with the PowerShell running this script.
+  Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security')
   $signature = Get-AuthenticodeSignature -LiteralPath $path
   if ($signature.Status -ne 'Valid' -or
     $signature.SignerCertificate.Subject -notlike "*$PUBLISHER*") {
