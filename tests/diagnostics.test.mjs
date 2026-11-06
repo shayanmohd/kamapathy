@@ -106,6 +106,33 @@ describe("script diagnostics", () => {
     });
   });
 
+  it("reads node --check's report with Windows line endings", async () => {
+    const file = await script(
+      "crlf.mjs",
+      "const a = {\n  b: 1,\n  c: 2,,\n};\n",
+    );
+    // Node's own error printer ends each line with CRLF on Windows.
+    const windows = failingCheck(
+      checkOutput(realpathSync(file)).replaceAll("\n", "\r\n"),
+    );
+    expect(await locateSyntaxError(file, { execFile: windows })).toEqual({
+      line: 3,
+      column: 8,
+      source: "  c: 2,,",
+    });
+    expect(
+      await describeScriptError(compileError(), {
+        label: "-e",
+        file,
+        execFile: windows,
+      }),
+    ).toEqual([
+      "error: SyntaxError: Unexpected token ',' (-e:3:8)",
+      "  3 |   c: 2,,",
+      "    |        ^",
+    ]);
+  });
+
   it("tells runtime SyntaxErrors apart without node --check", async () => {
     const file = await script("runtime.mjs", 'JSON.parse("{");\n');
     let checked = false;

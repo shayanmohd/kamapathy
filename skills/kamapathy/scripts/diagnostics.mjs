@@ -244,8 +244,9 @@ export function locateSyntaxError(
         { env: clean, timeout: 5000, maxBuffer: 65536 },
         (error, _stdout, stderr) =>
           resolve(
+            // Node's own error printer ends lines with CRLF on Windows.
             error
-              ? readBlock(String(stderr ?? "").split("\n"))
+              ? readBlock(String(stderr ?? "").split(/\r?\n/))
               : { imported: true },
           ),
       );
