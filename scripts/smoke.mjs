@@ -4043,11 +4043,15 @@ try {
   const markerRow = extensionsModal.getByText("Kamapathy marker", {
     exact: true,
   });
+  // A closing window's page is destroyed before the window leaves
+  // getAllWindows, and that page then throws on every call but isDestroyed.
   const extensionWindows = () =>
     app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()
-        .filter((item) =>
-          item.webContents.getURL().startsWith("chrome-extension://"),
+        .filter(
+          (item) =>
+            !item.webContents.isDestroyed() &&
+            item.webContents.getURL().startsWith("chrome-extension://"),
         )
         .map((item) => ({ visible: item.isVisible(), ...item.getBounds() })),
     );
