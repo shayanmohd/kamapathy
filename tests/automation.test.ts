@@ -8303,6 +8303,42 @@ describe("local automation socket", () => {
     expect(page.debugger.methods()).not.toContain("Runtime.terminateExecution");
   });
 
+  it("a capture from the surface goes out with the tab's view lent, as the screenshot route's does", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // Whether the view was lent when each capture reached Chromium.
+    let lending = false;
+    const lentWhenSent: boolean[] = [];
+    const lend = controller.withVisibleView.bind(controller);
+    controller.withVisibleView = (tabId, capture) =>
+      lend(tabId, async () => {
+        lending = true;
+        try {
+          return await capture();
+        } finally {
+          lending = false;
+        }
+      });
+    page.debugger.reply("Page.captureScreenshot", () => {
+      lentWhenSent.push(lending);
+      return { data: "" };
+    });
+    const shot = (params: Record<string, unknown>) =>
+      cdp(tab.id, { method: "Page.captureScreenshot", params });
+    expect((await shot({})).status).toBe(200);
+    expect((await shot({ fromSurface: true, format: "jpeg" })).status).toBe(200);
+    // A capture of the window, not of the surface, waits on no surface.
+    expect((await shot({ fromSurface: false })).status).toBe(200);
+    expect((await cdp(tab.id, { method: "Page.getLayoutMetrics" })).status).toBe(200);
+    expect(lentWhenSent).toEqual([true, true, false]);
+    expect(controller.lent).toEqual([tab.id, tab.id]);
+    expect(sentOn(page, "Page.captureScreenshot")).toEqual([
+      "agent-1",
+      "agent-1",
+      "agent-1",
+    ]);
+  });
+
   it("a frame path reaches that frame's own session", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });

@@ -542,14 +542,23 @@ export function createSpaceCdp(deps: {
                 message:
                   "A context id names a context only on the page or frame that gave it.",
               });
-          const sending = cdp.send(
-            call.method,
-            call.params,
-            {
+          const send = () =>
+            cdp.send(call.method, call.params, {
               ...step,
               ...(frameId === undefined ? {} : { frameId }),
-            },
-          );
+            });
+          // A capture from the surface waits for the view to draw, which a
+          // hidden tab or the shown tab of a hidden or minimized window may
+          // never do, and on Windows and Linux a renderer exit during that
+          // wait crashes the browser (see main.ts). So it goes out with the
+          // view where Chromium draws it, as the screenshot route's does. A
+          // capture with fromSurface false grabs the window and copies no
+          // surface.
+          const sending =
+            call.method === "Page.captureScreenshot" &&
+            call.params.fromSurface !== false
+              ? controller.withVisibleView(call.tabId, send)
+              : send();
           void sending.catch(() => {});
           const { result, newSession } = await Promise.race([sending, aborted]);
           answered = {
