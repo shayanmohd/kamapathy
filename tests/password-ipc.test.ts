@@ -24,6 +24,8 @@ import { memorySealer } from "../electron/passwords/seal";
 import { Vault, type VaultFiles } from "../electron/passwords/vault";
 import type { PasswordErrorBody } from "../shared/types";
 
+const posix = process.platform !== "win32";
+
 // Which digests the clipboard copy takes, so the kept value can be checked
 // without reading it.
 const { hashes } = vi.hoisted(() => ({ hashes: [] as string[] }));
@@ -705,15 +707,16 @@ describe("passwords shell IPC", () => {
       "write",
     ]);
     expect(exported.defaults).toEqual([
-      "/Users/ada/Downloads/Kamapathy Passwords.csv",
+      join("/Users/ada/Downloads", "Kamapathy Passwords.csv"),
     ]);
-    expect(statSync(target).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX mode bits.
+    if (posix) expect(statSync(target).mode & 0o777).toBe(0o600);
     const text = readFileSync(target, "utf8");
     expect(text.split("\r\n")[0]).toBe("name,url,username,password,note");
     expect(text).toContain(sample.password);
     // Written again, the file keeps its mode.
     await out.invoke(PASSWORD_CHANNELS.exportFile);
-    expect(statSync(target).mode & 0o777).toBe(0o600);
+    if (posix) expect(statSync(target).mode & 0o777).toBe(0o600);
 
     // Cancel at the warning or the save dialog writes nothing.
     const stopped = fakeFiles();

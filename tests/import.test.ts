@@ -548,9 +548,9 @@ describe("Chromium import", () => {
     expect(() => direct.prepare("SELECT url FROM urls").all()).toThrow(/locked/);
     direct.close();
     // The import's temporary copies go to a folder of this test's own, as
-    // other files' imports share the system's.
+    // other files' imports share the system's. Windows reads TEMP for it.
     const temporary = folder();
-    vi.stubEnv("TMPDIR", temporary);
+    vi.stubEnv(process.platform === "win32" ? "TEMP" : "TMPDIR", temporary);
     const earlier = vi.mocked(mkdtemp).mock.results.length;
     const started = Date.now();
 

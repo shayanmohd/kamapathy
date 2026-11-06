@@ -20,6 +20,8 @@ import { createTabLog, watchPopups } from "../electron/agent/tab-log";
 import type { Tab } from "../shared/types";
 import { FakeController, FakeDownloadItem } from "./fake-automation";
 
+const posix = process.platform !== "win32";
+
 // Downloads over a fake DownloadItem: the decision the controller's
 // will-download handler asks for, the private folder and the limits.
 function setup() {
@@ -157,8 +159,11 @@ describe("armed agent downloads", () => {
     const folder = join(root, id);
     expect(item.savePath).toBe(join(folder, "report final.pdf"));
     expect(item.dialogOptions).toBeUndefined();
-    expect(statSync(folder).mode & 0o777).toBe(0o700);
-    expect(statSync(dirname(folder)).mode & 0o777).toBe(0o700);
+    // Windows has no POSIX mode bits.
+    if (posix) {
+      expect(statSync(folder).mode & 0o777).toBe(0o700);
+      expect(statSync(dirname(folder)).mode & 0o777).toBe(0o700);
+    }
     // The name the agent sees is the one on disk: a base name, cleaned once.
     expect(entries()).toEqual([
       {
@@ -205,7 +210,7 @@ describe("armed agent downloads", () => {
       failure: null,
       finishedAt: expect.any(Number),
     });
-    expect(statSync(item.savePath).mode & 0o777).toBe(0o600);
+    if (posix) expect(statSync(item.savePath).mode & 0o777).toBe(0o600);
     expect(controller.activity).toEqual([
       {
         spaceId: tab.spaceId,

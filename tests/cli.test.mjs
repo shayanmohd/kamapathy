@@ -4690,12 +4690,14 @@ describe("scripted sessions", () => {
     expect(workspacePath({ KAMAPATHY_USER_DATA: userData })).toBe(
       join(userData, "workspace"),
     );
+    // An absolute folder on each platform: a Windows one has a drive.
+    const cwd = posix ? "/home/me" : "C:\\Users\\me";
     expect(
       workspacePath(
         { KAMAPATHY_USER_DATA: userData, KAMAPATHY_WORKSPACE: "tasks" },
-        "/home/me",
+        cwd,
       ),
-    ).toBe(join("/home/me", "tasks"));
+    ).toBe(join(cwd, "tasks"));
     const workspace = join(userData, "workspace");
     await mkdir(workspace, { mode: 0o700 });
     const dotEnv = join(workspace, ".env");
