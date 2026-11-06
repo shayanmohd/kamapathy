@@ -4129,9 +4129,9 @@ try {
   const popupOpened = app.waitForEvent("window");
   await markerButton.click();
   const popup = await popupOpened;
-  // Kamapathy keeps the window hidden until it places it, and on some Macs a
-  // page in a window never shown has no size, so this waits for the page
-  // here and for its text to show once the window is placed.
+  // Kamapathy keeps the window hidden at its smallest size until it places
+  // it, and there the page can have no size or #shown no width, so this
+  // waits for the page here and for its text to show once it is placed.
   await popup.waitForSelector("#shown", { state: "attached" });
   // A popup sizes itself from its page, which Chromium reports to the window
   // as a preferred size. That report never arrives while the end-to-end
