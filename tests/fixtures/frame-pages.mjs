@@ -274,6 +274,41 @@ document.getElementById("grid").src = location.origin.replace(location.hostname,
 for (const button of document.querySelectorAll("button"))
   button.onclick = () => { document.getElementById("grid-hit").textContent = "Grid hit " + button.textContent; };
 </script>`,
+  // A frame of this page's own origin, offset in the page, holding a frame
+  // from another site offset inside it: a point in the innermost document is
+  // placed through both offsets.
+  "/frames/wrap": `<!doctype html><meta charset="utf-8"><title>Wrapped frame</title>
+<style>body{margin:0}iframe{position:absolute;left:60px;top:120px;width:500px;height:320px;border:0}</style>
+<iframe id="wrapper" title="Wrapper" src="/frames/wrapper"></iframe>`,
+  "/frames/wrapper": `<!doctype html><meta charset="utf-8"><title>Wrapper</title>
+<style>body{margin:0}iframe{position:absolute;left:30px;top:40px;width:400px;height:220px;border:0}</style>
+<iframe id="grid" title="Wrapped grid" src="{{other}}/frames/inner-grid"></iframe>`,
+  // A frame from another site that adds, when asked, a frame whose load
+  // fails, which Kamapathy blocks as it blocks an extension's frame.
+  "/frames/guarded": `<!doctype html><meta charset="utf-8"><title>Guarded frame</title>
+<style>body{margin:0}iframe{position:absolute;left:0;top:0;width:400px;height:200px;border:0}</style>
+<iframe id="holder" title="Guard holder" src="{{other}}/frames/guard-holder"></iframe>
+<script>window.addBroken = () => document.getElementById("holder").contentWindow.postMessage("add", "*");</script>`,
+  "/frames/guard-holder": `<!doctype html><meta charset="utf-8"><title>Guard holder</title>
+<style>body{margin:0}iframe{position:absolute;left:10px;top:10px;width:200px;height:100px;border:0}</style>
+<script>
+addEventListener("message", () => {
+  const frame = document.createElement("iframe");
+  frame.title = "Broken";
+  frame.src = "http://127.0.0.1:9/";
+  document.body.append(frame);
+});
+</script>`,
+  // A frame of this page's own origin inside a closed shadow root, where the
+  // page's own walk never reaches it.
+  "/frames/closed-grid": `<!doctype html><meta charset="utf-8"><title>Closed grid</title>
+<style>body{margin:0}</style>
+<div id="host"></div>
+<script>
+const root = document.getElementById("host").attachShadow({ mode: "closed" });
+root.innerHTML = '<iframe id="grid" title="Closed grid" src="/frames/grid" style="display:block;margin:30px 0 0 20px;width:400px;height:200px;border:0"></iframe>';
+window.closedFrame = () => root.getElementById("grid");
+</script>`,
   // A frame from another site holding a handle a mouse drag carries to a
   // slot, and the press counts its own document saw.
   "/frames/drag": `<!doctype html><meta charset="utf-8"><title>Frame drag</title>

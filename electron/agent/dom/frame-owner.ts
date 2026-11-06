@@ -53,19 +53,25 @@ export function bindFrameOwner(
     return found;
   };
   // The frame's own path inside this group: the index of every frame between
-  // this world's document and the owner, outermost first.
+  // this world's document and the owner, outermost first. An owner the walk
+  // cannot reach from this world's document, such as one inside a closed
+  // shadow root, has no path, and answers an empty one.
   const path: number[] = [];
+  let placed = false;
   for (let frame: Element | null = owner; frame;) {
     const doc: Document | null = frame.ownerDocument;
     if (!doc) break;
     const index = framesIn(doc).indexOf(frame);
     if (index < 0) break;
     path.unshift(index);
-    if (doc === document) break;
+    if (doc === document) {
+      placed = true;
+      break;
+    }
     frame = doc.defaultView?.frameElement ?? null;
   }
   return {
-    local: path.join("/"),
+    local: placed ? path.join("/") : "",
     readable: !!(
       isFrame(owner) && (owner as HTMLIFrameElement).contentDocument
     ),

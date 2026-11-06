@@ -739,4 +739,42 @@ describe("frame groups", () => {
     const outer: GroupInfo | undefined = frames.groupOf("inner");
     expect(outer?.path).toBe("1/0");
   });
+
+  it("leaves a frame whose owner the walk cannot place unbound, so it takes no path and its owner chain ends", async () => {
+    // Frames inside a closed shadow root: the owner's walk cannot reach them
+    // from the page's document, so their bindings answer an empty path. One
+    // is from another site and the other from the page's own origin.
+    const { frames } = await open({
+      trees: {
+        "": [
+          { id: "main", url: "https://shop.example/" },
+          { id: "sealed", parentId: "main", url: "https://shop.example/grid" },
+        ],
+        "menu-session": [
+          { id: "menu", parentId: "main", url: "https://menu.example/" },
+        ],
+      },
+      owners: {
+        menu: { local: "" },
+        sealed: { local: "", readable: true },
+      },
+      targets: [
+        {
+          sessionId: "menu-session",
+          frameId: "menu",
+          url: "https://menu.example/",
+        },
+      ],
+    });
+    expect(await frames.groups(step())).toEqual([
+      { root: "main", path: "", origin: "https://shop.example", level: 0 },
+    ]);
+    // The page keeps its own path, so an owner chain that reads it ends.
+    expect(frames.frameAt("")?.frameId).toBe("main");
+    for (const frameId of ["menu", "sealed"]) {
+      expect(frames.pathOf(frameId), frameId).toBeUndefined();
+      expect(frames.groupOf(frameId), frameId).toBeUndefined();
+      expect(frames.ownerChain(frameId), frameId).toEqual([]);
+    }
+  });
 });
