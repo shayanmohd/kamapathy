@@ -3827,6 +3827,51 @@ describe("local automation socket", () => {
     expect(downs()).toBe(1);
   });
 
+  it("never sends a key again once the focus moved into another web frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      {
+        frameId: "search",
+        url: "https://search.example/",
+        local: "1",
+        sessionId: "search-session",
+      },
+    ]);
+    const downs = () =>
+      page.inputs.filter((input) => input.parameters.type === "keyDown").length;
+    // The card frame holds the focus and never counts the key, and once it
+    // went out the focus is in the field of a frame beside it, where every
+    // key guard passes.
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    page.result = (code: string, sessionId?: string) => {
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: 0, key: 0, drag: 0 };
+      if (code.includes(')("activeFrame",'))
+        return sessionId !== undefined
+          ? { ok: true, path: "", editable: true }
+          : downs()
+            ? { ok: true, path: "1", key: "search" }
+            : { ok: true, path: "0", key: "card" };
+      return { ok: true };
+    };
+    const response = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "a",
+    });
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatchObject({
+      code: "input_not_delivered",
+      dispatched: true,
+    });
+    expect(downs()).toBe(1);
+  });
+
   it("repeats native input the page never received and reports one that never arrives", async () => {
     const { tab } = await createPage();
     // A page drops native input until it renders a frame after a navigation.

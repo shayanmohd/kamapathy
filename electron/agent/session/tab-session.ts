@@ -486,14 +486,14 @@ export class TabSession {
     return reply.frameTree.frame.id;
   }
 
-  // The tab's frames as the registry holds them, main frame first and
-  // parents before their children, without the page work a path needs.
   // The URL a frame committed, which the registry alone holds for a frame
   // with no path, such as one inside a closed shadow root.
   frameUrl(frameId: string): string | undefined {
     return this.registry.get(frameId)?.url;
   }
 
+  // The tab's frames as the registry holds them, main frame first and
+  // parents before their children, without the page work a path needs.
   async knownFrames(step: Step): Promise<KnownFrame[]> {
     await this.mainFrameId(step);
     return this.registry.list().map((frame) => ({
