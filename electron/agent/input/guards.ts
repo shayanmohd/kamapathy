@@ -23,6 +23,7 @@ import {
   extensionInputMessage,
   type ExtensionNames,
 } from "../extension-frames";
+import { DialogOpenError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
 import type { KnownFrame, Step } from "../session/types";
 import { MODIFIER_BITS, type Chord } from "./keys";
@@ -154,6 +155,34 @@ interface DomNode {
   frameId?: string;
   shadowRoots?: { backendNodeId?: number; shadowRootType?: string }[];
 }
+// A walk's objects go on a budget of their own, as a drag's cancel does, so
+// a walk that ran out of time lets them go too. An open dialog holds the
+// page, so then they go once it closes.
+async function releaseFocus(
+  session: TabSession,
+  sessionId: string | undefined,
+): Promise<void> {
+  const release = () =>
+    session.send(
+      "Runtime.releaseObjectGroup",
+      { objectGroup: FOCUS_GROUP },
+      {
+        ...(sessionId === undefined ? {} : { sessionId }),
+        deadline: Date.now() + 2000,
+        timeoutMs: 2000,
+      },
+    );
+  try {
+    await release();
+  } catch (error) {
+    if (!(error instanceof DialogOpenError)) return;
+    const stop = session.on("dialog", ({ params }) => {
+      if (params.dialog) return;
+      stop();
+      release().catch(() => {});
+    });
+  }
+}
 // The frame holding the focus behind a closed shadow root, from the frame
 // whose walk ended at an element that may host one: blocked when input never
 // reaches it, and undefined when no frame inside a closed root holds it.
@@ -244,14 +273,7 @@ export async function focusInClosedRoot(
     if (toApiError(error)) throw error;
     return undefined;
   } finally {
-    for (const sessionId of sessions)
-      await session
-        .send(
-          "Runtime.releaseObjectGroup",
-          { objectGroup: FOCUS_GROUP },
-          at(sessionId),
-        )
-        .catch(() => {});
+    for (const sessionId of sessions) await releaseFocus(session, sessionId);
   }
 }
 

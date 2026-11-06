@@ -11,6 +11,7 @@ import {
   registerCounters,
 } from "../electron/agent/input/counters";
 import { createDispatchers } from "../electron/agent/input/dispatch";
+import { focusInClosedRoot } from "../electron/agent/input/guards";
 import type { AutomationController } from "../electron/agent/server";
 import {
   CaptureFailedError,
@@ -3688,6 +3689,42 @@ describe("dialogs, init scripts, agent sessions and events", () => {
       method: "Page.handleJavaScriptDialog",
       params: { accept: true, promptText: "Grace" },
     });
+  });
+
+  it("lets the key guard's focus walk objects go after a read that ran out of time, and once a dialog that stopped one closes", async () => {
+    const { session, cdp } = await ready();
+    const released = () =>
+      cdp.sent.filter(
+        (command) => command.method === "Runtime.releaseObjectGroup",
+      );
+    cdp.reply("Runtime.callFunctionOn", () => ({
+      result: { type: "object", subtype: "node", objectId: "host" },
+    }));
+    // The page never answers for the element the walk reached.
+    cdp.reply("DOM.describeNode", () => new Promise(() => {}));
+    const timed = track(
+      focusInClosedRoot(session, "main", { deadline: Date.now() + 1000 }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(timed.error).toBeInstanceOf(CdpTimeoutError);
+    expect(released()).toEqual([
+      {
+        method: "Runtime.releaseObjectGroup",
+        params: { objectGroup: "kamapathy-focus" },
+      },
+    ]);
+    // A dialog opens while the element is read, and holds the page until it
+    // closes.
+    const stopped = track(focusInClosedRoot(session, "main", soon()));
+    await settle();
+    cdp.event("Page.javascriptDialogOpening", opening("alert", "Saved"));
+    await settle();
+    expect(stopped.error).toBeInstanceOf(DialogOpenError);
+    expect(released()).toHaveLength(1);
+    cdp.event("Page.javascriptDialogClosed", { result: true, userInput: "" });
+    await settle();
+    expect(released()).toHaveLength(2);
   });
 
   it("strips bidirectional overrides and control characters from dialog text and cuts it to 2000 characters", async () => {
