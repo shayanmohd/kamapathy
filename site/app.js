@@ -825,7 +825,7 @@ const session = [
   ["cont", "await dinner.resume();"],
   ["cont", "const [page] = await dinner.tabs();"],
   ["cont", 'await page.click("button.confirm");'],
-  ["cont", "console.log(await page.text({ maxControls: 0 }));"],
+  ["cont", "console.log(await page.text({ maxControls: 0, header: false }));"],
   ["cont", "EOF"],
   ["out", "Booked · Luca\nhttps://table.example/booked\n\nYou're booked. Table for 2 at Luca, Friday 19:30."],
 ];
@@ -995,18 +995,27 @@ const installSteps = {
   ],
   linux: [
     "Make the AppImage executable: <b>chmod +x</b> the file.",
-    "Double-click it or run it from a terminal.",
+    "Double-click it or run it from a terminal. If it doesn't start, install FUSE 2 with <b>sudo apt install libfuse2</b>.",
     "Prefer a package? Install the <b>.deb</b> with <b>sudo apt install</b>.",
+  ],
+  "windows-portable": [
+    "Run the downloaded <b>portable .exe</b>. It runs without installing.",
+    "If SmartScreen appears, click <b>More info</b>, then <b>Run anyway</b>.",
+  ],
+  "linux-deb": [
+    "In a terminal, go to the folder with the download and run <b>sudo apt install ./Kamapathy-*.deb</b>.",
+    "Open Kamapathy from your applications menu.",
   ],
 };
 
-function thank(os, url) {
+function thank(key, url) {
   const dialog = $("[data-thanks]");
   if (!dialog.showModal) return;
   const name = decodeURIComponent(url.split("/").pop());
   $("[data-thanks-file]").textContent = name.includes(".") ? name : "Your download is on its way.";
-  $("[data-thanks-steps]").innerHTML = installSteps[os]
-    ? `<ol>${installSteps[os].map((step) => `<li>${step}</li>`).join("")}</ol>`
+  const steps = installSteps[key] ?? installSteps[osForAsset(key)];
+  $("[data-thanks-steps]").innerHTML = steps
+    ? `<ol>${steps.map((step) => `<li>${step}</li>`).join("")}</ol>`
     : "";
   $("[data-thanks-retry]").href = url;
   dialog.showModal();
@@ -1035,7 +1044,7 @@ async function setUpDownloads() {
     const iconName = { mac: "apple-logo", windows: "windows-logo", linux: "linux-logo" }[system.os];
     $("[data-os-icon] use").setAttribute("href", `#i-${iconName}`);
     detail.textContent = {
-      mac: system.arch === "x64" ? "For Intel Macs" : "For Macs with Apple silicon",
+      mac: system.arch === "x64" ? "For Intel Macs, macOS 13 or later" : "For Macs with Apple silicon, macOS 13 or later",
       windows: "For Windows 10 and 11",
       linux: "AppImage for x64",
     }[system.os];
@@ -1076,7 +1085,7 @@ document.addEventListener("click", (event) => {
   const link = event.target.closest("a[data-asset]");
   if (!link) return;
   const os = osForAsset(link.dataset.asset);
-  if (os && assetUrls[link.dataset.asset]) setTimeout(() => thank(os, link.href), 300);
+  if (os && assetUrls[link.dataset.asset]) setTimeout(() => thank(link.dataset.asset, link.href), 300);
 });
 
 setUpDownloads();

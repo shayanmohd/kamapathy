@@ -113,4 +113,14 @@ describe("what the README says", () => {
     for (const sentence of RETIRED)
       expect(readme, sentence).not.toContain(sentence);
   });
+
+  it("brings sign-ins over only from the Chrome-based browsers", () => {
+    expect(readme).toContain(
+      "From the Chrome-based browsers your sign-ins can come too, into your shared sign-ins or a new space for each profile.",
+    );
+    expect(readme).toContain("from Safari's exported file");
+    expect(readme).not.toContain(
+      "if you like, your sign-ins and saved passwords: a checkbox for every profile",
+    );
+  });
 });

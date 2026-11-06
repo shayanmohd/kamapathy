@@ -26,20 +26,22 @@ function Stop-Install($text, $code) {
   exit $code
 }
 
-# Where Kamapathy is, or $null. The installer lets the person choose a folder,
-# so its uninstall entry decides when the default folder holds nothing.
+# Where Kamapathy is, or $null. The installer lets the person choose a folder
+# and whether to install for everyone, so its uninstall entry decides when the
+# default folder holds nothing. That entry is named "Kamapathy <version>" and
+# its DisplayIcon is "<folder>\Kamapathy.exe,0".
 function Find-Kamapathy {
   $default = Join-Path $env:LOCALAPPDATA 'Programs\Kamapathy\Kamapathy.exe'
   if (Test-Path -LiteralPath $default) { return $default }
-  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
-  if (Test-Path -LiteralPath $key) {
-    foreach ($entry in Get-ChildItem -LiteralPath $key) {
+  $keys = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+  foreach ($key in $keys) {
+    if (-not (Test-Path -LiteralPath $key)) { continue }
+    foreach ($entry in Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue) {
       $properties = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
-      if ($properties.DisplayName -ne 'Kamapathy') { continue }
-      if ($properties.InstallLocation) {
-        return (Join-Path $properties.InstallLocation 'Kamapathy.exe')
-      }
-      return $default
+      if ($properties.DisplayName -notmatch '^Kamapathy( |$)') { continue }
+      $program = ([string]$properties.DisplayIcon -replace ',\d+$', '').Trim('"')
+      if ($program -and (Test-Path -LiteralPath $program)) { return $program }
     }
   }
   return $null

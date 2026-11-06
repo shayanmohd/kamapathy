@@ -74,7 +74,9 @@ describe("what the docs say about extensions", () => {
     // the page carried both versions, and each denied what the other offered.
     // One sentence each now, and neither denial can come back.
     expect(html).toContain("saved passwords from the Chrome-based browsers");
-    expect(html).toContain("Your extensions come over without their data");
+    expect(html).toContain(
+      "Your Chrome Web Store extensions come over without their data",
+    );
     expect(html).toContain(UPDATES);
     expect(html).not.toContain("Not there yet: browser extensions");
     expect(html).not.toContain("Browser extensions, sync, a password manager");

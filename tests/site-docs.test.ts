@@ -22,7 +22,7 @@ describe("what the site says", () => {
     );
     expect(html).toContain("Sees shadow roots and frames from any site");
     expect(html).toContain(
-      "Canvas interfaces and frames from other sites now take an agent's mouse and keyboard, while your extensions' frames and Kamapathy's own pages stay out of its reach.",
+      "Canvas interfaces and frames from other sites now take an agent's mouse and keyboard, while your extensions' frames, the PDF viewer and Kamapathy's own pages stay out of its reach.",
     );
     expect(html).not.toContain("same-origin frames");
     expect(html).not.toContain("frames from other origins");
@@ -32,7 +32,7 @@ describe("what the site says", () => {
 
   it("says agents can run their own scripts, and which switch stops it", () => {
     expect(html).toContain(
-      "In agent spaces they can also run their own scripts. Turn off <b>Page scripts</b> in Settings to keep agents to reading and clicking.",
+      "In agent spaces, and in a space you let them use, they can also run their own scripts. Turn off <b>Page scripts</b> in Settings to keep agents to reading and clicking.",
     );
   });
 

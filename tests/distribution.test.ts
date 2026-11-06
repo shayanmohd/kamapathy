@@ -7,6 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +96,27 @@ describe("distribution files", () => {
         '      - "!**/.DS_Store"',
       ].join("\n"),
     );
+  });
+
+  // electron-builder reads its configuration with js-yaml, which refuses a
+  // key given twice in one mapping, so such a file stops every package.
+  it("electron-builder can read both configurations", () => {
+    const builderRequire = createRequire(
+      createRequire(import.meta.url).resolve("app-builder-lib/package.json"),
+    );
+    const { load } = builderRequire("js-yaml") as {
+      load: (text: string) => unknown;
+    };
+    const base = load(read("electron-builder.yml")) as {
+      mac: { extendInfo: Record<string, unknown> };
+    };
+    expect(Object.keys(base.mac.extendInfo).sort()).toEqual([
+      "CFBundleDocumentTypes",
+      "NSBluetoothAlwaysUsageDescription",
+      "NSCameraUsageDescription",
+      "NSMicrophoneUsageDescription",
+    ]);
+    expect(() => load(read("electron-builder.signed.yml"))).not.toThrow();
   });
 
   it("the base mac.extendInfo has the camera and microphone strings", () => {

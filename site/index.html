@@ -21,7 +21,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" />
   <link rel="stylesheet" href="/styles.css?v=c3848aa70f" />
   <script src="/theme.js?v=9975d340e2"></script>
-  <script src="/app.js?v=236eebdb7c" defer></script>
+  <script src="/app.js?v=035e27e8e6" defer></script>
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" hidden aria-hidden="true">
@@ -214,7 +214,7 @@
           <p>Get the build for your computer, or install it with one command. The first launch walks you through spaces, privacy, import, agent setup and your default browser.</p>
           <div class="code-line"><code>curl -fsSL https://kamapathy.app/install.sh | sh</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
           <div class="code-line"><code>powershell -NoProfile -Command "irm https://kamapathy.app/install.ps1 | iex"</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
-          <p class="hint">The first command is for macOS and Linux, the second for Windows. Each takes the newest release, checks it against that release's SHA-256 sums and opens Kamapathy.</p>
+          <p class="hint">The first command is for macOS and Linux, the second for Windows. Each takes the newest release, checks it against that release's SHA-256 sums and opens Kamapathy. Where Kamapathy is already installed, the command opens it and changes nothing, so update an older copy from the <a href="#download">downloads below</a>.</p>
         </div>
       </li>
       <li class="step">
@@ -243,8 +243,8 @@
       <p>Kamapathy gives coding and research agents a real browser: yours, with your sign-ins, in spaces you can watch. Every step is visible, and the keys stay with you.</p>
       <ul class="points">
         <li><svg><use href="#i-robot" /></svg><div><b>A space of its own.</b> Every agent works in a space you can watch, and never sees your tabs unless you let it use a space.</div></li>
-        <li><svg><use href="#i-key" /></svg><div><b>Your sign-ins, unless you isolate.</b> Agents use the sites you're signed in to, so they can act for you. Isolate one space, or all of them in Settings.</div></li>
-        <li><svg><use href="#i-hand-palm" /></svg><div><b>Take over anytime.</b> One click pauses the agent. Let agent continue hands the space back, and an agent can ask for it back with resume.</div></li>
+        <li><svg><use href="#i-key" /></svg><div><b>Your sign-ins, unless you isolate.</b> Agents use the sites you're signed in to, so they can act for you. Isolate one space, or every new agent space in Settings.</div></li>
+        <li><svg><use href="#i-hand-palm" /></svg><div><b>Take over anytime.</b> One click pauses the agent. Let agent continue hands the space back. An agent can also take it back with resume, though Kamapathy tells it to wait until you ask. Stop ends its work in that space.</div></li>
         <li><svg><use href="#i-terminal" /></svg><div><b>One script, or one command at a time.</b> <code>node kamapathy.mjs run book.mjs</code> carries a whole task in JavaScript or TypeScript. The CLI does one step at a time when that's simpler.</div></li>
         <li><svg><use href="#i-globe" /></svg><div><b>Site packs.</b> Notes and tools for the sites you use, so an agent knows its way around. GitHub, Google Search and X are included.</div></li>
         <li><svg><use href="#i-eye" /></svg><div><b>Sees inside frames and shadow roots.</b> Snapshots read open shadow roots and frames, including ones from other sites.</div></li>
@@ -261,7 +261,7 @@
 console.<span class="fn">log</span>(<span class="str">`space ${dinner.id} ${dinner.signIns}`</span>);
 <span class="kw">const</span> page = <span class="kw">await</span> dinner.<span class="fn">open</span>(<span class="str">"https://table.example/reserve"</span>);
 <span class="kw">const</span> view = <span class="kw">await</span> page.<span class="fn">snapshot</span>();
-console.<span class="fn">log</span>(<span class="kw">await</span> page.<span class="fn">text</span>({ maxChars: <span class="num">0</span> }));
+console.<span class="fn">log</span>(<span class="kw">await</span> page.<span class="fn">text</span>({ maxChars: <span class="num">0</span>, header: <span class="kw">false</span> }));
 <span class="kw">const</span> ref = (label) =&gt;
   view.interactables.<span class="fn">find</span>((c) =&gt; c.label === label).ref;
 <span class="kw">await</span> page.<span class="fn">batch</span>([
@@ -312,7 +312,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
             <th scope="row">Several agents at once, each in its own space</th>
             <td class="us"><span class="yes"><svg><use href="#i-check" /></svg><span class="visually-hidden">Yes</span></span></td>
             <td><span class="no">Some</span></td>
-            <td><span class="no">No</span></td>
+            <td><span class="no">Some</span></td>
           </tr>
           <tr>
             <th scope="row">Uses your sign-ins, with a switch to isolate</th>
@@ -384,7 +384,7 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       <article class="platform" data-platform="mac">
         <svg class="platform-logo"><use href="#i-apple-logo" /></svg>
         <h3>macOS</h3>
-        <p>Apple silicon and Intel</p>
+        <p>macOS 13 or later, Apple silicon and Intel</p>
         <a class="button" data-asset="mac-arm64" href="https://github.com/shayanmohd/kamapathy/releases/latest">Apple silicon</a>
         <a class="button secondary" data-asset="mac-x64" href="https://github.com/shayanmohd/kamapathy/releases/latest">Intel</a>
       </article>
@@ -441,8 +441,10 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
           <li>For the <b>AppImage</b>, make it executable and run it:</li>
         </ol>
         <div class="code-line"><code>chmod +x Kamapathy-*.AppImage &amp;&amp; ./Kamapathy-*.AppImage</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
+        <p class="hint">The AppImage needs FUSE 2, which Ubuntu 22.04 and later don't install by default. If it doesn't start, install it and run the AppImage again:</p>
+        <div class="code-line"><code>sudo apt install libfuse2</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
         <ol start="2">
-          <li>Or install the <b>Debian package</b> on Debian, Ubuntu and friends:</li>
+          <li>Or install the <b>Debian package</b> on Debian, Ubuntu and friends. On Ubuntu 24.04 and later it keeps Chromium's sandbox, which the AppImage turns off there:</li>
         </ol>
         <div class="code-line"><code>sudo apt install ./Kamapathy-*.deb</code><button type="button" class="copy" data-copy aria-label="Copy command"><svg><use href="#i-copy" /></svg></button></div>
       </div>
@@ -469,15 +471,15 @@ console.<span class="fn">log</span>(<span class="str">"batch ok"</span>);
       </details>
       <details>
         <summary>Can an agent see my own tabs or accounts?</summary>
-        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. In agent spaces they can also run their own scripts. Turn off <b>Page scripts</b> in Settings to keep agents to reading and clicking. They never get your saved passwords. Kamapathy offers and fills those only while you are in control, and no API reaches them. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
+        <p>An agent never sees your tabs unless you let it use a space. Agents do use your sign-ins by default, in spaces of their own, so they can act for you on the sites you're already signed in to. In agent spaces, and in a space you let them use, they can also run their own scripts. Turn off <b>Page scripts</b> in Settings to keep agents to reading and clicking. They never get your saved passwords. Kamapathy offers and fills those only while you are in control, and no API reaches them. Give a space <b>Separate sign-ins</b> to keep it apart, or turn on <b>Isolate agent spaces</b> in Settings so every new agent space starts with a temporary session. Turning <b>Agent access</b> off refuses all agents at once.</p>
       </details>
       <details>
         <summary>Can I import from Chrome?</summary>
-        <p>Yes. The first launch offers to bring your bookmarks and history over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera or Firefox, with your default browser preselected and a checkbox for each profile, and from Safari through the file it exports. Your sign-ins from the Chrome-based browsers can come too, into your shared sign-ins or a new space for each profile, and so can their saved passwords, into Kamapathy's own password manager; from any other browser or password manager, export a CSV file and import that under Passwords. Your extensions come over without their data. You can do it later from Settings, under Browsing. Kamapathy reads the other browser's files and never changes them.</p>
+        <p>Yes. The first launch offers to bring your bookmarks and history over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera or Firefox, with your default browser preselected and a checkbox for each profile, and from Safari through the file it exports. Your sign-ins from the Chrome-based browsers can come too, into your shared sign-ins or a new space for each profile, and so can their saved passwords, into Kamapathy's own password manager; from any other browser or password manager, export a CSV file and import that under Passwords. Your Chrome Web Store extensions come over without their data. You can do it later from Settings, under Browsing. Kamapathy reads the other browser's files and never changes them.</p>
       </details>
       <details>
         <summary>What can an agent not do?</summary>
-        <p>Canvas interfaces and frames from other sites now take an agent's mouse and keyboard, while your extensions' frames and Kamapathy's own pages stay out of its reach. A site's request for your location, your camera or a device waits for you in Kamapathy's own bar, which no agent can answer, and an agent keeps only a download it asked for.</p>
+        <p>Canvas interfaces and frames from other sites now take an agent's mouse and keyboard, while your extensions' frames, the PDF viewer and Kamapathy's own pages stay out of its reach. A site's request for your location, your camera or a device waits for you in Kamapathy's own bar, which no agent can answer, and an agent keeps only a download it asked for.</p>
       </details>
       <details>
         <summary>Will my sites work?</summary>

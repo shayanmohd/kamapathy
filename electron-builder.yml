@@ -41,8 +41,6 @@ electronFuses:
 mac:
   category: public.app-category.productivity
   icon: build/icon.icns
-  extendInfo:
-    NSBluetoothAlwaysUsageDescription: Kamapathy asks you before a site connects to a Bluetooth device.
   darkModeSupport: true
   identity: "-"
   hardenedRuntime: false
@@ -54,6 +52,7 @@ mac:
   extendInfo:
     NSCameraUsageDescription: Websites you allow can use the camera.
     NSMicrophoneUsageDescription: Websites you allow can use the microphone.
+    NSBluetoothAlwaysUsageDescription: Kamapathy asks you before a site connects to a Bluetooth device.
     CFBundleDocumentTypes:
       - CFBundleTypeName: Web content and documents
         CFBundleTypeRole: Viewer

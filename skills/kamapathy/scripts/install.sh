@@ -353,8 +353,8 @@ EXTRACT=$TMP/extract
 mkdir -p "$EXTRACT"
 if (cd "$EXTRACT" && "$APP" --appimage-extract >/dev/null 2>&1); then
   for icon in \
-    "$EXTRACT/squashfs-root/usr/share/icons/hicolor/512x512/apps/$BUNDLE_ID.png" \
-    "$EXTRACT/squashfs-root/$BUNDLE_ID.png"; do
+    "$EXTRACT/squashfs-root/usr/share/icons/hicolor/512x512/apps/kamapathy-browser.png" \
+    "$EXTRACT/squashfs-root/kamapathy-browser.png"; do
     if [ -f "$icon" ]; then
       ICONS=$HOME/.local/share/icons/hicolor/512x512/apps
       mkdir -p "$ICONS"

@@ -39,7 +39,7 @@
 
 ## Why Kamapathy
 
-Browsers were built for one person at a keyboard. Coding and research agents now want to browse too, and the sites they need are the ones you are already signed in to. Kamapathy lets you sign in once. Every space and every agent can use that session, so an agent books the table, files the ticket or reads the dashboard as you, in a space of its own, in plain sight, while you keep browsing next to it. When you would rather it didn't, give that one space separate sign-ins, isolate every agent space with a switch, or turn off agent access and stop everything at once.
+Browsers were built for one person at a keyboard. Coding and research agents now want to browse too, and the sites they need are the ones you are already signed in to. Kamapathy lets you sign in once. Every space and every agent can use that session, so an agent books the table, files the ticket or reads the dashboard as you, in a space of its own, in plain sight, while you keep browsing next to it. When you would rather it didn't, give that one space separate sign-ins, isolate every new agent space with a switch, or turn off agent access and stop everything at once.
 
 It is also simply a good browser: Chromium underneath, a small interface on top, and nothing that competes with the page.
 
@@ -55,13 +55,13 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
     </td>
     <td width="33%" valign="top">
       <h3>Your sign-ins, on purpose</h3>
-      Sign in once and every space and agent can use it. Give any space <b>Separate sign-ins</b>, or isolate every agent space from Settings.
+      Sign in once and every space and agent can use it. Give any space <b>Separate sign-ins</b>, or isolate every new agent space from Settings.
     </td>
   </tr>
   <tr>
     <td width="33%" valign="top">
       <h3>Bring your browser with you</h3>
-      On first launch, import bookmarks, history and, if you like, your sign-ins and saved passwords: a checkbox for every profile of Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera and Firefox, and Safari from the file it exports. Sign-ins join your shared sign-ins, or a new space for each profile. Passwords come from the Chrome-based browsers, or from a CSV file any browser or password manager exports. Later, from Settings.
+      On first launch, import bookmarks and history: a checkbox for every profile of Chrome, Chromium, Edge, Brave, Arc, Vivaldi, Opera and Firefox, and Safari from the file it exports. From the Chrome-based browsers your sign-ins can come too, into your shared sign-ins or a new space for each profile. Saved passwords come from the Chrome-based browsers, from Safari's exported file, or from a CSV file any browser or password manager exports. Later, from Settings.
     </td>
     <td width="33%" valign="top">
       <h3>Sees the whole page</h3>
@@ -88,7 +88,7 @@ It is also simply a good browser: Chromium underneath, a small interface on top,
   </tr>
 </table>
 
-Kamapathy also runs your extensions. Add one from the Chrome Web Store with the **Add to Kamapathy** button in the address bar or from the Extensions dialog, after Kamapathy checks the store's signatures and asks you, or bring the ones you already have over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera, whose data stays behind. Manifest V3 only, and only part of the extension API works, so the dialog that asks you lists what won't. They run in your spaces and in agent spaces that share your sign-ins, never in isolated ones. If you add extensions, Kamapathy asks the Chrome Web Store once a day whether they have updates, sending their IDs and versions. Turn this off in Settings, under Extensions.
+Kamapathy also runs your extensions. Add one from the Chrome Web Store with the **Add to Kamapathy** button in the address bar or from the Extensions dialog, after Kamapathy checks the store's signatures and asks you, or bring the Chrome Web Store ones you already have over from Chrome, Chromium, Edge, Brave, Arc, Vivaldi and Opera, whose data stays behind. Manifest V3 only, and only part of the extension API works, so the dialog that asks you lists what won't. They run in your spaces and in agent spaces that share your sign-ins, never in isolated ones. If you add extensions, Kamapathy asks the Chrome Web Store once a day whether they have updates, sending their IDs and versions. Turn this off in Settings, under Extensions.
 
 ## Take the tour
 
@@ -155,14 +155,14 @@ Two kinds of tools already let software browse. Kamapathy is neither: it is your
 | | Kamapathy | Automation libraries <sup>1</sup> | AI browsers with a built in assistant <sup>2</sup> |
 | --- | :---: | :---: | :---: |
 | Your own daily browser | ✓ | No | ✓ |
-| Any agent you already use | ✓ | ✓ | No |
+| Any agent you already use | ✓ | Some | Some |
 | Several agents at once, each in its own space | ✓ | Some | Some |
 | Uses your sign-ins, with a switch to isolate | ✓ | Some | Some |
-| Take over and hand back at any time | ✓ | No | Some |
+| Take over and hand back any time | ✓ | No | Some |
 | Sees shadow roots and frames from any site | ✓ | ✓ | Some |
-| Free and open source | ✓ | Some | Some |
+| Free and open source | ✓ | ✓ | Some |
 | macOS, Windows and Linux | ✓ | ✓ | Some |
-| No account, no telemetry | ✓ | Some | No |
+| No account, no telemetry | ✓ | Some | Some |
 
 <sup>1</sup> Browser automation libraries you drive from code, such as Playwright based tools: they launch a browser of their own, usually headless, and an agent uses them by writing a program rather than by using yours.<br />
 <sup>2</sup> Browsers that ship with an assistant of their own: the assistant is part of the product, so it comes with that vendor's model, account and terms.<br />
@@ -174,13 +174,13 @@ Download the latest build from **[kamapathy.app](https://kamapathy.app)**, which
 
 | Your computer | Download |
 | --- | --- |
-| Mac with Apple silicon or Intel | DMG or ZIP |
+| Mac with Apple silicon or Intel, macOS 13 or later | DMG or ZIP |
 | Windows 10 or 11, x64 | Installer or portable EXE |
 | Linux, x64 | AppImage or Debian package |
 
 Every release also carries the agent skill as a ZIP and a `SHA256SUMS.txt` file for checking downloads.
 
-One command installs it instead. It takes the newest release, checks the download against that release's `SHA256SUMS.txt` and opens Kamapathy, without sudo on macOS. On macOS and Linux:
+One command installs it instead. It takes the newest release, checks the download against that release's `SHA256SUMS.txt` and opens Kamapathy, without sudo on macOS. Where Kamapathy is already installed, the command opens it and changes nothing, so update an older copy from [kamapathy.app](https://kamapathy.app). On macOS and Linux:
 
 ```sh
 curl -fsSL https://kamapathy.app/install.sh | sh
@@ -192,7 +192,19 @@ On Windows:
 powershell -NoProfile -Command "irm https://kamapathy.app/install.ps1 | iex"
 ```
 
-The macOS and Linux script takes `--dir <folder>`, `--no-open` and, on Linux, `--deb` for the Debian package. The Windows script takes `-NoRun` to verify the installer without running it.
+The macOS and Linux script takes `--dir <folder>`, `--no-open` and, on Linux, `--deb` for the Debian package. Options go after `sh -s --`:
+
+```sh
+curl -fsSL https://kamapathy.app/install.sh | sh -s -- --deb
+```
+
+Run this way, `--deb` saves the package in your Downloads folder after checking it and prints the `sudo apt-get install` command that installs it.
+
+The Windows script takes `-NoRun` to verify the installer without running it:
+
+```powershell
+powershell -NoProfile -Command "& ([scriptblock]::Create((irm https://kamapathy.app/install.ps1))) -NoRun"
+```
 
 <details>
 <summary><strong>Opening it the first time</strong>: this preview isn't signed with a paid certificate yet</summary>
@@ -202,7 +214,7 @@ The macOS and Linux script takes `--dir <folder>`, `--no-open` and, on Linux, `-
 
 **Windows.** If SmartScreen says it protected your PC, click **More info**, then **Run anyway**.
 
-**Linux.** Make the AppImage executable with `chmod +x Kamapathy-*.AppImage` and run it, or install the Debian package with `sudo apt install ./Kamapathy-*.deb`.
+**Linux.** Make the AppImage executable with `chmod +x Kamapathy-*.AppImage` and run it, or install the Debian package with `sudo apt install ./Kamapathy-*.deb`. The AppImage needs FUSE 2, which Ubuntu 22.04 and later don't install by default. If it doesn't start, run `sudo apt install libfuse2` and open it again.
 
 </details>
 
@@ -286,7 +298,7 @@ space 8c1f2e04 "Dinner booking" agent shared
 $ node kamapathy.mjs open 8c1f2e04 https://table.example/reserve
 tab 51a9d7c3 https://table.example/reserve
 $ node kamapathy.mjs snapshot 8c1f2e04:p2
-Reserve a table
+page p2 "Reserve a table" | space "Dinner booking" 8c1f2e04 | tabs: p1 "New tab", p2 "Reserve a table" (this page)
 https://table.example/reserve
 
 Controls:
@@ -511,7 +523,7 @@ Every push to `main` and every pull request runs the **Build desktop apps** work
 
 ## Security
 
-Kamapathy's trust boundary is your operating system account. Web pages run sandboxed in Chromium views with no access to the interface or the agent API. The agent API listens only on a local socket that other accounts cannot open, so any program running as you can drive agent spaces while agent access is on, and since agent spaces share your sign-ins by default, that program acts as you on the sites you are signed in to. Separate sign-ins per space and the Isolate agent spaces switch exist for that reason, and turning agent access off is the hard stop. The [security model](docs/SECURITY.md) describes these boundaries and their limits in detail, and how to report a vulnerability.
+Kamapathy's trust boundary is your operating system account. Web pages run sandboxed in Chromium views with no access to the interface or the agent API. The Linux AppImage is the exception: where unprivileged user namespaces are restricted, as on Ubuntu 24.04 and later, it starts without Chromium's sandbox, while the Debian package keeps it. The agent API listens only on a local socket that other accounts cannot open, so any program running as you can drive agent spaces while agent access is on, and since agent spaces share your sign-ins by default, that program acts as you on the sites you are signed in to. Separate sign-ins per space and the Isolate agent spaces switch exist for that reason, and turning agent access off is the hard stop. The [security model](docs/SECURITY.md) describes these boundaries and their limits in detail, and how to report a vulnerability.
 
 ## What's not here yet
 

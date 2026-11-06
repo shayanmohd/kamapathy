@@ -48,7 +48,7 @@ npm start
 
 Run `npm start` in your desktop session. `xvfb-run` supplies a virtual display for tests. On distributions with renamed libraries, use the distribution's corresponding packages.
 
-Use `npm run package:linux` for AppImage and Debian packages. You can also download `Kamapathy-linux-x64` from a successful workflow run. For the AppImage, extract the ZIP, mark the file executable with `chmod +x release/Kamapathy-*.AppImage` if built locally, and launch it. The Debian package provides system integration on compatible distributions. Linux sandbox and AppImage support vary by distribution; report startup errors rather than running the browser with its sandbox disabled.
+Use `npm run package:linux` for AppImage and Debian packages. You can also download `Kamapathy-linux-x64` from a successful workflow run. For the AppImage, extract the ZIP, mark the file executable with `chmod +x release/Kamapathy-*.AppImage` if built locally, and launch it. The Debian package provides system integration on compatible distributions. Linux sandbox and AppImage support vary by distribution; report startup errors rather than running the browser with its sandbox disabled. On Ubuntu 24.04 and later the AppImage turns the sandbox off by itself, so check the sandbox there with the Debian package.
 
 Public website checks are optional:
 
