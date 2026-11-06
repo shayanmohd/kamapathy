@@ -1,6 +1,7 @@
 // Pages that open real popups: an OAuth-style sign-in that posts to its
-// opener and closes itself, about:blank, blob: and data: popups, and
-// target=_blank forms in each encoding.
+// opener and closes itself, about:blank, blob: and data: popups,
+// target=_blank forms in each encoding, and plain links and a POST form that
+// open a new tab only when clicked with a modifier or the middle button.
 const page = (title, body, script = "") =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title></head><body>${body}${script ? `<script>${script}</script>` : ""}</body></html>`;
 
@@ -12,6 +13,19 @@ const forms = [
   .map(
     ([type, button]) =>
       `<form action="/popups/echo" method="post" enctype="${type}" target="_blank"><input type="hidden" name="message" value="Hello popup"><button type="submit">${button}</button></form>`,
+  )
+  .join("");
+
+// Each leads to /popups/arrival with its own click name.
+const links = [
+  ["accelerator", "Accelerator link"],
+  ["middle", "Middle link"],
+  ["shift", "Shift link"],
+  ["agent", "Agent link"],
+]
+  .map(
+    ([click, label]) =>
+      `<p><a id="${click}" href="/popups/arrival?click=${click}">${label}</a></p>`,
   )
   .join("");
 
@@ -31,4 +45,11 @@ document.querySelector("#data").onclick = () => { const popup = window.open("dat
     `setTimeout(() => { window.opener.postMessage({ token: "token-123" }, location.origin); setTimeout(() => window.close(), 300); }, 300);`,
   ),
   "/popups/landing": page("Popup landing", '<h1 id="landing">Popup landing</h1>'),
+  // The page writes ?space into a cookie, so a request shows which session
+  // sent it.
+  "/popups/modifiers": page(
+    "Modifier clicks",
+    `<h1>Modifier clicks</h1>${links}<form action="/popups/arrival?click=form" method="post"><input type="hidden" name="message" value="Hello arrival"><button id="form" type="submit">Send the form</button></form>`,
+    `document.cookie = "opener=" + new URLSearchParams(location.search).get("space") + "; path=/";`,
+  ),
 };
