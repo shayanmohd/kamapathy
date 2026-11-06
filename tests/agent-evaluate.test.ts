@@ -458,6 +458,36 @@ describe("evaluate", () => {
       expect(call.error, expected.name).toBeInstanceOf(expected);
     }
   });
+
+  it("a page that answers a probe slowly still answers, so nothing is stopped", async () => {
+    const { cdp, session } = await ready();
+    // The script waits on a promise that never settles, and a loaded page
+    // answers each question 400 ms after it is asked.
+    cdp.reply(
+      "Runtime.evaluate",
+      (params) =>
+        new Promise((resolve) => {
+          if (params.expression === "1")
+            setTimeout(
+              () => resolve({ result: { type: "number", value: 1 } }),
+              400,
+            );
+        }),
+    );
+    const call = track(
+      evaluateScript(session, { expression: "pending()" }, step(2000)),
+    );
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(call.settled).toBe(true);
+    expect((call.error as ApiError).fields).toEqual({
+      awaited: "script",
+      timeoutMs: 2000,
+      executionStopped: false,
+      mayHaveLateEffects: true,
+      pageResponsive: true,
+    });
+    expect(cdp.methods()).not.toContain("Runtime.terminateExecution");
+  });
 });
 
 // A page that runs the script until Chromium's own limit stops it, lateMs

@@ -16,9 +16,10 @@ const DESCRIPTION_LIMIT = 4000;
 const HEAD_CHARS = 160;
 // What names the agent's script wherever the page reports it.
 const SOURCE_URL = "\n//# sourceURL=kamapathy-evaluate.js";
-// What a probe allows the page, and what the transport allows the probe.
+// What a probe allows the page, and what the transport allows each of its
+// two tries: together the margin the page has to report its own limit.
 const PROBE_EXECUTION_MS = 200;
-const PROBE_TRANSPORT_MS = 250;
+const PROBE_TRANSPORT_MS = EXECUTION_MARGIN_MS / 2;
 // How long a termination may take before the page counts as silent.
 const TERMINATE_MS = 1000;
 // How long before the execution limit is due an internal error still counts
@@ -244,7 +245,7 @@ const ask = (session: TabSession, step: SendStep) =>
   );
 
 // Whether the page still answers. A probe gets 200 ms of execution and
-// 250 ms of transport, and one more try on its own limit.
+// 500 ms of transport, and one more try on its own limit.
 export async function probePage(
   session: TabSession,
   step: Step,
