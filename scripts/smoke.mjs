@@ -2759,29 +2759,68 @@ try {
   const hiddenShot = await api(`/tabs/${agentTab}/screenshot`);
   const hiddenPng = Buffer.from(await hiddenShot.arrayBuffer());
   assert.equal(hiddenShot.status, 200, hiddenPng.toString("utf8").slice(0, 300));
-  const hiddenCentre = await app.evaluate(({ nativeImage }, base64) => {
-    const image = nativeImage.createFromBuffer(Buffer.from(base64, "base64"));
-    const { width, height } = image.getSize();
-    // toBitmap gives blue, green, red and alpha per pixel.
-    const [b, g, r] = image
-      .crop({ x: Math.floor(width / 2), y: Math.floor(height / 2), width: 1, height: 1 })
-      .toBitmap();
-    return [r, g, b];
-  }, hiddenPng.toString("base64"));
+  const centreOf = (data) =>
+    app.evaluate(({ nativeImage }, base64) => {
+      const image = nativeImage.createFromBuffer(Buffer.from(base64, "base64"));
+      const { width, height } = image.getSize();
+      // toBitmap gives blue, green, red and alpha per pixel.
+      const [b, g, r] = image
+        .crop({ x: Math.floor(width / 2), y: Math.floor(height / 2), width: 1, height: 1 })
+        .toBitmap();
+      return [r, g, b];
+    }, data);
+  const greenish = ([r, g, b]) => g > r + 60 && g > b + 60;
+  const hiddenCentre = await centreOf(hiddenPng.toString("base64"));
   assert.ok(
-    hiddenCentre[1] > hiddenCentre[0] + 60 && hiddenCentre[1] > hiddenCentre[2] + 60,
+    greenish(hiddenCentre),
     `A capture with the window hidden shows ${hiddenCentre}, not the green the page turned`,
   );
   assert.equal(await windowVisible(), false);
   assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  checked(
+    "the shown agent tab of a hidden window, as background mode leaves it, is captured as it is now",
+  );
+  // An agent's own Page.captureScreenshot goes through the capture window
+  // too. A copy left waiting on the hidden window would take the browser
+  // down with the page's renderer on Windows and Linux, so that renderer
+  // ends next and Kamapathy has to notice it.
+  const agentShot = await api(`/tabs/${agentTab}/cdp`, "POST", {
+    method: "Page.captureScreenshot",
+    params: { format: "png" },
+  });
+  const agentReply = await agentShot.json();
+  assert.equal(agentShot.status, 200, JSON.stringify(agentReply).slice(0, 300));
+  const agentCentre = await centreOf(agentReply.result.data);
+  assert.ok(
+    greenish(agentCentre),
+    `An agent's capture with the window hidden shows ${agentCentre}, not the green the page turned`,
+  );
+  assert.equal(await windowVisible(), false);
+  assert.deepEqual(await visibleViews(), viewsBeforeCapture);
+  await app.evaluate(
+    ({ webContents }, url) =>
+      webContents
+        .getAllWebContents()
+        .find((contents) => contents.getURL() === url)
+        .forcefullyCrashRenderer(),
+    tallPage,
+  );
+  await poll(
+    async () => (await (await api(`/spaces/${task}`)).json()).space.state === "error",
+    { timeoutMs: 10000, label: "the page that stopped after the agent's capture" },
+  );
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
   await poll(windowVisible, { label: "the shown window" });
   assert.equal(
     (await api(`/tabs/${agentTab}/navigate`, "POST", { url: origin })).status,
     200,
   );
+  await poll(
+    async () => (await (await api(`/spaces/${task}`)).json()).space.state === undefined,
+    { timeoutMs: 10000, label: "the page the agent loaded again" },
+  );
   checked(
-    "the shown agent tab of a hidden window, as background mode leaves it, is captured as it is now",
+    "an agent's own capture of that tab answers too, and the browser outlives the tab's renderer after it",
   );
   assert.equal((await api(`/spaces/${task}/handoff`, "POST", {})).status, 200);
   await agentBar.getByText("Research helper · You're in control").waitFor();
