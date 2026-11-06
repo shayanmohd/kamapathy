@@ -264,18 +264,19 @@ export async function probePage(
 
 // The three outcomes of a limit, shared with the function wait and with
 // cdp_timeout. Chromium's own limit says both answers at once; a transport
-// limit asks the page, then stops it and asks again. A page that still held
-// the script at its own limit answers only once that limit has stopped it.
+// limit asks the page, then stops it and asks again. Chromium sends a busy
+// script's limit answer before it answers a probe queued behind it, so once
+// the page answers, stoppedLate says whether that answer came.
 export async function recoverFromTimeout(
   session: TabSession,
   step: Step,
   hitExecutionLimit: boolean,
-  heldAtLimit = false,
+  stoppedLate: () => boolean = () => false,
 ): Promise<Recovery> {
   if (hitExecutionLimit)
     return { executionStopped: true, pageResponsive: true };
   if (await probePage(session, step))
-    return { executionStopped: heldAtLimit, pageResponsive: true };
+    return { executionStopped: stoppedLate(), pageResponsive: true };
   await session
     .send(
       "Runtime.terminateExecution",
@@ -317,8 +318,8 @@ export function evaluationTimeout(
 }
 // Chromium names a termination when it knows one. Its own execution limit
 // arrives as an internal error, as do a value it cannot return and a
-// termination from elsewhere, and a loaded machine delivers it any time
-// before the transport limit. So an internal error is that limit once the
+// termination from elsewhere, and a loaded machine delivers it late, even
+// after the transport limit. So an internal error is that limit once the
 // limit is due, unless the page answered the question asked at the limit
 // first.
 const STOPPED = /terminat|timed out|timeout/i;
@@ -355,10 +356,8 @@ export async function evaluateScript(
   // answers the question first was waiting on a promise the script
   // returned. Both answers can land in one task, where their callbacks run
   // in either order, so the page's answer counts from the task after it.
-  let asked = false;
   let answered = false;
   const question = setTimeout(() => {
-    asked = true;
     ask(session, {
       deadline: step.deadline,
       signal: step.signal,
@@ -373,9 +372,17 @@ export async function evaluateScript(
   } catch (error) {
     const execution = hitExecutionLimit(error, limitAt, answered);
     if (!execution && !(error instanceof CdpTimeoutError)) throw error;
+    // The script's answer can still come after the call's own limit. A
+    // handler on Chromium's reply itself runs before any answer that came
+    // after it has passed through the session.
+    let stoppedLate = false;
+    if (error instanceof CdpTimeoutError)
+      error.late?.catch((late: unknown) => {
+        stoppedLate = hitExecutionLimit(late, limitAt, answered);
+      });
     throw evaluationTimeout(
       step.timeoutMs,
-      await recoverFromTimeout(session, step, execution, asked && !answered),
+      await recoverFromTimeout(session, step, execution, () => stoppedLate),
     );
   } finally {
     clearTimeout(question);

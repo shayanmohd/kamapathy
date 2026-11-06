@@ -41,6 +41,8 @@ export class CdpTimeoutError extends Error {
   constructor(
     readonly awaited: "page" | "load",
     readonly timeoutMs?: number,
+    // Chromium's own answer to the command, which can still come.
+    readonly late?: Promise<unknown>,
   ) {
     super("The page did not respond in time.");
   }

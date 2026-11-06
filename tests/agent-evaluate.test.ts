@@ -363,8 +363,9 @@ describe("evaluate", () => {
   it("the execution limit stopped the script however late its answer lands", async () => {
     const { cdp, session } = await ready();
     // A loaded machine delivers Chromium's answer to its own limit hundreds
-    // of milliseconds late, and once the call's own limit has passed.
-    for (const lateMs of [150, 500, 950, 1300]) {
+    // of milliseconds late, and once the call's own limit has passed, within
+    // the first probe or the second.
+    for (const lateMs of [150, 500, 950, 1300, 1800]) {
       holdUntilLimit(cdp, lateMs);
       const before = evaluations(cdp).length;
       const call = track(
@@ -435,6 +436,72 @@ describe("evaluate", () => {
       await vi.advanceTimersByTimeAsync(2000 - EXECUTION_MARGIN_MS + lateMs);
       expect(call.settled, `${lateMs} ms late`).toBe(true);
       own(call.error);
+    }
+    // The same failure once the call's own limit has passed, from a page
+    // that answers 400 ms after each question, lands before the probe's
+    // answer. The page answered at the limit first, so nothing was stopped.
+    cdp.reply("Runtime.evaluate", (params) =>
+      params.expression === "1"
+        ? new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ result: { type: "number", value: 1 } }),
+              400,
+            ),
+          )
+        : new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Internal error")),
+              params.timeout + 1300,
+            ),
+          ),
+    );
+    const afterCall = track(
+      evaluateScript(session, { function: "async () => later()" }, step(2000)),
+    );
+    await vi.advanceTimersByTimeAsync(2400);
+    expect(afterCall.settled).toBe(true);
+    expect((afterCall.error as ApiError).fields).toEqual({
+      awaited: "script",
+      timeoutMs: 2000,
+      executionStopped: false,
+      mayHaveLateEffects: true,
+      pageResponsive: true,
+    });
+    expect(cdp.methods()).not.toContain("Runtime.terminateExecution");
+  });
+
+  it("a page held past both limits by work after the script returned stops nothing", async () => {
+    const { cdp, session } = await ready();
+    // The script waits on a promise that never settles, and a long task of
+    // the page's own, the script's continuation or another frame holds the
+    // main thread from before the page's limit until freeMs, so every
+    // question asked meanwhile is answered then, within the first probe or
+    // the second.
+    for (const freeMs of [2200, 2700]) {
+      const freeAt = Date.now() + freeMs;
+      cdp.reply("Runtime.evaluate", (params) => {
+        if (params.expression !== "1") return new Promise(() => {});
+        const answer = { result: { type: "number", value: 1 } };
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(answer), Math.max(0, freeAt - Date.now())),
+        );
+      });
+      const call = track(
+        evaluateScript(
+          session,
+          { function: "async () => later()" },
+          step(2000),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(freeMs);
+      expect(call.settled, `free at ${freeMs} ms`).toBe(true);
+      expect((call.error as ApiError).fields, `free at ${freeMs} ms`).toEqual({
+        awaited: "script",
+        timeoutMs: 2000,
+        executionStopped: false,
+        mayHaveLateEffects: true,
+        pageResponsive: true,
+      });
     }
     expect(cdp.methods()).not.toContain("Runtime.terminateExecution");
   });

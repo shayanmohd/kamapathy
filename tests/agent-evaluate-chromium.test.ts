@@ -103,4 +103,47 @@ describe.skipIf(!chromiumAvailable)("evaluate in Chromium", () => {
     expect(error).not.toBeInstanceOf(ApiError);
     expect((error as Error).message).toBe("Internal error");
   }, 30000);
+
+  it("a script whose own continuation holds the page past both limits is left running", async () => {
+    const session = await open();
+    // The limit covers only the script's own run, so the work it continues
+    // with holds the main thread from 400 ms to 2150 ms, past the call's own
+    // limit, and the script then waits on a promise that never settles.
+    const error = await failure(
+      evaluateScript(
+        session,
+        {
+          function: `async () => {
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const end = Date.now() + 1750;
+            while (Date.now() < end) {}
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            window.finished = true;
+            await new Promise(() => {});
+          }`,
+        },
+        step(),
+      ),
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).fields).toEqual({
+      awaited: "script",
+      timeoutMs: 2000,
+      executionStopped: false,
+      mayHaveLateEffects: true,
+      pageResponsive: true,
+    });
+    // Nothing stopped it, so its work still lands.
+    await expect
+      .poll(
+        () =>
+          evaluateScript(
+            session,
+            { expression: "window.finished === true" },
+            step(),
+          ),
+        { timeout: 5000, interval: 100 },
+      )
+      .toEqual({ value: true });
+  }, 30000);
 });

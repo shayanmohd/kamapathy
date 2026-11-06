@@ -8281,7 +8281,7 @@ describe("local automation socket", () => {
         replies: Map<string, (params: any, sessionId?: string) => any>;
       }
     ).replies;
-    const evaluate = replies.get("Runtime.evaluate") ?? (() => ({}));
+    const earlier = replies.get("Runtime.evaluate") ?? (() => ({}));
     page.debugger.reply("Runtime.evaluate", (params, sessionId) =>
       params.expression === "1" && sessionId === undefined
         ? new Promise((resolve) =>
@@ -8290,7 +8290,7 @@ describe("local automation socket", () => {
               400,
             ),
           )
-        : evaluate(params, sessionId),
+        : earlier(params, sessionId),
     );
     const timed = await failure(
       await cdp(tab.id, { method: "Page.getLayoutMetrics", timeoutMs: 1000 }),
