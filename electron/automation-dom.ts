@@ -2590,7 +2590,6 @@ export function pageOperation(
         inline: "center",
         behavior: "instant",
       });
-    const own = frameOrigin(owner);
     const placement = ownerPlacement(owner);
     const spot = payload.point as { x: number; y: number } | undefined;
     const point = spot && {
@@ -2607,11 +2606,13 @@ export function pageOperation(
     const blocked = !outside && (!hit || !within(owner, hit));
     return {
       ok: true,
+      // Where the owner's document begins in this world's viewport, through
+      // the frames of this origin around the owner, as the point is placed.
       box: {
-        x: own.x,
-        y: own.y,
-        scaleX: own.scaleX,
-        scaleY: own.scaleY,
+        x: placement.x,
+        y: placement.y,
+        scaleX: placement.scaleX,
+        scaleY: placement.scaleY,
         width: placement.width,
         height: placement.height,
       },

@@ -26,12 +26,18 @@ type FakeNode = {
   attributes?: Record<string, string>;
   // The frame a frame owner holds, as DOM.describeNode reports it.
   frameId?: string;
+  // Where a frame owner's content box is drawn in the viewport of the
+  // session that hit it, its size in the owner's own pixels and the scale it
+  // is drawn at, as DOM.getBoxModel reports them.
+  box?: { x: number; y: number; width: number; height: number; scale?: number };
 };
 type Spot = {
   x: number;
   y: number;
   // The frame the hit belongs to, as DOM.getNodeForLocation reports it.
   frameId?: string;
+  // The session of a frame in its own process the hit test ran on.
+  session?: string;
   author: FakeNode;
   shadow?: FakeNode;
 };
@@ -53,8 +59,9 @@ const flat = (attributes: Record<string, string> = {}) =>
 const step = (): Step => ({ deadline: Date.now() + 5000 });
 
 // A tab whose page answers DOM.getNodeForLocation and DOM.describeNode from
-// the spots given, Page.getLayoutMetrics from the visual viewport given, and
-// refuses every other command.
+// the spots given, DOM.getBoxModel from their owners' boxes,
+// Page.getLayoutMetrics from the visual viewport given, on the page's own
+// session or a frame's, and refuses every other command.
 const tab = (
   options: {
     spots?: Spot[];
@@ -65,9 +72,15 @@ const tab = (
     paths?: Record<string, string>;
     broken?: unknown;
     visual?: Record<string, number>;
+    // The visual viewport of each frame session, by its session id.
+    views?: Record<string, Record<string, number>>;
   } = {},
 ) => {
-  const sent: { method: string; params: Record<string, any> }[] = [];
+  const sent: {
+    method: string;
+    params: Record<string, any>;
+    sessionId?: string;
+  }[] = [];
   const nodes = new Map<number, FakeNode>();
   const hits = new Map<string, { id: number; frameId?: string }>();
   let next = 1;
@@ -79,11 +92,15 @@ const tab = (
   for (const spot of options.spots ?? []) {
     const author = record(spot.author);
     const shadow = spot.shadow ? record(spot.shadow) : author;
-    hits.set(`${spot.x},${spot.y},false`, {
+    const on = spot.session ?? "";
+    hits.set(`${on}|${spot.x},${spot.y},false`, {
       id: author,
       frameId: spot.frameId,
     });
-    hits.set(`${spot.x},${spot.y},true`, { id: shadow, frameId: spot.frameId });
+    hits.set(`${on}|${spot.x},${spot.y},true`, {
+      id: shadow,
+      frameId: spot.frameId,
+    });
   }
   const session = {
     knownFrames: async () => options.frames ?? [known(MAIN)],
@@ -109,14 +126,19 @@ const tab = (
     send: async (
       method: string,
       params: Record<string, any> = {},
-      sending?: Step,
+      sending?: Step & { sessionId?: string },
     ) => {
       sending?.guard?.();
-      sent.push({ method, params });
+      const on = sending?.sessionId;
+      sent.push({
+        method,
+        params,
+        ...(on === undefined ? {} : { sessionId: on }),
+      });
       if (options.broken !== undefined) throw options.broken;
       if (method === "DOM.getNodeForLocation") {
         const found = hits.get(
-          `${params.x},${params.y},${params.includeUserAgentShadowDOM === true}`,
+          `${on ?? ""}|${params.x},${params.y},${params.includeUserAgentShadowDOM === true}`,
         );
         if (!found) throw new Error("No node found at given location");
         return {
@@ -136,8 +158,25 @@ const tab = (
           },
         };
       }
-      if (method === "Page.getLayoutMetrics" && options.visual)
-        return { cssVisualViewport: options.visual };
+      if (method === "DOM.getBoxModel") {
+        const box = nodes.get(params.backendNodeId)?.box;
+        if (!box) throw new Error("Could not compute box model.");
+        const scale = box.scale ?? 1;
+        const right = box.x + box.width * scale;
+        const bottom = box.y + box.height * scale;
+        const quad = [box.x, box.y, right, box.y, right, bottom, box.x, bottom];
+        return {
+          model: {
+            content: quad,
+            border: quad,
+            width: box.width,
+            height: box.height,
+          },
+        };
+      }
+      const view = on === undefined ? options.visual : options.views?.[on];
+      if (method === "Page.getLayoutMetrics" && view)
+        return { cssVisualViewport: view };
       throw new Error(`No reply for ${method}`);
     },
   } as unknown as TabSession;
@@ -488,6 +527,159 @@ describe("the input guards", () => {
     await expect(
       press(top.session, { x: 180, y: 200 }),
     ).resolves.toBeUndefined();
+  });
+
+  it("goes on inside a frame in its own process and refuses a blocked frame there", async () => {
+    // A payment frame Chromium runs in its own process, whose content box is
+    // drawn at 100, 50 at half size, holds a password manager's frame. The
+    // page's hit test stops at the payment frame's owner, so the check goes
+    // on inside it, on its own session: 180, 90 is 160, 80 of the payment
+    // frame's own pixels, and with that frame scrolled 20 down, 160, 100 of
+    // its document.
+    const spots: Spot[] = [
+      {
+        x: 180,
+        y: 90,
+        frameId: MAIN,
+        author: {
+          nodeName: "iframe",
+          frameId: "pay",
+          box: { x: 100, y: 50, width: 400, height: 300, scale: 0.5 },
+        },
+      },
+      {
+        x: 160,
+        y: 100,
+        session: "pay-session",
+        frameId: "pay",
+        author: { nodeName: "iframe", frameId: "panel" },
+      },
+    ];
+    const frames = [
+      known(MAIN),
+      known("pay", { ownSession: true, sessionId: "pay-session" }),
+      known("panel", { blocked: true, parentFrameId: "pay" }),
+    ];
+    const views = { "pay-session": { pageX: 0, pageY: 20 } };
+    for (const pressing of [true, false]) {
+      const { session, sent } = tab({
+        spots,
+        frames,
+        views,
+        paths: { panel: "0/0" },
+      });
+      const error = await refusal(
+        checkPointerTarget(session, { x: 180, y: 90 }, step(), {
+          button: "left",
+          press: pressing,
+        }),
+      );
+      expect([error.code, error.fields.frame]).toEqual([
+        "input_target_blocked",
+        "0/0",
+      ]);
+      expect(
+        sent
+          .filter((command) => command.method === "DOM.getNodeForLocation")
+          .map((command) => [
+            command.sessionId,
+            command.params.x,
+            command.params.y,
+          ]),
+      ).toEqual([
+        [undefined, 180, 90],
+        ["pay-session", 160, 100],
+      ]);
+    }
+  });
+
+  it("names the frame a point reaches: the one inside every owner's content box, else the document around the owner", async () => {
+    // A payment frame in its own process shows its document from 30, 30 to
+    // 330, 230, inside a border and padding from 20, 20. It holds a card
+    // frame, in a process of its own again, whose content box spans 50, 50
+    // to 250, 200 of the payment frame's own pixels.
+    const owner: FakeNode = {
+      nodeName: "iframe",
+      frameId: "pay",
+      box: { x: 30, y: 30, width: 300, height: 200 },
+    };
+    const spots: Spot[] = [
+      ...[25, 29, 30, 40, 130, 200].map((x) => ({
+        x,
+        y: x === 200 ? 200 : x === 40 ? 40 : 100,
+        frameId: MAIN,
+        author: owner,
+      })),
+      {
+        x: 0,
+        y: 70,
+        session: "pay-session",
+        frameId: "pay",
+        author: { nodeName: "body" },
+      },
+      {
+        x: 100,
+        y: 70,
+        session: "pay-session",
+        frameId: "pay",
+        author: { nodeName: "button" },
+      },
+      {
+        x: 10,
+        y: 10,
+        session: "pay-session",
+        frameId: "pay",
+        author: { nodeName: "select" },
+      },
+      {
+        x: 170,
+        y: 170,
+        session: "pay-session",
+        frameId: "pay",
+        author: {
+          nodeName: "iframe",
+          frameId: "card",
+          box: { x: 50, y: 50, width: 200, height: 150 },
+        },
+      },
+      {
+        x: 120,
+        y: 120,
+        session: "card-session",
+        frameId: "card",
+        author: { nodeName: "input" },
+      },
+    ];
+    const frames = [
+      known(MAIN),
+      known("pay", { ownSession: true, sessionId: "pay-session" }),
+      known("card", {
+        ownSession: true,
+        sessionId: "card-session",
+        parentFrameId: "pay",
+      }),
+    ];
+    const reachedAt = async (point: { x: number; y: number }) => {
+      const reached: { frameId?: string } = {};
+      await checkPointerTarget(tab({ spots, frames }).session, point, step(), {
+        button: "left",
+        press: true,
+        reached,
+      });
+      return reached.frameId;
+    };
+    // Chromium sends a point on the owner's border or padding, or a fraction
+    // of a pixel before its content box, to the page around the frame.
+    expect(await reachedAt({ x: 25, y: 100 })).toBe(MAIN);
+    expect(await reachedAt({ x: 29.6, y: 100 })).toBe(MAIN);
+    expect(await reachedAt({ x: 30, y: 100 })).toBe("pay");
+    expect(await reachedAt({ x: 130, y: 100 })).toBe("pay");
+    expect(await reachedAt({ x: 200, y: 200 })).toBe("card");
+    // What a press would open is read where it lands, inside a frame too.
+    const picking = tab({ spots, frames });
+    expect((await refusal(press(picking.session, { x: 40, y: 40 }))).code).toBe(
+      "native_popup_blocked",
+    );
   });
 
   it("refuses a press that would open a native select, color or date picker", async () => {

@@ -440,6 +440,24 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     });
   }, 20000);
 
+  it("frameBox places an owner inside a frame of this origin through that frame", async () => {
+    await open("/frames/wrap");
+    await bindOwner("f-wrapped", () =>
+      (
+        document.getElementById("wrapper") as HTMLIFrameElement
+      ).contentDocument!.getElementById("grid"),
+    );
+    // The wrapper sits at 60, 120 and the owner at 30, 40 inside it, so the
+    // owner's document begins at 90, 160 of this world's viewport, where
+    // the point the reply gives is placed too.
+    const got = await operate("frameBox", {
+      key: "f-wrapped",
+      point: { x: 150, y: 60 },
+    });
+    expect(got.box).toMatchObject({ x: 90, y: 160, scaleX: 1, scaleY: 1 });
+    expect(got.point).toEqual({ x: 240, y: 220 });
+  }, 20000);
+
   it("frameBox translates a point and names an overlay over the owner", async () => {
     await open("/frames/covered");
     await bindOwner("f-pay", () => document.getElementById("pay"));
@@ -563,6 +581,34 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
       local: "0",
       readable: true,
     });
+  }, 20000);
+
+  it("bindFrameOwner answers no path for an owner its walk cannot reach from this document", async () => {
+    await open("/frames/closed-grid");
+    const sealed = () =>
+      (window as unknown as { closedFrame(): HTMLIFrameElement }).closedFrame();
+    // The walk does not enter a closed shadow root, so the frame there has
+    // no path in this world.
+    expect(await bindOwner("f-sealed", sealed)).toEqual({
+      local: "",
+      readable: true,
+    });
+    // Nor has a frame inside that one, whose walk stops at the closed root.
+    await page.evaluate(() => {
+      const inner = (
+        window as unknown as { closedFrame(): HTMLIFrameElement }
+      ).closedFrame().contentDocument!;
+      const frame = inner.createElement("iframe");
+      frame.id = "deeper";
+      inner.body.append(frame);
+    });
+    expect(
+      await bindOwner("f-deeper", () =>
+        (window as unknown as { closedFrame(): HTMLIFrameElement })
+          .closedFrame()
+          .contentDocument!.getElementById("deeper"),
+      ),
+    ).toEqual({ local: "", readable: true });
   }, 20000);
 
   it("activeFrame follows focus through two owners", async () => {

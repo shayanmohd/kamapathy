@@ -29,6 +29,7 @@ import {
   type InputActions,
 } from "../electron/agent/input/actions";
 import { registerCounters } from "../electron/agent/input/counters";
+import { checkPointerTarget } from "../electron/agent/input/guards";
 import {
   createDispatchers,
   type InputDispatchers,
@@ -1176,5 +1177,191 @@ for (const mode of ISOLATION)
         expect(JSON.stringify(reply).length).toBeLessThan(2000);
       expect(pressed).toMatchObject({ ok: true });
       expect((await topCounters()).key).toBe((counted.key ?? 0) + 1);
+    }, 60000);
+
+    // The raw routes name a point and nothing else, so what they reach is
+    // the document the hit test finds there, inside every frame Chromium
+    // runs in its own process.
+    const rawMouse = (
+      kind: "move" | "down" | "up" | "click",
+      x = 0,
+      y = 0,
+    ) =>
+      input!.mouse(
+        "tab-1",
+        {
+          kind,
+          x,
+          y,
+          steps: 1,
+          button: "left",
+          clickCount: 1,
+          delayMs: 0,
+        },
+        run(),
+      );
+    const frameCounters = (frameId: string) =>
+      resolver.run(
+        "tab-1",
+        session!,
+        "input",
+        {},
+        { deadline: Date.now() + 20000, namespace: "frames", frameId },
+      ) as Promise<{ mouse?: number }>;
+    // Where a frame's owner shows its document, in the page's viewport.
+    const contentBoxOf = async (frameId: string) => {
+      const owner = await session!.send<{ backendNodeId: number }>(
+        "DOM.getFrameOwner",
+        { frameId },
+        step(),
+      );
+      const { model } = await session!.send<{
+        model: { content: number[] };
+      }>("DOM.getBoxModel", { backendNodeId: owner.backendNodeId }, step());
+      const [left, top, right, , , bottom] = model.content;
+      return { left, top, right, bottom };
+    };
+    // A frame inside a closed shadow root has no path, so open() cannot
+    // count it: the registry lists it once it holds a web document.
+    const closedFrame = async () => {
+      const main = await session!.mainFrameId(step());
+      let inner = "";
+      await vi.waitFor(
+        async () => {
+          const found = (await session!.knownFrames(step())).find(
+            (frame) => frame.frameId !== main,
+          );
+          expect(found?.origin).toMatch(/^https?:\/\//);
+          inner = found!.frameId;
+        },
+        { timeout: 15000, interval: 100 },
+      );
+      return inner;
+    };
+    const refusedAt = async (running: Promise<unknown>) => {
+      const error = await running.then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      expect(error).toBeInstanceOf(ApiError);
+      return (error as ApiError).code;
+    };
+
+    it("raw presses reach a control two frames from other sites deep", async () => {
+      await open("/frames/half", 3);
+      const { placed } = await placeOf(byLabel(await take(), "Target").ref);
+      const { x, y } = placed.point;
+      expect(await rawMouse("click", x, y)).toMatchObject({ ok: true });
+      expect((await take()).text).toContain("Grid hit Target");
+      // A press where the pointer already stands waits for its own move too.
+      await open("/frames/half", 3);
+      await rawMouse("move", x, y);
+      await rawMouse("down");
+      await rawMouse("up");
+      expect((await take()).text).toContain("Grid hit Target");
+    }, 60000);
+
+    it("a raw click reaches a frame from another site inside a frame of the page's own origin", async () => {
+      await open("/frames/wrap", 3);
+      // The Target button's middle is 150, 60 of the grid's own pixels: the
+      // wrapper sits at 60, 120 of the page and the grid at 30, 40 of it.
+      expect(await rawMouse("click", 240, 220)).toMatchObject({ ok: true });
+      expect((await take()).text).toContain("Grid hit Target");
+    }, 60000);
+
+    it("a raw click on a frame's border, padding or the fraction of a pixel before its content reaches the page around it", async () => {
+      await open("/frames/pay", 3);
+      const listing = await take();
+      const card = groups!.homeFrame(byLabel(listing, "Card number").ref)!;
+      const box = await contentBoxOf(card.frameId);
+      const middle = (box.top + box.bottom) / 2;
+      // The frame has a 4 px border and 6 px padding, so 5 px before its
+      // content box is its own padding, which belongs to the page.
+      for (const x of [box.left - 5, box.left - 0.4]) {
+        const top = await topCounters();
+        const inside = await frameCounters(card.frameId);
+        expect(await rawMouse("click", x, middle), String(x)).toMatchObject({
+          ok: true,
+        });
+        expect((await topCounters()).mouse, String(x)).toBe(
+          (top.mouse ?? 0) + 1,
+        );
+        expect((await frameCounters(card.frameId)).mouse, String(x)).toBe(
+          inside.mouse ?? 0,
+        );
+      }
+    }, 60000);
+
+    it("raw input never reaches a blocked frame inside a frame from another site", async () => {
+      await open("/frames/guarded", 2);
+      // The frame inside the holder fails to load, so Chromium shows its
+      // error page there, a frame agents never reach, as an extension's.
+      await session!.send(
+        "Runtime.evaluate",
+        { expression: "addBroken()" },
+        step(),
+      );
+      await vi.waitFor(
+        async () => {
+          const known = await session!.knownFrames(step());
+          expect(known.some((frame) => frame.blocked)).toBe(true);
+        },
+        { timeout: 15000, interval: 100 },
+      );
+      // The broken frame sits at 10, 10 of the holder, which fills the
+      // page's top left corner.
+      for (const press of [true, false])
+        expect(
+          await refusedAt(
+            checkPointerTarget(session!, { x: 60, y: 40 }, step(), {
+              button: "left",
+              press,
+            }),
+          ),
+          String(press),
+        ).toBe("input_target_blocked");
+      for (const kind of ["move", "click"] as const)
+        expect(await refusedAt(rawMouse(kind, 60, 40)), kind).toBe(
+          "input_target_blocked",
+        );
+      // The holder's own document beside the broken frame takes input.
+      expect(await rawMouse("click", 300, 150)).toMatchObject({ ok: true });
+    }, 60000);
+
+    it("a raw click over a frame from another site inside a closed shadow root presses there", async () => {
+      await open("/frames/closed-root", 1);
+      const inner = await closedFrame();
+      // The frame has no path the page could print, so no group holds it.
+      await groups!.bind(step());
+      expect(groups!.groupOf(inner)).toBeUndefined();
+      expect(groups!.frameAt("")?.frameId).toBe(
+        await session!.mainFrameId(step()),
+      );
+      const box = await contentBoxOf(inner);
+      const before = await frameCounters(inner);
+      expect(
+        await rawMouse("click", box.left + 40, box.top + 30),
+      ).toMatchObject({ ok: true });
+      expect((await frameCounters(inner)).mouse).toBe(
+        (before.mouse ?? 0) + 1,
+      );
+    }, 60000);
+
+    it("a raw click inside a frame of the page's own origin inside a closed shadow root presses there", async () => {
+      await open("/frames/closed-grid", 1);
+      await closedFrame();
+      // The grid sits at 20, 30 of the page, and its Target button's middle
+      // at 150, 60 of the grid.
+      expect(await rawMouse("click", 170, 90)).toMatchObject({ ok: true });
+      const shown = await session!.send<{ result: { value?: unknown } }>(
+        "Runtime.evaluate",
+        {
+          expression:
+            "closedFrame().contentDocument.getElementById('grid-hit').textContent",
+          returnByValue: true,
+        },
+        step(),
+      );
+      expect(shown.result.value).toBe("Closed grid hit Target");
     }, 60000);
   });

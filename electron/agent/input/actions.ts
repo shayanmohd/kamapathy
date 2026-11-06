@@ -680,14 +680,19 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         }),
         { deadline: step.deadline, signal: step.signal, guard: step.guard },
       );
-    const { local } = landing;
-    if (local === undefined) {
-      await move();
-      return true;
-    }
     const before = await counters();
     await move();
-    return landedAt(before, await counters(), local, landing.scale ?? { x: 1, y: 1 });
+    const after = await counters();
+    const { local } = landing;
+    // A frame no group can place has no pixels to compare, so its own
+    // document only has to see the move.
+    if (local === undefined)
+      return (
+        typeof before.move !== "number" ||
+        typeof after.move !== "number" ||
+        after.move > before.move
+      );
+    return landedAt(before, after, local, landing.scale ?? { x: 1, y: 1 });
   };
   // The documents around the one holding a frame target, which a press
   // routed by a layout drawn before reaches instead: the page's own and each

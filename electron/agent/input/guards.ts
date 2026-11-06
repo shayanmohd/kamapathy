@@ -9,12 +9,12 @@
 // "No node found at given location" for a point over nothing. It pierces
 // closed shadow roots: a select and an iframe inside one were both
 // reported. Over a frame in its own process it answers the owner element,
-// whose DOM.describeNode names the frame it holds in frameId, so that is
-// the frame the input would reach. With includeUserAgentShadowDOM the hit
-// is the control's inner part, which carries none of the control's own
-// attributes, so the author level decides the kind and the deeper hit is
-// only asked for a date input, to tell its picker indicator from the fields
-// that take typing.
+// whose DOM.describeNode names the frame it holds in frameId, and looks no
+// further, so the check goes on inside that frame, on the frame's own
+// session. With includeUserAgentShadowDOM the hit is the control's inner
+// part, which carries none of the control's own attributes, so the author
+// level decides the kind and the deeper hit is only asked for a date input,
+// to tell its picker indicator from the fields that take typing.
 import { fail, toApiError } from "../errors";
 import {
   NO_EXTENSION_NAMES,
@@ -23,9 +23,9 @@ import {
   extensionInputMessage,
   type ExtensionNames,
 } from "../extension-frames";
-import { DialogOpenError } from "../session/errors";
+import { DialogOpenError, TargetRefusedError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
-import type { KnownFrame, Step } from "../session/types";
+import type { KnownFrame, SendStep, Step } from "../session/types";
 import { MODIFIER_BITS, type Chord } from "./keys";
 import type { Button } from "./state";
 
@@ -42,9 +42,11 @@ export interface FocusedControl {
 }
 export interface HitNode {
   backendNodeId: number;
-  // The frame the input would reach: the frame a frame owner holds, else
+  // The frame the hit is checked for: the frame a frame owner holds, else
   // the frame the node sits in.
   frameId?: string;
+  /** For a frame owner, the frame the owner element itself sits in. */
+  around?: string;
   nodeName: string;
   attributes: Record<string, string>;
   editable: boolean;
@@ -93,6 +95,13 @@ const editableNode = (nodeName: string, attributes: Record<string, string>) => {
   return nodeName === "input" && TEXT_TYPES.includes(typeOf(attributes));
 };
 
+// A read that failed says nothing about the point, and nor does one sent to
+// a frame whose session ended after the registry was read. A refusal, or a
+// page the agent lost, still stops here.
+const passOn = (error: unknown) => {
+  if (toApiError(error) && !(error instanceof TargetRefusedError)) throw error;
+};
+
 // The node under a point, through the tab's own session. Both commands are
 // one-shot, so the DOM domain stays disabled.
 export async function hitNodeAt(
@@ -126,15 +135,17 @@ export async function hitNodeAt(
     return {
       backendNodeId: hit.backendNodeId,
       ...(frameId === undefined ? {} : { frameId }),
+      ...(node.frameId === undefined || hit.frameId === undefined
+        ? {}
+        : { around: hit.frameId }),
       nodeName,
       attributes,
       editable: editableNode(nodeName, attributes),
     };
   } catch (error) {
     // A hit test that failed says nothing about the point, so an ordinary
-    // press is never refused for it. A refusal, or a page the agent lost,
-    // still stops here.
-    if (toApiError(error)) throw error;
+    // press is never refused for it.
+    passOn(error);
     return undefined;
   }
 }
@@ -389,13 +400,73 @@ async function landingPoint(
       typeof value === "number" && Number.isFinite(value) ? value : 0;
     return { x: point.x + by(pageX), y: point.y + by(pageY) };
   } catch (error) {
-    if (toApiError(error)) throw error;
+    passOn(error);
     return point;
   }
 }
 
+// Where a frame owner shows its frame's document in the viewport of the
+// session that hit it, and at what scale: DOM.getBoxModel's content box,
+// which reads closed shadow roots and transforms, against its border box
+// drawn next to the owner's own size. A probe in Chromium saw a move at the
+// content box's left or top edge land in the frame, and one 0.4 pixels
+// before it, or at its right or bottom edge, land in the page around it.
+async function contentBox(
+  session: TabSession,
+  backendNodeId: number,
+  step: Step,
+): Promise<
+  | {
+      x: number;
+      y: number;
+      right: number;
+      bottom: number;
+      scaleX: number;
+      scaleY: number;
+    }
+  | undefined
+> {
+  try {
+    const { model } = await session.send<{
+      model?: {
+        content?: number[];
+        border?: number[];
+        width?: number;
+        height?: number;
+      };
+    }>("DOM.getBoxModel", { backendNodeId }, step);
+    const content = model?.content;
+    const border = model?.border;
+    if (content?.length !== 8 || border?.length !== 8) return undefined;
+    // The least and greatest of a quad's x values, or of its y values.
+    const span = (quad: number[], from: number) => {
+      const values = [0, 2, 4, 6].map((corner) => quad[from + corner]);
+      return { low: Math.min(...values), high: Math.max(...values) };
+    };
+    const scaleOf = (from: number, size: number | undefined) => {
+      const { low, high } = span(border, from);
+      return size && high > low ? (high - low) / size : 1;
+    };
+    const across = span(content, 0);
+    const down = span(content, 1);
+    return {
+      x: across.low,
+      y: down.low,
+      right: across.high,
+      bottom: down.high,
+      scaleX: scaleOf(0, model?.width),
+      scaleY: scaleOf(1, model?.height),
+    };
+  } catch (error) {
+    passOn(error);
+    return undefined;
+  }
+}
+
 // Every press goes through this, force included, and a move with no press
-// is checked for its frame alone.
+// is checked for its frame alone. A hit on the owner of a frame in its own
+// process is followed into that frame, through every such frame the point
+// lies in, so a frame nested in one is checked too.
 export async function checkPointerTarget(
   session: TabSession,
   point: { x: number; y: number },
@@ -424,19 +495,62 @@ export async function checkPointerTarget(
         options.extensions ?? NO_EXTENSION_NAMES,
       );
   };
-  const at = await landingPoint(session, point, step);
-  const hit = await hitNodeAt(session, at, step);
-  await checkFrame(hit);
-  for (const whole of besideWhole(at))
-    await checkFrame(await hitNodeAt(session, whole, step));
-  if (options.reached) options.reached.frameId = hit?.frameId;
+  const known = await session.knownFrames(step);
+  // The session hit-tested, the point in its own viewport, and what lies
+  // there.
+  let on: SendStep = step;
+  let local = point;
+  let at = point;
+  let hit: HitNode | undefined;
+  let reached: string | undefined;
+  // Each pass enters a frame inside the last, so there are never more
+  // passes than the frames the tab holds.
+  for (let depth = 0; depth <= known.length; depth += 1) {
+    at = await landingPoint(session, local, on);
+    hit = await hitNodeAt(session, at, on);
+    await checkFrame(hit);
+    // Input goes to the exact point, which lies on the same side of an edge
+    // at a whole pixel as the whole point below it, so that point's hit
+    // says where the input goes.
+    let below = hit;
+    for (const whole of besideWhole(at)) {
+      const near = await hitNodeAt(session, whole, on);
+      await checkFrame(near);
+      if (whole.x === Math.floor(at.x) && whole.y === Math.floor(at.y))
+        below = near;
+    }
+    if (below?.around === undefined) {
+      reached = below?.frameId ?? reached;
+      break;
+    }
+    // A point inside the owner's content box reaches the frame it holds,
+    // and one on its border or padding the document around it.
+    const owner = below;
+    const box = await contentBox(session, owner.backendNodeId, on);
+    const inside =
+      !box ||
+      (local.x >= box.x &&
+        local.x < box.right &&
+        local.y >= box.y &&
+        local.y < box.bottom);
+    reached = inside ? owner.frameId : owner.around;
+    const frame = known.find((entry) => entry.frameId === owner.frameId);
+    if (!box || !inside || !frame?.ownSession || frame.sessionId === undefined)
+      break;
+    on = { ...step, sessionId: frame.sessionId };
+    local = {
+      x: (local.x - box.x) / box.scaleX,
+      y: (local.y - box.y) / box.scaleY,
+    };
+  }
+  if (options.reached) options.reached.frameId = reached;
   if (!hit || !options.press) return;
   if (platform === "linux" && options.button === "middle" && hit.editable)
     fail(
       "clipboard_blocked",
       "A middle press on Linux pastes the system's primary selection, which Kamapathy never uses. Use fill or keyboard.paste instead.",
     );
-  const kind = await pickerAt(session, at, step, hit);
+  const kind = await pickerAt(session, at, on, hit);
   if (kind)
     fail(
       "native_popup_blocked",

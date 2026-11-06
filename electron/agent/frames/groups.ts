@@ -328,7 +328,11 @@ export function createFrameGroups(
           step,
           resolved,
         );
-        if (!binding) {
+        // An owner the walk could not place, such as one inside a closed
+        // shadow root, has an empty path, which is the group's own. Such a
+        // frame stays unbound rather than take the path of the frame
+        // around it.
+        if (!binding || binding.local === "") {
           nextContents.set(frame.frameId, "pending");
           continue;
         }
@@ -433,8 +437,14 @@ export function createFrameGroups(
       const chainOf: OwnerBinding[] = [];
       let group = groupOfFrame.get(frameId);
       // One binding per group boundary: the frames inside a group are the
-      // page's own work, which its own read folds in.
-      while (group?.owner) {
+      // page's own work, which its own read folds in. Each step goes out to
+      // the group around the last, so no chain holds more steps than there
+      // are groups.
+      for (
+        let steps = 0;
+        group?.owner && steps < groupList.length;
+        steps += 1
+      ) {
         chainOf.unshift(group.owner);
         const outer = frameOfPath.get(group.owner.group);
         group = outer === undefined ? undefined : groupOfFrame.get(outer);
