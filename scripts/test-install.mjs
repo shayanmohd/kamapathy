@@ -34,7 +34,8 @@ const server = await startReleaseServer({
   releases: (origin) => serving(origin),
 });
 
-const lines = (text) => text.split("\n").filter((line) => line !== "");
+// Windows PowerShell ends its lines with CRLF.
+const lines = (text) => text.split(/\r?\n/).filter((line) => line !== "");
 
 // A home, a temporary folder and an install folder of its own per run.
 function area(name) {
