@@ -142,6 +142,14 @@ export async function startFormSite() {
         events.push({ type: 'popup-echo', contentType: request.headers['content-type'], body: Buffer.concat(chunks).toString('utf8'), origin: request.headers.origin, referer: request.headers.referer });
         return send('Echo received', '<h1 id="echo">Echo received</h1>');
       }
+      // Where the links and the form of /popups/modifiers lead.
+      if (url.pathname === '/popups/arrival') {
+        const chunks = []; let size = 0;
+        for await (const chunk of request) { size += chunk.length; if (size > 32768) throw new Error('Form too large'); chunks.push(chunk); }
+        const click = url.searchParams.get('click') ?? '';
+        events.push({ type: 'popup-arrival', click, method: request.method, contentType: request.headers['content-type'], body: Buffer.concat(chunks).toString('utf8'), cookie: request.headers.cookie ?? '', referer: request.headers.referer });
+        return send('Arrival', `<h1 id="arrival">Arrived by ${escape(click)}</h1>`);
+      }
       if (url.pathname === '/popup-receipt') {
         const chunks = []; let size = 0;
         for await (const chunk of request) { size += chunk.length; if (size > 32768) throw new Error('Form too large'); chunks.push(chunk); }

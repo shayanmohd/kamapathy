@@ -2292,6 +2292,199 @@ try {
   }
   await cli(["space", "close", popupSpace.id]);
   passed("target=_blank forms keep urlencoded, multipart and text/plain bodies");
+  // Since Electron 44.9.0 a link's new window, from a modifier click or the
+  // middle button, reaches the window-open handler with a guest Electron
+  // made in the opener's session, where Kamapathy used to load the page
+  // itself.
+  const stateNow = () => chrome.evaluate(() => window.kamapathy.getState());
+  const shownBeforeClicks = (await stateNow()).activeTabId;
+  const windowCount = () =>
+    browser.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
+  const windowsBeforeClicks = await windowCount();
+  // The person's press and release at the middle of an element of the page
+  // at address, as the window delivers them.
+  const personClick = (address, selector, button, modifiers) =>
+    browser.evaluate(
+      async ({ webContents }, [pageAddress, target, pressed, modifierNames]) => {
+        const contents = webContents
+          .getAllWebContents()
+          .find((item) => item.getURL() === pageAddress);
+        const box = await contents.executeJavaScript(
+          `document.querySelector(${JSON.stringify(target)}).getBoundingClientRect().toJSON()`,
+        );
+        const middle = {
+          x: Math.round(box.x + box.width / 2),
+          y: Math.round(box.y + box.height / 2),
+        };
+        contents.focus();
+        for (const type of ["mouseDown", "mouseUp"])
+          contents.sendInputEvent({
+            type,
+            ...middle,
+            button: pressed,
+            clickCount: 1,
+            modifiers: modifierNames,
+          });
+      },
+      [address, selector, button, modifiers],
+    );
+  // Runs a click on a link or the form of /popups/modifiers and checks the
+  // one tab it opened, once loaded, and the one request that tab sent.
+  const clickOpensOne = async (openerTab, spaceName, clickName, act) => {
+    const tabsBefore = (await stateNow()).tabs.map((item) => item.id);
+    const eventsBefore = fixture.events.length;
+    const arrivals = () =>
+      fixture.events
+        .slice(eventsBefore)
+        .filter(
+          (event) => event.type === "popup-arrival" && event.click === clickName,
+        );
+    await act();
+    await waitForState(
+      chrome,
+      (state) =>
+        arrivals().length > 0 &&
+        state.tabs.some(
+          (item) =>
+            !tabsBefore.includes(item.id) &&
+            item.title === "Arrival" &&
+            !item.loading,
+        ),
+      undefined,
+      { label: `the tab the ${clickName} click opens` },
+    );
+    // A second tab or request would come with the first.
+    await sleep(500);
+    const added = (await stateNow()).tabs.filter(
+      (item) => !tabsBefore.includes(item.id),
+    );
+    assert.equal(added.length, 1, `${clickName}: ${JSON.stringify(added)}`);
+    assert.equal(arrivals().length, 1, `${clickName}: ${JSON.stringify(arrivals())}`);
+    assert.equal(await windowCount(), windowsBeforeClicks);
+    const [arrival] = added;
+    assert.deepEqual(
+      [
+        arrival.spaceId,
+        arrival.url,
+        arrival.openedBy,
+        arrival.openerId,
+        arrival.managed,
+        arrival.error,
+      ],
+      [
+        openerTab.spaceId,
+        `${fixture.origin}/popups/arrival?click=${clickName}`,
+        "page",
+        openerTab.id,
+        spaceName === "agent",
+        undefined,
+      ],
+    );
+    const [request] = arrivals();
+    assert.deepEqual(
+      [
+        request.method,
+        request.referer,
+        new URLSearchParams(request.cookie.replaceAll("; ", "&")).get("opener"),
+      ],
+      [clickName === "form" ? "POST" : "GET", openerTab.url, spaceName],
+      `${clickName}: ${JSON.stringify(request)}`,
+    );
+    if (clickName === "form") {
+      assert.ok(
+        request.contentType.startsWith("application/x-www-form-urlencoded"),
+        request.contentType,
+      );
+      assert.equal(request.body, "message=Hello+arrival");
+    }
+    return arrival;
+  };
+  const openModifierPage = async (spaceName, open) => {
+    const address = `${fixture.origin}/popups/modifiers?space=${spaceName}`;
+    const openerId = await open(address);
+    return (
+      await waitForState(chrome, (state) =>
+        state.tabs.some(
+          (item) =>
+            item.id === openerId &&
+            item.title === "Modifier clicks" &&
+            !item.loading,
+        ),
+      )
+    ).tabs.find((item) => item.id === openerId);
+  };
+  const linkModifier = process.platform === "darwin" ? "meta" : "control";
+  const personClicks = [
+    ["accelerator", "left", [linkModifier]],
+    ["middle", "middle", []],
+    ["shift", "left", ["shift"]],
+    ["form", "left", ["shift"]],
+  ];
+  const personalOpener = await openModifierPage("personal", async (address) =>
+    (
+      await chrome.evaluate(
+        (url) =>
+          window.kamapathy.dispatch({ type: "tab:create", spaceId: "personal", url }),
+        address,
+      )
+    ).tabs.find((item) => item.url === address).id,
+  );
+  for (const [clickName, button, modifiers] of personClicks) {
+    await chrome.evaluate(
+      (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+      personalOpener.id,
+    );
+    const personalPopup = await clickOpensOne(personalOpener, "personal", clickName, () =>
+      personClick(personalOpener.url, `#${clickName}`, button, modifiers),
+    );
+    assert.equal(personalPopup.label, undefined);
+    await chrome.evaluate(
+      (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+      personalPopup.id,
+    );
+  }
+  passed(
+    "in a space that shares sign-ins, a Cmd- or Ctrl-click, a middle click, a Shift-click and a Shift-clicked POST form each open one tab there that loads with the opener's cookie, the referrer and the body",
+  );
+  const isolatedClicks = (
+    await json(["space", "create", "Modifier clicks", "--isolated"])
+  ).space;
+  const agentOpener = await openModifierPage(
+    "agent",
+    async (address) => (await json(["open", isolatedClicks.id, address])).tab.id,
+  );
+  for (const [clickName, button, modifiers] of personClicks) {
+    await chrome.evaluate(
+      (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+      agentOpener.id,
+    );
+    const agentPopup = await clickOpensOne(agentOpener, "agent", clickName, () =>
+      personClick(agentOpener.url, `#${clickName}`, button, modifiers),
+    );
+    assert.match(agentPopup.label, /^p\d+$/);
+    assert.ok((await observe(agentPopup.id)).text.includes(`Arrived by ${clickName}`));
+    await cli(["close", agentPopup.id]);
+  }
+  const agentLink = ref(await observe(agentOpener.id), "Agent link");
+  const heldPopup = await clickOpensOne(agentOpener, "agent", "agent", async () => {
+    await cli(["key-down", agentOpener.id, "ControlOrMeta"]);
+    await json(["click", agentOpener.id, agentLink]);
+    await cli(["key-up", agentOpener.id, "ControlOrMeta"]);
+  });
+  assert.match(heldPopup.label, /^p\d+$/);
+  assert.ok((await observe(heldPopup.id)).text.includes("Arrived by agent"));
+  await cli(["space", "close", isolatedClicks.id]);
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:close", id }),
+    personalOpener.id,
+  );
+  await chrome.evaluate(
+    (id) => window.kamapathy.dispatch({ type: "tab:activate", id }),
+    shownBeforeClicks,
+  );
+  passed(
+    "in an isolated agent space, the person's same clicks and an agent's click with Cmd or Ctrl held each open one managed tab there that loads in the space's own session with the referrer and the body",
+  );
   // Section 16 in the real app: PDFs read by page, a form's PDF never sent
   // again, a blob PDF read from the page, and Chromium's viewer out of reach.
   const pdfSpace = (await json(["space", "create", "PDF review"])).space;
