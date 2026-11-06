@@ -8316,6 +8316,87 @@ describe("local automation socket", () => {
     expect(sentOn(page, "Input.dispatchKeyEvent")).toHaveLength(3);
   });
 
+  // The protocol's side of a focus the page's own walk cannot follow into a
+  // closed shadow root: the active element of each frame's document, and
+  // each element as DOM.describeNode gives it, with its shadow root and the
+  // active element inside that root. Other calls go to the replies already
+  // set.
+  type FocusElement = {
+    name: string;
+    frame?: string;
+    root?: "open" | "closed";
+    inside?: string | null;
+  };
+  const hiddenFocus = (
+    page: FakeContents,
+    actives: Record<string, string>,
+    elements: Record<string, FocusElement>,
+  ) => {
+    const replies = (
+      page.debugger as unknown as {
+        replies: Map<string, (params: any, sessionId?: string) => any>;
+      }
+    ).replies;
+    const earlier = (method: string) => replies.get(method) ?? (() => ({}));
+    const world = earlier("Page.createIsolatedWorld");
+    const call = earlier("Runtime.callFunctionOn");
+    const resolve = earlier("DOM.resolveNode");
+    const describeOther = earlier("DOM.describeNode");
+    // The frame of each world made from here on; the main frame's may be
+    // older.
+    const frames = new Map<number, string>();
+    const ids = Object.keys(elements);
+    const object = (id: string | null | undefined) => ({
+      result: id
+        ? { type: "object", subtype: "node", objectId: id }
+        : { type: "object", subtype: "null", value: null },
+    });
+    page.debugger.reply("Page.createIsolatedWorld", (params, sessionId) => {
+      const made = world(params, sessionId);
+      frames.set(made.executionContextId, params.frameId);
+      return made;
+    });
+    page.debugger.reply("Runtime.callFunctionOn", (params, sessionId) => {
+      if (params.objectGroup !== "kamapathy-focus")
+        return call(params, sessionId);
+      return params.objectId === undefined
+        ? object(actives[frames.get(params.executionContextId) ?? "main"])
+        : object(elements[params.objectId.replace("root-", "")].inside);
+    });
+    page.debugger.reply("DOM.resolveNode", (params, sessionId) =>
+      params.objectGroup === "kamapathy-focus"
+        ? {
+            object: {
+              type: "object",
+              objectId: `root-${ids[params.backendNodeId - 1000]}`,
+            },
+          }
+        : resolve(params, sessionId),
+    );
+    page.debugger.reply("DOM.describeNode", (params, sessionId) => {
+      const found = elements[params.objectId];
+      if (!found) return describeOther(params, sessionId);
+      // One element at a time, never its subtree.
+      expect(params).toEqual({ objectId: params.objectId, depth: 0 });
+      return {
+        node: {
+          nodeName: found.name,
+          ...(found.frame === undefined ? {} : { frameId: found.frame }),
+          ...(found.root === undefined
+            ? {}
+            : {
+                shadowRoots: [
+                  {
+                    shadowRootType: found.root,
+                    backendNodeId: 1000 + ids.indexOf(params.objectId),
+                  },
+                ],
+              }),
+        },
+      };
+    });
+  };
+
   it("keys never reach an extension's frame inside a closed shadow root that holds focus", async () => {
     const { tab } = await createPage();
     const page = controller.contents;
@@ -8327,35 +8408,20 @@ describe("local automation socket", () => {
       url: `chrome-extension://${EXTENSION_ID}/panel.html`,
     });
     // A frame inside a closed root has no path a snapshot could print. The
-    // page's own walk stops at the host of a closed root, which cannot
-    // take focus itself; the protocol sees the extension's frame inside.
+    // page's own walk stops at the host of a closed root, which is outside
+    // the tab order; the protocol follows the focus into the root, to the
+    // extension's frame that holds it.
     page.pageActions.focusedKind = { ok: true, kind: "other", hidden: true };
-    const replies = (
-      page.debugger as unknown as {
-        replies: Map<string, (params: any, sessionId?: string) => unknown>;
-      }
-    ).replies;
-    const evaluate = replies.get("Runtime.evaluate")!;
-    let rootType = "closed";
-    page.debugger.reply("Runtime.evaluate", (params, sessionId) =>
-      params.objectGroup === "kamapathy-focus"
-        ? { result: { type: "object", objectId: "host" } }
-        : evaluate(params, sessionId),
+    const host: FocusElement = {
+      name: "PASSWORD-MENU",
+      root: "closed",
+      inside: "menu-frame",
+    };
+    hiddenFocus(
+      page,
+      { main: "host" },
+      { host, "menu-frame": { name: "IFRAME", frame: "frame-x" } },
     );
-    page.debugger.reply("DOM.describeNode", (params) => {
-      expect(params).toMatchObject({ objectId: "host", pierce: true });
-      return {
-        node: {
-          nodeName: "PASSWORD-MENU",
-          shadowRoots: [
-            {
-              shadowRootType: rootType,
-              children: [{ nodeName: "IFRAME", frameId: "frame-x" }],
-            },
-          ],
-        },
-      };
-    });
     const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
       key: "Enter",
     });
@@ -8374,12 +8440,73 @@ describe("local automation socket", () => {
     );
     expect(status).toBe(403);
     expect(sentOn(page, "Input.dispatchKeyEvent")).toEqual([]);
-    // A root the page can open is one its own walk follows, so only a
-    // closed one is read this way.
-    rootType = "open";
+    // A host that holds the focus itself, as a page's own element outside
+    // the tab order does, takes the keys.
+    host.inside = null;
     expect(
       (await request(`/tabs/${tab.id}/press`, "POST", { key: "Enter" })).status,
     ).toBe(200);
+    // A root the page can open is one its own walk follows, so only a
+    // closed one is followed this way.
+    host.inside = "menu-frame";
+    host.root = "open";
+    expect(
+      (await request(`/tabs/${tab.id}/press`, "POST", { key: "Enter" })).status,
+    ).toBe(200);
+  });
+
+  it("counts a key in the frame inside a closed shadow root that holds focus, and sends it once", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    // A card form from another site in its own process, inside a closed
+    // root, where no owner binding finds it.
+    page.emitProtocol("Page.frameAttached", {
+      frameId: "card",
+      parentFrameId: "main",
+    });
+    attachedTarget(page.debugger, {
+      sessionId: "card-session",
+      targetId: "card",
+      url: "https://pay.example/",
+    });
+    await expect
+      .poll(() =>
+        page.debugger.sent.some(
+          (command) => command.sessionId === "card-session",
+        ),
+      )
+      .toBe(true);
+    const downs = () =>
+      page.inputs.filter((input) => input.parameters.type === "keyDown").length;
+    // The card frame counts the key, and the page's own document never sees
+    // it.
+    page.result = (code: string, sessionId?: string) =>
+      code.includes(')("input",')
+        ? {
+            ok: true,
+            mouse: 0,
+            key: sessionId === "card-session" ? downs() : 0,
+            drag: 0,
+          }
+        : { ok: true, card: sessionId === "card-session" };
+    page.pageActions.focusedKind = (given: { card?: boolean }) =>
+      given.card
+        ? { ok: true, kind: "editable" }
+        : { ok: true, kind: "other", hidden: true };
+    hiddenFocus(
+      page,
+      { main: "host", card: "field" },
+      {
+        host: { name: "DIV", root: "closed", inside: "card-frame" },
+        "card-frame": { name: "IFRAME", frame: "card" },
+        field: { name: "INPUT" },
+      },
+    );
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "a",
+    });
+    expect(pressed.status).toBe(200);
+    expect(downs()).toBe(1);
   });
 
   it("raw keys stop where section 9's walk finds an extension's frame", async () => {
