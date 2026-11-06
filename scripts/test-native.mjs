@@ -19,6 +19,9 @@ import { promptPages, ATTACHMENT } from "../tests/fixtures/prompt-pages.mjs";
 
 const page = (body, script = "") =>
   `<!doctype html><html><body style="margin:20px">${body}<script>${script}</script></body></html>`;
+// Counts a 16 ms interval's ticks for two seconds and reports how long the
+// page itself measured, since a throttled page's timeout fires late.
+const countTicks = `const start=performance.now();let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks+' in '+Math.round(performance.now()-start)+' ms';},2000);`;
 const pages = {
   "/animated": page(
     `<style>@keyframes fade{to{opacity:1}}#go{opacity:0;animation:fade .3s forwards}</style><button id="go">Animated button</button>`,
@@ -34,17 +37,14 @@ const pages = {
     `<div id="item" draggable="true" style="width:120px;padding:12px;border:1px solid">Drag me</div><div id="zone" style="margin-top:40px;width:240px;height:80px;border:1px dashed">Drop here</div>`,
     `document.getElementById('item').ondragstart=(event)=>event.dataTransfer.setData('text/plain','item');const zone=document.getElementById('zone');zone.ondragover=(event)=>event.preventDefault();zone.ondrop=(event)=>{event.preventDefault();zone.textContent='dropped '+event.dataTransfer.getData('text/plain');};`,
   ),
-  "/timers": page(
-    `<p id="ticks">Counting timer ticks</p>`,
-    `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
-  ),
+  "/timers": page(`<p id="ticks">Counting timer ticks</p>`, countTicks),
   "/opener": page(
     `<button id="open">Open popup</button>`,
     `document.getElementById('open').onclick=()=>window.open('/popup-timers');`,
   ),
   "/popup-timers": page(
     `<p id="ticks">Counting timer ticks</p><button id="go" onclick="this.textContent='popup clicked'">Popup button</button>`,
-    `let ticks=0;const timer=setInterval(()=>ticks++,16);setTimeout(()=>{clearInterval(timer);document.getElementById('ticks').textContent='ticks '+ticks;},1000);`,
+    countTicks,
   ),
   "/tall": `<!doctype html><html><body style="margin:0"><h1 style="margin:0;height:40px">Tall page</h1><div style="height:2400px"></div><p id="sizes" style="margin:0;height:20px">sizes</p><script>document.getElementById('sizes').textContent='viewport '+Math.floor(visualViewport.width)+'x'+Math.floor(visualViewport.height)+' document '+document.documentElement.scrollWidth+'x'+document.documentElement.scrollHeight;</script></body></html>`,
   // A page tall enough to scroll that reports the viewport and document it
@@ -533,16 +533,23 @@ try {
     "a normally launched Kamapathy navigates, reads the page state and waits for a late control in an unwatched agent tab",
   );
 
+  // Chromium wakes a hidden page's timers once a second, so there a 16 ms
+  // interval ticks about once a second. Unthrottled it ticks dozens of times
+  // a second, fewer on a busy machine; ten a second sits clear of both.
+  const assertUnthrottled = ([, ticks, elapsed], where) =>
+    assert.ok(
+      Number(ticks) >= Number(elapsed) / 100,
+      `Only ${ticks} ticks of a 16 ms interval ran in ${elapsed} ms in ${where}, fewer than ten a second`,
+    );
   const timers = await open("/timers");
   const ticked = await poll(
-    async () => /ticks (\d+)/.exec((await snapshot(timers)).text),
-    { timeoutMs: 10000, label: "a second of timer ticks in an unwatched agent tab" },
+    async () => /ticks (\d+) in (\d+) ms/.exec((await snapshot(timers)).text),
+    { timeoutMs: 10000, label: "two seconds of timer ticks in an unwatched agent tab" },
   );
-  assert.ok(
-    Number(ticked[1]) >= 30,
-    `Only ${ticked[1]} ticks of a 16 ms interval ran in one second`,
+  assertUnthrottled(ticked, "an unwatched agent tab");
+  passed(
+    "an unwatched agent tab's timers are not held to one wake-up a second with its session attached",
   );
-  passed("an unwatched agent tab keeps 60 Hz timers with its session attached");
 
   const audio = await open("/audio");
   await poll(async () => (await controls(audio)).includes("Play sound"), {
@@ -579,17 +586,16 @@ try {
   assert.equal(popup.managed, true);
   assert.equal(popup.openerId, opener);
   const popupTicks = await poll(
-    async () => /ticks (\d+)/.exec((await snapshot(popup.id)).text),
-    { timeoutMs: 10000, label: "a second of timer ticks in the popup" },
+    async () => /ticks (\d+) in (\d+) ms/.exec((await snapshot(popup.id)).text),
+    { timeoutMs: 10000, label: "two seconds of timer ticks in the popup" },
   );
-  assert.ok(
-    Number(popupTicks[1]) >= 30,
-    `Only ${popupTicks[1]} ticks of a 16 ms interval ran in the popup in one second`,
-  );
+  assertUnthrottled(popupTicks, "the popup");
   const popupClick = await api(`/tabs/${popup.id}/click`, "POST", { selector: "#go" });
   assert.equal(popupClick.status, 200, JSON.stringify(await popupClick.response.json()));
   assert.ok((await controls(popup.id)).includes("popup clicked"));
-  passed("a background popup from an unwatched agent tab runs timers at full rate and takes a native click");
+  passed(
+    "a background popup from an unwatched agent tab is not held to one timer wake-up a second and takes a native click",
+  );
 
   // Section 7: a download an agent armed in a tab nobody watches is kept,
   // and its bytes come back as the site served them.
