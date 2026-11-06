@@ -3758,6 +3758,75 @@ describe("local automation socket", () => {
       ).toBe(400);
   });
 
+  it("checks the focus again before a key no frame received goes out again", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    const downs = () =>
+      page.inputs.filter((input) => input.parameters.type === "keyDown").length;
+    // The page never counts the key, and once it went out the focus is on a
+    // select, where Enter opens the browser's own list.
+    page.result = (code: string) =>
+      code.includes(')("input",')
+        ? { ok: true, mouse: 0, key: 0, drag: 0 }
+        : { ok: true };
+    page.pageActions.focusedKind = () => ({
+      ok: true,
+      kind: downs() ? "select" : "editable",
+    });
+    const response = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toMatchObject({
+      code: "native_popup_blocked",
+      dispatched: true,
+    });
+    expect(downs()).toBe(1);
+  });
+
+  it("never sends a key again once the focus moved into an extension's frame", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    await addFrames([
+      {
+        frameId: "card",
+        url: "https://pay.example/",
+        local: "0",
+        sessionId: "card-session",
+      },
+      {
+        frameId: "panel",
+        url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+        local: "1",
+      },
+    ]);
+    const downs = () =>
+      page.inputs.filter((input) => input.parameters.type === "keyDown").length;
+    // The card frame holds the focus and never counts the key, and once it
+    // went out the focus is in the person's extension.
+    page.pageActions.focusedKind = { ok: true, kind: "editable" };
+    page.result = (code: string) => {
+      if (code.includes(')("input",'))
+        return { ok: true, mouse: 0, key: 0, drag: 0 };
+      if (code.includes(')("activeFrame",'))
+        return downs()
+          ? { ok: true, path: "1", key: "panel", blocked: true }
+          : { ok: true, path: "0", key: "card", blocked: false };
+      return { ok: true };
+    };
+    const response = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "a",
+    });
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toMatchObject({
+      code: "input_target_blocked",
+      frame: "1",
+      extension: EXTENSION_NAME,
+      dispatched: true,
+    });
+    expect(downs()).toBe(1);
+  });
+
   it("repeats native input the page never received and reports one that never arrives", async () => {
     const { tab } = await createPage();
     // A page drops native input until it renders a frame after a navigation.

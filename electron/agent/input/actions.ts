@@ -2119,6 +2119,22 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           focus?.frameId,
         );
       },
+      // A resend runs the key guards again where the focus is now, and goes
+      // out only while the focus is still in the frame whose counters
+      // decide.
+      again: async () => {
+        const now = await focusedFrame(id, session, step);
+        checkKeyTarget(
+          await focusedControl(id, session, run.deadline, step, now?.frameId),
+          chord,
+          platformName,
+        );
+        if (now?.frameId !== focus?.frameId)
+          fail(
+            "input_not_delivered",
+            "The page did not accept native input. Inspect the page before retrying.",
+          );
+      },
       epoch: () => session.epoch,
       budget: step.deadline,
       deliver: send,
