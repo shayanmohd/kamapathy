@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow, WebContents } from "electron";
 import {
@@ -77,6 +78,11 @@ function idAt(index: number): string {
 const [ALL, HOSTS, NONE, EVERY] = [1, 2, 3, 4].map(idAt);
 const PERSONAL = "persist:space-personal";
 const WORK = "persist:space-work";
+// Every fixture extension's folder, and a file in it as the bridge resolves
+// it, which on Windows puts the current drive first.
+const EXTENSION_FOLDER = "/tmp/extension";
+const extensionFile = (file: string): string =>
+  resolve(EXTENSION_FOLDER, file);
 
 function entryFor(
   id: string,
@@ -87,7 +93,7 @@ function entryFor(
     id,
     source: "unpacked",
     version: "1.0.0",
-    path: "/tmp/extension",
+    path: EXTENSION_FOLDER,
     enabled: true,
     pinned: false,
     installedAt: 1,
@@ -1868,15 +1874,15 @@ describe("extension action buttons and popups", () => {
       },
       icons: { 128: "icons/128.png" },
     });
-    imageSizes.set("/tmp/extension/icons/16.png", 16);
-    imageSizes.set("/tmp/extension/icons/48.png", 48);
-    imageSizes.set("/tmp/extension/icons/128.png", 128);
-    imageSizes.set("/tmp/extension/icons/256.png", 256);
+    imageSizes.set(extensionFile("icons/16.png"), 16);
+    imageSizes.set(extensionFile("icons/48.png"), 48);
+    imageSizes.set(extensionFile("icons/128.png"), 128);
+    imageSizes.set(extensionFile("icons/256.png"), 256);
 
     // The manifest's defaults, with the largest action icon of 128 px or less.
     expect(bridge.actionState(PERSONAL, ALL)).toEqual({
       title: "Count the tabs",
-      icon: "data:image/png;base64,/tmp/extension/icons/48.png",
+      icon: `data:image/png;base64,${extensionFile("icons/48.png")}`,
       badge: "",
       badgeColor: "#5f6368",
       popup: `chrome-extension://${ALL}/popup.html`,
@@ -1981,12 +1987,12 @@ describe("extension action buttons and popups", () => {
     ).rejects.toThrow(extensionBridgeCopy.invalid("action.setIcon"));
     await channel.run("action", caller, "setIcon", [{ path: "icons/16.png" }]);
     expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
-      "data:image/png;base64,/tmp/extension/icons/16.png",
+      `data:image/png;base64,${extensionFile("icons/16.png")}`,
     );
     // Nothing to set puts the manifest's icon back.
     await channel.run("action", caller, "setIcon", [{}]);
     expect(bridge.actionState(PERSONAL, ALL).icon).toBe(
-      "data:image/png;base64,/tmp/extension/icons/48.png",
+      `data:image/png;base64,${extensionFile("icons/48.png")}`,
     );
 
     // A popup outside the extension is refused, and "" means none.
@@ -2203,7 +2209,7 @@ describe("extension action buttons and popups", () => {
     host.manifests.set(HOSTS, { name: "One site" });
     host.manifests.set(NONE, { name: "Nothing" });
     host.manifests.set(EVERY, { name: "Every site" });
-    imageSizes.set("/tmp/extension/icons/48.png", 48);
+    imageSizes.set(extensionFile("icons/48.png"), 48);
     // extensions.json holds them in this order: ALL, HOSTS, NONE, EVERY.
     host.entry(NONE)!.pinned = true;
     host.entry(ALL)!.pinned = true;
@@ -2228,7 +2234,7 @@ describe("extension action buttons and popups", () => {
       id: ALL,
       name: "All tabs",
       title: "Count the tabs",
-      icon: "data:image/png;base64,/tmp/extension/icons/48.png",
+      icon: `data:image/png;base64,${extensionFile("icons/48.png")}`,
       badge: "",
       badgeColor: "#5f6368",
       enabled: true,

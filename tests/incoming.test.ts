@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   afterAll,
   afterEach,
@@ -19,6 +19,7 @@ import {
 
 const exe = "/Applications/Kamapathy.app/Contents/MacOS/Kamapathy";
 const packaged = { defaultApp: false };
+const windows = process.platform === "win32";
 let folder: string;
 const path = (name: string) => join(folder, name);
 const href = (name: string) => pathToFileURL(path(name)).href;
@@ -104,11 +105,18 @@ describe("links and files from other apps", () => {
       path("missing.pdf"),
       href("missing.pdf"),
       "file://host/share/doc.pdf",
-      `file://${folder.replace(/^\//, "")}/doc.pdf`,
+      // file:// before a POSIX folder makes its first segment the host.
+      ...(windows ? [] : [`file://${folder.replace(/^\//, "")}/doc.pdf`]),
       "",
     ];
     for (const value of dropped)
       expect(incomingItem(value, folder), value).toBeUndefined();
+    // A Windows folder starts with its drive, which a file: URL reads as the
+    // start of the path, so there the same spelling names the file.
+    if (windows) {
+      const item = incomingItem(`file://${folder}/doc.pdf`, folder);
+      expect(item && fileURLToPath(item)).toBe(path("doc.pdf"));
+    }
     expect(
       incomingItems(
         [exe, ...dropped, path("doc.pdf"), href("doc.pdf")],
@@ -121,9 +129,12 @@ describe("links and files from other apps", () => {
       "https://a.example/",
     );
     expect(incomingItem(path("Page.HTML"), folder)).toBe(href("Page.HTML"));
-    expect(incomingItem(`file://localhost${path("doc.pdf")}`, folder)).toBe(
-      href("doc.pdf"),
-    );
+    expect(
+      incomingItem(
+        href("doc.pdf").replace("file:///", "file://localhost/"),
+        folder,
+      ),
+    ).toBe(href("doc.pdf"));
   });
 
   it("relative paths", () => {
@@ -133,15 +144,19 @@ describe("links and files from other apps", () => {
     expect(incomingItems([exe, "doc.pdf"], folder, packaged)).toEqual([
       href("doc.pdf"),
     ]);
-    // The second instance's directory, which isFile sees resolved.
-    const isFile = vi.fn((value: string) => value === "/elsewhere/doc.pdf");
-    expect(incomingItem("doc.pdf", "/elsewhere", isFile)).toBe(
-      "file:///elsewhere/doc.pdf",
-    );
+    // The second instance's directory, which isFile sees resolved. Windows
+    // passes it with a drive, which resolve would otherwise read from cwd.
+    const elsewhere = windows ? "C:\\elsewhere" : "/elsewhere";
+    const file = join(elsewhere, "doc.pdf");
+    const url = windows
+      ? "file:///C:/elsewhere/doc.pdf"
+      : "file:///elsewhere/doc.pdf";
+    const isFile = vi.fn((value: string) => value === file);
+    expect(incomingItem("doc.pdf", elsewhere, isFile)).toBe(url);
     expect(
-      incomingItems([exe, "doc.pdf"], "/elsewhere", { ...packaged, isFile }),
-    ).toEqual(["file:///elsewhere/doc.pdf"]);
-    expect(isFile).toHaveBeenCalledWith("/elsewhere/doc.pdf");
+      incomingItems([exe, "doc.pdf"], elsewhere, { ...packaged, isFile }),
+    ).toEqual([url]);
+    expect(isFile).toHaveBeenCalledWith(file);
     expect(cwd).not.toHaveBeenCalled();
   });
 
