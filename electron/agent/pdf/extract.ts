@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { dirname, join, sep } from "node:path";
+import { posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, utilityProcess } from "electron";
 import { ApiError } from "../errors";
@@ -118,10 +118,15 @@ export function forkPdfWorker(): PdfChild {
 }
 
 // The CMaps a predefined encoding needs, next to the app when packaged.
-export function cMapDirectory(): string {
-  if (app.isPackaged) return join(process.resourcesPath, "pdfjs-cmaps") + sep;
+// pdf.js takes the folder only with a trailing "/", and Node reads a Windows
+// path that ends in one.
+export function cMapDirectory(
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const { dirname, join } = platform === "win32" ? win32 : posix;
+  if (app.isPackaged) return `${join(process.resourcesPath, "pdfjs-cmaps")}/`;
   const build = createRequire(import.meta.url).resolve(
     "pdfjs-dist/legacy/build/pdf.mjs",
   );
-  return join(dirname(dirname(dirname(build))), "cmaps") + sep;
+  return `${join(dirname(dirname(dirname(build))), "cmaps")}/`;
 }
