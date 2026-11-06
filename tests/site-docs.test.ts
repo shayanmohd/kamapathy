@@ -15,9 +15,10 @@ const SITE_PACKS =
 describe("what the site says", () => {
   it("reads and acts in frames from any site, and says what stays out of reach", () => {
     expect(html).toContain(
-      "Agent snapshots read open shadow roots and frames from any site, so an agent can fill an embedded checkout form. For a sign-in it hands the space to you, since agents never get your saved passwords.",
+      "Agent snapshots read open shadow roots and frames from any site, so an agent can fill an embedded checkout form. When a sign-in form needs a password the agent wasn't given, it hands the space to you, since Kamapathy never fills saved passwords for agents.",
     );
     expect(html).not.toContain("checkout or sign-in form");
+    expect(html).not.toContain("For a sign-in it hands the space to you");
     expect(html).toContain(
       "Snapshots read open shadow roots and frames, including ones from other sites.",
     );
