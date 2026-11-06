@@ -14,6 +14,7 @@ import {
 import { FILES_SOURCE } from "../electron/agent/dom/files";
 import { pdfDocument, readBlobPdf } from "../electron/agent/dom/pdf";
 import type { Level, Mode } from "../electron/agent/dom/select";
+import { COUNTER_SOURCE } from "../electron/agent/input/counters";
 import { parseSelector } from "../electron/agent/selectors";
 import {
   FRAME_OWNER_SOURCE,
@@ -155,6 +156,95 @@ describe.skipIf(!browserAvailable)("page script in Chromium", () => {
     await page.keyboard.press("Enter");
     expect((await operate("input")).key).toBe(received.key + 1);
     expect((await snapshot()).text).toMatch(/Entered/);
+  }, 20000);
+
+  // Chromium fires no mousedown for a press on a control that cancels its
+  // pointerdown or is disabled, and no pointerdown for a press while
+  // another button is held. Section 1's init script and the input
+  // operation's own listeners, for a document the script missed, count
+  // each press once all the same.
+  const PRESS_PAGE = `<style>button{position:absolute;left:20px;width:100px;height:40px}</style>
+<button type="button" id="cancel" style="top:20px">Cancel</button>
+<button type="button" id="plain" style="top:80px">Plain</button>
+<button type="button" id="off" style="top:140px" disabled>Off</button>
+<script>
+document.getElementById("cancel").addEventListener("pointerdown", (event) => event.preventDefault());
+</script>`;
+  const centreOf = (id: string) =>
+    page.evaluate((key) => {
+      const box = document.getElementById(key)!.getBoundingClientRect();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    }, id);
+
+  it("counts each press once, whatever the page cancels", async () => {
+    for (const installed of [true, false]) {
+      await page?.close();
+      page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      await page.setContent(PRESS_PAGE);
+      if (installed) await page.evaluate(`(() => {${COUNTER_SOURCE}})()`);
+      const counted = async (gesture: () => Promise<void>) => {
+        const before = (await operate("input")).mouse;
+        await gesture();
+        return (await operate("input")).mouse - before;
+      };
+      for (const id of ["plain", "cancel", "off"]) {
+        const { x, y } = await centreOf(id);
+        expect(
+          await counted(() => page.mouse.click(x, y)),
+          `${id}, counters installed: ${installed}`,
+        ).toBe(1);
+      }
+      // A right press while the left is held, after a left press the page
+      // let through and after one it cancelled.
+      for (const id of ["plain", "cancel"]) {
+        const { x, y } = await centreOf(id);
+        await page.mouse.move(x, y);
+        expect(
+          await counted(async () => {
+            await page.mouse.down();
+            await page.mouse.down({ button: "right" });
+            await page.mouse.up({ button: "right" });
+            await page.mouse.up();
+          }),
+          `${id} chord, counters installed: ${installed}`,
+        ).toBe(2);
+      }
+    }
+  }, 20000);
+
+  it("counts no input the page dispatches itself", async () => {
+    for (const installed of [true, false]) {
+      await page?.close();
+      page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      await page.setContent(PRESS_PAGE);
+      if (installed) await page.evaluate(`(() => {${COUNTER_SOURCE}})()`);
+      const { x, y } = await centreOf("plain");
+      await operate("input");
+      await page.mouse.move(x, y);
+      const before = await operate("input");
+      expect(before.landing, `counters installed: ${installed}`).toBeDefined();
+      // A page can raise every event the counters listen to, a press and a
+      // move at a point of its own choosing among them.
+      await page.evaluate(() => {
+        for (const event of [
+          new PointerEvent("pointerdown", { button: 0, buttons: 1 }),
+          new PointerEvent("pointermove", {
+            clientX: 300,
+            clientY: 200,
+            button: 2,
+            buttons: 3,
+          }),
+          new KeyboardEvent("keydown", { key: "a" }),
+          new DragEvent("dragstart"),
+        ])
+          dispatchEvent(event);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        await operate("input"),
+        `counters installed: ${installed}`,
+      ).toEqual(before);
+    }
   }, 20000);
 
   it("scrolls the frame around a target instead of the page", async () => {

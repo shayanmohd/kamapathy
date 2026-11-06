@@ -1539,7 +1539,7 @@ Show the commands, or help on one
 | `not_selectable` | 422 | not retryable |  | No select at, for or inside the target. |
 | `not_focusable` | 422 | not retryable |  | Nothing focusable at, around or inside the target. |
 | `ambiguous_field` | 422 | not retryable | `candidates` | Retargeting found several candidates. |
-| `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry. |
+| `fill_not_accepted` | 422 | not retryable | `match` | The field kept its old value after one retry, or a click to retry would not land on it. |
 | `point_outside_viewport` | 422 | not retryable | `width`, `height` | The point lies outside the page's viewport. |
 | `clip_outside_page` | 422 | not retryable | `clip` | The clip misses the viewport, or the document with fullPage. |
 | `screenshot_too_large` | 422 | not retryable | `width`, `height`, `maxSide`, `maxPixels` | The image would be larger than 16,384 pixels on a side or 33,554,432 pixels in all. |
