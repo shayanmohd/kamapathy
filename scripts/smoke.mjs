@@ -575,10 +575,20 @@ try {
   let state = await page.evaluate(() => window.kamapathy.getState());
   assert.equal(state.platform, process.platform);
   checked("desktop bridge and platform detection");
+  // macOS answers captures of a tab no shown window holds without the
+  // feature, so Kamapathy adds it on Windows and Linux alone.
+  const surfaceCopies = process.platform === "win32" || process.platform === "linux";
   const enabledFeatures = (target) =>
-    target.evaluate(({ app }) => app.commandLine.getSwitchValue("enable-features"));
-  assert.equal(await enabledFeatures(app), "CDPScreenshotNewSurface");
-  checked("Chromium copies screenshots from a new surface");
+    target.evaluate(({ app }) =>
+      app.commandLine.hasSwitch("enable-features")
+        ? app.commandLine.getSwitchValue("enable-features")
+        : null,
+    );
+  assert.equal(
+    await enabledFeatures(app),
+    surfaceCopies ? "CDPScreenshotNewSurface" : null,
+  );
+  checked("Chromium copies screenshots straight from the surface on Windows and Linux only");
   // The dialog's name follows its step, so it is found by class.
   const welcome = page.locator(".welcome-modal");
   await welcome.getByRole("heading", { name: "Welcome to Kamapathy" }).waitFor();
@@ -672,9 +682,11 @@ try {
   try {
     assert.equal(
       await enabledFeatures(secondApp),
-      "SmokeLauncherFeature,CDPScreenshotNewSurface",
+      surfaceCopies
+        ? "SmokeLauncherFeature,CDPScreenshotNewSurface"
+        : "SmokeLauncherFeature",
     );
-    checked("features a launcher enables stay beside the one Kamapathy enables");
+    checked("features a launcher enables stay, beside the one Kamapathy enables on Windows and Linux");
     const secondPage = await secondApp.firstWindow();
     await secondPage.waitForSelector(".home-page, .web-page");
     await secondPage.waitForFunction(() => !!window.kamapathy);

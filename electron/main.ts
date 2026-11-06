@@ -120,16 +120,24 @@ if (process.platform === "linux") app.setDesktopName("app.kamapathy.browser.desk
 // root, where Chromium needs --no-sandbox, this switch would reach the
 // network service and other helpers, which then refuse to start.
 if (process.getuid?.() !== 0) app.enableSandbox();
-// Chromium answers a page screenshot only once a fresh frame has reached the
-// screen, which on Windows and Linux never happens for a tab that no shown
-// window holds. This feature has it copy the fresh frame from a new surface.
-app.commandLine.appendSwitch(
-  "enable-features",
-  withFeature(
-    app.commandLine.getSwitchValue("enable-features"),
-    "CDPScreenshotNewSurface",
-  ),
-);
+// Chromium answers a page screenshot once the frame it forces has been
+// presented. On Windows and Linux a tab that no shown window holds, such as
+// one lent to the capture window, may never present it, and this feature has
+// Chromium ask the view's surface for the copy at once instead. macOS answers
+// those captures without it. In Chromium 152 a renderer exit while that copy
+// waits crashes the browser: OnSnapshotFromSurfaceReceived in
+// render_widget_host_impl.cc retries through the view RendererExited has
+// cleared. So every Page.captureScreenshot Kamapathy sends runs where the
+// view draws (BrowserController.withVisibleView), and that retry needs
+// reading again on each Electron upgrade until it checks for the view.
+if (process.platform === "win32" || process.platform === "linux")
+  app.commandLine.appendSwitch(
+    "enable-features",
+    withFeature(
+      app.commandLine.getSwitchValue("enable-features"),
+      "CDPScreenshotNewSurface",
+    ),
+  );
 // Every session, worker and service worker presents Chrome's reduced user agent.
 app.userAgentFallback = chromeUserAgent(
   app.userAgentFallback,
