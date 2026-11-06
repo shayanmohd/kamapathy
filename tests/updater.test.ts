@@ -39,6 +39,7 @@ vi.mock("electron", () => ({
   session: { fromPartition: vi.fn() },
 }));
 
+const posix = process.platform !== "win32";
 const START = Date.parse("2026-10-18T10:00:00.000Z");
 const MINUTE = 60000;
 const HOUR = 3600000;
@@ -611,10 +612,13 @@ describe("the updater", () => {
     expect(started.started).toBe(true);
     expect(started.status.state).toBe("downloading");
     const file = h.file(NEXT);
-    expect((statSync(join(h.directory, NEXT)).mode & 0o777).toString(8)).toBe(
-      "700",
-    );
-    expect((statSync(`${file}.part`).mode & 0o777).toString(8)).toBe("600");
+    // Windows has no POSIX mode bits.
+    if (posix) {
+      expect(
+        (statSync(join(h.directory, NEXT)).mode & 0o777).toString(8),
+      ).toBe("700");
+      expect((statSync(`${file}.part`).mode & 0o777).toString(8)).toBe("600");
+    }
 
     stream.push(installerData.subarray(0, 600));
     for (let step = 0; step < 50 && !h.updater.state.progress; step++)
@@ -628,9 +632,10 @@ describe("the updater", () => {
     await h.settled();
 
     expect(readFileSync(file).equals(installerData)).toBe(true);
-    expect((statSync(file).mode & 0o777).toString(8)).toBe("644");
+    if (posix) expect((statSync(file).mode & 0o777).toString(8)).toBe("644");
     expect(readFileSync(`${file}.sha256`, "utf8")).toBe(hashOf(installerData));
-    expect((statSync(`${file}.sha256`).mode & 0o777).toString(8)).toBe("600");
+    if (posix)
+      expect((statSync(`${file}.sha256`).mode & 0o777).toString(8)).toBe("600");
     expect(existsSync(`${file}.part`)).toBe(false);
     expect(existsSync(join(h.directory, "0.4.0"))).toBe(false);
     expect(h.updater.state).toMatchObject({
@@ -658,11 +663,12 @@ describe("the updater", () => {
     await appImage.updater.download();
     await appImage.settled();
     expect(appImage.updater.state.state).toBe("ready");
-    expect(
-      (statSync(appImage.file(NEXT, "linux-appimage")).mode & 0o777).toString(
-        8,
-      ),
-    ).toBe("755");
+    if (posix)
+      expect(
+        (statSync(appImage.file(NEXT, "linux-appimage")).mode & 0o777).toString(
+          8,
+        ),
+      ).toBe("755");
   });
 
   it("deletes a mismatched download with update_verify_failed", async () => {

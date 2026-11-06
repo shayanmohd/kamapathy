@@ -1042,11 +1042,17 @@ export async function importToolExport(pack, tool) {
 }
 
 /** The first frame inside the pack, as "tools/search-repositories.mjs:31:9". */
-export function toolFrame(stack, pack) {
+export function toolFrame(stack, pack, platform = process.platform) {
   // Node names the module by the URL the import used; a loader that reports
-  // the path instead is read too.
-  const prefixes = [`${pathToFileURL(pack.dir).href}/`, `${pack.dir}${sep}`];
-  for (const text of String(stack ?? "").split("\n"))
+  // the path instead is read too. Windows takes either slash, and Vite's
+  // loader, which Vitest runs, writes forward ones.
+  const slashed = (value) =>
+    platform === "win32" ? value.replaceAll("\\", "/") : value;
+  const prefixes = [
+    `${pathToFileURL(pack.dir).href}/`,
+    `${slashed(pack.dir)}/`,
+  ];
+  for (const text of slashed(String(stack ?? "")).split("\n"))
     for (const prefix of prefixes) {
       const at = text.indexOf(prefix);
       if (at < 0) continue;
@@ -1056,9 +1062,7 @@ export function toolFrame(stack, pack) {
         /\?v=[0-9a-f]+(?=:)/,
         "",
       );
-      const found = /^(.+):(\d+):(\d+)$/.exec(frame);
-      if (found)
-        return `${found[1].split(sep).join("/")}:${found[2]}:${found[3]}`;
+      if (/^.+:\d+:\d+$/.test(frame)) return frame;
     }
   return undefined;
 }

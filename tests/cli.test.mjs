@@ -3750,6 +3750,11 @@ describe("scripted sessions", () => {
     expect(existsSync(globalThis.__scripted.path)).toBe(false);
   });
 
+  // Vite's module runner names a script run in this process by a
+  // forward-slash path on Windows, a form Node never prints there, so only
+  // POSIX shows where it failed. Spawned runs show it on every platform.
+  const failedAt = posix ? "  at -e:1:\\d+\\n" : "";
+
   it("ends a failing script with the error's code and message and exit status 1", async () => {
     const api = fakeApi({
       ...routes,
@@ -3771,7 +3776,7 @@ describe("scripted sessions", () => {
       ),
     ).toBe(1);
     expect(stale.text()).toMatch(
-      /^error: stale_ref: Observe again\.\n  at -e:1:\d+\n$/,
+      new RegExp(`^error: stale_ref: Observe again\\.\\n${failedAt}$`),
     );
     const plain = sink();
     expect(
@@ -3782,7 +3787,7 @@ describe("scripted sessions", () => {
         stderr: plain,
       }),
     ).toBe(1);
-    expect(plain.text()).toMatch(/^error: boom\n  at -e:1:\d+\n$/);
+    expect(plain.text()).toMatch(new RegExp(`^error: boom\\n${failedAt}$`));
     const missing = sink();
     expect(
       await runCli(["run", "-e", 'await space("space-9")'], {
@@ -4010,7 +4015,7 @@ describe("scripted sessions", () => {
           stdout: "kept\n",
           stderr: expect.stringMatching(
             new RegExp(
-              `^error: human_control: ${message}\\n  at -e:1:\\d+\\n${hold}$`,
+              `^error: human_control: ${message}\\n${failedAt}${hold}$`,
             ),
           ),
         },
@@ -4021,9 +4026,7 @@ describe("scripted sessions", () => {
           status: 1,
           stdout: "kept\n",
           stderr: expect.stringMatching(
-            new RegExp(
-              `^error: human_control: ${message}\\n  at -e:1:\\d+\\n$`,
-            ),
+            new RegExp(`^error: human_control: ${message}\\n${failedAt}$`),
           ),
         },
       ],
@@ -4115,7 +4118,7 @@ describe("scripted sessions", () => {
       status: 1,
       stdout: "x\n",
       stderr: expect.stringMatching(
-        /^error: space_ended: Finished\.\n  at -e:1:\d+\n$/,
+        new RegExp(`^error: space_ended: Finished\\.\\n${failedAt}$`),
       ),
     });
   });
@@ -4193,7 +4196,7 @@ describe("scripted sessions", () => {
       ),
     ).toMatchObject({
       status: 1,
-      stderr: expect.stringMatching(/^error: boom\n  at -e:1:\d+\n$/),
+      stderr: expect.stringMatching(new RegExp(`^error: boom\\n${failedAt}$`)),
     });
     expect(calls.map(([name]) => name)).toEqual(["first", "second"]);
     calls.length = 0;
@@ -4276,7 +4279,7 @@ describe("scripted sessions", () => {
     });
   });
 
-  it("SIGTERM aborts the call in progress, flushes and exits 143 with interrupted", async () => {
+  it("SIGTERM aborts the call in progress, flushes and exits 143 with interrupted; Windows, which cannot deliver it, ends the run at once", async () => {
     const { paths: agent, env: profileEnv } = await profile();
     let closed = false;
     let arrived;
@@ -4310,11 +4313,17 @@ describe("scripted sessions", () => {
     await request;
     child.kill("SIGTERM");
     const status = await new Promise((done) => child.once("close", done));
-    expect([status, stdout, stderr]).toEqual([
-      143,
-      "started\n",
-      "error: interrupted: The run was stopped by SIGTERM. A call in progress may still have taken effect, so inspect the page before retrying.\n",
-    ]);
+    // Windows ends the process without running its handlers, so the held
+    // output and the interrupted line never print.
+    expect([status, stdout, stderr]).toEqual(
+      posix
+        ? [
+            143,
+            "started\n",
+            "error: interrupted: The run was stopped by SIGTERM. A call in progress may still have taken effect, so inspect the page before retrying.\n",
+          ]
+        : [null, "", ""],
+    );
     await expect.poll(() => closed).toBe(true);
   }, 20000);
 
@@ -4681,12 +4690,14 @@ describe("scripted sessions", () => {
     expect(workspacePath({ KAMAPATHY_USER_DATA: userData })).toBe(
       join(userData, "workspace"),
     );
+    // An absolute folder on each platform: a Windows one has a drive.
+    const cwd = posix ? "/home/me" : "C:\\Users\\me";
     expect(
       workspacePath(
         { KAMAPATHY_USER_DATA: userData, KAMAPATHY_WORKSPACE: "tasks" },
-        "/home/me",
+        cwd,
       ),
-    ).toBe(join("/home/me", "tasks"));
+    ).toBe(join(cwd, "tasks"));
     const workspace = join(userData, "workspace");
     await mkdir(workspace, { mode: 0o700 });
     const dotEnv = join(workspace, ".env");
