@@ -11845,14 +11845,14 @@ describe("local automation socket", () => {
     )!;
     expect(route.budget).toEqual({
       compute: "mouseClickBudget",
-      maxMs: 40100,
+      maxMs: 43100,
     });
     expect(route.lane).toBe("space");
     expect(route.follow).toBe(true);
     expect(route.label).toBe(false);
     expect(route.since).toBe(4);
     expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 20 })).toBe(
-      15160,
+      18160,
     );
   });
 

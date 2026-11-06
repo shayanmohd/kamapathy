@@ -1367,7 +1367,7 @@ export const ROUTES = [
     "{ ok: true, url, input, loading?, popups?, dialog?, moreDialogs?, download?, deniedRequests? }",
     FIELDS.mouseClick,
     {
-      budget: { compute: "mouseClickBudget", maxMs: 40100 },
+      budget: { compute: "mouseClickBudget", maxMs: 43100 },
       follow: true,
       since: 4,
     },
@@ -1864,8 +1864,9 @@ export const COMPUTE = {
     (body.ref || body.selector ? timeout(body, 3000) : 0) +
     gaps(1, body) +
     AFTER_INPUT_MS,
+  // The wait for its move to land, which no timeoutMs bounds.
   mouseClickBudget: (body) =>
-    gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
+    3000 + gaps(2 * clicks(body) - 1, body) + AFTER_INPUT_MS,
   typeBudget: (body) =>
     10000 +
     (typeof body.delayMs === "number" ? body.delayMs : 0) *

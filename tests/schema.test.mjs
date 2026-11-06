@@ -884,9 +884,10 @@ describe("API schema", () => {
     expect(
       COMPUTE.pressBudget({ key: "a", selector: "#name", delayMs: 5000 }),
     ).toBe(23100);
-    expect(COMPUTE.mouseClickBudget({})).toBe(15100);
+    // mouse/click also waits up to 3000 ms for its move to land.
+    expect(COMPUTE.mouseClickBudget({})).toBe(18100);
     expect(COMPUTE.mouseClickBudget({ clickCount: 2, delayMs: 5000 })).toBe(
-      30100,
+      33100,
     );
     expect(COMPUTE.typeBudget({ text: "hello" })).toBe(10000);
     expect(COMPUTE.typeBudget({ text: "hello", delayMs: 1000 })).toBe(15000);
