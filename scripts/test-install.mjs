@@ -2,6 +2,7 @@
 // platform against a local release server, in temporary folders.
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -37,7 +38,8 @@ const server = await startReleaseServer({
 // Windows PowerShell ends its lines with CRLF.
 const lines = (text) => text.split(/\r?\n/).filter((line) => line !== "");
 
-// A home, a temporary folder and an install folder of its own per run.
+// A home, a temporary folder, an install folder and, for Windows, an HKCU
+// subkey for uninstall entries of its own per run.
 function area(name) {
   const base = join(workspace, name);
   const paths = {
@@ -46,7 +48,7 @@ function area(name) {
     dir: join(base, "apps"),
   };
   for (const path of Object.values(paths)) mkdirSync(path, { recursive: true });
-  return paths;
+  return { ...paths, key: `Software\\Kamapathy install test ${randomUUID()}` };
 }
 
 function offer(name, data, sums = sha256sums([[name, data]])) {
@@ -106,17 +108,15 @@ const sh = (args, { home, temp }) =>
     KAMAPATHY_RELEASES_API: server.listUrl,
   });
 
-const powershell = (args, { home, temp }) =>
+// The script reads the run's own uninstall entries, never this computer's.
+const powershell = (
+  args,
+  { home, temp, key },
+  { script = join(SCRIPTS, "install.ps1"), env = {} } = {},
+) =>
   run(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      join(SCRIPTS, "install.ps1"),
-      ...args,
-    ],
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...args],
     {
       ...process.env,
       USERPROFILE: home,
@@ -124,6 +124,8 @@ const powershell = (args, { home, temp }) =>
       TEMP: temp,
       TMP: temp,
       KAMAPATHY_RELEASES_API: server.listUrl,
+      KAMAPATHY_UNINSTALL_KEY: key,
+      ...env,
     },
   );
 
@@ -311,6 +313,53 @@ function linuxChecks() {
 function windowsChecks() {
   const name = `Kamapathy-${VERSION}-windows-x64-setup.exe`;
   const data = Buffer.from("stub installer\n");
+  const modules = pwshModulePath();
+  // Without PowerShell 7 no module folder of its can reach Windows PowerShell.
+  if (!modules)
+    console.log("SKIP checks under PowerShell 7's module path: no pwsh.exe");
+  const underPwsh = [
+    [
+      "Windows verifies an installer under PowerShell 7's module path",
+      async () => {
+        const where = area("windows-pwsh");
+        offer(name, data);
+        const run = await powershell(["-NoRun"], where, {
+          env: { PSModulePath: modules },
+        });
+        assert.equal(run.status, 0, run.text);
+        const path = join(where.home, "Downloads", name);
+        assert.equal(run.out.at(-1), `downloaded ${path}`);
+        assert.ok(readFileSync(path).equals(data));
+      },
+    ],
+    [
+      "Windows checks a pinned publisher under PowerShell 7's module path",
+      async () => {
+        const where = area("windows-publisher");
+        const publisher = "Kamapathy test publisher";
+        const source = readFileSync(join(SCRIPTS, "install.ps1"), "utf8");
+        const pinned = source.replace(
+          /^\$PUBLISHER = '[^']*'$/m,
+          () => `$PUBLISHER = '${publisher}'`,
+        );
+        assert.notEqual(pinned, source, "install.ps1 sets no $PUBLISHER");
+        const script = join(where.dir, "install.ps1");
+        writeFileSync(script, pinned);
+        offer(name, data);
+        const run = await powershell(["-NoRun"], where, {
+          script,
+          env: { PSModulePath: modules },
+        });
+        assert.equal(run.status, 1, run.text);
+        assert.equal(
+          run.err.at(-1),
+          `Kamapathy install: ${name} is not signed by ${publisher}, so nothing was installed.`,
+          run.text,
+        );
+        assert.equal(existsSync(join(where.home, "Downloads", name)), false);
+      },
+    ],
+  ];
   return [
     [
       "Windows deletes an installer that fails its checksum",
@@ -335,8 +384,119 @@ function windowsChecks() {
         assert.equal(skippedFetched(), false, "fetched the skipped release");
       },
     ],
+    ...(modules ? underPwsh : []),
+    [
+      "Windows finds Kamapathy installed in a folder the person chose",
+      async () => {
+        const where = area("windows-folder");
+        const folder = join(where.dir, "Chosen", "Kamapathy");
+        const app = join(folder, "Kamapathy.exe");
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(app, "");
+        const requests = server.requests.length;
+        try {
+          await writeEntries(where.key, {
+            [randomUUID()]: uninstallEntry(folder),
+          });
+          const run = await powershell(["-NoRun"], where);
+          assert.equal(run.status, 0, run.text);
+          assert.equal(run.out.at(-1), `already installed ${app}`);
+          assert.equal(server.requests.length, requests, "looked for releases");
+        } finally {
+          await removeKey(where.key);
+        }
+      },
+    ],
+    [
+      "Windows passes over entries without Kamapathy.exe or of other products",
+      async () => {
+        const where = area("windows-entries");
+        const removed = join(where.dir, "Removed", "Kamapathy");
+        const tools = join(where.dir, "Kamapathy Tools");
+        mkdirSync(removed, { recursive: true });
+        mkdirSync(tools, { recursive: true });
+        writeFileSync(join(tools, "Kamapathy.exe"), "");
+        offer(name, data);
+        try {
+          await writeEntries(where.key, {
+            removed: uninstallEntry(removed),
+            tools: {
+              ...uninstallEntry(tools),
+              DisplayName: "Kamapathy Tools 1.0.0",
+              UninstallString: `"${join(tools, "Uninstall Kamapathy Tools.exe")}" /currentuser`,
+              InstallLocation: tools,
+            },
+            // The entry the script used to trust, naming no folder.
+            bare: { DisplayName: "Kamapathy" },
+          });
+          const run = await powershell(["-NoRun"], where);
+          assert.equal(run.status, 0, run.text);
+          const path = join(where.home, "Downloads", name);
+          assert.equal(run.out.at(-1), `downloaded ${path}`);
+        } finally {
+          await removeKey(where.key);
+        }
+      },
+    ],
   ];
 }
+
+// The PSModulePath a PowerShell 7 process hands its children, with its own
+// module folders first, or undefined without PowerShell 7.
+function pwshModulePath() {
+  const result = spawnSync(
+    "pwsh.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", "$env:PSModulePath"],
+    { encoding: "utf8" },
+  );
+  if (result.error?.code === "ENOENT") return undefined;
+  assert.equal(result.status, 0, `${result.error ?? ""}${result.stderr}`);
+  return result.stdout.trim();
+}
+
+// The values electron-builder's installer writes to its uninstall entry.
+const uninstallEntry = (folder) => ({
+  DisplayName: `Kamapathy ${VERSION}`,
+  DisplayVersion: VERSION,
+  UninstallString: `"${join(folder, "Uninstall Kamapathy.exe")}" /currentuser`,
+  DisplayIcon: `${join(folder, "Kamapathy.exe")},0`,
+});
+
+// Windows PowerShell with .NET calls only, so no PSModulePath can break it.
+async function registry(script) {
+  const encoded = Buffer.from(
+    `$ErrorActionPreference = 'Stop'\n${script}`,
+    "utf16le",
+  ).toString("base64");
+  const result = await run(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    process.env,
+  );
+  assert.equal(result.status, 0, result.text);
+}
+
+const literal = (text) => `'${text.replaceAll("'", "''")}'`;
+
+// One subkey of `key` per entry, holding REG_SZ values.
+const writeEntries = (key, entries) =>
+  registry(
+    Object.entries(entries)
+      .flatMap(([name, values]) => [
+        `$entry = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(${literal(`${key}\\${name}`)})`,
+        ...Object.entries(values).map(
+          ([value, data]) =>
+            `$entry.SetValue(${literal(value)}, ${literal(data)})`,
+        ),
+        "$entry.Close()",
+      ])
+      .join("\n"),
+  );
+
+const removeKey = (key) =>
+  registry(
+    `[Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree(${literal(key)}, $false)`,
+  );
 
 const parts = {
   darwin: macChecks,
