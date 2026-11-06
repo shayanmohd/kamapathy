@@ -4131,6 +4131,40 @@ console.log(JSON.stringify({ busy, pending, after: await page.evaluate(() => 1 +
     "cdp_method_blocked",
   );
   passed("Target and cookie commands are blocked");
+  // Before Electron 44.5.0 a value of another type for an optional string
+  // parameter aborted the main process.
+  for (const [method, params] of [
+    ["Page.navigate", { url: `${fixture.origin}/scripts/cookie`, referrer: 1 }],
+    ["Runtime.evaluate", { expression: "6 * 7", objectGroup: {} }],
+    ["Page.captureScreenshot", { format: 5 }],
+  ]) {
+    const mistyped = await callApi(`/tabs/${scriptTab.id}/cdp`, "POST", {
+      method,
+      params,
+    });
+    const protocolError = (await mistyped.json()).error;
+    assert.deepEqual(
+      [
+        mistyped.status,
+        protocolError?.code,
+        protocolError?.method,
+        protocolError?.protocolCode,
+      ],
+      [422, "cdp_error", method, -32602],
+      JSON.stringify(protocolError),
+    );
+  }
+  assert.equal((await cli(["health"])).output.trim(), `ok Kamapathy ${packageVersion}`);
+  assert.equal((await observe(scriptTab.id)).title, "Event log");
+  assert.equal(
+    (await json(["tabs", scriptSpace.id])).tabs.find(
+      (item) => item.id === scriptTab.id,
+    ).url,
+    `${fixture.origin}/input/events`,
+  );
+  passed(
+    "a number or an object for an optional string parameter of Page.navigate, Runtime.evaluate and Page.captureScreenshot is a protocol error, and the browser still answers health and a snapshot",
+  );
   // The page sends its cookie with every request, and the agent's own
   // Network session records them with the value hidden.
   await json(["navigate", scriptTab.id, `${fixture.origin}/scripts/cookie`]);
