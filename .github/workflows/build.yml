@@ -166,6 +166,14 @@ jobs:
         run: node scripts/check-bundled-skill.mjs
       - name: Verify packaged registrations
         run: node scripts/test-branding.mjs --packaged
+      - name: Test the packaged app
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node scripts/test-packaged.mjs
+          else
+            node scripts/test-packaged.mjs
+          fi
       - name: Upload installable artifacts
         uses: actions/upload-artifact@v4
         with:
