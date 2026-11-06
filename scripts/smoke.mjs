@@ -3515,9 +3515,8 @@ try {
     const entry = join(agent.folder, "kamapathy");
     entries.push(entry);
     assert.ok(existsSync(join(entry, "SKILL.md")), entry);
-    if (process.platform === "win32")
-      assert.ok(lstatSync(entry).isDirectory());
-    else assert.equal(readlinkSync(entry), stable);
+    // A Windows entry is a junction, which Node reads as a link too.
+    assert.equal(readlinkSync(entry), stable);
   }
   assert.equal(setup.command.state, "on");
   assert.ok(existsSync(setup.command.path));
