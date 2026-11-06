@@ -1,7 +1,7 @@
 import { ApiError, fail } from "./errors";
 import { CdpTimeoutError, ContextLostError } from "./session/errors";
 import type { TabSession } from "./session/tab-session";
-import type { Step } from "./session/types";
+import type { SendStep, Step } from "./session/types";
 
 // How long an agent's own source may be, per field.
 export const SCRIPT_LIMIT = 16384;
@@ -21,7 +21,8 @@ const PROBE_EXECUTION_MS = 200;
 const PROBE_TRANSPORT_MS = 250;
 // How long a termination may take before the page counts as silent.
 const TERMINATE_MS = 1000;
-// How close to the execution limit an internal error counts as that limit.
+// How long before the execution limit is due an internal error still counts
+// as that limit.
 const LIMIT_WINDOW_MS = 100;
 
 // An agent's page script: an expression, or a function source called with
@@ -233,6 +234,15 @@ export interface Recovery {
   pageResponsive: boolean;
 }
 
+// The trivial question that needs the page's main thread, which a running
+// script holds.
+const ask = (session: TabSession, step: SendStep) =>
+  session.send(
+    "Runtime.evaluate",
+    { expression: "1", returnByValue: true, timeout: PROBE_EXECUTION_MS },
+    step,
+  );
+
 // Whether the page still answers. A probe gets 200 ms of execution and
 // 250 ms of transport, and one more try on its own limit.
 export async function probePage(
@@ -240,35 +250,31 @@ export async function probePage(
   step: Step,
 ): Promise<boolean> {
   const once = () =>
-    session
-      .send(
-        "Runtime.evaluate",
-        { expression: "1", returnByValue: true, timeout: PROBE_EXECUTION_MS },
-        {
-          deadline: Date.now() + PROBE_TRANSPORT_MS,
-          timeoutMs: PROBE_TRANSPORT_MS,
-          signal: step.signal,
-        },
-      )
-      .then(
-        () => true,
-        () => false,
-      );
+    ask(session, {
+      deadline: Date.now() + PROBE_TRANSPORT_MS,
+      timeoutMs: PROBE_TRANSPORT_MS,
+      signal: step.signal,
+    }).then(
+      () => true,
+      () => false,
+    );
   return (await once()) || (await once());
 }
 
 // The three outcomes of a limit, shared with the function wait and with
 // cdp_timeout. Chromium's own limit says both answers at once; a transport
-// limit asks the page, then stops it and asks again.
+// limit asks the page, then stops it and asks again. A page that still held
+// the script at its own limit answers only once that limit has stopped it.
 export async function recoverFromTimeout(
   session: TabSession,
   step: Step,
   hitExecutionLimit: boolean,
+  heldAtLimit = false,
 ): Promise<Recovery> {
   if (hitExecutionLimit)
     return { executionStopped: true, pageResponsive: true };
   if (await probePage(session, step))
-    return { executionStopped: false, pageResponsive: true };
+    return { executionStopped: heldAtLimit, pageResponsive: true };
   await session
     .send(
       "Runtime.terminateExecution",
@@ -308,18 +314,27 @@ export function evaluationTimeout(
     },
   );
 }
-// Chromium names a termination when it knows one; its own execution limit
-// arrives as an internal error, so the moment it lands tells the rest.
+// Chromium names a termination when it knows one. Its own execution limit
+// arrives as an internal error, as do a value it cannot return and a
+// termination from elsewhere, and a loaded machine delivers it any time
+// before the transport limit. So an internal error is that limit once the
+// limit is due, unless the page answered the question asked at the limit
+// first.
 const STOPPED = /terminat|timed out|timeout/i;
 const INTERNAL = /internal error/i;
-function hitExecutionLimit(error: unknown, limitAt: number): boolean {
+function hitExecutionLimit(
+  error: unknown,
+  limitAt: number,
+  answeredFirst: boolean,
+): boolean {
   // A failure with a meaning of its own, such as a page exception, is not
   // the limit however it reads.
   if (error instanceof ApiError || !(error instanceof Error)) return false;
   if (STOPPED.test(error.message)) return true;
   return (
     INTERNAL.test(error.message) &&
-    Math.abs(Date.now() - limitAt) <= LIMIT_WINDOW_MS
+    !answeredFirst &&
+    Date.now() >= limitAt - LIMIT_WINDOW_MS
   );
 }
 
@@ -333,15 +348,36 @@ export async function evaluateScript(
 ): Promise<ScriptValue> {
   const executionMs = Math.max(1, step.timeoutMs - EXECUTION_MARGIN_MS);
   const limitAt = Date.now() + executionMs;
+  // When the script has not answered by its own limit, Kamapathy asks the
+  // page the trivial question. Chromium answers one session's commands in
+  // order, and the limit covers only the script's own run, so a page that
+  // answers the question first was waiting on a promise the script
+  // returned. Both answers can land in one task, where their callbacks run
+  // in either order, so the page's answer counts from the task after it.
+  let asked = false;
+  let answered = false;
+  const question = setTimeout(() => {
+    asked = true;
+    ask(session, {
+      deadline: step.deadline,
+      signal: step.signal,
+      guard: step.guard,
+    }).then(
+      () => setTimeout(() => (answered = true)),
+      () => {},
+    );
+  }, executionMs);
   try {
     return await evaluateOnce(session, source, { ...step, executionMs });
   } catch (error) {
-    const execution = hitExecutionLimit(error, limitAt);
+    const execution = hitExecutionLimit(error, limitAt, answered);
     if (!execution && !(error instanceof CdpTimeoutError)) throw error;
     throw evaluationTimeout(
       step.timeoutMs,
-      await recoverFromTimeout(session, step, execution),
+      await recoverFromTimeout(session, step, execution, asked && !answered),
     );
+  } finally {
+    clearTimeout(question);
   }
 }
 
