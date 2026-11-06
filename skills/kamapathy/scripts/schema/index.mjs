@@ -29,7 +29,7 @@ export {
 export { OBJECTS } from "./objects.mjs";
 export { SELECTOR_FORMS } from "./selectors.mjs";
 
-export const CLIENT_VERSION = "0.2.0";
+export const CLIENT_VERSION = "0.3.0";
 export const API_LEVEL = 4;
 
 export const ENTRIES = [

@@ -32,7 +32,7 @@ describe("desktop session persistence", () => {
         },
       }),
     );
-    const restored = readState(path, "darwin", "0.2.0");
+    const restored = readState(path, "darwin", original.version);
     expect(restored.settings).toEqual({
       ...original.settings,
       showBookmarksBar: true,

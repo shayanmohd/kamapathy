@@ -1,6 +1,6 @@
 # Kamapathy API reference
 
-Client 0.2.0, API level 4. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
+Client 0.3.0, API level 4. Generated from the schema by `npm run docs:api`; edit the schema, not this file.
 
 ## Globals
 

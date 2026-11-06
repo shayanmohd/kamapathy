@@ -11,6 +11,30 @@ export interface ReleaseNote {
 // Newest first. docs/releases.md says to add the version's entry before a build.
 export const releaseNotes: readonly ReleaseNote[] = [
   {
+    version: "0.3.0",
+    headline:
+      "Saved passwords, extensions and update checks, and agents that do more on a page",
+    changes: [
+      "Kamapathy now asks GitHub once a day for a new version, sending no ID or usage data. Download it or turn this off in Settings, under Updates.",
+      "Kamapathy saves and fills your passwords, kept encrypted on this computer, and can import them from other browsers. No agent command reaches them.",
+      "Add extensions from the Chrome Web Store, or bring over those you added from it in another browser. They also run in agent spaces that share your sign-ins.",
+      "Make Kamapathy your default browser in Settings. Links and files from other apps open in a personal space no agent can reach.",
+      "An agent's own cursor, its status and a label for each step show what it is doing, and Stop ends its work in one space.",
+      "Sites ask for your location, camera, microphone or a device in a bar above the page, and no agent can answer for you.",
+    ],
+    agents: [
+      "An agent can ask to use one of your spaces, and Let an agent use this space, in a space's options, offers one. Stop ends its access.",
+      "Agents read and act inside frames from any site and draw on canvases. Input Kamapathy finds aimed at your extensions or the PDF viewer is refused.",
+      "Agents in different spaces now work at the same time and can keep working after you close the window.",
+      "Agents handle popups, dialogs, file choosers and the downloads they ask for.",
+    ],
+    steps: [
+      "Page scripts is on, so agents can run their own scripts in agent tabs. To keep them to snapshots, clicks and typing, turn it off in Settings, under Agents.",
+      "Open Set up agents from the menu or Settings, tick Use Kamapathy's copy for any agent with its own copy, choose Set up, then restart your agents.",
+      "If you run scripts written for 0.2.0, open Release notes below for the list of changes they may notice.",
+    ],
+  },
+  {
     version: "0.2.0",
     headline: "Spaces you share with your agents, in plain sight",
     changes: [
@@ -22,12 +46,7 @@ export const releaseNotes: readonly ReleaseNote[] = [
     ],
     agents: [
       "Agents reach Kamapathy over a socket on this computer and work in spaces of their own, never in your personal tabs.",
-      "Settings, under Agents, adds Kamapathy's skill and the kamapathy command to the agents on this computer.",
       "Snapshots read open shadow roots and same-origin frames, and list cross-origin frames so an agent knows they are there.",
-    ],
-    steps: [
-      "Restart your agents so they load the skill this version ships.",
-      "Open a new terminal window if you use the kamapathy command.",
     ],
   },
 ];

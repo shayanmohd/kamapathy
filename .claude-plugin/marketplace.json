@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "kamapathy",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "source": "./",
       "strict": false,
       "skills": ["./skills/kamapathy"],
