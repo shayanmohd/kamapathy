@@ -104,6 +104,17 @@ document.getElementById("pay").src = location.origin.replace(location.hostname, 
 </script>`,
   // A press Chromium routes by a layout drawn before the scroll reaches this
   // page's own frame element instead of the frame, which the page counts.
+  "/frames/closed-root": `<!doctype html><meta charset="utf-8"><title>Closed root</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:300px;height:100px;border:0}</style>
+<input id="plain" aria-label="Plain">
+<div id="menu"></div>
+<script>
+const root = document.getElementById("menu").attachShadow({ mode: "closed" });
+root.innerHTML = '<input aria-label="Inside"><iframe title="Menu frame"></iframe>';
+const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+root.querySelector("iframe").src = location.origin.replace(location.hostname, otherHost) + "/frames/other";
+window.focusInside = () => root.querySelector("input").focus();
+</script>`,
   "/frames/far": `<!doctype html><meta charset="utf-8"><title>Far frame</title>
 <style>body{font:14px sans-serif;margin:0}#spacer{height:1600px}iframe{display:block;width:400px;height:200px;border:0}</style>
 <p>Top of the far page</p>

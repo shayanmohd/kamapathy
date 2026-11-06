@@ -1012,7 +1012,18 @@ export function actionOperations(
           blockedFrame: true as const,
           ...place,
         }
-      : { ok: true as const, kind: controlKind(active), ...place };
+      : {
+          ok: true as const,
+          kind: controlKind(active),
+          ...place,
+          // An element that cannot take focus itself is the host of a
+          // closed shadow root the focus is inside, which the main process
+          // reads through the protocol.
+          ...((active as HTMLElement).tabIndex < 0 &&
+          (active as HTMLElement).isContentEditable !== true
+            ? { hidden: true as const }
+            : {}),
+        };
   };
 
   // What fill can put a value into, and the way it gets there. "host" names

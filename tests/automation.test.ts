@@ -8316,6 +8316,72 @@ describe("local automation socket", () => {
     expect(sentOn(page, "Input.dispatchKeyEvent")).toHaveLength(3);
   });
 
+  it("keys never reach an extension's frame inside a closed shadow root that holds focus", async () => {
+    const { tab } = await createPage();
+    const page = controller.contents;
+    page.result = { ok: true };
+    frameNavigated(page.debugger, {
+      frameId: "frame-x",
+      parentId: "main",
+      loaderId: "loader-x",
+      url: `chrome-extension://${EXTENSION_ID}/panel.html`,
+    });
+    // A frame inside a closed root has no path a snapshot could print. The
+    // page's own walk stops at the host of a closed root, which cannot
+    // take focus itself; the protocol sees the extension's frame inside.
+    page.pageActions.focusedKind = { ok: true, kind: "other", hidden: true };
+    const replies = (
+      page.debugger as unknown as {
+        replies: Map<string, (params: any, sessionId?: string) => unknown>;
+      }
+    ).replies;
+    const evaluate = replies.get("Runtime.evaluate")!;
+    let rootType = "closed";
+    page.debugger.reply("Runtime.evaluate", (params, sessionId) =>
+      params.objectGroup === "kamapathy-focus"
+        ? { result: { type: "object", objectId: "host" } }
+        : evaluate(params, sessionId),
+    );
+    page.debugger.reply("DOM.describeNode", (params) => {
+      expect(params).toMatchObject({ objectId: "host", pierce: true });
+      return {
+        node: {
+          nodeName: "PASSWORD-MENU",
+          shadowRoots: [
+            {
+              shadowRootType: rootType,
+              children: [{ nodeName: "IFRAME", frameId: "frame-x" }],
+            },
+          ],
+        },
+      };
+    });
+    const pressed = await request(`/tabs/${tab.id}/press`, "POST", {
+      key: "Enter",
+    });
+    expect(pressed.status).toBe(403);
+    expect((await pressed.json()).error).toEqual({
+      code: "input_target_blocked",
+      message: EXTENSION_MESSAGE,
+      extension: EXTENSION_NAME,
+    });
+    expect(page.inputs).toEqual([]);
+    const { status } = await failure(
+      await cdp(tab.id, {
+        method: "Input.dispatchKeyEvent",
+        params: { type: "keyDown", key: "a" },
+      }),
+    );
+    expect(status).toBe(403);
+    expect(sentOn(page, "Input.dispatchKeyEvent")).toEqual([]);
+    // A root the page can open is one its own walk follows, so only a
+    // closed one is read this way.
+    rootType = "open";
+    expect(
+      (await request(`/tabs/${tab.id}/press`, "POST", { key: "Enter" })).status,
+    ).toBe(200);
+  });
+
   it("raw keys stop where section 9's walk finds an extension's frame", async () => {
     const { tab } = await createPage();
     const page = controller.contents;

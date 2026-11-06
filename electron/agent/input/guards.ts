@@ -136,6 +136,64 @@ export async function hitNodeAt(
   }
 }
 
+// A frame inside a closed shadow root, which no page script can see: with
+// the focus in one, the document's active element is the root's host. The
+// protocol reads closed roots, so it lists the frames under that host that
+// a closed root holds, by the ids the registry knows them by.
+const FOCUS_GROUP = "kamapathy-focus";
+const ACTIVE_ELEMENT = `(() => { let active = document.activeElement; while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement; return active; })()`;
+interface DomNode {
+  nodeName?: string;
+  frameId?: string;
+  children?: DomNode[];
+  shadowRoots?: (DomNode & { shadowRootType?: string })[];
+}
+export async function framesInClosedRoots(
+  session: TabSession,
+  world: { sessionId?: string; contextId: number },
+  step: Step,
+): Promise<string[]> {
+  const on = {
+    ...step,
+    ...(world.sessionId === undefined ? {} : { sessionId: world.sessionId }),
+  };
+  try {
+    const { result } = await session.send<{ result?: { objectId?: string } }>(
+      "Runtime.evaluate",
+      {
+        expression: ACTIVE_ELEMENT,
+        contextId: world.contextId,
+        objectGroup: FOCUS_GROUP,
+      },
+      on,
+    );
+    if (!result?.objectId) return [];
+    const { node } = await session.send<{ node?: DomNode }>(
+      "DOM.describeNode",
+      { objectId: result.objectId, depth: -1, pierce: true },
+      on,
+    );
+    const found: string[] = [];
+    const visit = (item: DomNode, closed: boolean) => {
+      const name = (item.nodeName ?? "").toLowerCase();
+      if (closed && item.frameId && (name === "iframe" || name === "frame"))
+        found.push(item.frameId);
+      for (const child of item.children ?? []) visit(child, closed);
+      for (const root of item.shadowRoots ?? [])
+        visit(root, closed || root.shadowRootType === "closed");
+    };
+    if (node) visit(node, false);
+    return found;
+  } catch (error) {
+    if (toApiError(error)) throw error;
+    return [];
+  } finally {
+    await session
+      .send("Runtime.releaseObjectGroup", { objectGroup: FOCUS_GROUP }, on)
+      .catch(() => {});
+  }
+}
+
 export function pickerKindOf(node: HitNode): PickerKind | undefined {
   if (node.attributes.pseudo === PICKER_INDICATOR) return "date";
   if (node.nodeName === "select") {

@@ -28,6 +28,7 @@ import type { Authority } from "../authority";
 import { ApiError, fail } from "../errors";
 import {
   NO_EXTENSION_NAMES,
+  blockedFrameOf,
   blockedFramesByPath,
   extensionFrame,
   type ExtensionNames,
@@ -59,6 +60,7 @@ import type { InputDispatcher, InputDispatchers } from "./dispatch";
 import {
   checkKeyTarget,
   checkPointerTarget,
+  framesInClosedRoots,
   type FocusedControl,
 } from "./guards";
 import { inputMarker } from "./marker";
@@ -775,12 +777,44 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       frameId,
     );
     const kind = typeof found.kind === "string" ? found.kind : "none";
-    if (found.blockedFrame !== true) return { kind };
-    return {
-      kind,
-      blockedFrame: true as const,
-      ...(await focusedExtension(id, session, step)),
-    };
+    if (found.blockedFrame === true)
+      return {
+        kind,
+        blockedFrame: true as const,
+        ...(await focusedExtension(id, session, step)),
+      };
+    if (found.hidden !== true) return { kind };
+    // The focus is inside a closed shadow root, where a frame agents never
+    // reach, such as an extension's inline menu, may hold it. Any such frame
+    // there is answered as the frame holding focus.
+    const world = await session.world(
+      frameId ?? (await session.mainFrameId(step)),
+      step,
+    );
+    const known = await session.knownFrames(step);
+    for (const inner of await framesInClosedRoots(session, world, step)) {
+      if (!known.some((frame) => frame.frameId === inner && frame.blocked))
+        continue;
+      const outer = await blockedFrameOf(session, inner, step).catch(
+        () => undefined,
+      );
+      if (outer)
+        return {
+          kind,
+          blockedFrame: true as const,
+          ...(await blockedFrameNames(session, outer.path, step)),
+        };
+      // A frame with no path is named by the extension its page belongs to.
+      const url = session.frameUrl(inner);
+      const extension =
+        url === undefined ? undefined : extensionFrame(url, guards.extensions);
+      return {
+        kind,
+        blockedFrame: true as const,
+        ...(extension ? { extension: extension.name } : {}),
+      };
+    }
+    return { kind };
   };
   // How a refusal names a frame input never reaches: section 9's path for
   // it, and section 17's extension when the page it holds is one of the
