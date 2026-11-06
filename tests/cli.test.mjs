@@ -4276,7 +4276,7 @@ describe("scripted sessions", () => {
     });
   });
 
-  it("SIGTERM aborts the call in progress, flushes and exits 143 with interrupted", async () => {
+  it("SIGTERM aborts the call in progress, flushes and exits 143 with interrupted; Windows, which cannot deliver it, ends the run at once", async () => {
     const { paths: agent, env: profileEnv } = await profile();
     let closed = false;
     let arrived;
@@ -4310,11 +4310,17 @@ describe("scripted sessions", () => {
     await request;
     child.kill("SIGTERM");
     const status = await new Promise((done) => child.once("close", done));
-    expect([status, stdout, stderr]).toEqual([
-      143,
-      "started\n",
-      "error: interrupted: The run was stopped by SIGTERM. A call in progress may still have taken effect, so inspect the page before retrying.\n",
-    ]);
+    // Windows ends the process without running its handlers, so the held
+    // output and the interrupted line never print.
+    expect([status, stdout, stderr]).toEqual(
+      posix
+        ? [
+            143,
+            "started\n",
+            "error: interrupted: The run was stopped by SIGTERM. A call in progress may still have taken effect, so inspect the page before retrying.\n",
+          ]
+        : [null, "", ""],
+    );
     await expect.poll(() => closed).toBe(true);
   }, 20000);
 
