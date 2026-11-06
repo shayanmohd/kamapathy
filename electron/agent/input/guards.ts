@@ -23,6 +23,7 @@ import {
   extensionInputMessage,
   type ExtensionNames,
 } from "../extension-frames";
+import { DialogOpenError } from "../session/errors";
 import type { TabSession } from "../session/tab-session";
 import type { KnownFrame, Step } from "../session/types";
 import { MODIFIER_BITS, type Chord } from "./keys";
@@ -36,6 +37,8 @@ export interface FocusedControl {
   /** A blocked frame's section 9 path and extension, when it is one of the person's. */
   frame?: string;
   extension?: string;
+  /** The frame inside a closed shadow root holding the focus, which answered for the control and counts the key. */
+  frameId?: string;
 }
 export interface HitNode {
   backendNodeId: number;
@@ -136,61 +139,141 @@ export async function hitNodeAt(
   }
 }
 
-// A frame inside a closed shadow root, which no page script can see: with
-// the focus in one, the document's active element is the root's host. The
-// protocol reads closed roots, so it lists the frames under that host that
-// a closed root holds, by the ids the registry knows them by.
+// A page script cannot see into a closed shadow root: with the focus inside
+// one, the document's active element is the root's host. The protocol reads
+// a closed root's own active element, so the focus is followed from the
+// frame the page's walk ended in, through closed roots and the frames it
+// meets, one element at a time and never a subtree.
 const FOCUS_GROUP = "kamapathy-focus";
-const ACTIVE_ELEMENT = `(() => { let active = document.activeElement; while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement; return active; })()`;
+// The active element of a document, called on the window, or of a shadow
+// root, through the open roots inside it.
+const DEEP_ACTIVE = `function () { let active = (this.nodeType ? this : document).activeElement; while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement; return active; }`;
+// The elements one walk reads at most, one in each frame or closed root it
+// enters. Focus any deeper is answered as a frame input never reaches.
+const FOCUS_HOPS = 32;
 interface DomNode {
-  nodeName?: string;
   frameId?: string;
-  children?: DomNode[];
-  shadowRoots?: (DomNode & { shadowRootType?: string })[];
+  shadowRoots?: { backendNodeId?: number; shadowRootType?: string }[];
 }
-export async function framesInClosedRoots(
+// A walk's objects go on a budget of their own, as a drag's cancel does, so
+// a walk that ran out of time lets them go too. An open dialog holds the
+// page, so then they go once it closes.
+async function releaseFocus(
   session: TabSession,
-  world: { sessionId?: string; contextId: number },
-  step: Step,
-): Promise<string[]> {
-  const on = {
-    ...step,
-    ...(world.sessionId === undefined ? {} : { sessionId: world.sessionId }),
-  };
-  try {
-    const { result } = await session.send<{ result?: { objectId?: string } }>(
-      "Runtime.evaluate",
+  sessionId: string | undefined,
+): Promise<void> {
+  const release = () =>
+    session.send(
+      "Runtime.releaseObjectGroup",
+      { objectGroup: FOCUS_GROUP },
       {
-        expression: ACTIVE_ELEMENT,
-        contextId: world.contextId,
-        objectGroup: FOCUS_GROUP,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        deadline: Date.now() + 2000,
+        timeoutMs: 2000,
       },
-      on,
     );
-    if (!result?.objectId) return [];
-    const { node } = await session.send<{ node?: DomNode }>(
-      "DOM.describeNode",
-      { objectId: result.objectId, depth: -1, pierce: true },
-      on,
-    );
-    const found: string[] = [];
-    const visit = (item: DomNode, closed: boolean) => {
-      const name = (item.nodeName ?? "").toLowerCase();
-      if (closed && item.frameId && (name === "iframe" || name === "frame"))
-        found.push(item.frameId);
-      for (const child of item.children ?? []) visit(child, closed);
-      for (const root of item.shadowRoots ?? [])
-        visit(root, closed || root.shadowRootType === "closed");
+  try {
+    await release();
+  } catch (error) {
+    if (!(error instanceof DialogOpenError)) return;
+    const stop = session.on("dialog", ({ params }) => {
+      if (params.dialog) return;
+      stop();
+      release().catch(() => {});
+    });
+  }
+}
+// The frame holding the focus behind a closed shadow root, from the frame
+// whose walk ended at an element that may host one: blocked when input never
+// reaches it, and undefined when no frame inside a closed root holds it.
+export async function focusInClosedRoot(
+  session: TabSession,
+  frameId: string,
+  step: Step,
+): Promise<
+  | { frameId: string; blocked: false }
+  | { frameId?: string; blocked: true }
+  | undefined
+> {
+  const known = await session.knownFrames(step);
+  const sessions = new Set<string | undefined>();
+  const at = (sessionId?: string) => ({
+    ...step,
+    ...(sessionId === undefined ? {} : { sessionId }),
+  });
+  // The active element of the frame's document, or of the closed root with
+  // this node id, as an object in Kamapathy's world there.
+  const activeOf = async (
+    world: { sessionId?: string; contextId: number },
+    root?: number,
+  ) => {
+    sessions.add(world.sessionId);
+    let on: { objectId: string } | { executionContextId: number } = {
+      executionContextId: world.contextId,
     };
-    if (node) visit(node, false);
-    return found;
+    if (root !== undefined) {
+      const { object } = await session.send<{
+        object?: { objectId?: string };
+      }>(
+        "DOM.resolveNode",
+        {
+          backendNodeId: root,
+          executionContextId: world.contextId,
+          objectGroup: FOCUS_GROUP,
+        },
+        at(world.sessionId),
+      );
+      if (object?.objectId === undefined) return undefined;
+      on = { objectId: object.objectId };
+    }
+    const { result } = await session.send<{ result?: { objectId?: string } }>(
+      "Runtime.callFunctionOn",
+      { functionDeclaration: DEEP_ACTIVE, ...on, objectGroup: FOCUS_GROUP },
+      at(world.sessionId),
+    );
+    return result?.objectId;
+  };
+  let current = frameId;
+  // The last frame entered from inside a closed root, which holds the focus.
+  let entered: string | undefined;
+  let hidden = false;
+  try {
+    let world = await session.world(current, step);
+    let active = await activeOf(world);
+    for (let hops = 0; active !== undefined; hops += 1) {
+      if (hops === FOCUS_HOPS) return { blocked: true };
+      const { node } = await session.send<{ node?: DomNode }>(
+        "DOM.describeNode",
+        { objectId: active, depth: 0 },
+        at(world.sessionId),
+      );
+      // A frame owner: the focus is in the frame it holds.
+      const owned = node?.frameId;
+      if (owned !== undefined && owned !== current) {
+        const frame = known.find((entry) => entry.frameId === owned);
+        if (!frame || refusesInput(frame))
+          return { frameId: owned, blocked: true };
+        current = owned;
+        if (hidden) entered = owned;
+        world = await session.world(owned, step);
+        active = await activeOf(world);
+        continue;
+      }
+      const root = node?.shadowRoots?.find(
+        (entry) => entry.shadowRootType === "closed",
+      )?.backendNodeId;
+      if (root === undefined) break;
+      hidden = true;
+      active = await activeOf(world, root);
+    }
+    return entered === undefined
+      ? undefined
+      : { frameId: entered, blocked: false };
   } catch (error) {
     if (toApiError(error)) throw error;
-    return [];
+    return undefined;
   } finally {
-    await session
-      .send("Runtime.releaseObjectGroup", { objectGroup: FOCUS_GROUP }, on)
-      .catch(() => {});
+    for (const sessionId of sessions) await releaseFocus(session, sessionId);
   }
 }
 

@@ -1021,4 +1021,160 @@ for (const mode of ISOLATION)
       await click(byLabel(listing, "Decoy").ref);
       expect((await take()).text).toContain("Grid hit Decoy");
     }, 60000);
+
+    // A page script cannot see into a closed shadow root, so the key guard
+    // follows the focus there through the protocol. The frames inside one
+    // have no path, so the registry is waited on for them, and for the
+    // document of the one from the other name.
+    const closedFrames = async (count: number) => {
+      let holder = "";
+      await vi.waitFor(
+        async () => {
+          const known = await session!.knownFrames(step());
+          expect(known).toHaveLength(count);
+          holder =
+            known.find((frame) => frame.origin.includes("localhost"))
+              ?.frameId ?? "";
+          if (holder)
+            expect(
+              await session!.evaluateInFrame(
+                holder,
+                "ready",
+                {},
+                { ...step(), namespace: "internal" },
+              ),
+            ).toEqual({ ok: true, readyState: "complete" });
+        },
+        { timeout: 20000, interval: 100 },
+      );
+      return holder;
+    };
+    const inFrame = async (frameId: string, expression: string) => {
+      const { sessionId, contextId } = await session!.world(frameId, step());
+      const reply = await session!.send<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression, contextId, returnByValue: true },
+        { ...step(), ...(sessionId === undefined ? {} : { sessionId }) },
+      );
+      return reply.result?.value;
+    };
+    const onPage = (expression: string) =>
+      session!.send("Runtime.evaluate", { expression }, step());
+    // A press as the press route runs it, answering with the error code it
+    // ended in and whether anything went out.
+    const pressKey = async (key: string) => {
+      const request = run();
+      try {
+        return {
+          ...(await input!.press(
+            "tab-1",
+            { key, delayMs: 0, timeoutMs: 0 },
+            request,
+          )),
+          dispatched: request.dispatch.dispatched,
+        };
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        return { code: error.code, dispatched: request.dispatch.dispatched };
+      }
+    };
+    const refused = { code: "input_target_blocked", dispatched: false };
+
+    it("refuses keys while an error page holds the focus inside a closed root, or inside a frame there", async () => {
+      await open("/frames/closed-menu", 1);
+      await closedFrames(2);
+      await onPage("focusMenu()");
+      expect(await pressKey("a")).toEqual(refused);
+      await open("/frames/closed-frame", 1);
+      const holder = await closedFrames(3);
+      await onPage("focusIn('inner')");
+      await vi.waitFor(async () =>
+        expect(await inFrame(holder, "document.activeElement.id")).toBe(
+          "inner",
+        ),
+      );
+      expect(await pressKey("a")).toEqual(refused);
+      await expect(
+        input!.checkFocus("tab-1", session!, step()),
+      ).rejects.toMatchObject({ code: "input_target_blocked" });
+    }, 60000);
+
+    it("refuses keys while an error page holds the focus inside a closed root in a frame of the page's own origin", async () => {
+      await open("/frames/closed-child", 2);
+      await closedFrames(3);
+      await onPage(
+        "document.getElementById('child').contentWindow.focusMenu()",
+      );
+      expect(await pressKey("Enter")).toEqual(refused);
+      await expect(
+        input!.keyboard(
+          "tab-1",
+          { kind: "type", text: "a", delayMs: 0 },
+          run(),
+        ),
+      ).rejects.toMatchObject({ code: "input_target_blocked" });
+      await expect(
+        input!.checkFocus("tab-1", session!, step()),
+      ).rejects.toMatchObject({ code: "input_target_blocked" });
+    }, 60000);
+
+    it("refuses keys while Chromium's PDF viewer holds the focus", async () => {
+      await open("/frames/pdf-frame", 2);
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await session!.knownFrames(step())).some((frame) => frame.blocked),
+          ).toBe(true),
+        { timeout: 20000, interval: 100 },
+      );
+      // The person clicks into the viewer, which takes the focus once it
+      // has drawn, and may hand it back to the page while it loads. Until
+      // then the keys go to the page.
+      await vi.waitFor(
+        async () => {
+          for (const type of ["mousePressed", "mouseReleased"])
+            await session!.send(
+              "Input.dispatchMouseEvent",
+              { type, x: 200, y: 150, button: "left", clickCount: 1 },
+              step(),
+            );
+          expect(await pressKey("a")).toEqual(refused);
+        },
+        { timeout: 20000, interval: 250 },
+      );
+    }, 60000);
+
+    it("sends a key into a field of a frame inside a closed root once", async () => {
+      await open("/frames/closed-frame", 1);
+      const holder = await closedFrames(3);
+      await onPage("focusIn('field')");
+      await vi.waitFor(async () =>
+        expect(await inFrame(holder, "document.activeElement.id")).toBe(
+          "field",
+        ),
+      );
+      expect(await pressKey("a")).toMatchObject({ ok: true });
+      expect(
+        await inFrame(holder, "document.getElementById('field').value"),
+      ).toBe("a");
+    }, 60000);
+
+    it("lets keys reach the page's own element outside the tab order, reading that element alone", async () => {
+      await open("/frames/closed-menu", 1);
+      await closedFrames(2);
+      // The element holds the focus itself, with the closed root and 2000
+      // other elements inside it.
+      await onPage("document.getElementById('wrap').focus()");
+      const counted = await topCounters();
+      const sent = vi.spyOn(session!, "send");
+      const pressed = await pressKey("a");
+      const described = sent.mock.calls.flatMap(([method], index) =>
+        method === "DOM.describeNode" ? [sent.mock.results[index].value] : [],
+      );
+      expect(described.length).toBeGreaterThan(0);
+      for (const reply of await Promise.all(described))
+        expect(JSON.stringify(reply).length).toBeLessThan(2000);
+      expect(pressed).toMatchObject({ ok: true });
+      expect((await topCounters()).key).toBe((counted.key ?? 0) + 1);
+    }, 60000);
   });

@@ -19,7 +19,7 @@ import {
   TargetRefusedError,
 } from "../electron/agent/session/errors";
 import { EventBufferPool } from "../electron/agent/session/event-buffer";
-import { framesInClosedRoots } from "../electron/agent/input/guards";
+import { focusInClosedRoot } from "../electron/agent/input/guards";
 import { TabSession } from "../electron/agent/session/tab-session";
 import type { FrameInfo, Step } from "../electron/agent/session/types";
 import {
@@ -157,7 +157,7 @@ describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
     firstRef: 1,
   };
 
-  it("reads the frames inside a closed shadow root that holds the focus, which the page's own walk cannot", async () => {
+  it("follows the focus through a closed shadow root into the frame there, which the page's own walk cannot", async () => {
     // The frame in the closed root has no path a snapshot could print, so
     // only the page itself is listed, and the registry knows the frame.
     const { session } = await open("/frames/closed-root", 1);
@@ -180,16 +180,15 @@ describe.skipIf(!chromiumAvailable)("TabSession in Chromium", () => {
       ok: true,
       kind: "editable",
     });
-    // The host of the closed root is the active element, and cannot take
-    // focus itself.
+    // The host of the closed root is the active element, outside the tab
+    // order. A field inside the root holds the focus in the page itself.
     expect(await focus("focusInside()")).toMatchObject({ hidden: true });
-    expect(
-      await framesInClosedRoots(
-        session,
-        await session.world(main, step()),
-        step(),
-      ),
-    ).toEqual([inner]);
+    expect(await focusInClosedRoot(session, main, step())).toBeUndefined();
+    expect(await focus("focusFrame()")).toMatchObject({ hidden: true });
+    expect(await focusInClosedRoot(session, main, step())).toEqual({
+      frameId: inner,
+      blocked: false,
+    });
   }, 30000);
 
   it("gives the localhost frame of /frames/outer its own session and crossOrigin true against its 127.0.0.1 parent, and runs ready inside it", async () => {

@@ -1,3 +1,8 @@
+import { textPdf } from "./pdf/index.mjs";
+
+// The PDF the pdf-frame page shows.
+const REPORT_PDF = textPdf([["Quarterly report"]]).toString("base64");
+
 // Pages whose controls sit inside open shadow roots and same-origin frames,
 // as component libraries and embedded forms draw them, plus a frame from
 // another origin that a snapshot can only announce. That frame is served by
@@ -102,8 +107,8 @@ document.getElementById("cross").src = location.origin.replace(location.hostname
 const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
 document.getElementById("pay").src = location.origin.replace(location.hostname, otherHost) + "/frames/checkout";
 </script>`,
-  // A press Chromium routes by a layout drawn before the scroll reaches this
-  // page's own frame element instead of the frame, which the page counts.
+  // A field and a frame from the other name inside a closed root, which
+  // the page's own scripts can focus.
   "/frames/closed-root": `<!doctype html><meta charset="utf-8"><title>Closed root</title>
 <style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:300px;height:100px;border:0}</style>
 <input id="plain" aria-label="Plain">
@@ -114,7 +119,52 @@ root.innerHTML = '<input aria-label="Inside"><iframe title="Menu frame"></iframe
 const otherHost = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
 root.querySelector("iframe").src = location.origin.replace(location.hostname, otherHost) + "/frames/other";
 window.focusInside = () => root.querySelector("input").focus();
+window.focusFrame = () => root.querySelector("iframe").focus();
 </script>`,
+  // Closed roots holding an error page, which agent input never reaches as
+  // it never reaches an extension's frame: in an element outside the tab
+  // order with 2000 others, and in a frame of the page's own origin. Port 9
+  // is one Chromium never connects to. The closed-frame page holds a frame
+  // from the other name instead, with a field and an error page of its own.
+  "/frames/closed-menu": `<!doctype html><meta charset="utf-8"><title>Closed menu</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:300px;height:100px;border:0}</style>
+<main id="wrap" tabindex="-1"><div id="menu"></div><div id="bulk"></div></main>
+<script>
+const root = document.getElementById("menu").attachShadow({ mode: "closed" });
+root.innerHTML = '<iframe title="Broken" src="http://127.0.0.1:9/"></iframe>';
+document.getElementById("bulk").innerHTML = "<span>Bulk</span>".repeat(2000);
+window.focusMenu = () => root.querySelector("iframe").focus();
+</script>`,
+  "/frames/closed-child": `<!doctype html><meta charset="utf-8"><title>Closed root in a frame</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:400px;height:300px;border:0}</style>
+<iframe id="child" title="Sign in" src="/frames/closed-menu"></iframe>`,
+  "/frames/closed-frame": `<!doctype html><meta charset="utf-8"><title>Closed frame</title>
+<style>body{font:14px sans-serif;margin:16px}iframe{display:block;width:300px;height:100px;border:0}</style>
+<div id="menu"></div>
+<script>
+const root = document.getElementById("menu").attachShadow({ mode: "closed" });
+root.innerHTML = '<iframe title="Holder" src="{{other}}/frames/closed-holder"></iframe>';
+window.focusIn = (id) => {
+  const holder = root.querySelector("iframe");
+  holder.focus();
+  holder.contentWindow.postMessage(id, "*");
+};
+</script>`,
+  "/frames/closed-holder": `<!doctype html><meta charset="utf-8"><title>Closed holder</title>
+<style>body{font:14px sans-serif;margin:8px}iframe{display:block;width:200px;height:40px;border:0}</style>
+<input id="field" aria-label="Field"><iframe id="inner" title="Broken" src="http://127.0.0.1:9/"></iframe>
+<script>addEventListener("message", (event) => document.getElementById(event.data).focus());</script>`,
+  // A PDF in a frame of the page's own origin. Chromium's viewer shows it
+  // from a closed root on the PDF document's body.
+  "/frames/pdf-frame": `<!doctype html><meta charset="utf-8"><title>PDF frame</title>
+<style>body{margin:0}iframe{display:block;width:400px;height:300px;border:0}</style>
+<iframe id="pdf" title="Report"></iframe>
+<script>
+const bytes = Uint8Array.from(atob("${REPORT_PDF}"), (c) => c.charCodeAt(0));
+document.getElementById("pdf").src = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+</script>`,
+  // A press Chromium routes by a layout drawn before the scroll reaches this
+  // page's own frame element instead of the frame, which the page counts.
   "/frames/far": `<!doctype html><meta charset="utf-8"><title>Far frame</title>
 <style>body{font:14px sans-serif;margin:0}#spacer{height:1600px}iframe{display:block;width:400px;height:200px;border:0}</style>
 <p>Top of the far page</p>

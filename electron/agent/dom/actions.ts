@@ -996,10 +996,12 @@ export function actionOperations(
   const focusedKind = (_payload?: Record<string, unknown>) => {
     const active = deepActive();
     const doc = active && host.docOf(active);
+    // A PDF document's body hosts the closed root that holds Chromium's
+    // viewer, so it is followed below as any such host is.
     if (
       !active ||
       !doc ||
-      active === doc.body ||
+      (active === doc.body && doc.contentType !== "application/pdf") ||
       active === doc.documentElement
     )
       return { ok: true as const, kind: "none" as const };
@@ -1016,9 +1018,9 @@ export function actionOperations(
           ok: true as const,
           kind: controlKind(active),
           ...place,
-          // An element that cannot take focus itself is the host of a
-          // closed shadow root the focus is inside, which the main process
-          // reads through the protocol.
+          // An element outside the tab order may be the host of a closed
+          // shadow root the focus is inside, which the main process follows
+          // through the protocol.
           ...((active as HTMLElement).tabIndex < 0 &&
           (active as HTMLElement).isContentEditable !== true
             ? { hidden: true as const }

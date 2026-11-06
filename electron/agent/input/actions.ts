@@ -60,7 +60,7 @@ import type { InputDispatcher, InputDispatchers } from "./dispatch";
 import {
   checkKeyTarget,
   checkPointerTarget,
-  framesInClosedRoots,
+  focusInClosedRoot,
   type FocusedControl,
 } from "./guards";
 import { inputMarker } from "./marker";
@@ -784,37 +784,54 @@ export function createInputActions(deps: InputActionDeps): InputActions {
         ...(await focusedExtension(id, session, step)),
       };
     if (found.hidden !== true) return { kind };
-    // The focus is inside a closed shadow root, where a frame agents never
-    // reach, such as an extension's inline menu, may hold it. Any such frame
-    // there is answered as the frame holding focus.
-    const world = await session.world(
+    // The page's walk ended at an element outside the tab order, which may be
+    // the host of a closed shadow root the focus is inside. The protocol
+    // follows the focus from there: a frame agents never reach, such as an
+    // extension's inline menu, is answered as the frame holding focus, and a
+    // web frame answers for the control itself.
+    const behind = await focusInClosedRoot(
+      session,
       frameId ?? (await session.mainFrameId(step)),
       step,
     );
-    const known = await session.knownFrames(step);
-    for (const inner of await framesInClosedRoots(session, world, step)) {
-      if (!known.some((frame) => frame.frameId === inner && frame.blocked))
-        continue;
-      const outer = await blockedFrameOf(session, inner, step).catch(
-        () => undefined,
+    if (!behind) return { kind };
+    if (!behind.blocked) {
+      const inner = await actions.evaluatePage(
+        id,
+        session,
+        "focusedKind",
+        {},
+        deadline,
+        step,
+        behind.frameId,
       );
-      if (outer)
-        return {
-          kind,
-          blockedFrame: true as const,
-          ...(await blockedFrameNames(session, outer.path, step)),
-        };
-      // A frame with no path is named by the extension its page belongs to.
-      const url = session.frameUrl(inner);
-      const extension =
-        url === undefined ? undefined : extensionFrame(url, guards.extensions);
+      if (inner.blockedFrame === true)
+        return { kind: "other", blockedFrame: true as const };
+      return {
+        kind: typeof inner.kind === "string" ? inner.kind : "none",
+        frameId: behind.frameId,
+      };
+    }
+    if (behind.frameId === undefined)
+      return { kind, blockedFrame: true as const };
+    const outer = await blockedFrameOf(session, behind.frameId, step).catch(
+      () => undefined,
+    );
+    if (outer)
       return {
         kind,
         blockedFrame: true as const,
-        ...(extension ? { extension: extension.name } : {}),
+        ...(await blockedFrameNames(session, outer.path, step)),
       };
-    }
-    return { kind };
+    // A frame with no path is named by the extension its page belongs to.
+    const url = session.frameUrl(behind.frameId);
+    const extension =
+      url === undefined ? undefined : extensionFrame(url, guards.extensions);
+    return {
+      kind,
+      blockedFrame: true as const,
+      ...(extension ? { extension: extension.name } : {}),
+    };
   };
   // How a refusal names a frame input never reaches: section 9's path for
   // it, and section 17's extension when the page it holds is one of the
@@ -2106,11 +2123,17 @@ export function createInputActions(deps: InputActionDeps): InputActions {
     // The keys go to the frame that holds the focus, which the target's own
     // focus step may just have changed.
     const focus = await focusedFrame(id, session, step);
-    checkKeyTarget(
-      await focusedControl(id, session, run.deadline, step, focus?.frameId),
-      chord,
-      platformName,
+    const control = await focusedControl(
+      id,
+      session,
+      run.deadline,
+      step,
+      focus?.frameId,
     );
+    checkKeyTarget(control, chord, platformName);
+    // The frame whose counters see the key: section 9's, or the one inside
+    // a closed shadow root that its walk cannot reach.
+    const keyFrame = control.frameId ?? focus?.frameId;
     const epoch = session.epoch;
     const { down, up } = chordCommands(
       chord,
@@ -2140,7 +2163,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           {},
           step.deadline,
           step,
-          focus?.frameId,
+          keyFrame,
         ),
       frames: async () => {
         await actions.evaluatePage(
@@ -2150,7 +2173,7 @@ export function createInputActions(deps: InputActionDeps): InputActions {
           {},
           Math.min(step.deadline, Date.now() + 2000),
           step,
-          focus?.frameId,
+          keyFrame,
         );
       },
       // A resend runs the key guards again where the focus is now, and goes
@@ -2158,12 +2181,15 @@ export function createInputActions(deps: InputActionDeps): InputActions {
       // decide.
       again: async () => {
         const now = await focusedFrame(id, session, step);
-        checkKeyTarget(
-          await focusedControl(id, session, run.deadline, step, now?.frameId),
-          chord,
-          platformName,
+        const seen = await focusedControl(
+          id,
+          session,
+          run.deadline,
+          step,
+          now?.frameId,
         );
-        if (now?.frameId !== focus?.frameId)
+        checkKeyTarget(seen, chord, platformName);
+        if ((seen.frameId ?? now?.frameId) !== keyFrame)
           fail(
             "input_not_delivered",
             "The page did not accept native input. Inspect the page before retrying.",
