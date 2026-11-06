@@ -83,6 +83,7 @@ const RETIRED = [
   "cross_origin_frame", // no route answers it any more
   "nothing runs inside", // page.evaluate runs in the page
   "only screenshots wait", // a capture works with the window closed
+  "for a USB or HID chooser", // 0.3.0 opens no device chooser
 ];
 
 const FLAGS = new Set([

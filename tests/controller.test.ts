@@ -653,7 +653,7 @@ describe("native browser lifecycle", () => {
     expect(browser.state.sitePermissions).toEqual([]);
   });
 
-  it("installs the device handlers per partition and asks the person which device to connect", async () => {
+  it("installs the device handlers per partition and refuses every USB and HID request", async () => {
     const browser = controller();
     const tab = browser.state.tabs[0];
     await browser.dispatch({
@@ -673,32 +673,59 @@ describe("native browser lifecycle", () => {
     expect(partition.listenerCount("usb-device-added")).toBe(1);
     // The Bluetooth chooser belongs to the page, not to the partition.
     expect(page.listenerCount("select-bluetooth-device")).toBe(1);
-    const callback = vi.fn();
-    partition.emit(
-      "select-usb-device",
-      { preventDefault: vi.fn() },
-      {
-        deviceList: [
-          { deviceId: "dev-a", vendorId: 1, productId: 2, productName: "Phone" },
-        ],
-        frame: { contents: page },
-      },
-      callback,
-    );
-    expect(browser.state.prompts).toMatchObject([
-      {
-        spaceId: "personal",
-        tabId: tab.id,
-        kind: "usb",
-        devices: [{ id: "1:2:dev-a", name: "Phone" }],
-      },
-    ]);
-    browser.prompts.answer({
-      id: browser.state.prompts[0].id,
-      allow: true,
-      deviceId: "1:2:dev-a",
-    });
-    expect(callback).toHaveBeenCalledExactlyOnceWith("dev-a");
+    // Electron 44.10.2 checks with the page's contents, for a subframe too,
+    // and opens no chooser when the check says no.
+    const check = partition.setPermissionCheckHandler.mock.calls[0][0];
+    for (const kind of ["usb", "hid"]) {
+      expect(
+        check(page, kind, "https://example.com/", {
+          isMainFrame: true,
+          requestingUrl: "https://example.com/",
+          securityOrigin: "https://example.com/",
+        }),
+      ).toBe(false);
+      expect(
+        check(page, kind, "https://widget.example/", {
+          isMainFrame: false,
+          requestingUrl: "https://widget.example/frame",
+          securityOrigin: "https://widget.example/",
+        }),
+      ).toBe(false);
+    }
+    // A chooser Electron opened anyway, for the page or one of its frames,
+    // gets no device.
+    for (const frame of [
+      { contents: page },
+      { contents: page, parent: { contents: page } },
+    ]) {
+      const usb = vi.fn();
+      partition.emit(
+        "select-usb-device",
+        { preventDefault: vi.fn() },
+        {
+          deviceList: [
+            {
+              deviceId: "dev-a",
+              vendorId: 1,
+              productId: 2,
+              productName: "Phone",
+            },
+          ],
+          frame,
+        },
+        usb,
+      );
+      expect(usb).toHaveBeenCalledExactlyOnceWith("");
+      const hid = vi.fn();
+      partition.emit(
+        "select-hid-device",
+        { preventDefault: vi.fn() },
+        { deviceList: [{ deviceId: "hid-a", name: "Pad" }], frame },
+        hid,
+      );
+      expect(hid).toHaveBeenCalledExactlyOnceWith("");
+    }
+    expect(browser.state.prompts).toEqual([]);
     const mayUse = partition.setDevicePermissionHandler.mock.lastCall![0];
     expect(
       mayUse({
@@ -706,9 +733,7 @@ describe("native browser lifecycle", () => {
         origin: "https://example.com",
         device: { deviceId: "dev-a" },
       }),
-    ).toBe(true);
-    // A device is granted for this run only, and nothing is written down.
-    expect(browser.state.sitePermissions).toEqual([]);
+    ).toBe(false);
     browser.dispose();
     expect(partition.listenerCount("select-usb-device")).toBe(0);
     expect(partition.setDevicePermissionHandler).toHaveBeenLastCalledWith(null);

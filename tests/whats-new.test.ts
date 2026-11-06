@@ -57,6 +57,12 @@ describe("what's new notes", () => {
       }
     }
   });
+  it("names no device among the requests 0.3.0 asks in the bar", () => {
+    const notes = releaseNotes.find((note) => note.version === "0.3.0");
+    expect(notes?.changes).toContain(
+      "Sites ask for your location, camera or microphone in a bar above the page, and no agent can answer for you.",
+    );
+  });
   it("shows at most three versions above the last one seen", () => {
     expect(versions(notesSince("0.1.0", "0.4.0", testNotes))).toEqual([
       "0.4.0",

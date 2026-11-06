@@ -20,7 +20,7 @@ export const releaseNotes: readonly ReleaseNote[] = [
       "Add extensions from the Chrome Web Store, or bring over those you added from it in another browser. They also run in agent spaces that share your sign-ins.",
       "Make Kamapathy your default browser in Settings. Links and files from other apps open in a personal space no agent can reach.",
       "An agent's own cursor, its status and a label for each step show what it is doing, and Stop ends its work in one space.",
-      "Sites ask for your location, camera, microphone or a device in a bar above the page, and no agent can answer for you.",
+      "Sites ask for your location, camera or microphone in a bar above the page, and no agent can answer for you.",
     ],
     agents: [
       "An agent can ask to use one of your spaces, and Let an agent use this space, in a space's options, offers one. Stop ends its access.",

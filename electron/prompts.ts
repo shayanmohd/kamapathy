@@ -32,11 +32,15 @@ export const CREDENTIAL_ORIGINS = 8; // origins an agent space may store
 const SAVED_LOGIN_ID = 64;
 // The most of a site's own words any prompt shows.
 const ORIGIN_TEXT = 120;
-// The chooser kinds Kamapathy opens. Electron 44.2.0 emits no
+// The chooser kinds Kamapathy opens: none in this build, so every device
+// request is refused instead of asked. Electron 44.2.0 emits no
 // select-serial-port and blocks the main process for the whole time a serial
-// or Bluetooth request is pending, so those two are refused instead of asked
-// (phase 6 Verify first 7).
-const CHOOSABLE: readonly DeviceKind[] = ["usb", "hid"];
+// or Bluetooth request is pending (phase 6 Verify first 7). The USB and HID
+// chooser below never opened on 44.2.0, which checked those requests with no
+// page, and is untried on 44.10.2, where it would show a frame's request
+// under the page's origin and mayUseDevice would match no HID grant, since
+// Electron's HID permission details carry no deviceId.
+const CHOOSABLE: readonly DeviceKind[] = [];
 
 /** What an agent space answers one server challenge from one origin with. */
 export interface HttpCredentials {
@@ -490,8 +494,9 @@ export function createPromptCenter(
     electronId: device.deviceId,
   });
 
-  // A site asked for a device. The person always chooses, in an agent tab as
-  // in their own, and exactly the device they pick is granted.
+  // A site asked for a device. A kind Kamapathy opens goes to the person, in
+  // an agent tab as in their own, and exactly the device they pick is
+  // granted; any other kind is refused.
   const openChooser = (
     kind: DeviceKind,
     browsingSession: Session | null,
