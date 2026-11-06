@@ -2588,6 +2588,119 @@ describe("local automation socket", () => {
     expect([seen.page.mouse, seen.frame.mouse]).toEqual([0, 2]);
   });
 
+  // The bodies of a raw click at the frame owner's point and of a drag with
+  // both ends in the frame, and what the page answers them with.
+  const FRAME_GESTURES: Record<string, Record<string, unknown>> = {
+    "mouse/click": { x: 65, y: 105 },
+    drag: { source: { ref: "@e2" }, target: { ref: "@e2" } },
+  };
+  const gesturesInFrame = (page: FakeContents) => {
+    page.hits = [{ x: 65, y: 105, nodeName: "iframe", holds: "card" }];
+    const answer = page.result as (code: string, sessionId?: string) => unknown;
+    page.result = (code: string, sessionId?: string) =>
+      code.includes(')("actionPoint",') && code.includes('"kind":"drag"')
+        ? { ok: true, from: { x: 10, y: 20 }, to: { x: 110, y: 120 } }
+        : answer(code, sessionId);
+  };
+
+  it("never sends again a raw click or a drag the page around the frame took", async () => {
+    for (const [route, body] of Object.entries(FRAME_GESTURES)) {
+      const { tab } = await createPage();
+      const page = await framedPage(tab.id, { sessionId: "card-session" });
+      // The move reached the frame, and the press then went to the page.
+      const { seen } = drawnLayout(page, { presses: "page" });
+      gesturesInFrame(page);
+      const refused = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(refused.status, route).toBe(409);
+      expect((await refused.json()).error, route).toEqual({
+        code: "element_obscured",
+        message:
+          "Another element covers the target. The input Kamapathy already sent was not repeated; inspect the page before retrying.",
+        presses: 1,
+        dispatched: true,
+      });
+      expect([seen.page.mouse, seen.frame.mouse], route).toEqual([1, 0]);
+      expect(pressesOf(page), route).toBe(1);
+    }
+  });
+
+  it("never sends a lost press again once the move before the resend no longer lands", async () => {
+    for (const [route, body] of Object.entries({
+      click: { ref: "@e2" },
+      ...FRAME_GESTURES,
+    })) {
+      const { tab } = await createPage();
+      const page = await framedPage(tab.id, { sessionId: "card-session" });
+      // No document counts the press, and the page scrolls right after it,
+      // so the move before a resend goes by a layout Chromium has not drawn
+      // and reaches the page around the frame.
+      const drawing: { drawAfter?: number; presses: "nowhere" } = {
+        presses: "nowhere",
+      };
+      drawnLayout(page, drawing);
+      const drop = page.afterInput!;
+      page.afterInput = () => {
+        drop();
+        if (page.inputs.at(-1)?.parameters.type === "mousePressed")
+          drawing.drawAfter = Number.POSITIVE_INFINITY;
+      };
+      gesturesInFrame(page);
+      const refused = await request(`/tabs/${tab.id}/${route}`, "POST", body);
+      expect(refused.status, route).toBe(409);
+      expect((await refused.json()).error, route).toEqual({
+        code: "input_not_delivered",
+        message:
+          "The page did not accept native input. Inspect the page before retrying.",
+        dispatched: true,
+      });
+      // One press went out, and after it only the move that did not land.
+      expect(pressesOf(page), route).toBe(1);
+      expect(pointerTypes(page).at(-1), route).toBe("mouseMoved");
+    }
+  });
+
+  it("mouse/down and mouse/click wait for their move to land and time out without pressing", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    // The page never draws the frame where it is, so every move at the
+    // owner's point reaches the page around it.
+    const { seen } = drawnLayout(page, { drawAfter: Number.POSITIVE_INFINITY });
+    page.hits = [{ x: 65, y: 105, nodeName: "iframe", holds: "card" }];
+    expect(
+      (await request(`/tabs/${tab.id}/mouse/move`, "POST", { x: 65, y: 105 }))
+        .status,
+    ).toBe(200);
+    const started = Date.now();
+    // Each waits between its attempts, so the two run side by side.
+    const [down, click] = await Promise.all([
+      request(`/tabs/${tab.id}/mouse/down`, "POST", {}),
+      request(`/tabs/${tab.id}/mouse/click`, "POST", { x: 65, y: 105 }),
+    ]);
+    const waited = Date.now() - started;
+    for (const [route, refused] of [
+      ["mouse/down", down],
+      ["mouse/click", click],
+    ] as const) {
+      expect(refused.status, route).toBe(504);
+      expect(await refused.json(), route).toEqual({
+        error: {
+          code: "action_timeout",
+          message: `${route} timed out after 3000 ms: The page has not drawn what lies at the point yet, so input there would land elsewhere.`,
+          awaited: "actionable",
+          blocker: "not_drawn",
+          frame: "0",
+          timeoutMs: 3000,
+          retryable: true,
+        },
+      });
+    }
+    expect(waited).toBeGreaterThanOrEqual(3000);
+    expect(new Set(pointerTypes(page))).toEqual(new Set(["mouseMoved"]));
+    expect([seen.page.mouse, seen.frame.mouse, seen.frame.move]).toEqual([
+      0, 0, 0,
+    ]);
+  });
+
   it("sends a press at once while a button is held, and never again where the held press took it", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });
@@ -2842,6 +2955,78 @@ describe("local automation socket", () => {
     expect(page.inputs).toEqual([]);
   });
 
+  it("never sends again a press the frame between the page and the target took", async () => {
+    const { tab } = await createPage();
+    const page = await nestedFramedPage(tab.id);
+    // Each owner sits 40,60 into the document around it. The move reached
+    // the inner frame at the control, and the press went to the frame
+    // around it, by a layout drawn before.
+    const seen: Record<string, Seen> = {
+      main: { mouse: 0, key: 0, drag: 0, move: 0 },
+      card: { mouse: 0, key: 0, drag: 0, move: 0 },
+      deep: { mouse: 0, key: 0, drag: 0, move: 0 },
+    };
+    page.afterInput = () => {
+      const { method, parameters } = page.inputs.at(-1)!;
+      if (method !== "Input.dispatchMouseEvent") return;
+      if (parameters.type === "mouseMoved") {
+        seen.deep.move += 1;
+        seen.deep.landing = {
+          x: Number(parameters.x) - 80,
+          y: Number(parameters.y) - 120,
+        };
+      }
+      if (parameters.type === "mousePressed") seen.card.mouse += 1;
+    };
+    // The frame whose world runs the call being answered, the last one
+    // sent, from the worlds the page handed out in order.
+    const answering = () => {
+      const made = page.debugger.sent
+        .filter((command) => command.method === "Page.createIsolatedWorld")
+        .map((command) => command.params.frameId as string);
+      const call = page.debugger.sent
+        .filter((command) => command.method === "Runtime.evaluate")
+        .at(-1);
+      return made[Number(call?.params.contextId) - 1];
+    };
+    page.result = (code: string) => {
+      if (code.includes(')("input",')) return { ok: true, ...seen[answering()] };
+      if (code.includes(')("frameBox",')) {
+        const at = /"point":\{"x":(-?[\d.]+),"y":(-?[\d.]+)\}/.exec(code);
+        return {
+          ok: true,
+          ...OWNER_BOX,
+          ...(at
+            ? { point: { x: Number(at[1]) + 40, y: Number(at[2]) + 60 } }
+            : {}),
+        };
+      }
+      return { ok: true, x: 25, y: 45 };
+    };
+    const refused = await request(`/tabs/${tab.id}/click`, "POST", {
+      ref: "@e3",
+    });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({
+      code: "element_obscured",
+      presses: 1,
+      dispatched: true,
+    });
+    expect(mouseEvents(page)).toEqual([
+      ["mouseMoved", 105, 165],
+      ["mousePressed", 105, 165],
+      ["mouseReleased", 105, 165],
+    ]);
+    // The inner frame decided, and the page and the frame around the inner
+    // one were both read for a press they took instead.
+    expect(new Set(ranIn(page, "input"))).toEqual(
+      new Set(["deep", "main", "card"]),
+    );
+    expect([seen.main.mouse, seen.card.mouse, seen.deep.mouse]).toEqual([
+      0, 1, 0,
+    ]);
+  });
+
   it("a wheel for a target inside a frame goes to the translated point with the scaled delta", async () => {
     const { tab } = await createPage();
     const page = await framedPage(tab.id, { sessionId: "card-session" });
@@ -2926,6 +3111,36 @@ describe("local automation socket", () => {
       ["mousePressed", 65, 105],
       ["mouseReleased", 65, 105],
     ]);
+  });
+
+  it("a fill sends no retry click whose move never reached the field", async () => {
+    const { tab } = await createPage();
+    const page = await framedPage(tab.id, { sessionId: "card-session" });
+    page.pageActions.fillPrepare = {
+      ok: true,
+      mode: "insert",
+      previous: "old",
+      point: { x: 25, y: 45 },
+    };
+    page.pageActions.fillRead = { ok: true, match: "unchanged", value: "old" };
+    // The page has not drawn the frame where it is, so the click's move
+    // reaches the page around it, and the fill gives up at once.
+    const { seen } = drawnLayout(page, { drawAfter: Number.POSITIVE_INFINITY });
+    const refused = await request(`/tabs/${tab.id}/fill`, "POST", {
+      ref: "@e2",
+      value: "4111",
+    });
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toEqual({
+      code: "fill_not_accepted",
+      message:
+        "The field kept its old value, and a click on it would land on another control or out of view. Inspect the page before retrying.",
+      match: "unchanged",
+      dispatched: true,
+    });
+    expect(mouseEvents(page)).toEqual([["mouseMoved", 65, 105]]);
+    expect([seen.page.move, seen.frame.move]).toEqual([1, 0]);
+    expect(callsOf(page, "fillPrepare")).toHaveLength(1);
   });
 
   it("scroll without a target continues into the frame under the viewport centre", async () => {
