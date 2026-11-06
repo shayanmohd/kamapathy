@@ -1194,7 +1194,7 @@ export class TabSession {
       this.pending.add(entry);
       if (timeoutMs !== undefined)
         timer = setTimeout(
-          () => entry.fail(new CdpTimeoutError("page", timeoutMs)),
+          () => entry.fail(new CdpTimeoutError("page", timeoutMs, reply)),
           timeoutMs,
         );
       reply.then((value) => {
