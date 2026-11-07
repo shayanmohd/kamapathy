@@ -23,7 +23,10 @@ export interface Trackers {
 }
 export interface TrackersDeps {
   controller: AutomationController;
-  sessions: { get(tabId: string): TabSession | undefined };
+  sessions: {
+    get(tabId: string): TabSession | undefined;
+    onSession(listener: (session: TabSession) => void): () => void;
+  };
 }
 
 // One navigation tracker per live tab session, subscribed to the session's
@@ -68,19 +71,33 @@ export function createTrackers({
     stop.push(() =>
       session.contents.removeListener("did-fail-load", onFailLoad),
     );
-    // A debugger that detached missed what the page did meanwhile; a closed
-    // tab keeps nothing.
-    stop.push(session.on("detached", () => tracker.reset()));
-    stop.push(
-      session.on("closed", () => {
-        for (const end of stop.splice(0)) end();
-        live.delete(session);
-      }),
+    // The page's own report of a commit, for one Chromium does not report.
+    const onNavigate = (_event: unknown, url: string) =>
+      tracker.markNavigated(url);
+    session.contents.on("did-navigate", onNavigate);
+    stop.push(() =>
+      session.contents.removeListener("did-navigate", onNavigate),
     );
+    stop.push(session.on("attached", () => tracker.attached()));
+    // A debugger that detached missed what the page did meanwhile; a released
+    // session hears nothing more, and a closed tab keeps nothing.
+    stop.push(session.on("detached", () => tracker.reset()));
+    const end = () => {
+      for (const unsubscribe of stop.splice(0)) unsubscribe();
+      live.delete(session);
+    };
+    stop.push(session.on("releasing", end), session.on("closed", end));
     const entry = { tracker, stop };
     live.set(session, entry);
     return entry;
   };
+  // Every session's tracker listens from before its attach: a new view starts
+  // its first navigation inside the load that follows.
+  stops.push(
+    sessions.onSession((session) => {
+      open(session);
+    }),
+  );
   return {
     for: (session) => open(session).tracker,
     async probe(session, step) {

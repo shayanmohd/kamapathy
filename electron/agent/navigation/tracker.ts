@@ -8,6 +8,9 @@ export const COMMIT_RING = 32;
 export const ENDED_GRACE_MS = 1000;
 // How soon a newer navigation counts as the one that replaced an abort.
 export const REPLACED_WITHIN_MS = 150;
+// How much a tracker keeps while its session has not named the main frame.
+// Past that the log counts as incomplete.
+const HELD_INPUTS = 1000;
 // What Chromium reports for a request the browser itself cancelled, used when
 // nothing else named the failure.
 const BLOCKED_BY_CLIENT = "ERR_BLOCKED_BY_CLIENT";
@@ -67,6 +70,9 @@ export type TrackerEvent =
 // A navigation that ended without the document it asked for, kept for as long
 // as a late reason can still explain it.
 type Ended = PendingNavigation & { endedAt: number; by?: string };
+// An event, or one of the page's own reports, kept until the main frame is
+// known. A report hears which loaders' commits Chromium reported meanwhile.
+type Held = CdpEvent | ((reported: Set<string>) => void);
 
 const name = (netError: string) => netError.replace(/^net::/, "");
 // A download or a newer navigation says more about an abort than its error
@@ -87,6 +93,7 @@ export class NavigationTracker {
   private doc?: MainDocument;
   private current?: PendingNavigation;
   private recent?: Ended;
+  private held?: Held[];
   private listeners = new Set<(event: TrackerEvent) => void>();
 
   constructor(private readonly mainFrame: () => string | undefined) {}
@@ -109,7 +116,7 @@ export class NavigationTracker {
 
   apply(event: CdpEvent): void {
     // An out-of-process frame reports on its own session, never the page's.
-    if (event.sessionId !== undefined) return;
+    if (event.sessionId !== undefined || this.hold(event)) return;
     const { params } = event;
     switch (event.method) {
       case "Page.frameStartedNavigating":
@@ -146,6 +153,7 @@ export class NavigationTracker {
   // after the navigation's abort, so an end that just happened is reported
   // again as a download.
   markDownload(): void {
+    if (this.hold(() => this.markDownload())) return;
     const ended = this.current ? undefined : this.explainable(ENDED_GRACE_MS);
     const target = this.current ?? ended;
     if (!target || target.download) return;
@@ -155,6 +163,7 @@ export class NavigationTracker {
 
   // A server redirect the agent URL rule cancelled.
   markBlocked(url: string): void {
+    if (this.hold(() => this.markBlocked(url))) return;
     const ended = this.current ? undefined : this.explainable(ENDED_GRACE_MS);
     const target = this.current ?? ended;
     if (!target || target.failure?.blockedUrl === url) return;
@@ -169,6 +178,7 @@ export class NavigationTracker {
   // The page's own did-fail-load, the only source of the numeric code: CDP
   // reports the name alone.
   markFailed(failure: { netError: string; errorCode: number }): void {
+    if (this.hold(() => this.markFailed(failure))) return;
     const ended = this.current ? undefined : this.explainable(ENDED_GRACE_MS);
     const target = this.current ?? ended;
     if (!target) return;
@@ -184,6 +194,18 @@ export class NavigationTracker {
         : { blockedUrl: held.blockedUrl }),
     };
     if (ended && !explained(ended)) this.report(ended);
+  }
+
+  // The page's own report that its main frame committed a document. Chromium
+  // reports no commit that lands while the session attaches, as a new view's
+  // first one does, so there the page's report stands in, in its place among
+  // what was held. An attached session reports every commit itself.
+  markNavigated(url: string): void {
+    this.hold((reported) => {
+      const pending = this.current;
+      if (pending && !reported.has(pending.loaderId))
+        this.committed({ loaderId: pending.loaderId, url });
+    });
   }
 
   // A document that loaded before the tracker saw it, read by loadProbe.
@@ -237,13 +259,48 @@ export class NavigationTracker {
     this.current = undefined;
     this.recent = undefined;
     this.doc = undefined;
+    this.held = undefined;
     this.dropped = true;
     this.emit({ type: "reset" });
+  }
+
+  // A session that attached has named its main frame, so what waited for it
+  // is applied, even when nothing arrives after it.
+  attached(): void {
+    if (this.held && this.mainFrame() !== undefined) this.release();
   }
 
   private main(frameId: unknown): boolean {
     const main = this.mainFrame();
     return main !== undefined && frameId === main;
+  }
+
+  // Until its session names the main frame, as an attach does once Chromium
+  // answers it, a tracker cannot tell whose an event is. A new view starts its
+  // first navigation in that window, so what arrives waits, in order, and is
+  // applied once the frame is known.
+  private hold(input: Held): boolean {
+    if (!this.held) {
+      if (this.mainFrame() !== undefined) return false;
+      this.held = [];
+    }
+    if (this.held.length < HELD_INPUTS) this.held.push(input);
+    else this.dropped = true;
+    if (this.mainFrame() !== undefined) this.release();
+    return true;
+  }
+
+  private release(): void {
+    const held = this.held ?? [];
+    this.held = undefined;
+    // A commit Chromium reported too is counted once.
+    const reported = new Set<string>();
+    for (const input of held)
+      if (typeof input !== "function" && input.method === "Page.frameNavigated")
+        reported.add(input.params.frame?.loaderId);
+    for (const input of held)
+      if (typeof input === "function") input(reported);
+      else this.apply(input);
   }
 
   private started(params: {

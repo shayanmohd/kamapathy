@@ -351,6 +351,36 @@ try {
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
+  // The skill's quick start. A new space's first page and a page new-page
+  // adds have no view yet, so each loads its first document while the tab's
+  // debugger is still attaching, and navigate answers at the commit anyway.
+  const quickStart = await json(["space", "open", "Quick start"]);
+  const quickUrl = `${fixture.origin}${NAVIGATION_PATHS.landing}`;
+  let quickAt = Date.now();
+  assert.equal(
+    (await cli(["navigate", `${quickStart.space.id}:p1`, quickUrl])).output.trim(),
+    `tab ${quickStart.tab.id} ${quickUrl} 200`,
+  );
+  const quickMs = [Date.now() - quickAt];
+  const quickPage = (await json(["new-page", quickStart.space.id])).tab;
+  quickAt = Date.now();
+  const quickAnswer = await callApi(`/tabs/${quickPage.id}/navigate`, "POST", {
+    url: quickUrl,
+    waitUntil: "commit",
+  });
+  quickMs.push(Date.now() - quickAt);
+  const quickBody = await quickAnswer.json();
+  assert.deepEqual(
+    [quickAnswer.status, quickBody.ok, quickBody.tab?.url, quickBody.httpStatus],
+    [200, true, quickUrl, 200],
+  );
+  assert.ok(quickMs.every((ms) => ms < 5000), JSON.stringify(quickMs));
+  assert.match(
+    (await cli(["snapshot", `${quickStart.space.id}:p1`])).output,
+    /Landing page/,
+  );
+  await cli(["space", "close", quickStart.space.id]);
+  passed("navigate commits a new space's first page and a new page at once");
   const { space } = await json(["space", "create", "Skill form review"]);
   const { tab } = await json(["open", space.id, `${fixture.origin}/forms/new`]);
   const initial = await observe(tab.id);
