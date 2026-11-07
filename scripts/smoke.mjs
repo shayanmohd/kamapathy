@@ -721,6 +721,12 @@ try {
   }
   checked("the window has no sidebar, and macOS window buttons sit in the tab strip");
   const spacesButton = page.getByRole("button", { name: /^Spaces: / });
+  // The label follows the state on the next render, so it is polled.
+  const spacesSay = (pattern) =>
+    poll(
+      async () => pattern.test((await spacesButton.getAttribute("aria-label")) ?? ""),
+      { label: `the Spaces button saying ${pattern}` },
+    );
   const spacesMenu = page.getByRole("menu", { name: "Spaces" });
   await spacesButton.click();
   await spacesMenu.getByRole("menuitem", { name: "New space" }).click();
@@ -2974,7 +2980,7 @@ try {
   }, origin);
   await researchBar.getByText("Research helper · A page stopped working").waitFor();
   // A space whose page stopped is still a space with an agent in it.
-  assert.match(await spacesButton.getAttribute("aria-label"), /1 agent working/);
+  await spacesSay(/1 agent working/);
   assert.equal((await (await api(`/spaces/${task}`)).json()).space.state, "error");
   assert.equal(
     (await api(`/tabs/${agentTab}/navigate`, "POST", { url: origin })).status,
@@ -3344,7 +3350,7 @@ try {
   // Awaited after the dialog; a failure surfaces there.
   requesting.catch(() => {});
   await waitForState(page, (state) => state.spaceRequests.length === 1);
-  assert.match(await spacesButton.getAttribute("aria-label"), /an agent needs you/);
+  await spacesSay(/an agent needs you/);
   await spacesButton.click();
   await spacesMenu.getByRole("menuitem", { name: "An agent is asking for a space" }).click();
   const requestDialog = page.getByRole("dialog", { name: "Let an agent use a space?" });
@@ -3521,7 +3527,7 @@ try {
     window.kamapathy.dispatch({ type: "space:activate", id: "personal" }),
   );
   assert.equal(await promptBar.count(), 0);
-  assert.match(await spacesButton.getAttribute("aria-label"), /needs you/);
+  await spacesSay(/needs you/);
   // Opening the space brings forward the page that asked, with the bar.
   await page.evaluate(
     (id) => window.kamapathy.dispatch({ type: "space:activate", id }),
