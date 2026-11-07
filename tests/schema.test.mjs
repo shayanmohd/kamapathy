@@ -178,7 +178,7 @@ describe("API schema", () => {
         evaluatePage() {},
         executeToolAction() {},
       },
-      sessions: { get() {} },
+      sessions: { get() {}, onSession: () => () => {} },
       presence: { setStatus() {}, fail() {}, setState() {} },
     };
     const impls = {

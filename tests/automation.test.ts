@@ -66,6 +66,10 @@ const pngSize = (image: ArrayBuffer): number[] => {
   return [png.readUInt32BE(16), png.readUInt32BE(20)];
 };
 
+// Node fires a timer against its event loop's cached clock, so a delay
+// measured with Date.now() can come out a millisecond or two short.
+const TIMER_SLACK_MS = 2;
+
 describe("local automation socket", () => {
   let controller: FakeController;
   let refs: RefBook;
@@ -6193,8 +6197,8 @@ describe("local automation socket", () => {
       named(source),
     ]);
     // The checks are the interval apart.
-    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(50);
-    expect(calls[2].at - calls[1].at).toBeGreaterThanOrEqual(50);
+    expect(calls[1].at - calls[0].at).toBeGreaterThanOrEqual(50 - TIMER_SLACK_MS);
+    expect(calls[2].at - calls[1].at).toBeGreaterThanOrEqual(50 - TIMER_SLACK_MS);
     // One main-world evaluation per check: no world of Kamapathy's own and
     // no frame session, so it reads the page's own globals.
     const sent = page.debugger.sent.filter(
@@ -11836,7 +11840,7 @@ describe("local automation socket", () => {
     ]);
     // The delay sits between the key's own down and its up, nowhere else.
     const gaps = times.slice(1).map((at, index) => at - times[index]);
-    expect(gaps[2]).toBeGreaterThanOrEqual(120);
+    expect(gaps[2]).toBeGreaterThanOrEqual(120 - TIMER_SLACK_MS);
     for (const index of [0, 1, 3, 4])
       expect(gaps[index], `gap ${index}`).toBeLessThan(100);
     // Today's 14 keys send the key, code, virtual key code and text they
@@ -12123,7 +12127,7 @@ describe("local automation socket", () => {
     ]);
     expect(commandsOf(page).at(-1)).toBe("insertText é");
     // The delay sits between characters, not inside one.
-    expect(times[2] - times[1]).toBeGreaterThanOrEqual(20);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(20 - TIMER_SLACK_MS);
     expect(times[1] - times[0]).toBeLessThan(20);
     // The gaps are counted before the lane, so a long text with a long delay
     // cannot outrun the route's budget.
@@ -12707,7 +12711,9 @@ describe("local automation socket", () => {
     expect(deltas.length).toBeGreaterThan(1);
     expect(deltas.length).toBeLessThanOrEqual(10);
     expect(deltas.reduce((sum, delta) => sum + delta, 0)).toBe(900);
-    expect(times[1] - times[0]).toBeGreaterThanOrEqual(WHEEL_GAP_MS);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(
+      WHEEL_GAP_MS - TIMER_SLACK_MS,
+    );
     // The held modifiers travel with each event.
     page.afterInput = undefined;
     expect(
