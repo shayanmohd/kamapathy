@@ -416,6 +416,10 @@ class FakeSession {
     for (const listener of this.page.get("did-fail-load") ?? [])
       listener({}, code, description, this.url, true);
   }
+  didNavigate(url: string): void {
+    for (const listener of this.page.get("did-navigate") ?? [])
+      listener({}, url, 200, "OK");
+  }
   async mainFrameId(): Promise<string> {
     return MAIN;
   }
@@ -447,6 +451,7 @@ describe("a tab's tracker set", () => {
           tabId === session.tabId
             ? (session as unknown as TabSession)
             : undefined,
+        onSession: () => () => {},
       },
     });
     return { session, trackers, blocked, downloads };
@@ -483,6 +488,44 @@ describe("a tab's tracker set", () => {
     expect(tracker.pending?.download).toBe(true);
     session.failLoad(-102, "ERR_CONNECTION_REFUSED");
     expect(tracker.pending?.failure?.errorCode).toBe(-102);
+    trackers.dispose();
+  });
+
+  it("holds what arrives before the session names its main frame", () => {
+    const { session, trackers } = setup();
+    session.mainFrame = undefined;
+    const tracker = trackers.for(session as unknown as TabSession);
+    const seen: TrackerEvent[] = [];
+    tracker.subscribe((item) => seen.push(item));
+    // A new view's first navigation: Chromium reports its start and its
+    // request, and only the page reports its commit.
+    session.emit(started("a", "https://a.test/one"));
+    session.emit(request("a", "https://a.test/one"));
+    session.emit(response("a", 200));
+    session.didNavigate("https://a.test/one");
+    session.emit(stopped());
+    expect(seen).toEqual([]);
+    session.mainFrame = MAIN;
+    session.signal("attached");
+    expect(seen.map((item) => item.type)).toEqual(["started", "committed"]);
+    expect(tracker.document).toMatchObject({
+      loaderId: "a",
+      url: "https://a.test/one",
+      httpStatus: 200,
+    });
+    // A commit both Chromium and the page reported counts once.
+    session.signal("detached");
+    session.mainFrame = undefined;
+    session.emit(started("b", "https://a.test/two"));
+    session.didNavigate("https://a.test/two");
+    session.emit(navigated("b", "https://a.test/two"));
+    session.mainFrame = MAIN;
+    session.emit(lifecycle("b", "load"));
+    expect(tracker.navigation).toBe(2);
+    expect(tracker.document).toMatchObject({ loaderId: "b", load: true });
+    // An attached session reports every commit itself.
+    session.didNavigate("https://a.test/three");
+    expect(tracker.navigation).toBe(2);
     trackers.dispose();
   });
 

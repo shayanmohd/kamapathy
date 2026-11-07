@@ -53,7 +53,12 @@ import {
   socketFetch,
   testSocket,
 } from "./fake-automation";
-import { attachedTarget, frameNavigated, frameOwners } from "./fake-cdp";
+import {
+  attachedTarget,
+  frameNavigated,
+  frameOwners,
+  frameTree,
+} from "./fake-cdp";
 
 // The size a PNG's header reports.
 const pngSize = (image: ArrayBuffer): number[] => {
@@ -4802,6 +4807,98 @@ describe("local automation socket", () => {
     again.response(200);
     again.commit("https://example.com/next");
     expect((await reloading).status).toBe(200);
+  });
+
+  it("navigate answers the first load of a page that had no view like any other", async () => {
+    const space = await createSpace();
+    const first = controller.state.tabs.find(
+      (item) => item.spaceId === space.id,
+    )!;
+    const added = (
+      await (await request(`/spaces/${space.id}/tabs`, "POST", {})).json()
+    ).tab as BrowserState["tabs"][number];
+    // Chromium starts a new view's first navigation inside the load call and
+    // answers the view's debugger only once that navigation is done, so its
+    // commit is reported by the page alone.
+    controller.onNewPage = (page) => {
+      page.debugger.holdReplies = true;
+      const load = page.loadURL.bind(page);
+      page.loadURL = (address, options) => {
+        const loading = load(address, options);
+        mainFrame(page, "loader-first").start(address);
+        return loading;
+      };
+    };
+    const firstLoad = async (
+      tabId: string,
+      address: string,
+      drive: (page: FakeContents, frame: ReturnType<typeof mainFrame>) => void,
+    ) => {
+      const done = request(`/tabs/${tabId}/navigate`, "POST", {
+        url: address,
+        waitUntil: "commit",
+        timeoutMs: 2000,
+      });
+      void done.catch(() => {});
+      await expect
+        .poll(() => controller.pages.get(tabId)?.loads.length)
+        .toBe(1);
+      const page = controller.pages.get(tabId)!;
+      drive(page, mainFrame(page, "loader-first"));
+      page.debugger.holdReplies = false;
+      page.debugger.flush();
+      return done;
+    };
+    const url = "https://example.com/first";
+    const loaded = await firstLoad(first.id, url, (page, frame) => {
+      frame.request(url);
+      frame.response(200);
+      page.emit("did-navigate", {}, url, 200, "OK");
+      page.debugger.reply("Page.getFrameTree", () =>
+        frameTree([{ id: "main", url, loaderId: "loader-first" }]),
+      );
+    });
+    expect(loaded.status).toBe(200);
+    expect(await loaded.json()).toEqual({
+      ok: true,
+      tab: expect.objectContaining({ id: first.id, url }),
+      httpStatus: 200,
+      waitUntil: "commit",
+    });
+    // A failed first load says why, as any navigation does.
+    const refusedUrl = "https://example.com/refused";
+    const refused = await failure(
+      await firstLoad(added.id, refusedUrl, (page, frame) => {
+        frame.request(refusedUrl);
+        frame.failed("net::ERR_CONNECTION_REFUSED");
+        page.emit(
+          "did-fail-load",
+          {},
+          -102,
+          "ERR_CONNECTION_REFUSED",
+          refusedUrl,
+          true,
+        );
+        frame.stop();
+        page.debugger.reply("Page.getFrameTree", () =>
+          frameTree([
+            {
+              id: "main",
+              url: "chrome-error://chromewebdata/",
+              loaderId: "loader-first",
+            },
+          ]),
+        );
+      }),
+    );
+    expect(refused.status).toBe(422);
+    expect(refused.error).toMatchObject({
+      code: "navigation_failed",
+      url: refusedUrl,
+      netError: "ERR_CONNECTION_REFUSED",
+      errorCode: -102,
+      retryable: true,
+    });
   });
 
   it("navigate still answers tab, and POST /tabs/:id/wait keeps its contract", async () => {

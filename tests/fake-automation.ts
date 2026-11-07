@@ -340,6 +340,9 @@ export class FakeController implements AutomationController {
   // One page per web tab, made with its view as in BrowserController. Most
   // tests drive the newest page through `contents`.
   pages = new Map<string, FakeContents>();
+  // Called with each new page before view listeners hear of it, so a test
+  // can make it a view with no renderer yet.
+  onNewPage?: (page: FakeContents) => void;
   private fallback = new FakeContents();
   private stateListeners = new Set<(state: BrowserState) => void>();
   private viewListeners = new Set<
@@ -488,6 +491,7 @@ export class FakeController implements AutomationController {
     if (!page) {
       page = new FakeContents();
       this.pages.set(tab.id, page);
+      this.onNewPage?.(page);
       for (const listener of this.viewListeners)
         listener(tab.id, page as unknown as WebContents);
     }
